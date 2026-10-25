@@ -177,3 +177,62 @@ open (~195 MB) is dominated by the kernel's cached directory listings (>= one
 tree 190 ms; attribute lookups 580-630 ms single-threaded, 89-94 ms parallel.
 Files that would need conversion with Linux defaults: chromium 1
 (`text eol=crlf`), spark 19 (*.cmd/*.bat), linux 0 (no .gitattributes).
+
+## Additional measurements (logged retroactively, 2026-10-25)
+
+Taken during development on the same machine; referenced by README.md and
+ARCHITECTURE.md. Sizes are decimal (MB = 10^6 bytes) unless marked MiB.
+
+Repository sizes: spark 27,599 files, 210 MB of blobs at HEAD; Linux kernel
+97,203 files, 1.67 GB; chromium 511,958 files, 4.36 GB (4,158 MiB), 64 GB pack.
+
+Object database access (spark, warm): `git cat-file -p` per file, 200 random
+files: 472 ms (~2.4 ms per process); one `git cat-file --batch` for the same
+200 files: 37 ms; `git grep -c SparkContext HEAD`: 250 ms; Claude Code's
+grep (embedded ugrep) on the native checkout: 102-104 ms; rg: 30-35 ms.
+
+open vs no-open (spark, `bench/probe.sh`, directories warm, content cold/warm):
+with kernel opens rg 276 ms cold / 177 ms warm; with FUSE_NO_OPEN_SUPPORT
+186 ms / 42 ms; native warm 35 ms. This run is separate from the bench.sh
+table above (native rg 47 ms there).
+
+Snapshot overlap, chromium (by object id, from `git ls-tree -r -t`):
+
+| vs HEAD   | committed before HEAD | trees shared | files shared | entries in unshared trees |
+|-----------|----------------------:|-------------:|-------------:|--------------------------:|
+| HEAD~100  |              ~22 h    |        99.4% |       99.94% |                      2.3% |
+| HEAD~1000 |              ~2.3 d   |        95.3% |        99.2% |                     16.2% |
+| HEAD~5000 |              ~6.5 d   |        81.2% |        96.1% |                     37.0% |
+
+Old per-node design: 342 MB heap after creating one chromium snapshot of 558k
+entries, ~610 bytes per entry.
+
+Daemon heap after one full content read of chromium (rg over everything),
+old per-node design, by setting:
+
+| setting                                              | heap    |
+|------------------------------------------------------|--------:|
+| defaults then (32 MB/thread object cache set by gitfold, 96 MB/thread delta-base cache, 512 MB blob cache) | 4451 MB |
+| delta-base cache 0                                   | 3117 MB |
+| object cache 0                                       | 3335 MB |
+| object cache 0 + delta-base cache 0                  | 2509 MB |
+| ... + blob cache 64 MB                               | 1015 MB |
+| MALLOC_ARENA_MAX=2 alone                             | 4073 MB |
+
+Speed with object and delta-base caches off: unchanged (cold rg 2.6 s vs 2.9 s,
+warm unchanged); bench-read 24 threads 6.6 GB/s vs 5.5 GB/s.
+
+glibc retention, shared store, 4 chromium snapshots: heap 904 MB after the
+first full rg; with a fixed M_MMAP_THRESHOLD 296-385 MB; with the idle trimmer
+107 MB once reads stop.
+
+Prewarm content, chromium: 3.8 s with 8 threads, 2.6 s with 24.
+
+After index buffer preallocation (latest build): nearby chromium snapshots
+97 ms (HEAD~100) and 116 ms (HEAD~1000); first snapshot 556-814 ms across runs
+(tree decoding varies run to run).
+
+bench-attrs, chromium: attribute lookups 630 ms single-threaded and 94 ms
+parallel in the corrected measurement.
+
+Not measured: time of `git worktree add` on a 20-40 GB monorepo.
