@@ -68,12 +68,17 @@ fn visit<'s>(s: &rayon::Scope<'s>, dir: PathBuf, mode: Prewarm, stats: &'s Stats
         } else {
             stats.files.fetch_add(1, Ordering::Relaxed);
             if mode == Prewarm::Content && ft.is_file() {
-                stats
-                    .bytes
-                    .fetch_add(read_all(&entry.path()), Ordering::Relaxed);
+                let path = entry.path();
+                stats.bytes.fetch_add(read_all(&path), Ordering::Relaxed);
+                let _ = fs::symlink_metadata(&path); // see below
             }
         }
     }
+    // On a writable mount the kernel marks atime stale after reading a directory
+    // or file, so the next stat asks the daemon again. Stat here, in the
+    // background, so the agent's first find or git status finds attributes cached
+    // (chromium: first find 759 ms without this, 351 ms with).
+    let _ = fs::symlink_metadata(&dir);
 }
 
 fn read_all(path: &Path) -> u64 {

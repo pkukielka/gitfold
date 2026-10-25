@@ -75,7 +75,8 @@ fn main() -> Result<()> {
             let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
             let mut config = Config::default();
             config.mount_options = vec![
-                MountOption::RO,
+                // Read-write: workspaces are writable; snapshots answer EROFS themselves.
+                MountOption::DefaultPermissions,
                 MountOption::FSName("gitfold".into()),
                 MountOption::Subtype("gitfold".into()),
             ];

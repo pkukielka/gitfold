@@ -29,6 +29,17 @@ pub struct FileRec {
     pub kind: EntryKind,
 }
 
+impl FileRec {
+    /// Permission bits as shown in the mount (and given to copied-up files).
+    pub fn perm(&self) -> u16 {
+        match self.kind {
+            EntryKind::BlobExecutable => 0o755,
+            EntryKind::Link => 0o777,
+            _ => 0o644,
+        }
+    }
+}
+
 /// One tree entry. 16 bytes; the name lives in the table's name buffer.
 #[derive(Clone, Copy)]
 pub struct TEntry {
@@ -296,37 +307,50 @@ impl Store {
         dirs.into()
     }
 
-    /// Writes the git index entries of a snapshot, with inodes as `stat` reports
-    /// them. Tables are in tree order, so a depth-first walk yields index order.
-    pub fn write_index(&self, dirs: &[DirRec], w: &mut IndexWriter) {
+    /// Writes the git index entries of a tree, in index order (tables are in tree
+    /// order, so a depth-first walk yields it). `ino(path, dir, entry)` gives the
+    /// low 32 bits of the inode `stat` reports for each entry.
+    pub fn write_index(
+        &self,
+        dirs: &[DirRec],
+        w: &mut IndexWriter,
+        ino: impl Fn(&[u8], &DirRec, &TEntry) -> u32,
+    ) {
         let trees = self.trees.read();
         let files = self.files.read();
-        write_dir(&trees.tables, &files.recs, dirs, 0, &mut Vec::new(), w);
+        let walk = IndexWalk {
+            tables: &trees.tables,
+            files: &files.recs,
+            dirs,
+            ino,
+        };
+        walk.dir(0, &mut Vec::new(), w);
     }
 }
 
-fn write_dir(
-    tables: &[Arc<TreeTable>],
-    files: &[FileRec],
-    dirs: &[DirRec],
-    dir: u32,
-    path: &mut Vec<u8>,
-    w: &mut IndexWriter,
-) {
-    let rec = dirs[dir as usize];
-    let table = &tables[rec.tree as usize];
-    for e in table.entries() {
-        let len = path.len();
-        path.extend_from_slice(table.name(e));
-        if e.kind == EntryKind::Tree {
-            path.push(b'/');
-            write_dir(tables, files, dirs, rec.first_child + e.ord, path, w);
-        } else {
-            // Submodules are index entries but empty directories in the mount. The
-            // index keeps only the low 32 bits of the inode, which don't depend on the slot.
-            let f = &files[e.id as usize];
-            w.push(path, e.kind, &f.oid, f.size, rec.child_ino(0, e) as u32);
+struct IndexWalk<'a, F> {
+    tables: &'a [Arc<TreeTable>],
+    files: &'a [FileRec],
+    dirs: &'a [DirRec],
+    ino: F,
+}
+
+impl<F: Fn(&[u8], &DirRec, &TEntry) -> u32> IndexWalk<'_, F> {
+    fn dir(&self, dir: u32, path: &mut Vec<u8>, w: &mut IndexWriter) {
+        let rec = self.dirs[dir as usize];
+        let table = &self.tables[rec.tree as usize];
+        for e in table.entries() {
+            let len = path.len();
+            path.extend_from_slice(table.name(e));
+            if e.kind == EntryKind::Tree {
+                path.push(b'/');
+                self.dir(rec.first_child + e.ord, path, w);
+            } else {
+                // Submodules are index entries but empty directories in the mount.
+                let f = &self.files[e.id as usize];
+                w.push(path, e.kind, &f.oid, f.size, (self.ino)(path, &rec, e));
+            }
+            path.truncate(len);
         }
-        path.truncate(len);
     }
 }

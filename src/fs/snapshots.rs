@@ -95,19 +95,29 @@ impl Snapshots {
         self.root.lock().mtime
     }
 
-    /// (inode, name) of every snapshot directory, copied so callers can stat
+    /// (inode, last component) of the snapshots directly below `prefix` ("" for
+    /// the mount root, `@origin` for `@origin/main`), copied so callers can stat
     /// entries (which locks the root again) while iterating.
-    pub fn root_entries(&self) -> Vec<(u64, Vec<u8>)> {
+    pub fn children(&self, prefix: &str) -> Vec<(u64, Vec<u8>)> {
         (self.root.lock().names.iter())
-            .map(|(name, slot)| (inode::dir(*slot, 0), name.clone()))
+            .filter_map(|(name, slot)| {
+                let rest = super::child_name(prefix, name)?;
+                Some((inode::dir(*slot, 0), rest.to_vec()))
+            })
             .collect()
+    }
+
+    /// The root inode of an already opened snapshot.
+    pub fn existing(&self, name: &[u8]) -> Option<u64> {
+        let root = self.root.lock();
+        let (_, slot) = root.names.iter().find(|(n, _)| n == name)?;
+        Some(inode::dir(*slot, 0))
     }
 
     /// Resolves `@<rev>` to a snapshot root inode, creating the snapshot on first use.
     pub fn resolve(&self, store: &Store, name: &[u8]) -> Result<u64, Errno> {
-        let find = |root: &Root| root.names.iter().find(|(n, _)| n == name).map(|(_, s)| *s);
-        if let Some(slot) = find(&self.root.lock()) {
-            return Ok(inode::dir(slot, 0));
+        if let Some(ino) = self.existing(name) {
+            return Ok(ino);
         }
         // Other names stay silent: shells and file managers probe for files like
         // `.git` or `.hidden` in every directory, including the root.
@@ -125,8 +135,8 @@ impl Snapshots {
         })?;
 
         let _creating = self.creating.lock();
-        if let Some(slot) = find(&self.root.lock()) {
-            return Ok(inode::dir(slot, 0));
+        if let Some(ino) = self.existing(name) {
+            return Ok(ino);
         }
         let path = self.mount_point.join(OsStr::from_bytes(name));
         // Another name may already resolve to the same commit: new slot (own
@@ -176,7 +186,8 @@ impl Snapshots {
         let dirs = store.dir_table(root);
         let capacity = self.last_index_len.load(Ordering::Relaxed);
         let mut writer = IndexWriter::new(self.stat, capacity + capacity / 8);
-        store.write_index(&dirs, &mut writer);
+        // The index keeps only the low 32 bits of the inode, which don't depend on the slot.
+        store.write_index(&dirs, &mut writer, |_, rec, e| rec.child_ino(0, e) as u32);
         let count = writer.len();
         let index = writer.finish();
         self.last_index_len.store(index.len(), Ordering::Relaxed);

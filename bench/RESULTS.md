@@ -74,8 +74,8 @@ snapshot is created (half the CPUs).
 | repo     | snapshot | meta prewarm | content prewarm (opt-in) |
 |----------|---------:|-------------:|-------------------------:|
 | spark    |    32 ms |        36 ms |    244 ms (200 MB, 8 thr) |
-| linux    |    92 ms |        67 ms |    1.0 s (1.6 GB, 8 thr)  |
-| chromium |   567 ms |       387 ms |  2.6 s (4.2 GB, 24 thr)   |
+| linux    |    92 ms |        67 ms |  1007 ms (1.6 GB, 8 thr)  |
+| chromium |   567 ms |       387 ms |  2630 ms (4.2 GB, 24 thr) |
 
 chromium (512k files):
 
@@ -95,7 +95,7 @@ linux (97k files):
 | rg          |       89 ms |     854 ms |      90 ms |
 | git status  |       92 ms |     135 ms |     137 ms |
 
-With `--prewarm content`, the first rg on chromium is 495 ms instead of 2.9 s.
+With `--prewarm content`, the first rg on chromium is 495 ms instead of 2868 ms.
 
 ### Findings
 
@@ -142,7 +142,7 @@ other snapshots when read. Snapshot creation for nearby commits ~0.23 s
 (new trees 2-40 ms; rest is index synthesis: sort, write, SHA-1 of ~60 MB).
 
 Speed unchanged vs previous defaults (chromium warm: find 349 ms, rg 416 ms,
-git status 1.14 s; linux warm rg 92 ms).
+git status 1140-1160 ms; linux warm rg 92 ms).
 
 Known gap: content is served in repository form. Checkout conversions from
 .gitattributes (eol=crlf, LFS smudge, ident, filters) are not applied, so
@@ -236,3 +236,126 @@ bench-attrs, chromium: attribute lookups 630 ms single-threaded and 94 ms
 parallel in the corrected measurement.
 
 Not measured: time of `git worktree add` on a 20-40 GB monorepo.
+
+## 2026-10-25, writable workspaces (phase 1) and read-write mount
+
+Spark (scratch clone; workspace on a branch at HEAD vs snapshot @HEAD, same
+mount, after prewarm; first / second run):
+
+| cmd        | snapshot      | workspace     |
+|------------|---------------|---------------|
+| find       | 12 / 12 ms    | 11 / 11 ms    |
+| rg         | 185 / 61 ms   | 196 / 45 ms   |
+| git status | 118 / 71 ms   | 131 / 75 ms   |
+
+Fixes found while measuring:
+
+- Workspace readdir rebuilt the merged listing for every page the kernel asked
+  for (quadratic in a 7.5k-entry directory) and stat-ed every entry: prewarm of
+  a spark workspace 6 s. Listing built once per directory and cached while
+  paged, lower entries taken from the tree table without a stat: 111-162 ms.
+- Root and namespace directories (`feature/` for `feature/x`) had a zero TTL for
+  both entry and attributes, so every path walk through `feature` was a lookup:
+  3 rg runs in `feature/x` made 30,469 lookups. Entries now get a long TTL
+  (`entry_with_ttls`): 52 lookups. Namespace attributes get a 1 s TTL instead
+  of 0, because `default_permissions` re-checks them on every path walk:
+  getattr 64,426 -> 34,009 (snapshot: 33,981).
+- The mount is now read-write (workspaces), and on a writable mount the kernel
+  marks atime stale after each readdir/read, so the next stat goes to the daemon.
+  Chromium first find after prewarm went 351 -> 759 ms, first git status
+  1.16 -> 1.29 s; prewarm now stats each directory (and file, for content
+  prewarm) after reading it: back to 352 ms and 1177 ms. `default_permissions`
+  itself made no difference (63 ms vs 63 ms spark cold find without the fix).
+
+Chromium snapshot after these changes: find 352 / 351 ms, rg 2970 / 433 ms,
+git status 1177 / 1167 ms, Claude's grep 5443 / 4646 ms (native 471, 370, 908,
+4243 ms).
+
+Chromium workspace on a new branch at HEAD: open 845 ms (worktree registration
++ index), prewarm 1434 ms; find (bfs) 90 / 86 ms for all 511,663 files; git
+status (Claude's invocation) 1227 / 1226 ms; rg 3413 / 416 ms; an edit shows
+as ` M README.md`.
+
+`tests/workspace.sh ~/work/spark`: 39 checks (edits, truncation, chmod,
+symlinks, utimes, deletions, opaque recreated directories, renames incl. EXDEV
+fallback, git add/commit, persistence across remount, namespaces, slashed rev
+snapshots, refusing a branch checked out elsewhere, read-only snapshots/root),
+all passing.
+
+## 2026-10-26, workspace review fixes and re-measurement
+
+Fixes from code review (all covered by `tests/workspace.sh`, now 53 checks):
+listing invalidation after (not before) each mutation, lock before path
+resolution, setattr without following symlinks (utimensat AT_SYMLINK_NOFOLLOW),
+atomic rmdir emptiness check, copy-ups via a private tmp/ directory, upper
+directories created 0755 regardless of umask, fsync passed through, node table
+freed on kernel forget (re-created files get their path-derived inode back),
+bare repositories' HEAD not treated as a checkout, workspace index written from
+the branch tip when a registration is (re)created.
+
+Markers as an append-only log (compacted on open and in process): `rm -r` of
+spark's 7.5k-file `sql/hive/src/test/resources/golden` in a workspace takes
+199-226 ms; the log stays bounded (~130 KB right after, 72 bytes after the next
+open). The previous whole-file rewrite per change was quadratic.
+
+Chromium, one session, current build (first / repeat; native column from the
+same session; `find` is GNU find, run by bench.sh):
+
+| cmd        | native        | snapshot      | workspace (fresh) |
+|------------|---------------|---------------|-------------------|
+| open       |               | 839 ms        | 847 ms            |
+| prewarm    |               | 641 ms        | 1366 ms           |
+| find       | 474 / 473 ms  | 355 / 353 ms  | 353 / 350 ms      |
+| git status | 864 / 881 ms  | 1145 / 1131 ms| 1200 / 1171 ms    |
+| rg         | 367 / 366 ms  | 2975 / 403 ms | 3357 / 410 ms     |
+| Claude grep| 4226 / 4256 ms| 5287 / 4599 ms|                   |
+
+Snapshot prewarm 641 ms vs 387 ms before the read-write mount (it now stats each
+directory it read). The earlier "workspace find 90 ms" was measured with
+Claude Code's `find` shell function (bfs), not GNU find, and is not comparable.
+
+Daemon heap with one chromium workspace: 177 MB after prewarm, 58 MB with
+`--prewarm none` (node table ~120 MB, ~215 B per looked-up entry). One snapshot
+alone: 59 MB.
+
+## 2026-10-26, second review round
+
+Fixed (and covered by `tests/workspace.sh`, 57 checks): nodes are claimed
+together with the kernel reference in one locked step (a separate count raced
+with `forget` and could free a node the kernel still used); listings no longer
+create nodes (readdirplus claims per sent entry and gives back entries that
+don't fit); freed directory nodes drop their child maps; `tmp/` is cleared on
+open and a failed copy-up removes its temp file (leftovers made later copy-ups
+fail with EEXIST); whiteouts are logged before the upper file is removed, and
+before a rename (crash ordering); `base` is written atomically, worktree
+registrations write HEAD last and are rewritten if incomplete; copy-up, create
+and mkdir set exact modes regardless of the daemon's umask; reads, readlink,
+getattr and lookup resolve and read under the workspace lock; a cached listing
+is dropped only when a request starts past its end (it was rebuilt by the
+kernel's closing request); markers are ordered sets, so "markers below a
+directory" is a range query instead of a full scan.
+
+No speed or memory change: spark warm find 29 ms, rg 45 ms, git status 70 ms;
+chromium workspace after prewarm 176 MB heap, GNU find 350 / 352 ms, git status
+1190 / 1187 ms, prewarm 1344 ms.
+
+## 2026-10-26, third review round
+
+Fixed (and covered by `tests/workspace.sh`, now 61 checks): readdirplus pages
+are served with the workspace lock held (`Workspace::page`), so a racing `rm`
+can't make a page hand the kernel a node for the deleted name (stress test:
+300 create/delete cycles while `ls -l` loops, no phantom entries); the
+workspace base is pinned by `refs/gitfold/<id>` so `git gc` can't prune it
+after amend/rebase/reset; listings no longer cache stat data for upper
+entries, so writes and attribute changes don't invalidate cached listings
+(only structural changes and copy-ups do); plain-readdir inode numbers probe
+like real allocation; `mknod`/`link` outside workspaces answer EROFS;
+removing the virtual `.git` answers EPERM; atomic writes are synced before
+the rename. Spark speed unchanged (warm find 30 ms, rg 45 ms, git status 74 ms).
+
+## 2026-10-26, fourth review round
+
+No critical or major findings. Minor fixes (now 64 checks): snapshot files and
+directories report no write bits (`test -w` used to say yes on a mount that is
+no longer `ro`); listings are invalidated as soon as a copy-up or creation
+happens, even if the rest of the operation then fails.

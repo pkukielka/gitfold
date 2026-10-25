@@ -125,14 +125,88 @@ pub fn register(
     let dir = common_dir
         .join("worktrees")
         .join(format!("gitfold-{}", commit.id.to_hex_with_len(12)));
-    fs::create_dir_all(&dir)?;
-    fs::write(dir.join("HEAD"), format!("{}\n", commit.id))?;
-    fs::write(dir.join("commondir"), "../..\n")?;
-    fs::write(dir.join("gitdir"), format!("{}\n", gitfile.display()))?;
-    // Keeps `git worktree prune` from deleting the entry while unmounted.
-    fs::write(dir.join("locked"), "managed by gitfold\n")?;
-    let tmp = dir.join("index.gitfold-tmp");
-    fs::write(&tmp, index)?;
-    fs::rename(&tmp, dir.join("index"))?;
+    write_admin(&dir, gitfile, index, &format!("{}\n", commit.id))?;
     Ok(dir)
+}
+
+/// Admin directory of the workspace with directory name `id`:
+/// `<common>/worktrees/gitfold-ws-<id>`.
+pub fn ws_admin_dir(common_dir: &Path, id: &str) -> PathBuf {
+    common_dir
+        .join("worktrees")
+        .join(format!("gitfold-ws-{id}"))
+}
+
+/// Registers a workspace on `branch` with admin directory `dir` (see
+/// `ws_admin_dir`). HEAD and the index belong to git once the worktree exists,
+/// so they are only written when it is new or incomplete (`index` is called
+/// then); otherwise this just points `gitdir` at the current mount path.
+pub fn register_branch(
+    dir: &Path,
+    branch: &str,
+    gitfile: &Path,
+    index: impl FnOnce() -> Vec<u8>,
+) -> Result<()> {
+    if dir.join("HEAD").exists() && dir.join("index").exists() {
+        write_atomic(
+            &dir.join("gitdir"),
+            format!("{}\n", gitfile.display()).as_bytes(),
+        )?;
+    } else {
+        write_admin(
+            dir,
+            gitfile,
+            &index(),
+            &format!("ref: refs/heads/{branch}\n"),
+        )?;
+    }
+    Ok(())
+}
+
+/// Writes a worktree admin directory. HEAD goes last: git (and
+/// `register_branch`) treat a directory with HEAD as a worktree, so a crash
+/// earlier leaves something that is rewritten next time instead of a worktree
+/// without an index.
+fn write_admin(dir: &Path, gitfile: &Path, index: &[u8], head: &str) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    write_atomic(&dir.join("commondir"), b"../..\n")?;
+    write_atomic(
+        &dir.join("gitdir"),
+        format!("{}\n", gitfile.display()).as_bytes(),
+    )?;
+    // Keeps `git worktree prune` from deleting the entry while unmounted.
+    write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
+    write_atomic(&dir.join("index"), index)?;
+    write_atomic(&dir.join("HEAD"), head.as_bytes())?;
+    Ok(())
+}
+
+/// Replaces `path` with `data` atomically (via `<path>.gitfold-tmp`).
+pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("gitfold-tmp");
+    let mut file = fs::File::create(&tmp)?;
+    std::io::Write::write_all(&mut file, data)?;
+    // Synced before the rename, so a power loss leaves the old file or the new
+    // one, never an empty one.
+    file.sync_all()?;
+    fs::rename(&tmp, path)
+}
+
+/// Keeps `commit` reachable for `git gc` with ref `name` (a workspace's base is
+/// not otherwise referenced once its branch moves on). Goes through `git
+/// update-ref`, which handles every ref backend (files, packed, reftable).
+pub fn pin(common_dir: &Path, name: &str, commit: &gix::ObjectId) -> Result<()> {
+    let status = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(common_dir)
+        .args([
+            "update-ref",
+            "-m",
+            "gitfold: workspace base",
+            name,
+            &commit.to_string(),
+        ])
+        .status()?;
+    anyhow::ensure!(status.success(), "git update-ref {name} failed ({status})");
+    Ok(())
 }

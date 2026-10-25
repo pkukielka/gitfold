@@ -100,3 +100,29 @@ pub fn read_blob(oid: ObjectId) -> Result<Vec<u8>> {
     }
     data
 }
+
+/// Whether `refs/heads/<name>` exists.
+pub fn branch_exists(name: &str) -> bool {
+    with_repo(|repo| {
+        repo.try_find_reference(format!("refs/heads/{name}").as_str())
+            .is_ok_and(|r| r.is_some())
+    })
+}
+
+/// Whether any reference starts with one of `prefixes` (e.g. `refs/heads/feature/`).
+pub fn any_ref_under(prefixes: &[String]) -> bool {
+    with_repo(|repo| {
+        let Ok(platform) = repo.references() else {
+            return false;
+        };
+        prefixes.iter().any(|prefix| {
+            platform
+                .prefixed(prefix.as_str())
+                .is_ok_and(|mut refs| refs.next().is_some())
+        })
+    })
+}
+
+pub fn is_bare() -> bool {
+    with_repo(|repo| repo.is_bare())
+}

@@ -1,33 +1,41 @@
 # gitfold
 
-Any git revision as a directory, without a checkout.
+Any git revision or branch as a directory, without a checkout.
 
 ```
 $ mkdir -p ~/mnt/repo
 $ gitfold mount ~/src/monorepo ~/mnt/repo > /tmp/gitfold.log 2>&1 &
-$ cd ~/mnt/repo/@HEAD~3                # or @HEAD, @<sha>, @v1.2.0 ...
-$ git status                           # works: it's a real (linked) git worktree
-$ rg TODO                              # works, at close to native speed once warm
+$ cd ~/mnt/repo/@origin/main~3          # read-only snapshot of any revision
+$ git -C ~/src/monorepo branch feature/login origin/main
+$ cd ~/mnt/repo/feature/login           # writable workspace on that branch
+$ vim src/app.ts && git commit -am fix  # commits go to branch feature/login
+$ rg TODO                               # close to native speed once warm
 ```
 
-gitfold is a FUSE filesystem. Each `<mount>/@<rev>` directory shows the tree of
-that revision, read straight from the repository's object database, and is
-registered as a linked git worktree, so git commands inside it behave as in a
-normal checkout.
+(`gitfold` is `target/release/gitfold` unless you `cargo install` it; see
+[Build](#build).)
+
+gitfold is a FUSE filesystem with two kinds of directories:
+
+- **Snapshots**, `<mount>/@<rev>`: the tree of any revision, read-only, read
+  straight from the repository's object database.
+- **Workspaces**, `<mount>/<branch>`: a branch you can edit. Unchanged files come
+  from the object database; changed files are stored as real files under
+  `.git/gitfold/`, so a workspace costs only its changes and survives unmounts.
+
+Both are registered as linked git worktrees, so git commands inside them behave
+as in a normal checkout.
 
 It is built for coding agents and code review on large repositories, where
 `git worktree add` of a 20-40 GB monorepo is slow and needs a full copy on disk,
-and where an agent needs many revisions side by side. On Chromium (512k files)
-the first revision opens in 0.6-0.8 s and each nearby one in 0.1-0.2 s, and
-revisions share almost everything: each additional one costs a few MB of daemon
-memory plus reclaimable kernel cache (see [Running it](#running-it)).
+and where agents need many revisions and branches side by side. On Chromium
+(512k files) a snapshot or workspace opens in about 0.85 s, a snapshot near one
+already open in 0.1-0.2 s, and warm searches and `git status` run close to native
+speed (see [Performance](#performance)).
 
-**Scope today:** snapshots are read-only. gitfold suits agents and reviewers
-that read, search and run git queries; agents that edit files need writable
-branch workspaces, which are planned ([ARCHITECTURE.md](ARCHITECTURE.md#future-work)).
-Although the mounted files are read-only, gitfold does write into the
-repository: one worktree registration per snapshotted commit under
-`.git/worktrees/gitfold-*` (see [Cleaning up](#cleaning-up)).
+gitfold writes into the repository: worktree registrations under
+`.git/worktrees/gitfold-*` and workspace changes under `.git/gitfold/` (see
+[Cleaning up](#cleaning-up)).
 
 ## Requirements
 
@@ -54,67 +62,123 @@ gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>
 ```
 
 `<REPO>` is the repository's work tree (or any path git accepts as the
-repository). `<MOUNTPOINT>` must be an existing, empty directory you own.
+repository). `<MOUNTPOINT>` must be an existing, empty directory you own. The
+mount is read-write (for workspaces). Snapshots report no write permission
+bits, so the kernel refuses most writes there with `EACCES`; what an owner may
+do regardless (`chmod`, `touch` of an existing file) fails with `EROFS`.
 
-Inside the mount point:
+Names below the mount point:
 
 - `@<rev>` is a snapshot. `<rev>` is anything that resolves to a commit using
-  git's revision syntax (parsed by gitoxide), as long as it is a single path
-  component: `@HEAD`, `@HEAD~5`, `@HEAD^`, `@<sha>`, `@<short-sha>`, `@v1.2.0`.
-  Revs containing `/` (e.g. `origin/main`) cannot be named; use the commit
-  instead: `cd ~/mnt/repo/@$(git -C ~/src/monorepo rev-parse origin/main)`.
-- A rev that doesn't resolve looks like a missing directory (`No such file or
-  directory`); the daemon logs why (`cannot resolve @<rev>: ...`).
-- A snapshot is created on first access and pinned for the life of the mount:
-  `@HEAD` keeps showing the commit HEAD pointed to when it was first opened. To
-  see a newer commit, open it by SHA (as above) or remount.
-- `ls <MOUNTPOINT>` lists only the snapshots opened so far; it starts empty, so
-  revisions can't be browsed or tab-completed.
-- Everything is read-only: writes fail with `EROFS`.
+  git's revision syntax (parsed by gitoxide): `@HEAD`, `@HEAD~5`, `@<sha>`,
+  `@<short-sha>`, `@v1.2.0`. Revs containing `/` work as typed
+  (`@origin/main`, `@origin/main~3`); `@origin` is then a directory, so git's
+  `origin` shorthand is `@origin/HEAD`.
+- `<branch>` is a workspace on an existing local branch: `feature/login` is
+  `<mount>/feature/login`, through a `feature/` directory. Git doesn't allow
+  `feature` and `feature/login` to coexist, so this is never ambiguous. Branches
+  whose name starts with `@` can't be opened (`@` means a snapshot).
+- Snapshots and workspaces are opened on first access (a workspace resumes its
+  saved changes). `ls <MOUNTPOINT>` lists only what has been opened so far; it
+  starts empty, so names can't be browsed or tab-completed.
+- A name that doesn't resolve looks like a missing directory (`No such file or
+  directory`); for `@<rev>` the daemon logs why (`cannot resolve @<rev>: ...`),
+  for branch names it doesn't.
+- Snapshots are pinned for the life of the mount: `@HEAD` keeps showing the
+  commit HEAD pointed to when it was first opened. To see a newer commit, open
+  it by SHA or remount.
 
 Options:
 
 | option | default | |
 |---|---|---|
-| `--prewarm none\|meta\|content` | `meta` | After creating a snapshot, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The snapshot is usable while this runs (chromium: 0.4 s for `meta`). |
+| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.64 s for a snapshot, 1.4 s for a workspace). |
 | `--prewarm-threads N` | half the CPUs | Threads used by the prewarm walk. |
 | `--threads N` | number of CPUs | FUSE worker threads. |
 | `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |
 
-### Recommended agent workflow
+### Snapshots
 
-Resolve the revision to a SHA yourself and give each task its own snapshot:
-
-```
-sha=$(git -C ~/src/monorepo rev-parse origin/main)
-cd ~/mnt/repo/@$sha
-```
-
-If agents grep a fresh snapshot immediately, consider `--prewarm content`: on
-chromium it reads everything in the background in 2.6-3.8 s (24 vs 8 threads),
-after which the first `rg` takes 0.5 s instead of 2.9 s.
-
-### Git inside a snapshot
-
-Each snapshotted commit is registered as a linked worktree under
-`<repo>/.git/worktrees/gitfold-<sha12>` (the first 12 hex digits of the commit),
-with a detached HEAD; the snapshot's `.git` file points there. `git status`,
-`log`, `diff`, `show`, `blame` etc. work as in a checkout.
-
+Read-only: files and directories have no write bits, so writes fail with
+`EACCES` (`chmod` and `touch` of existing files with `EROFS`). Each
+snapshotted commit is registered as a linked worktree under
+`<repo>/.git/worktrees/gitfold-<sha12>` (the first 12 hex digits of the commit)
+with a detached HEAD, so `git status`, `log`, `diff`, `show`, `blame` etc. work.
 Names that resolve to the same commit (`@HEAD` and `@<its sha>`) share one
 registration; `git worktree list` shows it once, under the first name opened.
-Git works in all of them.
 
-Commands that write files (`checkout`, `reset --hard`, `stash`, merges) fail with
-`EROFS`. Commands that only change `.git` (e.g. `commit`, `reset --soft`)
+Git commands that write files (`checkout`, `reset --hard`, `stash`, merges) fail.
+Commands that only change `.git` (e.g. `commit`, `reset --soft`)
 succeed and move that worktree's HEAD away from the snapshot's files, after which
-`git status` shows differences. Don't use them in a snapshot.
+`git status` shows differences. Don't use them in a snapshot; use a workspace.
+
+Recommended for agents: resolve the revision to a SHA yourself and give each task
+its own snapshot (`cd <mount>/@$(git rev-parse origin/main)`). If agents grep a
+fresh snapshot immediately, consider `--prewarm content`: on chromium it reads
+everything in the background in 2.6-3.8 s (24 vs 8 threads), after which the
+first `rg` takes about 0.5 s instead of 3 s.
+
+### Workspaces
+
+**Start.** Create a branch with git (gitfold only opens existing local
+branches) and open it:
+
+```
+git -C ~/src/monorepo branch agent/task-17 origin/main
+cd ~/mnt/repo/agent/task-17
+```
+
+Like `git worktree add`, a branch that is checked out elsewhere (for example in
+your main checkout) is refused with `EBUSY` (`Device or resource busy`); the
+daemon logs where it is checked out. Create another branch from it instead.
+`@agent/task-17` is a separate, read-only snapshot of the branch tip when it was
+opened; it doesn't see the workspace's uncommitted changes, and both can be open
+at once. Recommended for agents: one branch and workspace per task.
+
+**Work.** Edit, create, delete and rename files normally. The workspace is a
+linked worktree whose HEAD is the branch, so `git add`, `commit`, `diff`,
+`log` etc. work and commits move the branch in your repository. Changes are
+written to `.git/gitfold/` as they happen (and `fsync` is passed through), so
+unmounting, remounting or a daemon crash keeps them. Don't switch branches
+inside a workspace (`git switch`, `git checkout <branch>`): it works as in any
+worktree, but the directory keeps the old branch's name and its stored changes.
+
+**Finish.** Push or merge the branch from anywhere, then remove the workspace
+(see [Cleaning up](#cleaning-up)). Until it is removed, git treats the branch as
+checked out, even while unmounted: you can't check it out elsewhere or delete
+it.
+
+**How it's stored.** The workspace id is the branch name with `%` and `/`
+escaped (`agent%2Ftask-17`). The worktree registration is
+`.git/worktrees/gitfold-ws-<id>`; the changes are in `.git/gitfold/<id>/`:
+`upper/` holds every file that differs from the workspace's base (the branch tip
+when it was first opened), as real files; `markers` records deleted files so they
+stay deleted; `base` is that commit, kept from `git gc` by the ref
+`refs/gitfold/<id>`. Don't modify `.git/gitfold/` while mounted.
+
+**Limitations.**
+
+- Committed files are not yet removed from `upper/`, so a workspace's disk use
+  grows with its history until it is removed. What you see is unaffected.
+- Renaming a directory from the base commit, or onto one, returns `EXDEV`, as
+  overlayfs does. `mv` then copies and deletes, but `git mv` of such a directory
+  fails. Renaming files, and directories you created, works directly.
+- Hard links and special files (`mknod`) are not supported (`EPERM`); symlinks
+  are.
+- Reads and writes are addressed by path, so reading or writing a file that was
+  deleted or replaced (renamed over) while open fails.
+- Writes go through the gitfold daemon, so writing many files (for example
+  build output) is slower than on a local disk. Not measured yet.
+- Git's own check also refuses a branch that another worktree is rebasing or
+  bisecting; gitfold only checks which branch each worktree has checked out.
+- After `git add` of files with `eol=crlf` attributes, git warns that line
+  endings will be converted (see [Differences](#differences-from-a-checkout)).
 
 ## Running it
 
 - `gitfold mount` runs in the foreground until the file system is unmounted.
   Run it in the background (or under a service manager) and redirect its output;
-  it logs one line per snapshot and prewarm, and fuser warnings for
+  it logs one line per snapshot, workspace and prewarm, and fuser warnings for
   unimplemented operations such as extended attributes. Set `RUST_LOG=warn` for
   less output.
 - **Stop it with Ctrl-C, `kill` (SIGTERM) or `fusermount3 -u <MOUNTPOINT>`.**
@@ -126,27 +190,52 @@ succeed and move that worktree's HEAD away from the snapshot's files, after whic
   `Transport endpoint is not connected`, and `fusermount3 -u <MOUNTPOINT>`
   cleans it up. `gitfold mount` detects such stale mounts, and mount points
   that are missing, not directories or already mounted, and says so.
-- **Cost of a long-running mount:** snapshots stay loaded until unmount. Each
-  additional chromium snapshot costs 1-11 MB of daemon heap, ~160 MB of kernel
-  inode/dentry cache and ~190 MB of page cache when opened (mostly cached
-  directory listings), plus page cache for file contents not already cached by
-  another snapshot. Kernel caches are reclaimable; if evicted, the next access
-  is just slower.
+- **Cost of a long-running mount:** snapshots and workspaces stay loaded until
+  unmount.
+  - Each additional chromium snapshot costs 1-11 MB of daemon heap, ~160 MB of
+    kernel inode/dentry cache and ~190 MB of page cache when opened (mostly
+    cached directory listings), plus page cache for file contents not already
+    cached by another snapshot.
+  - A chromium workspace costs ~120 MB of daemon heap once prewarmed (its node
+    table: one entry per path the kernel has looked up; ~58 MB in total with
+    `--prewarm none`). Its unchanged files don't share page cache with
+    snapshots or other workspaces.
+  - Kernel caches are reclaimable; if evicted, the next access is just slower.
 
 ### Cleaning up
 
 Worktree registrations are locked, so `git worktree prune` keeps them while
-unmounted; later mounts reuse them. To remove all of them (works after
-unmounting):
+unmounted; later mounts reuse them. Unmount first; then use the repository's
+absolute git directory (a relative one would make `rm` act on the current
+directory):
 
 ```
-git -C <REPO> worktree list --porcelain \
-  | awk '/^worktree /{p=$2} /^locked/{print p}' | grep '/@' \
-  | while read -r p; do git -C <REPO> worktree unlock "$p"; done
-git -C <REPO> worktree prune
+common=$(git -C <REPO> rev-parse --path-format=absolute --git-common-dir)
 ```
 
-Or delete `$(git -C <REPO> rev-parse --git-common-dir)/worktrees/gitfold-*`.
+Snapshot registrations only (keeps workspaces):
+
+```
+rm -rf "$common"/worktrees/gitfold-[0-9a-f]*
+```
+
+A workspace: its registration and its changes, together (deleting only one leaves
+a workspace gitfold can't resume correctly). This discards uncommitted changes;
+commits are on the branch and stay there.
+
+```
+id=agent%2Ftask-17
+rm -rf "$common/worktrees/gitfold-ws-$id" "$common/gitfold/$id"
+git -C <REPO> update-ref -d "refs/gitfold/$id"
+```
+
+All workspaces:
+
+```
+rm -rf "$common"/worktrees/gitfold-ws-* "$common"/gitfold
+git -C <REPO> for-each-ref --format='%(refname)' refs/gitfold \
+  | xargs -r -n1 git -C <REPO> update-ref -d
+```
 
 ## Differences from a checkout
 
@@ -156,38 +245,45 @@ Or delete `$(git -C <REPO> rev-parse --git-common-dir)/worktrees/gitfold-*`.
   (`core.autocrlf` unset) only files with such explicit attributes are affected:
   19 in Apache Spark, 1 in Chromium. Git LFS files show their pointer files.
   `git status` is unaffected, since its index is built from the same unconverted
-  data.
-- **Timestamps:** everything inside a snapshot has mtime/ctime 2020-01-01; see
+  data; `git add` of such files in a workspace prints git's line-ending warning.
+- **Timestamps:** unchanged files have mtime/ctime 2020-01-01; files changed in
+  a workspace have their real times. See
   [ARCHITECTURE.md](ARCHITECTURE.md#constant-timestamps).
-- **Shared inodes:** files with identical content and mode share an inode,
+- **Inodes:** in snapshots, files with identical content and mode share an inode,
   within a snapshot and across snapshots. They report link count 1, so `cp -a`,
   `tar`, `du` and `rsync -H` don't treat them as hardlinks; tools that compare
-  device and inode (`find -samefile`) see them as the same file.
+  device and inode (`find -samefile`) see them as the same file. In workspaces,
+  inodes are per path.
 
 ## Performance
 
 Chromium (512k files, 4.4 GB at HEAD, 64 GB pack), 24 cores, 62 GB RAM, pack
-and native checkout in page cache, gitfold after the default metadata prewarm.
+and native checkout in page cache, gitfold after the default metadata prewarm;
+all columns from one session with the current build (first run / repeat).
 "git status" is the exact invocation Claude Code issues itself
 (`--porcelain=v2 --untracked-files=normal --ignored=matching`, fsmonitor off).
-Details and more repositories: [bench/RESULTS.md](bench/RESULTS.md).
+The workspace is a fresh one (no changes). Details and more repositories:
+[bench/RESULTS.md](bench/RESULTS.md).
 
-| | native checkout | gitfold |
-|---|---:|---:|
-| open a revision | `git worktree add` (not measured) | 0.56-0.81 s first, 0.10-0.17 s nearby |
-| `find . -type f` | 473 ms | 351 ms |
-| `git status` | 884 ms | 1.15 s |
-| `rg`, first run in a fresh snapshot | 371 ms | 2.9 s (0.5 s with `--prewarm content`) |
-| `rg`, repeat | 371 ms | 0.41 s |
-| `rg` in a 2nd snapshot ~1 day older than one already grepped | | 0.40 s |
-| daemon heap, 4 snapshots open (HEAD, ~1 day, ~2 days, ~1 week older) | | 77-82 MB |
+| | native checkout | snapshot | workspace |
+|---|---:|---:|---:|
+| open | `git worktree add`: not measured | 0.84 s (0.10-0.17 s near an open one) | 0.85 s |
+| prewarm (background) | | 0.64 s | 1.37 s |
+| `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.36 / 0.35 s | 0.35 / 0.35 s |
+| `git status` | 0.86 / 0.88 s | 1.15 / 1.13 s | 1.20 / 1.17 s |
+| `rg` | 0.37 / 0.37 s | 2.98 / 0.40 s | 3.36 / 0.41 s |
+| daemon heap | | 59 MB (4 snapshots: 77-82 MB) | 177 MB |
+| writes | | | not measured |
 
 The slow first `rg` is the cost of decompressing and caching every file it
 reads; later reads come from the kernel page cache, which snapshots share for
-identical files.
+identical files (a second snapshot ~1 day older than one already grepped:
+0.40 s for its first `rg`).
 
 Benchmark scripts are in `bench/`: `bench.sh` compares native and mounted runs of
 the commands an agent issues, `probe.sh` isolates content reads.
+`tests/workspace.sh <repo>` runs an end-to-end test of workspaces on a scratch
+clone.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works and why, including the
 code map.
