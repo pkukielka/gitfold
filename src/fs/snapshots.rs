@@ -10,7 +10,7 @@ use std::time::{Instant, SystemTime};
 
 use fuser::Errno;
 use gix::ObjectId;
-use log::{error, info};
+use log::{error, info, warn};
 use parking_lot::{Mutex, RwLock};
 
 use crate::git::{self, Commit};
@@ -109,9 +109,20 @@ impl Snapshots {
         if let Some(slot) = find(&self.root.lock()) {
             return Ok(inode::dir(slot, 0));
         }
+        // Other names stay silent: shells and file managers probe for files like
+        // `.git` or `.hidden` in every directory, including the root.
         let spec = name.strip_prefix(b"@").ok_or(Errno::ENOENT)?;
-        let spec = std::str::from_utf8(spec).map_err(|_| Errno::ENOENT)?;
-        let commit = git::resolve(spec).map_err(|_| Errno::ENOENT)?;
+        let spec = std::str::from_utf8(spec).map_err(|_| {
+            warn!(
+                "cannot resolve {}: not UTF-8",
+                String::from_utf8_lossy(name)
+            );
+            Errno::ENOENT
+        })?;
+        let commit = git::resolve(spec).map_err(|e| {
+            warn!("cannot resolve @{spec}: {e:#}");
+            Errno::ENOENT
+        })?;
 
         let _creating = self.creating.lock();
         if let Some(slot) = find(&self.root.lock()) {

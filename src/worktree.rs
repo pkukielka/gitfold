@@ -22,8 +22,8 @@ pub struct StatInfo {
     pub gid: u32,
 }
 
-/// Streams an index v4 file. v4 stores each path as a suffix of the previous
-/// one (~2.5x smaller for large trees), so entries must arrive in index order.
+/// Streams an index v4 file. v4 prefix-compresses paths against the previous
+/// entry (~half the size for large trees), so entries must arrive in index order.
 pub struct IndexWriter {
     out: Vec<u8>,
     prev: Vec<u8>,

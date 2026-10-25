@@ -22,8 +22,8 @@ thread_local! {
 /// Opens the repository at `path` and returns its common git dir (`.git`).
 pub fn init(path: &Path) -> Result<PathBuf> {
     // Trees are decoded once per snapshot and file content is cached by the kernel,
-    // so per-thread object and delta-base caches only cost memory (~2 GB on chromium
-    // with 24 threads) without making reads faster.
+    // so gitoxide's per-thread delta-base cache (96 MB by default) only costs memory
+    // (~2 GB on chromium with 24 threads) without making reads faster.
     let opts = gix::open::Options::default().config_overrides(["core.deltaBaseCacheLimit=0"]);
     let repo = gix::open_opts(path, opts)
         .with_context(|| format!("opening repository {}", path.display()))?;

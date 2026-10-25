@@ -3,6 +3,7 @@ mod benchread;
 mod fs;
 mod git;
 mod inode;
+mod mountpoint;
 mod prewarm;
 mod store;
 mod worktree;
@@ -55,7 +56,7 @@ enum Command {
 fn main() -> Result<()> {
     // Blob buffers are short-lived and often large. glibc raises its mmap threshold
     // after such frees, after which big buffers come from arenas that are never
-    // returned to the OS (~650 MB retained after one pass over chromium). A fixed
+    // returned to the OS (~600 MB retained after one pass over chromium). A fixed
     // threshold keeps large buffers mmapped, so freeing them returns the memory.
     unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -68,8 +69,9 @@ fn main() -> Result<()> {
             prewarm,
             prewarm_threads,
         } => {
+            let mountpoint = mountpoint::check(&mountpoint)?;
+            mountpoint::unmount_on_signal(mountpoint.clone());
             let common_dir = git::init(&repo)?;
-            let mountpoint = mountpoint.canonicalize()?;
             let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
             let mut config = Config::default();
             config.mount_options = vec![
