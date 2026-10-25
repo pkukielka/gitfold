@@ -1,0 +1,16 @@
+[package]
+name = "gitfold"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+env_logger = "0.11.11"
+fuser = "0.18.0"
+gix = { version = "0.90.0", default-features = false, features = ["attributes", "index", "max-performance", "parallel", "revision", "sha1"] }
+libc = "0.2.191"
+log = "0.4.34"
+parking_lot = "0.12"
+rayon = "1.12.0"
+sha1 = "0.11.0"
