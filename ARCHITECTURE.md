@@ -720,10 +720,10 @@ it likes, and gitfold avoids every request it can:
   directories for `.ignore`, `.gitignore` and `.git` took 109 ms by absolute
   path vs 12 ms by relative path. Now they have 1-year TTLs too, and when a
   lookup adds a name the daemon tells the kernel to drop their attributes and
-  listings (`Notifier::inval_inode`, from a thread of its own;
+  listings (`Notifier::inval_inode`, before replying to that lookup;
   `fs::names`; their new mtime drops a listing that was in flight meanwhile):
-  16 ms by absolute path (native 11 ms). A zero entry TTL for their names, as an
-  even earlier version had, turned every path walk through `feature/` into a
+  16 ms by absolute path (native 11 ms). A zero entry TTL for their names, as
+  an even earlier version had, turned every path walk through `feature/` into a
   lookup (30,469 vs 52).
 - **Negative entries:** without them, tools that probe every directory for
   `.gitignore`, `.ignore` or `.git` (`rg` with some versions and options) asked

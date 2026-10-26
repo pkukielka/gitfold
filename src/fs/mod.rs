@@ -205,9 +205,9 @@ impl Filesystem for GitFold {
         let names_before = names_dir.then(|| self.name_count());
         let result = self.lookup_attr(parent, name.as_bytes());
         // The lookup opened a snapshot or workspace: listings of names changed.
-        // Queued before replying, so the kernel hears of it as soon as possible.
+        // Told before replying, so the caller's next listing shows the name.
         if names_before.is_some_and(|before| self.name_count() != before) {
-            self.names.changed(self.names_dirs());
+            self.names.changed(&self.names_dirs());
         }
         match result {
             // Names never go away while mounted.

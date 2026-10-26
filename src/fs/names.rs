@@ -4,48 +4,39 @@
 //! absolute path through the mount cost a `getattr` of the root (the kernel
 //! re-checks permissions on each directory a path passes, `default_permissions`).
 //!
-//! The kernel is told on a thread of its own, so the lookup that added the name
-//! never waits on the kernel (defensive: `inval_inode` takes no lock a lookup
-//! holds). So it may land just after the reply: a listing taken in between can
-//! miss the new name, once (the directories' new mtime drops that listing when
-//! the invalidated attributes are next read).
+//! The kernel is told from the lookup that added the name, before it replies,
+//! so the caller's next listing already shows the name. `inval_inode` doesn't
+//! wait on requests in flight (unlike `inval_entry`, it takes no directory
+//! lock). A listing that was in flight meanwhile can still be cached after it;
+//! the directories' new mtime drops it when their attributes are next read.
 
 use std::sync::OnceLock;
-use std::sync::mpsc::{Sender, channel};
 
 use fuser::{INodeNo, Notifier};
 use log::debug;
 
 #[derive(Default)]
 pub struct NameChanges {
-    tx: OnceLock<Sender<Vec<u64>>>,
+    notifier: OnceLock<Notifier>,
 }
 
 impl NameChanges {
-    /// Starts telling the kernel through the session's `notifier` (it exists
-    /// once mounted, before any request).
+    /// The session's notifier: it exists once mounted, before any request.
     pub fn set_notifier(&self, notifier: Notifier) {
-        let (tx, rx) = channel::<Vec<u64>>();
-        if self.tx.set(tx).is_err() {
-            return;
-        }
-        std::thread::spawn(move || {
-            for inodes in rx {
-                for ino in inodes {
-                    // Offset 0, length 0: the attributes and the whole cached
-                    // listing. Fails harmlessly if the kernel holds no such inode.
-                    if let Err(e) = notifier.inval_inode(INodeNo(ino), 0, 0) {
-                        debug!("invalidating inode {ino}: {e}");
-                    }
-                }
-            }
-        });
+        let _ = self.notifier.set(notifier);
     }
 
     /// The names in directories `inodes` changed.
-    pub fn changed(&self, inodes: Vec<u64>) {
-        if let Some(tx) = self.tx.get() {
-            let _ = tx.send(inodes);
+    pub fn changed(&self, inodes: &[u64]) {
+        let Some(notifier) = self.notifier.get() else {
+            return;
+        };
+        for &ino in inodes {
+            // Offset 0, length 0: the attributes and the whole cached listing.
+            // Fails harmlessly if the kernel holds no such inode.
+            if let Err(e) = notifier.inval_inode(INodeNo(ino), 0, 0) {
+                debug!("invalidating inode {ino}: {e}");
+            }
         }
     }
 }
