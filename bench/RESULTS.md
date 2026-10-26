@@ -440,3 +440,23 @@ up to 10,000 files or 100 MiB. Spark, `rename(2)` of `sql/hive/src/test/resource
 status --porcelain` right after: 663 ms (7,507 lines: the old files deleted,
 the new directory untracked; nothing staged). `sql/` (21,094 files)
 still returns EXDEV.
+
+## 2026-10-26, builds in a workspace
+
+`cargo build --offline` (debug) of gitfold itself: a workspace vs a native clone
+on the same ext4 disk, dependencies in the shared cargo cache. The workspace's
+`target/` (715 MB, 1,677 files; 1,938 counted as ignored by `gitfold list`)
+lives in upper.
+
+| build                                  | native   | workspace |
+|----------------------------------------|---------:|----------:|
+| full                                   | 13642 ms |  15990 ms |
+| incremental (one source file touched)  |  1851 ms |   3905 ms |
+| no-op                                  |   165 ms |    357 ms |
+| `git status --porcelain` after         |     4 ms |      4 ms |
+
+Large build outputs cost little (full build +17%); the incremental rebuild is
+2.1x, mostly relinking the debug binary through the daemon. Many small files
+are the expensive case: untarring Spark's 27,599 files takes 3.00 s vs 0.53 s
+(see "phase 3"), which is what a `node_modules` install looks like (`npm` was
+not available to measure directly).
