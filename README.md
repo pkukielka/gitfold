@@ -35,9 +35,9 @@ already open in about 0.1 s, and warm searches and `git status` run close to nat
 speed (see [Performance](#performance)).
 
 gitfold writes into the repository: worktree registrations under
-`.git/worktrees/gitfold-*`, workspace changes and a lock file under
-`.git/gitfold/`, and refs `refs/gitfold/*` that keep workspace bases from
-`git gc` (see [Cleaning up](#cleaning-up)).
+`.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
+`refs/gitfold/*` that keep workspace bases from `git gc` (see
+[Cleaning up](#cleaning-up)).
 
 ## Requirements
 

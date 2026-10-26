@@ -2,8 +2,8 @@
 //! without a checkout: snapshots (detached HEAD, synthesized index) and
 //! workspaces (HEAD on the branch, index written once). Also the workspace
 //! helpers shared by the daemon and the management commands: `refs/gitfold/<id>`
-//! base pins, whether git is busy in a worktree, the `.git/gitfold/.lock` daemon
-//! lock, and workspace ids.
+//! base pins, whether git is busy in a worktree, the daemon lock (an `flock` on
+//! the git common directory), and workspace ids.
 //!
 //! The synthesized index carries exactly the stat data the filesystem reports
 //! (inode, mtime, ctime, uid, gid, size), so `git status` sees every file as
@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 use sha1::{Digest, Sha1};
@@ -273,27 +273,68 @@ pub fn state_root(common_dir: &Path) -> PathBuf {
     common_dir.join("gitfold")
 }
 
-/// Takes the lock on `<common>/gitfold/.lock` that a mounted daemon holds for
-/// its life and `remove`/`prune` hold while working (exclusively, so one
-/// repository has at most one daemon, and none while those run), without
-/// waiting: `None` if it is taken. Released when the returned file is closed,
-/// also when the process dies.
-pub fn lock(common_dir: &Path) -> Result<Option<fs::File>> {
-    let root = state_root(common_dir);
-    fs::create_dir_all(&root)?;
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(root.join(".lock"))?;
-    let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
-    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            return Ok(None);
+/// The repository lock (see `lock`); released when dropped, also when the
+/// process dies.
+pub struct Lock {
+    _files: Vec<fs::File>,
+}
+
+/// Takes the lock a mounted daemon holds for its life and `remove`/`prune` hold
+/// while working, so one repository has at most one daemon, and none while
+/// those run. Doesn't wait: `None` if it is taken.
+///
+/// It is an exclusive `flock` on the git common directory itself, so nothing is
+/// created on disk. Where directories can't be flocked (NFS, unless mounted
+/// with `local_lock=flock`), the lock file `<common>/gitfold/.lock` is used
+/// instead, as earlier builds did; that file, if it exists, is locked too, so a
+/// daemon of such a build is still seen.
+pub fn lock(common_dir: &Path) -> Result<Option<Lock>> {
+    let context = || format!("locking {}", common_dir.display());
+    let file_lock = state_root(common_dir).join(".lock");
+    let mut files = Vec::new();
+    let dir = fs::File::open(common_dir).with_context(context)?;
+    match flock(&dir) {
+        Ok(true) => files.push(dir),
+        Ok(false) => return Ok(None),
+        // Not supported for directories here: the lock file instead.
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(libc::ENOLCK | libc::EINVAL | libc::EBADF | libc::EOPNOTSUPP)
+            ) =>
+        {
+            fs::create_dir_all(state_root(common_dir)).with_context(context)?;
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&file_lock)
+                .with_context(context)?;
         }
-        return Err(e.into());
+        Err(e) => return Err(e).with_context(context),
     }
-    Ok(Some(file))
+    // The lock file of earlier builds (or of the fallback), only if it exists.
+    match fs::OpenOptions::new().append(true).open(&file_lock) {
+        Ok(file) => match flock(&file).with_context(context)? {
+            true => files.push(file),
+            false => return Ok(None),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(context),
+    }
+    Ok(Some(Lock { _files: files }))
+}
+
+/// An exclusive, non-blocking `flock`: whether it was taken.
+fn flock(file: &fs::File) -> std::io::Result<bool> {
+    let fd = std::os::fd::AsRawFd::as_raw_fd(file);
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(true);
+    }
+    let e = std::io::Error::last_os_error();
+    match e.raw_os_error() {
+        Some(libc::EWOULDBLOCK) => Ok(false),
+        _ => Err(e),
+    }
 }
 
 /// A workspace's id, naming its state and registration directories: the branch

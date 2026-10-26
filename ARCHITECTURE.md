@@ -58,7 +58,6 @@ Non-goals for now: macOS and Windows; applying checkout filters
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
            .git/gitfold/<id>/                workspace state: base, branch, markers, times, upper/, tmp/
-           .git/gitfold/.lock                held (shared) by a mounted daemon; remove/prune take it
            refs/gitfold/<id>                 keeps the workspace base from git gc
 ```
 
@@ -250,9 +249,12 @@ decision that creates them.
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
   the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers` and `times`
   record formats, `upper/`), the base-pinning ref `refs/gitfold/<id>`, the
-  `.git/gitfold/.lock` protocol, the registration names `gitfold-<sha12>` and
-  `gitfold-ws-<id>`, and the path hash. Changing any of them needs a migration, or every existing
-  workspace's index stops matching (Chromium: 4.4 GB re-hashed).
+  registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
+  hash. Changing any of them needs a migration, or every existing workspace's
+  index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
+  `flock` on the git common directory, or the `gitfold/.lock` file where that
+  isn't supported) is a contract between builds too: changing it makes older
+  and newer builds miss each other's daemons.
 - **Workspace operations take `layers` before resolving a path**, and keep it
   while acting on the result: creating, removing and renaming exclusively;
   writes, attribute changes, fsync, reads, lookups and each readdirplus page
@@ -871,12 +873,15 @@ checkout" and "Running it"); this is the why and what it would take.
   branch).
 - **Workspaces are removed only while unmounted** (`gitfold remove`): the
   daemon holds their state in memory. Until then git treats the branch as
-  checked out. A daemon holds an exclusive `flock` on `.git/gitfold/.lock` for
-  its whole life (also while exiting after an unmount, and through bind mounts
-  or other mount namespaces), so a repository has at most one daemon (two
-  would share, and corrupt, the stored workspace state); `remove` and `prune`
-  take the same lock or refuse.
-  Daemons from before this lock existed are not detected.
+  checked out. A daemon holds an exclusive `flock` on the git common
+  directory itself (nothing is created for it) for its whole life, also while
+  exiting after an unmount, and through bind mounts or other mount namespaces,
+  so a repository has at most one daemon (two would share, and corrupt, the
+  stored workspace state); `remove` and `prune` take the same lock or refuse.
+  Where directories can't be flocked (NFS without `local_lock=flock`), the
+  lock file `.git/gitfold/.lock` is used instead, as earlier builds did, and
+  an existing one is always locked too, so their daemons are still seen;
+  daemons of builds before any lock are not.
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
   resolution uses the kernel's own parent links, so this only affects tools that

@@ -42,6 +42,7 @@ check "second mount of the repository refused" fails timeout 5 "$BIN" mount "$RE
 check "second mount point not mounted" fails mountpoint -q "$T/mnt2"
 check "remove refused while mounted" fails "$BIN" remove "$REPO" two
 check "prune refused while mounted" fails "$BIN" prune "$REPO"
+check "the git common directory is what is locked" fails flock -n "$COMMON" true
 unmount_fs
 out=$("$BIN" list "$REPO" 2>/dev/null)
 eq "workspace with changes" "2 1" "$(echo "$out" | awk '$1 == "agent/one" { print $2, $3 }')"
@@ -226,6 +227,18 @@ R config core.excludesFile relign
 eq "relative core.excludesFile: status refused" yes "$("$BIN" list "$REPO" 2>/dev/null | grep "^twelve" | grep -q "relative path" && echo yes)"
 R config --unset core.excludesFile
 check "remove twelve" "$BIN" remove "$REPO" twelve --force
+
+echo "== the lock leaves nothing behind"
+git init -q "$T/plain"; git -C "$T/plain" -c user.name=t -c user.email=t@t commit -q --allow-empty -m e
+check "prune of a repository without gitfold state" "$BIN" prune "$T/plain"
+check "creates nothing in it" test ! -e "$T/plain/.git/gitfold"
+
+mkdir -p "$T/plain/.git/gitfold"; touch "$T/plain/.git/gitfold/.lock"
+flock "$T/plain/.git/gitfold/.lock" sleep 3 & OLD=$!   # a daemon of an earlier build
+sleep 0.3
+check "an earlier build's lock file is honoured" fails "$BIN" prune "$T/plain"
+wait $OLD
+check "free again" "$BIN" prune "$T/plain"
 
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"

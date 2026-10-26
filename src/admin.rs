@@ -25,7 +25,7 @@ pub fn fs_name(common_dir: &Path) -> String {
 /// Holds the repository's daemon lock for the life of a mount: two daemons
 /// would share, and corrupt, the stored workspace state, and `remove` and
 /// `prune` must not run meanwhile.
-pub fn mount_lock(common_dir: &Path) -> Result<fs::File> {
+pub fn mount_lock(common_dir: &Path) -> Result<worktree::Lock> {
     worktree::lock(common_dir)?.with_context(|| {
         format!(
             "{} is already mounted (or a `gitfold remove`/`prune` of it is running); \
@@ -49,7 +49,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<()> {
 /// holds it (mounted, or still exiting after an unmount): the daemon keeps
 /// workspace state in memory and owns the files below `.git/gitfold/`. Held
 /// until the returned file is dropped, so no mount starts meanwhile.
-fn exclusive(common_dir: &Path) -> Result<fs::File> {
+fn exclusive(common_dir: &Path) -> Result<worktree::Lock> {
     worktree::lock(common_dir)?.with_context(|| {
         format!(
             "{} is in use by a gitfold daemon; unmount it first",
@@ -107,7 +107,8 @@ fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
     for entry in entries {
         let entry = entry?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        // `.lock`; branch names (so ids) never start with a dot.
+        // Not a workspace, e.g. the `.lock` file of earlier builds (branch
+        // names, so ids, never start with a dot).
         if id.starts_with('.') {
             continue;
         }
