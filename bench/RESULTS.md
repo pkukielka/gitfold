@@ -460,3 +460,10 @@ Large build outputs cost little (full build +17%); the incremental rebuild is
 are the expensive case: untarring Spark's 27,599 files takes 2997 ms vs 525 ms
 (see "phase 3"), which is what a `node_modules` install looks like (`npm` was
 not available to measure directly).
+
+## 2026-10-26, `git worktree add` on Chromium
+
+The comparison the README leads with, on the Chromium bench clone (pack in page
+cache): `git worktree add --detach <dir> HEAD` took 17299 ms, and 17218 ms on a
+repeat after removing it; the worktree uses 5,634 MiB of disk. A gitfold
+workspace of the same commit opens in 845 ms and copies nothing.

@@ -1,20 +1,83 @@
 # gitfold
 
-Any git revision or branch as a directory, without a checkout.
+**Every branch and every commit of your git repository as a folder. No
+checkout, no copying, ready in about a second.**
 
 ```
-$ mkdir -p ~/mnt/repo
-$ gitfold mount ~/src/monorepo ~/mnt/repo > /tmp/gitfold.log 2>&1 &
-$ sleep 1                               # until `mountpoint -q ~/mnt/repo` succeeds
-$ cd ~/mnt/repo/@origin/main~3          # read-only snapshot of any revision
-$ git -C ~/src/monorepo branch feature/login origin/main
-$ cd ~/mnt/repo/feature/login           # writable workspace on that branch
-$ vim src/app.ts && git commit -am fix  # commits go to branch feature/login
-$ rg TODO                               # close to native speed once warm
+gitfold mount ~/src/monorepo ~/mnt/repo   # your existing clone, as folders
+cd ~/mnt/repo/@v2.1.0                     # @ + commit, tag or branch: read-only
+cd ~/mnt/repo/agent/task-17               # a branch: edit, commit, push
 ```
 
-(`gitfold` is `target/release/gitfold` unless you `cargo install` it; see
-[Build](#build).)
+Built for coding agents and code review on big monorepos. Give every agent its
+own branch and every reviewer any revision, side by side, without
+`git worktree add` copying gigabytes for each one. Linux only (FUSE).
+
+## Why gitfold
+
+- **Opens in under a second.** A branch of Chromium (512k files, 4.4 GB) opens
+  in 0.85 s; `git worktree add` takes over 17 s and 5.5 GiB of disk. Nothing is
+  copied: unchanged files are read straight from git.
+- **A real checkout to every tool.** Each folder is a linked git worktree, so
+  `git status`, `commit`, `push`, editors, `rg` and agents work as usual, and
+  reads run close to native speed once warm.
+- **Costs only what you change.** A workspace stores just the files you edit,
+  inside `.git/`, and drops them again once you commit. Changes survive
+  unmounts and crashes.
+- **Dozens side by side.** Open as many revisions and branches as you have
+  agents: snapshots of nearby revisions share memory and page cache, and a
+  Chromium workspace costs about 125 MB of daemon memory.
+- **Your repository, as is.** Works on your existing clone: no new clone, no
+  server, no root. Branches and commits are ordinary git.
+
+## Quick start
+
+Needs Linux with FUSE 3 (`fusermount3`, kernel 5.1+), git, and Rust 1.88+ to
+build.
+
+1. **Install:**
+
+   ```
+   git clone https://github.com/pkukielka/gitfold && cd gitfold
+   cargo install --locked --path .        # or: nix develop -c cargo install ...
+   ```
+
+2. **Mount** your existing clone (it runs in the background until you unmount
+   it):
+
+   ```
+   mkdir -p ~/mnt/repo
+   gitfold mount ~/src/monorepo ~/mnt/repo
+   ```
+
+3. **Use** it. Each folder opens on first access, in about a second even on a
+   large repository:
+
+   ```
+   cd ~/mnt/repo/@HEAD~5                       # any revision, read-only
+   gitfold branch ~/src/monorepo my-task       # create a branch...
+   cd ~/mnt/repo/my-task                       # ...and work in it
+   echo fix >> README.md
+   git commit -am "Fix" && git push -u origin HEAD
+   ```
+
+4. **Stop** the mount (from outside it), and remove the workspace when you no
+   longer need it (its commits stay on the branch):
+
+   ```
+   cd ~
+   gitfold unmount ~/mnt/repo
+   gitfold remove ~/src/monorepo my-task
+   ```
+
+The rest of this page is reference: [How it works](#how-it-works) ·
+[Requirements](#requirements) · [Usage](#usage) · [Snapshots](#snapshots) ·
+[Workspaces](#workspaces) · [Running it](#running-it) ·
+[Cleaning up](#cleaning-up) ·
+[Differences from a checkout](#differences-from-a-checkout) ·
+[Performance](#performance) · [Development](#development)
+
+## How it works
 
 gitfold is a FUSE filesystem with two kinds of directories:
 
@@ -27,13 +90,6 @@ gitfold is a FUSE filesystem with two kinds of directories:
 Both are registered as linked git worktrees, so git commands inside them behave
 as in a normal checkout.
 
-It is built for coding agents and code review on large repositories, where
-`git worktree add` of a 20-40 GB monorepo is slow and needs a full copy on disk,
-and where agents need many revisions and branches side by side. On Chromium
-(512k files) a snapshot or workspace opens in about 0.85 s, a snapshot near one
-already open in about 0.1 s, and warm searches and `git status` run close to native
-speed (see [Performance](#performance)).
-
 gitfold writes into the repository: worktree registrations under
 `.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
@@ -41,26 +97,21 @@ gitfold writes into the repository: worktree registrations under
 
 ## Requirements
 
-- Linux with FUSE 3 (`fusermount3` on `PATH`); no root needed. Tested on 6.12;
-  kernel 5.1 or newer is required for the no-opendir mode gitfold depends on.
+- Linux with FUSE 3 (`fusermount3` on `PATH`, access to `/dev/fuse`); no root
+  needed. Tested on 6.12; kernel 5.1 or newer is required for the no-opendir
+  mode gitfold depends on.
 - git with linked worktree and index v4 support (any git from the last decade;
   tested with 2.49).
-- Rust 1.88 or newer (edition 2024; developed with 1.99), or Nix on
-  x86_64-linux: `flake.nix` provides a dev shell with the toolchain.
-
-## Build
-
-```
-nix develop -c cargo build --release     # or, with Rust installed: cargo build --release
-cargo install --path .                   # optional: puts `gitfold` on PATH
-```
-
-The binary is `target/release/gitfold`.
+- To build: Rust 1.88 or newer (edition 2024; developed with 1.99), or Nix on
+  x86_64-linux (`flake.nix` provides a dev shell with the toolchain). Without
+  installing, the binary is `target/release/gitfold` after
+  `cargo build --release`.
 
 ## Usage
 
 ```
-gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>
+gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
+gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold branch <REPO> <NAME> [--from <REV>]   # create a branch for a workspace
 gitfold list <REPO>                           # workspaces and their changes
 gitfold remove <REPO> <BRANCH> [--force]      # delete a workspace (unmounted)
@@ -111,8 +162,7 @@ Options:
 
 Read-only: files and directories have no write bits, so writes fail with
 `EACCES`; `chmod` and setting times (`touch -d`, `utimensat`) fail with
-`EROFS`. Each
-snapshotted commit is registered as a linked worktree under
+`EROFS`. Each snapshotted commit is registered as a linked worktree under
 `<repo>/.git/worktrees/gitfold-<sha12>` (the first 12 hex digits of the commit)
 with a detached HEAD, so `git status`, `log`, `diff`, `show`, `blame` etc. work.
 Names that resolve to the same commit (`@HEAD` and `@<its sha>`) share one
@@ -165,15 +215,13 @@ unmounting, remounting or a daemon crash keeps them. Don't switch branches
 inside a workspace (`git switch`, `git checkout <branch>`): it works as in any
 worktree, but the directory keeps the old branch's name and its stored changes.
 
-**Commits, merges, rebases.** Within about a second of git moving the branch
-(commit, merge, rebase, `reset`, `commit --amend`, also from outside), gitfold
-moves the workspace's base to the new tip, once git is idle in the workspace: no
-operation running or stopped half-way (conflicts, `rebase -i`, `bisect`), HEAD
-on the branch. This is invisible: no file changes content, mode or mtime, and
-committed files also keep their ctime, so commands chained after a commit
-(`git commit && git status`) see the same files either way. It keeps `upper/`
-small: committed files are dropped from it, and so are files git rewrote
-unchanged (`stash`, `rebase --abort`).
+**Commits, merges, rebases** work as usual, also from outside the workspace
+(`reset`, `commit --amend`, ...). Within about a second, once git is idle (no
+conflicts, `rebase -i` or `bisect` pending), gitfold moves the workspace's base
+to the new branch tip. No file changes content, mode or mtime in the process,
+so commands chained after a commit (`git commit && git status`) see the same
+files either way, and committed files, as well as files git rewrote unchanged
+(`stash`, `rebase --abort`), stop taking space in `upper/`.
 
 **Finish.** Push or merge the branch from anywhere, unmount, then remove the
 workspace with `gitfold remove <REPO> <BRANCH>` (see
@@ -220,20 +268,27 @@ Don't modify `.git/gitfold/` while mounted.
 
 ## Running it
 
-- `gitfold mount` runs in the foreground until the file system is unmounted.
-  Run it in the background (or under a service manager) and redirect its output;
-  it logs one line per new snapshot commit, workspace, prewarm and workspace
-  rebase, operation counters on exit, and fuser warnings for unimplemented
-  operations such as extended attributes. Set `RUST_LOG=warn,fuser=error` for
-  only problems.
-- **Stop it with Ctrl-C, `kill` (SIGTERM) or `fusermount3 -u <MOUNTPOINT>`.**
-  On a signal the daemon unmounts itself, logs operation counters and exits. If
-  the mount is busy (a shell's working directory is inside it), it is detached
-  at once and the daemon exits when the last process leaves; signal again to
-  exit immediately.
+- `gitfold mount` starts the daemon in the background, detached from the
+  terminal (closing it doesn't stop the mount), and returns once the mount is
+  up, or with the daemon's error. It logs to a file named after the mount
+  point in `/gitfold/` (default `~/.local/state/gitfold/`),
+  printing its path (`--log` to choose): one line per new snapshot commit,
+  workspace, prewarm and workspace rebase, and operation counters on exit. `RUST_LOG=warn` for only problems. With `--foreground` it
+  stays in the foreground and logs to stderr, for service managers.
+- **Stop it with `gitfold unmount <MOUNTPOINT>`.** If the mount is busy (a
+  shell's working directory is inside it), it is detached at once and the
+  daemon exits when the last process leaves, so `cd` out before `gitfold
+  remove` or `prune`; otherwise `unmount` waits until the daemon has exited,
+  and they can follow right away. Before exiting, the daemon brings every open
+  workspace's base up to its branch tip. Ctrl-C (in the foreground), SIGTERM,
+  SIGHUP and `fusermount3 -u <MOUNTPOINT>` stop it as well; a second SIGINT or
+  SIGTERM exits immediately.
 - Only `kill -9` (or a crash) leaves the mount behind: accesses then fail with
-  `Transport endpoint is not connected`, and `fusermount3 -u <MOUNTPOINT>`
-  cleans it up. `gitfold mount` detects such stale mounts, and mount points
+  `Transport endpoint is not connected`, and `gitfold unmount <MOUNTPOINT>`
+  cleans it up. If accesses hang instead (killed while a prewarm walk was
+  running), `echo 1 > /sys/fs/fuse/connections/<N>/abort` releases them, with
+  `<N>` the minor device number from `grep gitfold /proc/self/mountinfo` (the
+  third field is `0:<N>`); no root needed. `gitfold mount` detects such stale mounts, and mount points
   that are missing, not directories or already mounted, and says so.
 - **Cost of a long-running mount:** snapshots and workspaces stay loaded until
   unmount.
@@ -327,19 +382,14 @@ git -C <REPO> for-each-ref --format='%(refname)' refs/gitfold \
 ## Performance
 
 Chromium (512k files, 4.4 GB at HEAD, 64 GB pack), 24 cores, 62 GB RAM, pack
-and native checkout in page cache, gitfold after the default metadata prewarm;
-all times from one session (first run / repeat). The snapshot open time near an
-open one and the daemon memory row come from later runs and builds (the
-workspace figure from a build with a smaller node table, which left the times
-unchanged). "git status" is the exact invocation Claude Code issues itself
-(`git -c core.fsmonitor= status --porcelain=v2 -z --untracked-files=normal
---ignored=matching --no-renames --ignore-submodules=all`).
-The workspace is a fresh one (no changes). Details and more repositories:
+and native checkout in page cache, gitfold after the default metadata prewarm,
+a fresh workspace; first run / repeat. "git status" is the invocation Claude
+Code issues itself. Details, methodology and more repositories:
 [bench/RESULTS.md](bench/RESULTS.md).
 
 | | native checkout | snapshot | workspace |
 |---|---:|---:|---:|
-| open | `git worktree add`: not measured | 0.84 s (0.10-0.12 s near an open one) | 0.85 s |
+| open | `git worktree add`: 17.30 / 17.22 s, 5.5 GiB | 0.84 s (0.10-0.12 s near an open one) | 0.85 s |
 | prewarm (background) | | 0.64 s | 1.37 s |
 | `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.36 / 0.35 s | 0.35 / 0.35 s |
 | `git status` | 0.86 / 0.88 s | 1.15 / 1.13 s | 1.20 / 1.17 s |
@@ -377,6 +427,8 @@ is 715 MB in 1,677 files:
 | full | 13.64 s | 15.99 s |
 | incremental (one source file touched) | 1.85 s | 3.91 s |
 | no-op | 0.17 s | 0.36 s |
+
+## Development
 
 Benchmark scripts are in `bench/`: `bench.sh` compares native and mounted runs of
 the commands an agent issues, `probe.sh` isolates content reads, `writes.sh`
