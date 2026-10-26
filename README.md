@@ -285,10 +285,7 @@ Don't modify `.git/gitfold/` while mounted.
   SIGTERM exits immediately.
 - Only `kill -9` (or a crash) leaves the mount behind: accesses then fail with
   `Transport endpoint is not connected`, and `gitfold unmount <MOUNTPOINT>`
-  cleans it up. If accesses hang instead (killed while a prewarm walk was
-  running), `echo 1 > /sys/fs/fuse/connections/<N>/abort` releases them, with
-  `<N>` the minor device number from `grep gitfold /proc/self/mountinfo` (the
-  third field is `0:<N>`); no root needed. `gitfold mount` detects such stale mounts, and mount points
+  cleans it up. `gitfold mount` detects such stale mounts, and mount points
   that are missing, not directories or already mounted, and says so.
 - **Cost of a long-running mount:** snapshots and workspaces stay loaded until
   unmount.

@@ -128,7 +128,7 @@ Then, per request (`fs/workspace/`):
 | `src/main.rs` | CLI (clap), mount options, `M_MMAP_THRESHOLD` |
 | `src/worktree.rs` | worktree registrations (snapshots, workspaces), streaming index v4 writer, base pin refs, git idle check, daemon lock, workspace ids |
 | `src/git.rs` | thread-local gitoxide handles, tree, blob and ref access |
-| `src/prewarm.rs` | background walk of new snapshots and workspaces |
+| `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
 | `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
 | `src/daemon.rs` | `mount` in the background (detached, log file), `unmount` |
@@ -739,8 +739,14 @@ of decoding trees on demand. The remaining cold cost is per-entry kernel work
 
 ### Prewarm instead of tricks
 
-**What:** right after opening a snapshot or workspace, the daemon walks it
-through its own mount on a thread pool. `meta` (default) lists every directory
+**What:** right after opening a snapshot or workspace, the daemon starts a
+walker process (`gitfold prewarm`) that walks it through the mount on a
+thread pool. A separate process, because a daemon killed with SIGKILL while
+its own threads wait on requests to its mount never finishes dying, and every
+access to the mount hangs; a separate walker's requests just fail once the
+daemon is gone. Walkers keep the mount busy, so the daemon stops its own
+before unmounting on a signal, and `gitfold unmount` stops those below the
+mount point. `meta` (default) lists every directory
 and stats it afterwards (see the read-write mount note under
 [caching](#kernel-caching-does-the-heavy-lifting)); `content` also reads and
 stats every file.

@@ -109,6 +109,8 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     let Some(source) = mountpoint::gitfold_source(&mountpoint)? else {
         bail!("{shown} is not a gitfold mount");
     };
+    // Prewarm walkers keep the mount busy, which would make this only detach it.
+    crate::prewarm::stop_below(&mountpoint);
     if let Unmounted::Detached = mountpoint::unmount_or_detach(&mountpoint)? {
         println!(
             "{shown} is in use (a shell inside?): detached it. gitfold exits, and \

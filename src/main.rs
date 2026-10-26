@@ -75,6 +75,15 @@ enum Command {
     /// Delete the snapshot registrations (recreated when opened again). The
     /// repository must not be mounted.
     Prune { repo: PathBuf },
+    /// Walk a freshly opened snapshot or workspace (started by the daemon).
+    #[command(hide = true)]
+    Prewarm {
+        root: PathBuf,
+        #[arg(long, value_enum)]
+        mode: prewarm::Prewarm,
+        #[arg(long)]
+        threads: usize,
+    },
     /// Evaluate checkout attributes for every file of a revision.
     #[command(hide = true)]
     BenchAttrs { repo: PathBuf, rev: String },
@@ -163,6 +172,11 @@ fn main() -> Result<()> {
             force,
         } => admin::remove(&repo, &branch, force)?,
         Command::Prune { repo } => admin::prune(&repo)?,
+        Command::Prewarm {
+            root,
+            mode,
+            threads,
+        } => prewarm::run(root, mode, threads)?,
         Command::BenchAttrs { repo, rev } => {
             git::init(&repo)?;
             benchattrs::run(&rev)?;

@@ -83,6 +83,8 @@ pub fn unmount_on_signal(mountpoint: PathBuf) {
             }
             signalled = true;
             info!("signal {sig}: unmounting {}", mountpoint.display());
+            // Walkers keep the mount busy; stop them so it unmounts rather than detaches.
+            crate::prewarm::stop_all();
             match unmount_or_detach(&mountpoint) {
                 Ok(Unmounted::Done) => {}
                 Ok(Unmounted::Detached) => {
