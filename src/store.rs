@@ -63,6 +63,12 @@ pub struct TreeTable {
     /// depth-first walk produce paths in index order.
     entries: Box<[TEntry]>,
     names: Box<[u8]>,
+    /// Index entries below this tree (files, symlinks and submodules).
+    index_entries: u32,
+    /// Whether the tree object was stored strictly in this order (no entry out
+    /// of order or listed twice), as git writes trees. Only then do index entries written from
+    /// this table make up that object, as the index's cache tree claims.
+    canonical: bool,
 }
 
 /// Git's tree entry order: names compare bytewise, with a directory's name
@@ -127,6 +133,8 @@ fn file_hash(oid: &ObjectId, kind: EntryKind) -> u64 {
 
 struct Trees {
     tables: Vec<Arc<TreeTable>>,
+    /// The object id of each table (for the index's cache tree).
+    oids: Vec<ObjectId>,
     ids: gix::hashtable::HashMap<ObjectId, u32>,
 }
 
@@ -165,10 +173,13 @@ impl Default for Store {
         let empty = TreeTable {
             entries: Box::new([]),
             names: Box::new([]),
+            index_entries: 0,
+            canonical: true,
         };
         Store {
             trees: RwLock::new(Trees {
                 tables: vec![Arc::new(empty)],
+                oids: vec![ObjectId::empty_tree(gix::hash::Kind::Sha1)],
                 // The real empty tree object is the same table; avoids storing it twice.
                 ids: [(ObjectId::empty_tree(gix::hash::Kind::Sha1), EMPTY_TREE)]
                     .into_iter()
@@ -204,15 +215,19 @@ impl Store {
             return Ok(id);
         }
         let mut raw = git::tree_entries(oid)?;
-        // Git already stores trees in this order; sorting keeps malformed trees searchable.
-        raw.sort_unstable_by(|a, b| {
+        let order = |a: &git::Entry, b: &git::Entry| {
             tree_order(
                 &a.name,
                 a.kind == EntryKind::Tree,
                 &b.name,
                 b.kind == EntryKind::Tree,
             )
-        });
+        };
+        let canonical = raw
+            .windows(2)
+            .all(|w| order(&w[0], &w[1]) == Ordering::Less);
+        // Git already stores trees in this order; sorting keeps malformed trees searchable.
+        raw.sort_unstable_by(order);
         let ids: Vec<u32> = raw
             .par_iter()
             .map(|e| match e.kind {
@@ -238,9 +253,21 @@ impl Store {
             names.extend_from_slice(&e.name);
             entries.push(entry);
         }
+        let index_entries = {
+            let trees = self.trees.read();
+            entries
+                .iter()
+                .map(|e| match e.kind {
+                    EntryKind::Tree => trees.tables[e.id as usize].index_entries,
+                    _ => 1,
+                })
+                .sum()
+        };
         let table = TreeTable {
             entries: entries.into(),
             names: names.into(),
+            index_entries,
+            canonical,
         };
 
         let mut trees = self.trees.write();
@@ -249,6 +276,7 @@ impl Store {
         }
         let id = trees.tables.len() as u32;
         trees.tables.push(Arc::new(table));
+        trees.oids.push(oid);
         trees.ids.insert(oid, id);
         Ok(id)
     }
@@ -308,8 +336,11 @@ impl Store {
     }
 
     /// Writes the git index entries of a tree, in index order (tables are in tree
-    /// order, so a depth-first walk yields it). `ino(path, dir, entry)` gives the
-    /// low 32 bits of the inode `stat` reports for each entry.
+    /// order, so a depth-first walk yields it), and its cache tree (the `TREE`
+    /// extension: entry count and tree id of every directory, which lets `git
+    /// status` skip comparing unchanged directories with HEAD entry by entry).
+    /// `ino(path, dir, entry)` gives the low 32 bits of the inode `stat` reports
+    /// for each entry.
     pub fn write_index(
         &self,
         dirs: &[DirRec],
@@ -320,31 +351,44 @@ impl Store {
         let files = self.files.read();
         let walk = IndexWalk {
             tables: &trees.tables,
+            oids: &trees.oids,
             files: &files.recs,
             dirs,
             ino,
         };
-        walk.dir(0, &mut Vec::new(), w);
+        walk.dir(0, b"", &mut Vec::new(), w);
     }
 }
 
 struct IndexWalk<'a, F> {
     tables: &'a [Arc<TreeTable>],
+    oids: &'a [ObjectId],
     files: &'a [FileRec],
     dirs: &'a [DirRec],
     ino: F,
 }
 
 impl<F: Fn(&[u8], &DirRec, &TEntry) -> u32> IndexWalk<'_, F> {
-    fn dir(&self, dir: u32, path: &mut Vec<u8>, w: &mut IndexWriter) {
+    fn dir(&self, dir: u32, name: &[u8], path: &mut Vec<u8>, w: &mut IndexWriter) {
         let rec = self.dirs[dir as usize];
         let table = &self.tables[rec.tree as usize];
+        // A cache tree node comes before its subdirectories' (empty ones
+        // included, with 0 entries, as git's own `read-tree` writes them).
+        let subtrees = table
+            .entries()
+            .iter()
+            .filter(|e| e.kind == EntryKind::Tree)
+            .count();
+        let valid = table
+            .canonical
+            .then(|| (table.index_entries, &self.oids[rec.tree as usize]));
+        w.push_tree(name, valid, subtrees as u32);
         for e in table.entries() {
             let len = path.len();
             path.extend_from_slice(table.name(e));
             if e.kind == EntryKind::Tree {
                 path.push(b'/');
-                self.dir(rec.first_child + e.ord, path, w);
+                self.dir(rec.first_child + e.ord, table.name(e), path, w);
             } else {
                 // Submodules are index entries but empty directories in the mount.
                 let f = &self.files[e.id as usize];

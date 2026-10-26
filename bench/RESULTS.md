@@ -498,3 +498,24 @@ lookup adds a name. Negative entries are cached forever in snapshots and
 workspaces, and for dot names in the root and namespaces too. `rg --files` of
 the snapshot (ripgrep 15.2, default options) was already near native (24-27 ms
 vs 20-26 ms) both before and after: this ripgrep doesn't probe every directory.
+
+## 2026-10-26, cache tree in the synthesized index
+
+Reported from a large corporate repository: git's untracked cache (`UNTR`,
+which git adds to an existing index itself) was there but the cache tree
+(`TREE`) wasn't, and adding it halved `git status` there. Git writes the
+cache tree on commit (and `read-tree`), not when `status` refreshes the index,
+so a registration's index went without it until the first commit.
+
+Chromium bench clone, snapshot of HEAD on a fresh registration, after
+prewarm, `git status --porcelain`, four runs per round:
+
+| build           | runs, round 1 / round 2 (ms)          |
+|-----------------|---------------------------------------|
+| without `TREE`  | 1305 946 946 949 / 1128 949 954 939   |
+| with `TREE`     | 907 728 718 722 / 902 718 730 725     |
+| native checkout | 887 882 866 (three runs)              |
+
+The index grows from 39,918 KiB to 41,535 KiB (46,362 cache tree nodes, all
+equal to those `git read-tree HEAD` writes); opening the snapshot took the same
+time (867 / 876 ms without, 860 / 840 ms with).

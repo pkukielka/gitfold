@@ -127,7 +127,7 @@ Then, per request (`fs/workspace/`):
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
 | `src/main.rs` | CLI (clap), mount options, `M_MMAP_THRESHOLD` |
-| `src/worktree.rs` | worktree registrations (snapshots, workspaces), streaming index v4 writer, base pin refs, git idle check, daemon lock, workspace ids |
+| `src/worktree.rs` | worktree registrations (snapshots, workspaces), streaming index v4 writer (with cache tree), base pin refs, git idle check, daemon lock, workspace ids |
 | `src/git.rs` | thread-local gitoxide handles, tree, blob and ref access |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
@@ -436,7 +436,8 @@ unmounted.
 ### A synthesized git index whose stat data matches the filesystem
 
 **What:** gitfold writes each snapshot's index itself, with exactly the stat
-data `getattr` reports. The index is version 4, streamed.
+data `getattr` reports, and with a cache tree. The index is version 4,
+streamed.
 
 **Why:** `git status` first `lstat`s every index entry and compares mtime,
 ctime, inode, uid, gid and size with the index. When they match, the file is
@@ -451,6 +452,22 @@ paths already sorted as the index requires, so entries are written straight to
 the output buffer: no collection, no sort, no per-entry allocation. Opening a
 nearby Chromium snapshot went from 225 ms (version 2, collect and sort) to
 122 ms, and to ~100 ms with the buffer preallocated from the previous index.
+
+The cache tree (the `TREE` extension) records each directory's entry count and
+tree id. `git status` compares the index with HEAD's tree, and skips every
+directory whose recorded tree id matches HEAD's instead of comparing it entry
+by entry. Git writes it on commit, not when it adds stat data, so without it a
+fresh registration was compared entry by entry until the first commit. The same
+walk writes it (a directory's node precedes its subdirectories'), from entry
+counts kept per tree table since loading. Empty subtrees (git never creates
+them) get nodes with 0 entries, as git's own `read-tree` writes them; on
+Chromium all 46,362 nodes equal git's. A tree object not stored strictly in
+git's order (out of order, or a name listed twice) gets an invalid node, which
+git works out itself: the index entries written from it come sorted, so
+they needn't make up that object (`read-tree` would still record
+it; gitfold errs on the safe side). Warm `git status` of a Chromium snapshot:
+947 ms without it, 722 ms with it (native 878 ms); the index grows 1.6 MiB
+(4%), and opening takes no longer.
 
 **Rejected:**
 

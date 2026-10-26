@@ -7,9 +7,12 @@
 //!
 //! The synthesized index carries exactly the stat data the filesystem reports
 //! (inode, mtime, ctime, uid, gid, size), so `git status` sees every file as
-//! clean from stat alone and never has to read file contents.
+//! clean from stat alone and never has to read file contents, and a cache tree
+//! (`TREE` extension), so it compares unchanged directories with HEAD by tree
+//! id instead of entry by entry.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -26,10 +29,13 @@ pub struct StatInfo {
     pub gid: u32,
 }
 
-/// Streams an index v4 file. v4 prefix-compresses paths against the previous
-/// entry (~half the size for large trees), so entries must arrive in index order.
+/// Streams an index v4 file, with a cache tree. v4 prefix-compresses paths
+/// against the previous entry (~half the size for large trees), so entries
+/// must arrive in index order.
 pub struct IndexWriter {
     out: Vec<u8>,
+    /// The body of the `TREE` extension (cache tree).
+    tree: Vec<u8>,
     prev: Vec<u8>,
     count: u32,
     stat: StatInfo,
@@ -44,6 +50,7 @@ impl IndexWriter {
         out.extend_from_slice(&0u32.to_be_bytes()); // entry count, patched in finish()
         IndexWriter {
             out,
+            tree: Vec::new(),
             prev: Vec::new(),
             count: 0,
             stat,
@@ -90,8 +97,30 @@ impl IndexWriter {
         self.count += 1;
     }
 
+    /// Adds a cache tree node, in pre-order (a directory before its
+    /// subdirectories; their order doesn't matter to git): directory `name`
+    /// (empty for the root) with `valid` = (index entries below it, its tree
+    /// id), or `None` to have git work them out, and `subtrees` nodes to
+    /// follow for its subdirectories.
+    pub fn push_tree(&mut self, name: &[u8], valid: Option<(u32, &ObjectId)>, subtrees: u32) {
+        self.tree.extend_from_slice(name);
+        self.tree.push(0);
+        let count = valid.map_or(-1, |(n, _)| i64::from(n));
+        // Writing to a Vec can't fail.
+        let _ = writeln!(self.tree, "{count} {subtrees}");
+        if let Some((_, oid)) = valid {
+            self.tree.extend_from_slice(oid.as_bytes());
+        }
+    }
+
     pub fn finish(mut self) -> Vec<u8> {
         self.out[8..12].copy_from_slice(&self.count.to_be_bytes());
+        if !self.tree.is_empty() {
+            self.out.extend_from_slice(b"TREE");
+            self.out
+                .extend_from_slice(&(self.tree.len() as u32).to_be_bytes());
+            self.out.extend_from_slice(&self.tree);
+        }
         let digest = Sha1::digest(&self.out);
         self.out.extend_from_slice(&digest);
         self.out

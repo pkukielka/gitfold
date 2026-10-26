@@ -6,6 +6,7 @@
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
+CACHE_TREE=$(realpath "$(dirname "$0")/cache-tree.pl")
 T=/tmp/gf-cli-test
 REPO=$T/repo
 MNT=$T/mnt
@@ -322,6 +323,38 @@ check "missing file in a snapshot stays missing" test ! -e "$MNT/@later-tag/.ign
 unmount_fs
 check "remove later" "$BIN" remove "$REPO" later --force
 check "remove ns/b" "$BIN" remove "$REPO" ns/b --force
+
+echo "== the index's cache tree (TREE extension)"
+# A submodule, a symlink, an executable and an empty directory; git's own
+# `read-tree` writes the cache tree to compare with.
+(cd "$REPO" && mkdir -p t/u/v && echo v >t/u/v/f && ln -s a.txt t/link && echo x >t/x && chmod +x t/x)
+R add -A; R commit -qm tree; R update-index --add --cacheinfo "160000,$(R rev-parse HEAD),t/sub"; R commit -qm sub
+EMPTY=$(R hash-object -w -t tree /dev/null)
+R branch cachetree "$(R commit-tree "$( (R ls-tree HEAD; printf '040000 tree %s\tempty\n' "$EMPTY") | R mktree)" -p HEAD -m empty)"
+mount_fs
+for v in @cachetree cachetree; do
+    check "$v opens" test -e "$MNT/$v/a.txt"
+    GIT_INDEX_VERSION=4 GIT_INDEX_FILE=$T/git.idx R read-tree "$(G "$MNT/$v" rev-parse HEAD^{tree})"
+    eq "$v: cache tree as git writes it" "$(perl "$CACHE_TREE" "$T/git.idx")" \
+        "$(perl "$CACHE_TREE" "$(G "$MNT/$v" rev-parse --path-format=absolute --git-path index)")"
+done
+eq "it has every directory" 7 "$(perl "$CACHE_TREE" "$T/git.idx" | wc -l)"
+(cd "$MNT/cachetree" && echo w >t/u/w && echo d >>d/b.txt && G . add -A && G . commit -qm w)
+R worktree add -q "$T/plain-ct" cachetree~1
+(cd "$T/plain-ct" && echo w >t/u/w && echo d >>d/b.txt && G . add -A && G . commit -qm w)
+eq "a commit builds the trees git would" "$(G "$T/plain-ct" rev-parse HEAD^{tree})" "$(G "$MNT/cachetree" rev-parse HEAD^{tree})"
+# A tree object stored out of order (git never writes one): its node is left
+# for git to work out, since the index entries come sorted.
+BLOB=$(R rev-parse HEAD:a.txt)
+UNSORTED=$(perl -e 'print map { "100644 $_\0" . pack("H*", $ARGV[0]) } qw(b a)' "$BLOB" | R hash-object -t tree --literally -w --stdin)
+R branch unsorted "$(R commit-tree "$( (R ls-tree HEAD; printf '040000 tree %s\tuns\n' "$UNSORTED") | R mktree)" -m unsorted)"
+check "a snapshot with an unsorted tree opens" test -f "$MNT/@unsorted/uns/a"
+eq "its cache tree node is left to git" "/uns -1 0 " \
+    "$(perl "$CACHE_TREE" "$(G "$MNT/@unsorted" rev-parse --path-format=absolute --git-path index)" | grep "^/uns ")"
+eq "git status is clean there" "" "$(G "$MNT/@unsorted" status --porcelain)"
+unmount_fs
+R worktree remove --force "$T/plain-ct"
+check "remove cachetree" "$BIN" remove "$REPO" cachetree --force
 
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"
