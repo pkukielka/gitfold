@@ -121,6 +121,11 @@ impl Markers {
         Ok(changed)
     }
 
+    /// Flushes appended records to stable storage.
+    pub(super) fn sync(&self) -> io::Result<()> {
+        self.log.sync_data()
+    }
+
     /// Markers strictly below directory `dir`.
     pub(super) fn below(&self, kind: Kind, dir: &[u8]) -> Vec<Vec<u8>> {
         let set = match kind {

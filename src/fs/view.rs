@@ -3,7 +3,7 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use gix::objs::tree::EntryKind;
@@ -31,10 +31,6 @@ pub(super) enum WsNode {
 pub(super) enum Content {
     Whole(Arc<Vec<u8>>),
     Range(Vec<u8>),
-}
-
-fn ctime(meta: &std::fs::Metadata) -> SystemTime {
-    UNIX_EPOCH + Duration::new(meta.ctime().max(0) as u64, meta.ctime_nsec() as u32)
 }
 
 impl GitFold {
@@ -98,7 +94,7 @@ impl GitFold {
                     kind,
                     (meta.mode() & 0o7777) as u16,
                     meta.len(),
-                    ctime(meta),
+                    inode::ctime(meta),
                 );
                 attr.mtime = meta.modified().unwrap_or(attr.mtime);
                 attr.atime = meta.accessed().unwrap_or(attr.atime);
@@ -107,7 +103,13 @@ impl GitFold {
             Obj::LowerDir => {
                 Ok(self.make_attr(ino, FileType::Directory, 0o755, 0, inode::file_time()))
             }
-            Obj::LowerFile { file_id } => self.file_attr(ino, *file_id, true),
+            Obj::LowerFile { file_id, stamp } => {
+                let mut attr = self.file_attr(ino, *file_id, true)?;
+                if let Some(stamp) = stamp {
+                    (attr.atime, attr.mtime, attr.ctime) = (stamp.mtime, stamp.mtime, stamp.ctime);
+                }
+                Ok(attr)
+            }
         }
     }
 

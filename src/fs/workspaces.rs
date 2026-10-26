@@ -12,8 +12,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::SystemTime;
+use std::sync::{Arc, Weak};
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 use fuser::Errno;
 use log::{error, info, warn};
@@ -119,7 +120,12 @@ impl Workspaces {
 
     /// Resolves a name below the mount root (`path` has no leading `/`; names
     /// in namespaces are full paths, like `feature/x` or `@origin/main`).
-    pub fn resolve(&self, store: &Store, snapshots: &Snapshots, path: &str) -> Result<u64, Errno> {
+    pub fn resolve(
+        &self,
+        store: &Arc<Store>,
+        snapshots: &Snapshots,
+        path: &str,
+    ) -> Result<u64, Errno> {
         if let Some(&slot) = self.by_path.lock().get(path) {
             return Ok(inode::ws(slot, 0));
         }
@@ -157,10 +163,20 @@ impl Workspaces {
     }
 
     /// The branch's checkout elsewhere, if any: git allows one checkout per branch.
+    /// A worktree in the middle of a rebase or bisect of the branch (detached
+    /// meanwhile) counts too, as for git.
     fn checked_out_elsewhere(&self, branch: &str, own_admin: &Path) -> Option<String> {
-        let head = format!("ref: refs/heads/{branch}");
-        let is_ours =
-            |dir: &Path| fs::read_to_string(dir.join("HEAD")).is_ok_and(|h| h.trim() == head);
+        let full = format!("refs/heads/{branch}");
+        let head = format!("ref: {full}");
+        let reads = |dir: &Path, file: &str, want: &str| {
+            fs::read_to_string(dir.join(file)).is_ok_and(|s| s.trim() == want)
+        };
+        let is_ours = |dir: &Path| {
+            reads(dir, "HEAD", &head)
+                || reads(dir, "rebase-merge/head-name", &full)
+                || reads(dir, "rebase-apply/head-name", &full)
+                || reads(dir, "BISECT_START", branch)
+        };
         // A bare repository's HEAD names a branch but checks nothing out.
         if !git::is_bare() && is_ours(&self.common_dir) {
             return Some("the main worktree".into());
@@ -175,7 +191,7 @@ impl Workspaces {
         })
     }
 
-    fn open_workspace(&self, store: &Store, branch: &str) -> Result<u64, Errno> {
+    fn open_workspace(&self, store: &Arc<Store>, branch: &str) -> Result<u64, Errno> {
         let _creating = self.creating.lock();
         if let Some(&slot) = self.by_path.lock().get(branch) {
             return Ok(inode::ws(slot, 0));
@@ -203,14 +219,20 @@ impl Workspaces {
         // The gitfile content must be known before the workspace exists; the admin
         // directory name is deterministic.
         let gitfile = format!("gitdir: {}\n", admin.display()).into_bytes();
-        let ws = Workspace::open(store, state_dir, branch, new_base, gitfile)
-            .map_err(|e| fail("opening", e))?;
+        let ws = Workspace::open(
+            store,
+            self.common_dir.clone(),
+            state_dir,
+            admin.clone(),
+            branch,
+            new_base,
+            gitfile,
+        )
+        .map_err(|e| fail("opening", e))?;
+        let (base, base_tree) = ws.base();
         // Nothing else keeps the base reachable once the branch moves on (amend,
         // rebase, reset): without the ref, `git gc` could prune it.
-        let pin = format!("refs/gitfold/{id}");
-        if git::resolve(&pin).map_or(true, |c| c.id != ws.base) {
-            worktree::pin(&self.common_dir, &pin, &ws.base).map_err(|e| fail("pinning base", e))?;
-        }
+        ws.pin_base().map_err(|e| fail("pinning base", e))?;
         // Written only when the registration is (re)created. It must describe what
         // HEAD points at, the branch tip: that is the base for a new workspace,
         // and if the registration was deleted after commits made here, the tip's
@@ -218,7 +240,7 @@ impl Workspaces {
         worktree::register_branch(&admin, branch, &path.join(".git"), || {
             let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
             let tree = tip.and_then(|c| store.load_tree(c.tree).ok());
-            let dirs = store.dir_table(tree.unwrap_or(ws.base_tree));
+            let dirs = store.dir_table(tree.unwrap_or(base_tree));
             let mut writer = IndexWriter::new(self.stat, 1 << 20);
             // Workspace inodes come from the path, so the index can be written up front.
             store.write_index(&dirs, &mut writer, |path, _, _| {
@@ -230,10 +252,43 @@ impl Workspaces {
         info!(
             "workspace {branch}: {} at {}",
             if created { "created" } else { "resumed" },
-            ws.base
+            base
         );
-        let slot = self.add(branch, Entry::Workspace(Arc::new(ws)));
+        let ws = Arc::new(ws);
+        let slot = self.add(branch, Entry::Workspace(ws.clone()));
+        watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
         prewarm::spawn(path, self.prewarm, self.prewarm_threads);
         Ok(inode::ws(slot, 0))
+    }
+}
+
+/// How often workspaces check whether their branch moved (see `workspace::rebase`).
+const SYNC_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Keeps the workspace's base at its branch tip while the workspace exists.
+fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
+    let name = format!("sync {branch}");
+    let spawned = thread::Builder::new().name(name).spawn({
+        let branch = branch.clone();
+        move || {
+            let mut last_error = String::new();
+            loop {
+                thread::sleep(SYNC_INTERVAL);
+                let Some(ws) = ws.upgrade() else { return };
+                match ws.sync(&store) {
+                    Ok(()) => last_error.clear(),
+                    Err(e) => {
+                        let e = format!("{e:#}");
+                        if e != last_error {
+                            error!("workspace {branch}: moving the base to the branch tip: {e}");
+                            last_error = e;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        error!("workspace {branch}: can't start its sync thread: {e}");
     }
 }

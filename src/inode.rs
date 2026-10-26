@@ -92,3 +92,9 @@ pub fn decode(ino: u64) -> Option<Ino> {
         dir => Some(Ino::Dir { slot, dir }),
     }
 }
+
+/// A file's ctime as reported to the kernel (and recorded by git in its index).
+pub fn ctime(meta: &std::fs::Metadata) -> SystemTime {
+    use std::os::unix::fs::MetadataExt;
+    UNIX_EPOCH + Duration::new(meta.ctime().max(0) as u64, meta.ctime_nsec() as u32)
+}

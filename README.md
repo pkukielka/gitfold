@@ -129,8 +129,8 @@ cd ~/mnt/repo/agent/task-17
 ```
 
 Like `git worktree add`, a branch that is checked out elsewhere (for example in
-your main checkout) is refused with `EBUSY` (`Device or resource busy`); the
-daemon logs where it is checked out. Create another branch from it instead.
+your main checkout), or being rebased or bisected there, is refused with
+`EBUSY` (`Device or resource busy`); the daemon logs where it is checked out. Create another branch from it instead.
 `@agent/task-17` is a separate, read-only snapshot of the branch tip when it was
 opened; it doesn't see the workspace's uncommitted changes, and both can be open
 at once. Recommended for agents: one branch and workspace per task.
@@ -143,6 +143,15 @@ unmounting, remounting or a daemon crash keeps them. Don't switch branches
 inside a workspace (`git switch`, `git checkout <branch>`): it works as in any
 worktree, but the directory keeps the old branch's name and its stored changes.
 
+**Commits, merges, rebases.** Within about a second of git moving the branch
+(commit, merge, rebase, `reset`, `commit --amend`, also from outside), gitfold
+moves the workspace's base to the new tip, once git is idle in the workspace: no
+operation running or stopped half-way (conflicts, `rebase -i`, `bisect`), HEAD
+on the branch. This is invisible: no file changes content, mode or mtime, and
+committed files also keep their ctime, so commands chained after a commit
+(`git commit && git status`) see the same files either way. It keeps `upper/` small: committed files are dropped from it,
+and so are files git rewrote unchanged (`stash`, `rebase --abort`).
+
 **Finish.** Push or merge the branch from anywhere, then remove the workspace
 (see [Cleaning up](#cleaning-up)). Until it is removed, git treats the branch as
 checked out, even while unmounted: you can't check it out elsewhere or delete
@@ -151,15 +160,18 @@ it.
 **How it's stored.** The workspace id is the branch name with `%` and `/`
 escaped (`agent%2Ftask-17`). The worktree registration is
 `.git/worktrees/gitfold-ws-<id>`; the changes are in `.git/gitfold/<id>/`:
-`upper/` holds every file that differs from the workspace's base (the branch tip
-when it was first opened), as real files; `markers` records deleted files so they
-stay deleted; `base` is that commit, kept from `git gc` by the ref
-`refs/gitfold/<id>`. Don't modify `.git/gitfold/` while mounted.
+`upper/` holds every file that differs from the workspace's base (the branch's
+last tip, see above), as real files; `markers` records deleted files so they
+stay deleted; `times` the timestamps of files dropped from upper (committed, or restored
+unchanged); `base` is that commit,
+kept from `git gc` by the ref `refs/gitfold/<id>`. Don't modify
+`.git/gitfold/` while mounted.
 
 **Limitations.**
 
-- Committed files are not yet removed from `upper/`, so a workspace's disk use
-  grows with its history until it is removed. What you see is unaffected.
+- Moving the branch far without changing the files (`reset --soft` to an old
+  commit) copies every file that differs into `upper/`, during which the
+  workspace's file operations wait: 0.40 s to copy 2,857 files in Apache Spark.
 - Renaming a directory from the base commit, or onto one, returns `EXDEV`, as
   overlayfs does. `mv` then copies and deletes, but `git mv` of such a directory
   fails. Renaming files, and directories you created, works directly.
@@ -169,8 +181,6 @@ stay deleted; `base` is that commit, kept from `git gc` by the ref
   deleted or replaced (renamed over) while open fails.
 - Writes go through the gitfold daemon, so writing many files (for example
   build output) is slower than on a local disk. Not measured yet.
-- Git's own check also refuses a branch that another worktree is rebasing or
-  bisecting; gitfold only checks which branch each worktree has checked out.
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
 
@@ -178,7 +188,7 @@ stay deleted; `base` is that commit, kept from `git gc` by the ref
 
 - `gitfold mount` runs in the foreground until the file system is unmounted.
   Run it in the background (or under a service manager) and redirect its output;
-  it logs one line per snapshot, workspace and prewarm, and fuser warnings for
+  it logs one line per snapshot, workspace, prewarm and workspace rebase, and fuser warnings for
   unimplemented operations such as extended attributes. Set `RUST_LOG=warn` for
   less output.
 - **Stop it with Ctrl-C, `kill` (SIGTERM) or `fusermount3 -u <MOUNTPOINT>`.**
@@ -247,7 +257,7 @@ git -C <REPO> for-each-ref --format='%(refname)' refs/gitfold \
   `git status` is unaffected, since its index is built from the same unconverted
   data; `git add` of such files in a workspace prints git's line-ending warning.
 - **Timestamps:** unchanged files have mtime/ctime 2020-01-01; files changed in
-  a workspace have their real times. See
+  a workspace have their real times, and keep them once committed. See
   [ARCHITECTURE.md](ARCHITECTURE.md#constant-timestamps).
 - **Inodes:** in snapshots, files with identical content and mode share an inode,
   within a snapshot and across snapshots. They report link count 1, so `cp -a`,

@@ -57,7 +57,7 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, markers, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, markers, times, upper/, tmp/
            refs/gitfold/<id>                 keeps the workspace base from git gc
 ```
 
@@ -86,12 +86,15 @@ lives; for example inode `(3 + 1) << 32 | 17` is directory 17 of slot 3: entry
 A workspace is opened on the first lookup of an existing local branch
 (`Workspaces::open_workspace`):
 
-1. refuse (`EBUSY`) if another worktree has the branch checked out;
+1. refuse (`EBUSY`) if another worktree has the branch checked out, or is
+   rebasing or bisecting it;
 2. resume its state from `.git/gitfold/<id>/`, or create it with the branch tip
    as base (`Workspace::open`; the base tree is loaded into the store);
 3. register a linked worktree on the branch, writing the index only if the
    registration is new (from the branch tip; git owns it afterwards);
-4. add the name and start a prewarm walk.
+4. add the name, start a prewarm walk and the workspace's sync thread, which
+   moves the base to the branch tip whenever git moved it and is idle in the
+   workspace (`Workspace::sync`, polling every second).
 
 Then, per request (`fs/workspace/`):
 
@@ -114,6 +117,8 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/write.rs` | copy-up and mutations |
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/markers.rs` | whiteouts and opaque markers, as an append-only log |
+| `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
+| `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
@@ -125,18 +130,27 @@ Then, per request (`fs/workspace/`):
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
+| `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |
+| `tests/lib.sh` | helpers shared by the tests |
 
 ## Glossary
 
 - **Snapshot**: `@<rev>`, showing the tree of a commit, read-only.
 - **Workspace**: `<branch>`, a writable view of a branch, made of a lower and an
   upper layer.
-- **Base**: the commit whose tree is a workspace's lower layer. Set to the branch
-  tip when the workspace is first created and persisted; commits don't change it
-  (yet; see [future work](#future-work)).
+- **Base**: the commit whose tree is a workspace's lower layer: the branch tip,
+  followed within a second of git moving the branch, once git is idle (see
+  **rebase**, **idle**).
+- **Rebase** (of a workspace, not `git rebase`): moving the base to the branch's
+  new tip without changing what the workspace shows.
+- **Stamp**: the mtime and ctime a lower file shows because a rebase or the
+  unchanged-file cleanup dropped its upper copy (`times`).
+- **Idle** (git in a workspace): HEAD on the branch, no operation stopped
+  half-way (merge conflict, rebase, cherry-pick, revert, bisect) in the
+  worktree's admin directory, and no lock on the index, HEAD or the branch ref.
 - **Lower**: the base tree, from the shared store.
-- **Upper**: every file that differs from the base, committed or not, as real
-  files in `.git/gitfold/<id>/upper`.
+- **Upper**: every file that differs from the base, as real files in
+  `.git/gitfold/<id>/upper`.
 - **Whiteout**: a recorded deleted lower path, so it stays hidden.
 - **Opaque**: a directory recreated over a whiteout; its lower children stay
   hidden.
@@ -188,12 +202,15 @@ decision that creates it.
   reports. Any change to attributes (timestamps, sizes after checkout filters,
   uid) must change `write_index` too, or `git status` reads every file. For a
   workspace this applies to the index gitfold writes when the registration is
-  created (path-hash inodes, constant times); git maintains it afterwards.
-  ([index](#a-synthesized-git-index-whose-stat-data-matches-the-filesystem))
+  created (path-hash inodes, constant times); git maintains it afterwards, and
+  rebases keep what git recorded true (stamps).
+  ([rebases](#workspaces-follow-their-branch-invisible-rebases),
+  [index](#a-synthesized-git-index-whose-stat-data-matches-the-filesystem))
 - **Snapshot file attributes depend only on (blob, mode).** A snapshot file inode
   is shared by every snapshot that contains it, so nothing per snapshot or per
   path may show in its attributes: one timestamp, link count 1. Unchanged
-  workspace files report the same attributes except the inode.
+  workspace files report the same attributes except the inode, the write bits,
+  and their stamp once committed.
   ([inodes](#inode-numbers-computed-for-snapshots-path-derived-for-workspaces),
   [timestamps](#constant-timestamps))
 - **Every directory inode has exactly one parent.** Directory inodes are per
@@ -203,12 +220,16 @@ decision that creates it.
   walk producing index order, and `TreeTable::find` relies on it for binary
   search. Never re-sort or filter tables without checking both.
   ([store](#shared-content-addressed-store), [index](#a-synthesized-git-index-whose-stat-data-matches-the-filesystem))
-- **Snapshots are immutable; workspaces change only through the mount.** That is
+- **Snapshots are immutable; workspaces change visibly only through the mount.** That is
   what makes the 1-year TTLs correct for both: the kernel sees every workspace
   change it caches. Nothing may modify `.git/gitfold/` behind the mount, and
-  anything gitfold itself changes from outside a request (future: diff cleanup
-  after a commit, `sync`) must invalidate the kernel's caches explicitly.
-  ([caching](#kernel-caching-does-the-heavy-lifting))
+  what gitfold itself changes outside a request (rebases, dropping unchanged
+  upper files) must not change anything the kernel may have cached: content,
+  size, mode, mtime, inode, the set of names. Only the ctime of a file copied up
+  by a rebase, the atime of a dropped file, and the times of upper directories
+  a rebase adds files to or removes them from change; git ignores all three.
+  ([rebases](#workspaces-follow-their-branch-invisible-rebases),
+  [caching](#kernel-caching-does-the-heavy-lifting))
 - **Names never disappear while mounted**, so their entries can be cached long;
   only listings grow. The root's and namespaces' mtime changes whenever an entry
   is added below them, which is what invalidates the kernel's cached listing.
@@ -218,7 +239,8 @@ decision that creates it.
   re-hash of that file.
   ([workspaces](#writable-workspaces-copy-on-write-inside-gitfold))
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
-  the layout of `.git/gitfold/<id>/` (`base`, `markers` record format, `upper/`),
+  the layout of `.git/gitfold/<id>/` (`base`, `markers` and `times` record
+  formats, `upper/`),
   the base-pinning ref `refs/gitfold/<id>`
   and the path hash. Changing any of them needs a migration, or every existing
   workspace's index stops matching (Chromium: 4.4 GB re-hashed).
@@ -227,6 +249,9 @@ decision that creates it.
   readdirplus page shared (`Workspace::page`). Resolving first lets a concurrent
   rename redirect a write or read to another file, and a page served without the
   lock could hand the kernel a node for a just-deleted name, cached for a year.
+  `layers` holds everything the view is computed from except upper (base,
+  markers, stamps), so a rebase, which takes it exclusively, is atomic for
+  every request.
 - **Structural changes call `Workspace::changed` afterwards, still holding
   `layers` exclusively** (create, remove, rename, and a copy-up turning a lower
   file into an upper one). Invalidating first lets a concurrent readdir cache the
@@ -250,10 +275,14 @@ decision that creates it.
   are written in `tmp/` (cleared on open) and renamed into place, `base` is
   written atomically last when a workspace is created, and a worktree
   registration's HEAD is written last (a directory without HEAD, or without an
-  index, is rewritten). Atomic writes (`worktree::write_atomic`: base,
+  index, is rewritten). A rebase first prepares what is valid under both bases,
+  then writes the stamps and the new base, then drops what the new base makes
+  redundant (opaque markers first, synced: a file dropped below a marker still
+  in place would vanish). Atomic writes (`worktree::write_atomic`: base, stamps,
   registrations, marker compaction) are synced before the rename. Marker
-  appends and upper removals are not synced, so a power loss (unlike a daemon
-  crash) can bring back a file deleted just before it, as on most file systems
+  appends and upper removals are not synced (a rebase syncs the copies,
+  directories and markers of its step 1 before switching the base), so a power
+  loss (unlike a daemon crash) can bring back a file deleted just before it, as on most file systems
   without an explicit sync.
 - **`.git` in a workspace root is virtual** and cannot be created, replaced or
   renamed onto.
@@ -414,13 +443,16 @@ nearby Chromium snapshot went from 225 ms (version 2, collect and sort) to
 **What:** everything inside a snapshot reports mtime, ctime and atime
 2020-01-01, and so do unchanged workspace entries. Only the mount root,
 namespace directories (see [caching](#kernel-caching-does-the-heavy-lifting))
-and changed (upper) workspace files and directories have real times.
+and changed (upper) workspace files and directories have real times, which
+committed files keep (stamps; see
+[rebases](#workspaces-follow-their-branch-invisible-rebases)).
 
 **Why:** a file inode is shared by every snapshot containing that content, so it
 can have only one timestamp, and the index must record the same value. Git and
 agents don't rely on mtimes in a read-only tree. Workspaces use the same
 constant for unchanged (lower) entries, so their index can be synthesized the
-same way; changed (upper) files are real files and report their real times.
+same way; changed (upper) files are real files and report their real times,
+and keep them once dropped from upper.
 
 ### Names with slashes: one directory per component
 
@@ -455,10 +487,10 @@ be opened as a workspace.
 
 - *Layout:* a workspace is a linked worktree on its branch
   (`.git/worktrees/gitfold-ws-<id>`, HEAD `ref: refs/heads/<branch>`). Its state
-  is `.git/gitfold/<id>/`: `base` (the commit of the lower layer, fixed when the
-  workspace is created), `upper/` (every file that differs from base, committed
-  or not, as real files), `markers` (whiteouts and opaque markers, an
-  append-only log) and `tmp/` (copy-ups in progress); `refs/gitfold/<id>` keeps
+  is `.git/gitfold/<id>/`: `base` (the commit of the lower layer, the branch's
+  last tip), `upper/` (every file that differs from base, as real files),
+  `markers` (whiteouts and opaque markers, an append-only log), `times`
+  (stamps) and `tmp/` (copy-ups in progress); `refs/gitfold/<id>` keeps
   the base commit from `git gc`, since nothing else references it once the
   branch moves on.
 - *Reads* resolve a path in the merged view: upper if present, else the base
@@ -482,7 +514,8 @@ Example: deleting `src/a.c` appends a whiteout for it; `mkdir src` after
 
 - *Copy-on-write inside gitfold* rather than kernel overlayfs: overlayfs needs
   root or a user namespace (see above), and gitfold must control the lower layer
-  (it will move when HEAD moves; see [future work](#future-work)).
+  (it moves with the branch; see
+  [rebases](#workspaces-follow-their-branch-invisible-rebases)).
 - *Upper as real files on the repository's filesystem:* simple, moved or
   deleted together with the repository, and inspectable with ordinary tools
   (read-only while mounted). Every write reaches the upper file before the
@@ -496,10 +529,9 @@ Example: deleting `src/a.c` appends a whiteout for it; `mkdir src` after
 - *Nodes freed on `forget`:* bounds the table to what the kernel holds, and lets
   a path recreated after deletion get its path-derived id back, which the git
   index expects.
-- *Index from the branch tip:* it describes what HEAD points at. For a new
-  workspace that is the base; if a registration is deleted after commits made in
-  the workspace, the tip's files are the ones upper holds, while the old base
-  would show them all as changed.
+- *Index from the branch tip:* it describes what HEAD points at. The base is
+  normally the tip; when it lags (the branch moved while unmounted, or git isn't
+  idle yet), the next rebase catches up and the index already matches.
 - *Path-derived inodes:* a write must keep the inode the kernel already holds,
   so workspace files can't use the shared content-based file inodes. A per-mount
   counter would change on every remount and invalidate git's index (every file
@@ -538,11 +570,87 @@ and allocate nodes); GNU `find` 0.35 s, warm `rg` 0.41 s and `git status`
 1.17 s, all on par with a snapshot. Its node table costs ~120 MB of heap once
 prewarmed (~215 bytes per entry), against ~1-11 MB per additional snapshot.
 
+### Workspaces follow their branch: invisible rebases
+
+**What:** each workspace has a thread that checks every second whether git is
+idle in it and its branch tip differs from its base (`Workspace::sync`). If so,
+it moves the base to the tip (`workspace/rebase.rs`) without changing anything
+the workspace shows. From base B to tip N, only paths where B's and N's trees
+differ are visited (tree ids are content-addressed, so equal subtrees are
+skipped), in three steps that each leave a consistent view:
+
+1. *Prepare*, valid under both bases: an untouched file N changes is copied up
+   with the mtime it showed; a path absent from the view that N adds gets a
+   whiteout; a lower directory N removes or replaces with a file becomes an
+   upper directory (opaque over N's file), its files copied up the same way;
+   in an opaque directory (one recreated over a deleted one) where N has a
+   directory, N's entries that upper doesn't have are whited out. These are
+   synced before step 2.
+2. *Switch*: record stamps for the upper files identical to N's (content and
+   mode), persist them, then the new base.
+3. *Clean up*, valid under N: drop those upper files (they now show N's file
+   with their old mtime and ctime), the whiteouts of paths N doesn't have, and
+   the opaque markers step 1 made unnecessary (so the files of a directory
+   recreated by a code generator can be dropped once committed).
+
+The same thread also drops upper files written since its last pass that are
+identical to the base again (git rewrites unchanged files in `stash`,
+`rebase --abort`, `checkout -- .`); it reads and hashes them under the shared
+lock and drops those a `stat` under the exclusive lock shows unchanged since
+(files changed in the last second wait for a later pass: timestamps move in
+coarse ticks, so a write right after the hash could leave the `stat` as it
+was).
+Then it points `refs/gitfold/<id>` at the base, retrying on every pass until
+that succeeds.
+
+Example: `git commit -am fix` of 3 edited files; within a second the base is
+the new commit, the 3 files leave `upper/`, and `stat` shows the same inode,
+size, mode, mtime and ctime as before, which is what git just recorded in the
+index, so `git status` stays clean by stat alone. After `git reset --soft
+HEAD~1`, the files the undone commit changed are copied up with the mtime they
+showed (their ctime is the copy's), and `git status` lists them as staged, as in a checkout.
+
+**Why:**
+
+- *Invisible, so timing doesn't matter:* `git commit && git status` (or a test
+  run) can start before or after the rebase, or during it (it holds `layers`
+  exclusively, so each request sees one side), and sees the same files either
+  way. Stat data is preserved because git compares it with the index: a
+  changed mtime would make git re-read the file, and the kernel caches
+  attributes for a year, so nothing needs invalidating.
+- *Only when idle:* during a conflicted merge, `rebase -i` or `bisect`, the
+  branch tip is not a state to move to (HEAD is detached or the operation is
+  half done); waiting costs nothing, since the view stays correct under the
+  current base.
+- *Polling:* about a dozen `stat`s and a ref read per workspace per second.
+  Latency only decides how long committed files stay in `upper/`.
+- *External moves are followed too* (`update-ref` and other
+  plumbing; git refuses to move a branch checked out in a worktree): the view stays, and `git status` shows the difference to the new
+  tip, as a checkout whose branch moved underneath it does.
+- *Upper files are compared by content and mode*, not by git's index: the index
+  only says what git last saw, and the comparison only reads files the commit
+  changed (`rebase` measured 12 ms with the lock held for a 200-file commit in
+  Spark, 62 ms for 2,000 files).
+
+**Rejected:**
+
+- *Git hooks* (`post-commit`, `post-rewrite`, `reference-transaction`): not run
+  by plumbing such as `update-ref`, overridden by a user's `core.hooksPath`,
+  and fired in the middle of multi-step operations, so the rebase would still
+  need the idle check and invisibility; they would only cut the latency.
+- *inotify on the admin directory:* the same, without the hook problems, but
+  more moving parts than a one-second poll for no visible difference.
+- *A visible rebase with kernel cache invalidation:* files' mtimes would return
+  to the constant, so a command chained after a commit could see them change
+  between two `stat`s, and git would re-read them.
+- *An explicit `sync` command for external moves:* following them keeps one
+  rule for every branch move, and the view never changes either way.
+
 ### Kernel caching does the heavy lifting
 
-**What:** snapshot contents are immutable and workspaces change only through the
-mount, so the kernel may cache everything as long as it likes, and gitfold
-avoids every request it can:
+**What:** snapshot contents are immutable, and workspaces change only through
+the mount or invisibly (rebases), so the kernel may cache everything as long as
+it likes, and gitfold avoids every request it can:
 
 - 1-year entry and attribute TTLs for snapshots and workspaces; names in the root
   and in namespace directories also get a 1-year *entry* TTL in lookup replies,
@@ -689,9 +797,21 @@ checkout" and "Running it"); this is the why and what it would take.
   and 19 in Spark need converting. The work: compute converted sizes when a
   snapshot is created (they must match in `stat` and the index), give converted
   files their own file ids, and for LFS fetch missing objects on first read.
-- **A workspace's upper is not cleaned up after commits yet**: committed files
-  stay there (same content, so nothing visible changes) and disk use grows. See
-  [future work](#future-work).
+- **A rebase copies up every untouched file that changes**, under the exclusive
+  lock: cheap after commits, but moving the branch far without touching the
+  files (`reset --soft` to an old commit) blocks the workspace for a while
+  (0.40 s to copy 2,857 files in Spark). Copying before taking the lock, then
+  re-checking, would shorten the wait.
+- **Upper files identical to the base are only noticed when written**: a file
+  edited and then restored by hand is dropped, but one written just before an
+  unmount or daemon restart (written paths are remembered in memory only), or
+  among more than 100,000 written while git was busy, stays in upper until it
+  is next written. Only disk use is affected.
+- **Files in an opaque directory wait for the next rebase**: the cleanup of
+  unchanged files doesn't look below one (a directory recreated over a deleted
+  one); a rebase removes the marker where the new base has a directory, and
+  over a file of the new base the directory stays opaque. Only disk use is
+  affected.
 - **Renaming a directory with lower content, or onto one, returns `EXDEV`** in
   workspaces (`git mv` of such a directory fails); hard links and special files
   are `EPERM`.
@@ -704,8 +824,6 @@ checkout" and "Running it"); this is the why and what it would take.
   additional snapshot. Storing names once and using dense ids would shrink it.
 - **Branch switching inside a workspace** works as in a worktree but leaves the
   directory named after the old branch, with its state under the old id.
-- **The checked-out check is narrower than git's**: it reads which branch each
-  worktree has checked out, not branches being rebased or bisected elsewhere.
 - **Workspaces can only be removed by hand** (README "Cleaning up"); until then
   git treats the branch as checked out.
 - **`..` in directory listings reports the mount root's inode.** A listing
@@ -725,21 +843,10 @@ checkout" and "Running it"); this is the why and what it would take.
 
 ## Future work
 
-Workspaces were built in phases: phase 1 (done) is the copy-on-write core
-described above. Next:
+Workspaces were built in phases: phase 1 is the copy-on-write core, phase 2
+the [invisible rebases](#workspaces-follow-their-branch-invisible-rebases).
+Next:
 
-- **Phase 2: follow HEAD inside a workspace.** Today the base stays the commit
-  the workspace was created at, which is correct (upper holds every change) but
-  lets upper grow. When HEAD moves (commit, checkout, reset), the new base
-  becomes HEAD's commit: upper entries identical to it are dropped, whiteouts
-  for paths absent from it are dropped, and untouched files that differ between
-  the old and new base are copied up first, so visible content never changes
-  underneath an agent. Attributes do change (a dropped file's mtime returns to
-  the constant), so this must invalidate the kernel's cached attributes through
-  fuser's notifier. A branch that moved elsewhere (only possible via plumbing
-  such as `update-ref`, since git protects checked-out branches) shows as a
-  dirty worktree, as in git; re-basing the diff onto it becomes an explicit
-  `sync`, never automatic.
 - **Phase 3: tooling and limits.** `gitfold branch <repo> <name> [--from <rev>]`
   as a wrapper around `git branch`, and `gitfold remove` to drop a workspace; a
   compact node table; measuring write-heavy loads (build output) and adding

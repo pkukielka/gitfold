@@ -20,7 +20,7 @@ use crate::inode;
 use crate::worktree::IndexWriter;
 
 /// Tree id of an empty table, used for submodules.
-const EMPTY_TREE: u32 = 0;
+pub const EMPTY_TREE: u32 = 0;
 
 #[derive(Clone, Copy)]
 pub struct FileRec {

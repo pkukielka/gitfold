@@ -5,8 +5,8 @@
 //! Snapshot contents are immutable, so entries, attributes and page cache are
 //! cached by the kernel indefinitely; after the first walk, `find`/`grep`/
 //! `git status` are served mostly without calling into this process.
-//! Workspaces change only through this file system, so the kernel's caches stay
-//! coherent with them too.
+//! Workspaces change only through this file system, or without visible effect
+//! (`workspace::rebase`), so the kernel's caches stay coherent with them too.
 //!
 //! Nothing is stored per snapshot node: inode numbers encode where to find an
 //! entry (see `inode`), trees and files live in the shared `Store`, and a
@@ -30,6 +30,7 @@ mod workspaces;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use fuser::{
@@ -74,7 +75,7 @@ pub struct Options {
 pub struct GitFold {
     no_open: bool,
     stat: StatInfo,
-    store: Store,
+    store: Arc<Store>,
     snapshots: Snapshots,
     workspaces: Workspaces,
     content: ContentCache,
@@ -90,7 +91,7 @@ impl GitFold {
         GitFold {
             no_open: opts.no_open,
             stat,
-            store: Store::default(),
+            store: Arc::default(),
             snapshots: Snapshots::new(
                 common_dir.clone(),
                 mount_point.clone(),
@@ -125,7 +126,7 @@ impl GitFold {
 
     /// The workspace and local id of a workspace entry inode (not a workspace or
     /// namespace directory itself, nor `.git`, which have no node).
-    fn ws_entry(&self, ino: u64) -> Option<(std::sync::Arc<Workspace>, u64)> {
+    fn ws_entry(&self, ino: u64) -> Option<(Arc<Workspace>, u64)> {
         match inode::decode(ino)? {
             inode::Ino::Ws { slot, local } if local != 0 && local != workspace::GITFILE_LOCAL => {
                 Some((self.workspaces.get(slot).ok()?.ok()?, local))

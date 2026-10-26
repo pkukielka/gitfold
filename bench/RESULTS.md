@@ -359,3 +359,29 @@ No critical or major findings. Minor fixes (now 64 checks): snapshot files and
 directories report no write bits (`test -w` used to say yes on a mount that is
 no longer `ro`); listings are invalidated as soon as a copy-up or creation
 happens, even if the rest of the operation then fails.
+
+## 2026-10-26, phase 2: invisible rebases
+
+Workspaces now move their base to the branch tip (1 s poll, only while git is
+idle). Spark workspace, times from the daemon log (whole rebase / with the
+workspace lock held):
+
+| change                                   | copied up | dropped | total     | locked    |
+|------------------------------------------|----------:|--------:|----------:|----------:|
+| commit of 200 edited files               |         0 |     200 |  14.21 ms |  11.58 ms |
+| commit of 2,000 edited files             |         0 |   2,000 |  80.08 ms |  61.90 ms |
+| `reset --soft HEAD~303` (2,858 files)    |     2,857 |       0 | 408.17 ms | 404.34 ms |
+| `reset --soft` back to the tip           |         0 |   2,857 | 109.18 ms | 109.18 ms |
+
+The first version synced the whole file system (`syncfs`) on every rebase: 549 ms
+for the 200-file commit. It now syncs only what the rebase created (files,
+directories, the marker log): `fsync` per file up to 64 of them, one `syncfs`
+above that (with an fsync per file, the 2,857-copy rebase took 2,260 ms instead
+of 404 ms). `git status` after each commit and after the reset back to the tip:
+0 lines, 73 ms (clean by stat alone: dropped files keep their mtime and ctime);
+after `reset --soft HEAD~303` it lists the undone commits' files as staged.
+`tests/rebase.sh`: 101 checks (merges and rebases with conflicts, `--abort`,
+stash, amend, resets, recreated directories, file/directory type changes, a
+rebase retried after failed copies, a stale opaque marker, bisect, an external
+`update-ref`, 20 chained `commit && status && cat` runs racing the rebases),
+all passing.

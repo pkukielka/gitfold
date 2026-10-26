@@ -13,12 +13,18 @@
 //! valid) and kept for the node's lifetime, so renames keep the inode the kernel
 //! holds.
 //!
+//! The base follows the branch tip (`rebase`), without visible effect.
+//!
 //! - `nodes`: local id ↔ (parent, name) table.
 //! - `markers`: persisted whiteouts and opaque markers.
+//! - `times`: timestamps of files dropped from upper.
+//! - `rebase`: moving the base to the branch tip.
 //! - `write`: mutations and copy-up.
 
 mod markers;
 mod nodes;
+mod rebase;
+mod times;
 mod write;
 
 use std::collections::{HashMap, HashSet};
@@ -28,7 +34,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use fuser::Errno;
@@ -42,6 +48,7 @@ use crate::store::Store;
 use crate::worktree;
 use markers::Markers;
 use nodes::Nodes;
+use times::{Stamp, Times};
 
 /// `local` of the virtual `.git` file in the workspace root.
 pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
@@ -50,7 +57,11 @@ pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
 pub enum Obj {
     Upper(Metadata),
     LowerDir,
-    LowerFile { file_id: u32 },
+    /// `stamp`: the times it showed as before a rebase made it lower (see `rebase`).
+    LowerFile {
+        file_id: u32,
+        stamp: Option<Stamp>,
+    },
 }
 
 impl Obj {
@@ -72,13 +83,23 @@ enum Lower {
 
 pub struct Workspace {
     upper: PathBuf,
-    pub base: ObjectId,
-    pub base_tree: u32,
+    common_dir: PathBuf,
+    state_dir: PathBuf,
+    /// The worktree's admin directory (`.git/worktrees/gitfold-ws-<id>`).
+    admin: PathBuf,
+    branch: String,
+    /// `refs/gitfold/<id>`, which keeps the base from `git gc`, and the commit it
+    /// was last set to.
+    pin_ref: String,
+    pinned: Mutex<Option<ObjectId>>,
+    /// The last rebase failed, maybe after copying files up, or none ran yet in
+    /// this process (a killed one may have left unsynced copies; see `rebase`).
+    rebase_failed: AtomicBool,
     /// Content of the virtual `.git` file in the workspace root.
     pub gitfile: Arc<Vec<u8>>,
-    /// Whiteouts and opaque markers; also the lock every mutation takes
-    /// exclusively and every read shared.
-    layers: RwLock<Markers>,
+    /// Everything the merged view is computed from but upper; also the lock
+    /// every mutation takes exclusively and every read shared.
+    layers: RwLock<Layers>,
     nodes: Mutex<Nodes>,
     /// Serializes copy-ups, which writers do under a shared `layers`.
     copy_lock: Mutex<()>,
@@ -88,6 +109,18 @@ pub struct Workspace {
     /// Bumped by every change; cached listings of older generations are stale.
     generation: AtomicU64,
     listings: Mutex<HashMap<u64, (u64, Arc<Listing>)>>,
+    /// Paths of upper files written since the last check for ones identical to
+    /// the base again (see `rebase`).
+    touched: Mutex<HashSet<Vec<u8>>>,
+}
+
+/// The lower layer and how upper overrides it.
+struct Layers {
+    base: ObjectId,
+    base_tree: u32,
+    /// Whiteouts and opaque markers.
+    markers: Markers,
+    times: Times,
 }
 
 /// A directory listing: the directory's path and its merged entries, sorted by
@@ -109,6 +142,7 @@ pub enum Entry {
 /// One page of a listing being served by `Workspace::page`, with `layers` held.
 pub struct Page<'a> {
     ws: &'a Workspace,
+    layers: &'a Layers,
     parent: u64,
     pub listing: Arc<Listing>,
 }
@@ -142,7 +176,12 @@ impl Page<'_> {
                 Obj::Upper(fs::symlink_metadata(path)?)
             }
             Entry::LowerDir => Obj::LowerDir,
-            Entry::LowerFile(file_id) => Obj::LowerFile { file_id: *file_id },
+            Entry::LowerFile(file_id) => Obj::LowerFile {
+                file_id: *file_id,
+                stamp: (!self.layers.times.is_empty())
+                    .then(|| self.layers.times.get(&join(&self.listing.dir, name)))
+                    .flatten(),
+            },
         })
     }
 
@@ -182,10 +221,13 @@ fn not_found(e: &io::Error) -> bool {
 }
 
 impl Workspace {
-    /// Opens the workspace stored in `state_dir`, creating it at `new_base` if new.
+    /// Opens the workspace stored in `state_dir`, creating it at `new_base` if new;
+    /// `admin` is its worktree's admin directory in `common_dir`.
     pub fn open(
         store: &Store,
+        common_dir: PathBuf,
         state_dir: PathBuf,
+        admin: PathBuf,
         branch: &str,
         new_base: Option<git::Commit>,
         gitfile: Vec<u8>,
@@ -210,15 +252,27 @@ impl Workspace {
                 git::resolve(hex.trim())?
             }
         };
-        let layers = Markers::open(&state_dir.join("markers"))?;
+        let layers = Layers {
+            base: base.id,
+            base_tree: store.load_tree(base.tree)?,
+            markers: Markers::open(&state_dir.join("markers"))?,
+            times: Times::open(&state_dir.join("times"))?,
+        };
         // Copy-ups a crash interrupted; their target was never replaced.
         let tmp = state_dir.join("tmp");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
+        let id = state_dir.file_name().unwrap_or_default().to_string_lossy();
+        let pin_ref = format!("refs/gitfold/{id}");
         Ok(Workspace {
             upper,
-            base: base.id,
-            base_tree: store.load_tree(base.tree)?,
+            common_dir,
+            state_dir,
+            admin,
+            branch: branch.to_string(),
+            pin_ref,
+            pinned: Mutex::new(None),
+            rebase_failed: AtomicBool::new(true),
             gitfile: Arc::new(gitfile),
             layers: RwLock::new(layers),
             nodes: Mutex::new(Nodes::default()),
@@ -226,7 +280,14 @@ impl Workspace {
             tmp,
             generation: AtomicU64::new(0),
             listings: Mutex::new(HashMap::new()),
+            touched: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// The base commit and its tree.
+    pub fn base(&self) -> (ObjectId, u32) {
+        let layers = self.layers.read();
+        (layers.base, layers.base_tree)
     }
 
     fn upper_path(&self, path: &[u8]) -> PathBuf {
@@ -243,8 +304,13 @@ impl Workspace {
         self.nodes.lock().path(local).ok_or(Errno::ENOENT)
     }
 
-    fn lower(&self, store: &Store, path: &[u8]) -> Option<Lower> {
-        let mut cur = Lower::Tree(self.base_tree);
+    fn lower(store: &Store, layers: &Layers, path: &[u8]) -> Option<Lower> {
+        Self::lower_in(store, layers.base_tree, path)
+    }
+
+    /// The entry at `path` below tree `tree`.
+    fn lower_in(store: &Store, tree: u32, path: &[u8]) -> Option<Lower> {
+        let mut cur = Lower::Tree(tree);
         if path.is_empty() {
             return Some(cur);
         }
@@ -263,20 +329,21 @@ impl Workspace {
 
     /// Whether the lower entry at `path` is hidden by a whiteout or an opaque
     /// ancestor.
-    fn lower_hidden(layers: &Markers, path: &[u8]) -> bool {
-        layers.whiteouts.contains(path)
-            || ancestors(path).any(|p| layers.whiteouts.contains(p) || layers.opaque.contains(p))
+    fn lower_hidden(layers: &Layers, path: &[u8]) -> bool {
+        layers.markers.whiteouts.contains(path)
+            || ancestors(path)
+                .any(|p| layers.markers.whiteouts.contains(p) || layers.markers.opaque.contains(p))
     }
 
     /// The lower entry at `path`, unless hidden.
-    fn visible_lower(&self, store: &Store, layers: &Markers, path: &[u8]) -> Option<Lower> {
+    fn visible_lower(&self, store: &Store, layers: &Layers, path: &[u8]) -> Option<Lower> {
         if Self::lower_hidden(layers, path) {
             return None;
         }
-        self.lower(store, path)
+        Self::lower(store, layers, path)
     }
 
-    fn resolve_in(&self, store: &Store, layers: &Markers, path: &[u8]) -> Result<Obj, Errno> {
+    fn resolve_in(&self, store: &Store, layers: &Layers, path: &[u8]) -> Result<Obj, Errno> {
         match fs::symlink_metadata(self.upper_path(path)) {
             Ok(meta) => return Ok(Obj::Upper(meta)),
             Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => return Err(Errno::ENOENT),
@@ -285,7 +352,10 @@ impl Workspace {
         }
         match self.visible_lower(store, layers, path) {
             Some(Lower::Tree(_) | Lower::Gitlink) => Ok(Obj::LowerDir),
-            Some(Lower::File(file_id)) => Ok(Obj::LowerFile { file_id }),
+            Some(Lower::File(file_id)) => Ok(Obj::LowerFile {
+                file_id,
+                stamp: layers.times.get(path),
+            }),
             None => Err(Errno::ENOENT),
         }
     }
@@ -341,6 +411,7 @@ impl Workspace {
         };
         Ok(f(&Page {
             ws: self,
+            layers: &layers,
             parent: local,
             listing,
         }))
@@ -350,7 +421,7 @@ impl Workspace {
     fn entries(
         &self,
         store: &Store,
-        layers: &Markers,
+        layers: &Layers,
         path: &[u8],
     ) -> Result<Vec<(Vec<u8>, Entry)>, Errno> {
         if !self.resolve_in(store, layers, path)?.is_dir() {
@@ -368,15 +439,15 @@ impl Workspace {
             Err(e) => return Err(e.into()),
         }
         let upper_names: HashSet<Vec<u8>> = entries.iter().map(|(n, _)| n.clone()).collect();
-        if !layers.opaque.contains(path)
+        if !layers.markers.opaque.contains(path)
             && let Some(Lower::Tree(tree)) = self.visible_lower(store, layers, path)
         {
             let table = store.tree(tree);
-            let check_whiteouts = !layers.whiteouts.is_empty();
+            let check_whiteouts = !layers.markers.whiteouts.is_empty();
             for e in table.entries() {
                 let name = table.name(e);
                 if upper_names.contains(name)
-                    || (check_whiteouts && layers.whiteouts.contains(&join(path, name)))
+                    || (check_whiteouts && layers.markers.whiteouts.contains(&join(path, name)))
                 {
                     continue;
                 }
@@ -401,6 +472,13 @@ impl Workspace {
     fn changed(&self) {
         self.generation.fetch_add(1, Ordering::Release);
         self.listings.lock().clear();
+    }
+
+    fn touched(&self, path: &[u8]) {
+        let mut touched = self.touched.lock();
+        if !touched.contains(path) {
+            touched.insert(path.to_vec());
+        }
     }
 
     /// The kernel dropped `n` references to `local`.
@@ -428,7 +506,7 @@ impl Workspace {
                 buf.truncate(done);
                 Ok(Read::Upper(buf))
             }
-            Obj::LowerFile { file_id } => Ok(Read::Lower(file_id)),
+            Obj::LowerFile { file_id, .. } => Ok(Read::Lower(file_id)),
             _ => Err(Errno::EISDIR),
         }
     }
@@ -442,7 +520,7 @@ impl Workspace {
                 let target = fs::read_link(self.upper_path(&path))?;
                 Ok(Read::Upper(target.as_os_str().as_bytes().to_vec()))
             }
-            Obj::LowerFile { file_id } => Ok(Read::Lower(file_id)),
+            Obj::LowerFile { file_id, .. } => Ok(Read::Lower(file_id)),
             Obj::LowerDir => Err(Errno::EINVAL),
         }
     }

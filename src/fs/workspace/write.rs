@@ -17,8 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fuser::Errno;
 use gix::objs::tree::EntryKind;
 
-use super::markers::{Kind, Markers};
-use super::{Obj, Workspace, join, not_found};
+use super::markers::Kind;
+use super::{Layers, Obj, Workspace, join, not_found};
 use crate::git;
 use crate::store::Store;
 
@@ -29,8 +29,20 @@ const DIR_MODE: u32 = 0o755;
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-fn cstring(path: &Path) -> Result<CString, Errno> {
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| Errno::EINVAL)
+fn cstring(path: &Path) -> io::Result<CString> {
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
+}
+
+/// Sets the atime and mtime of `path` (not following a symlink); `None` leaves one.
+fn set_times(path: &Path, atime: Option<SystemTime>, mtime: Option<SystemTime>) -> io::Result<()> {
+    let times = [timespec(atime), timespec(mtime)];
+    let path =
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
+    let flags = libc::AT_SYMLINK_NOFOLLOW;
+    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), flags) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 fn timespec(t: Option<SystemTime>) -> libc::timespec {
@@ -51,7 +63,7 @@ fn timespec(t: Option<SystemTime>) -> libc::timespec {
 
 impl Workspace {
     /// Makes sure directory `path` (visible in the merged view) exists in upper.
-    fn ensure_upper_dir(&self, path: &[u8]) -> Result<(), Errno> {
+    pub(super) fn ensure_upper_dir(&self, path: &[u8]) -> Result<(), Errno> {
         let mut prefix: Vec<u8> = Vec::new();
         for comp in path.split(|b| *b == b'/').filter(|c| !c.is_empty()) {
             if !prefix.is_empty() {
@@ -69,7 +81,7 @@ impl Workspace {
     }
 
     /// Whether a lower entry would show at `path` without an upper one.
-    fn has_lower(&self, store: &Store, layers: &Markers, path: &[u8]) -> bool {
+    fn has_lower(&self, store: &Store, layers: &Layers, path: &[u8]) -> bool {
         self.visible_lower(store, layers, path).is_some()
     }
 
@@ -79,7 +91,7 @@ impl Workspace {
     fn copy_up(
         &self,
         store: &Store,
-        layers: &Markers,
+        layers: &Layers,
         path: &[u8],
         truncate: bool,
     ) -> Result<bool, Errno> {
@@ -91,9 +103,23 @@ impl Workspace {
         let _copying = self.copy_lock.lock();
         let file_id = match self.resolve_in(store, layers, path)? {
             Obj::Upper(_) => return Ok(false),
-            Obj::LowerFile { file_id } => file_id,
+            Obj::LowerFile { file_id, .. } => file_id,
             Obj::LowerDir => return self.ensure_upper_dir(path).map(|()| true),
         };
+        self.copy_file(store, path, file_id, truncate, None)?;
+        Ok(true)
+    }
+
+    /// Writes stored file `file_id` to upper at `path` (empty with `truncate`),
+    /// creating its parent directories, with mtime and atime `time` if given.
+    pub(super) fn copy_file(
+        &self,
+        store: &Store,
+        path: &[u8],
+        file_id: u32,
+        truncate: bool,
+        time: Option<SystemTime>,
+    ) -> Result<(), Errno> {
         let parent = &path[..path.iter().rposition(|b| *b == b'/').unwrap_or(0)];
         self.ensure_upper_dir(parent)?;
         let rec = store.file(file_id).ok_or(Errno::EIO)?;
@@ -115,18 +141,21 @@ impl Workspace {
                 // Exactly the mode it showed as, whatever the daemon's umask.
                 fs::set_permissions(&tmp, fs::Permissions::from_mode(rec.perm().into()))?;
             }
+            if let Some(time) = time {
+                set_times(&tmp, Some(time), Some(time))?;
+            }
             fs::rename(&tmp, &target)
         })();
         if written.is_err() {
             let _ = fs::remove_file(&tmp);
         }
-        written?;
-        Ok(true)
+        Ok(written?)
     }
 
     pub fn write(&self, store: &Store, local: u64, offset: u64, data: &[u8]) -> Result<u32, Errno> {
         let layers = self.layers.read();
         let path = self.path(local)?;
+        self.touched(&path);
         // A copy-up turns a lower entry into an upper one, even if the write then
         // fails (listings stat upper entries when serving them, so plain writes
         // need no invalidation).
@@ -166,6 +195,7 @@ impl Workspace {
         }
         let layers = self.layers.read();
         let path = self.path(local)?;
+        self.touched(&path);
         if self.copy_up(store, &layers, &path, size == Some(0))? {
             self.changed();
         }
@@ -188,13 +218,7 @@ impl Workspace {
             fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))?;
         }
         if atime.is_some() || mtime.is_some() {
-            let times = [timespec(atime), timespec(mtime)];
-            let path = cstring(&target)?;
-            let flags = libc::AT_SYMLINK_NOFOLLOW;
-            if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), flags) } != 0
-            {
-                return Err(io::Error::last_os_error().into());
-            }
+            set_times(&target, atime, mtime)?;
         }
         Ok(())
     }
@@ -203,7 +227,7 @@ impl Workspace {
     fn new_entry_path(
         &self,
         store: &Store,
-        layers: &Markers,
+        layers: &Layers,
         parent_path: &[u8],
         parent: u64,
         name: &[u8],
@@ -239,6 +263,7 @@ impl Workspace {
         make(&upper)?;
         // The entry exists from here on, whatever fails below.
         self.changed();
+        self.touched(&path);
         let obj = self.resolve_in(store, &layers, &path)?;
         // The requested mode (already masked by the caller's umask), without the
         // daemon's umask applied on top; symlinks have none.
@@ -249,8 +274,8 @@ impl Workspace {
         }
         let obj = self.resolve_in(store, &layers, &path)?;
         // A directory recreated over a deleted lower one must not show its old content.
-        if layers.set(Kind::Whiteout, &path, false)? && obj.is_dir() {
-            layers.set(Kind::Opaque, &path, true)?;
+        if layers.markers.set(Kind::Whiteout, &path, false)? && obj.is_dir() {
+            layers.markers.set(Kind::Opaque, &path, true)?;
         }
         Ok((self.nodes.lock().claim(parent, name, &parent_path), obj))
     }
@@ -314,7 +339,7 @@ impl Workspace {
         // let the deleted lower content reappear. After an opaque directory is
         // removed, the lower one it replaced would show again, so it needs one too.
         if self.has_lower(store, &layers, &path) {
-            layers.set(Kind::Whiteout, &path, true)?;
+            layers.markers.set(Kind::Whiteout, &path, true)?;
         }
         let upper = self.upper_path(&path);
         let removed = if dir {
@@ -331,12 +356,12 @@ impl Workspace {
             // Markers below an empty directory are moot once it is gone (and
             // covered by its whiteout, logged above).
             for kind in [Kind::Whiteout, Kind::Opaque] {
-                for p in layers.below(kind, &path) {
-                    layers.set(kind, &p, false)?;
+                for p in layers.markers.below(kind, &path) {
+                    layers.markers.set(kind, &p, false)?;
                 }
             }
         }
-        layers.set(Kind::Opaque, &path, false)?;
+        layers.markers.set(Kind::Opaque, &path, false)?;
         self.changed();
         self.nodes.lock().orphan(parent, name);
         Ok(())
@@ -373,7 +398,7 @@ impl Workspace {
         }
         let src_obj = self.resolve_in(store, &layers, &src)?;
         let src_has_lower = self.has_lower(store, &layers, &src);
-        if src_obj.is_dir() && src_has_lower && !layers.opaque.contains(&src) {
+        if src_obj.is_dir() && src_has_lower && !layers.markers.opaque.contains(&src) {
             return Err(Errno::EXDEV);
         }
         match self.resolve_in(store, &layers, &dst) {
@@ -398,22 +423,26 @@ impl Workspace {
         // As in `remove`: the source's whiteout first (its upper copy still wins
         // until the rename), markers about the destination after it.
         if src_has_lower {
-            layers.set(Kind::Whiteout, &src, true)?;
+            layers.markers.set(Kind::Whiteout, &src, true)?;
         }
         fs::rename(self.upper_path(&src), self.upper_path(&dst))?;
         if src_obj.is_dir() {
             // Markers inside a moved (pure upper) directory move with it.
             for kind in [Kind::Whiteout, Kind::Opaque] {
-                for p in layers.below(kind, &src) {
-                    layers.set(kind, &[&dst[..], &p[src.len()..]].concat(), true)?;
-                    layers.set(kind, &p, false)?;
+                for p in layers.markers.below(kind, &src) {
+                    layers
+                        .markers
+                        .set(kind, &[&dst[..], &p[src.len()..]].concat(), true)?;
+                    layers.markers.set(kind, &p, false)?;
                 }
             }
+        } else {
+            self.touched(&dst);
         }
-        let was_opaque = layers.set(Kind::Opaque, &src, false)?;
-        let dst_whiteout = layers.set(Kind::Whiteout, &dst, false)?;
+        let was_opaque = layers.markers.set(Kind::Opaque, &src, false)?;
+        let dst_whiteout = layers.markers.set(Kind::Whiteout, &dst, false)?;
         if src_obj.is_dir() && (was_opaque || dst_whiteout) {
-            layers.set(Kind::Opaque, &dst, true)?;
+            layers.markers.set(Kind::Opaque, &dst, true)?;
         }
         self.changed();
         self.nodes
