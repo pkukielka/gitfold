@@ -1,9 +1,13 @@
-//! Registers a mounted snapshot as a linked git worktree and synthesizes its
-//! index, so git commands run inside the mount work without a checkout.
+//! Linked-worktree registrations, so git commands run inside the mount work
+//! without a checkout: snapshots (detached HEAD, synthesized index) and
+//! workspaces (HEAD on the branch, index written once). Also the workspace
+//! helpers shared by the daemon and the management commands: `refs/gitfold/<id>`
+//! base pins, whether git is busy in a worktree, the `.git/gitfold/.lock` daemon
+//! lock, and workspace ids.
 //!
-//! The index carries exactly the stat data the filesystem reports (inode,
-//! mtime, ctime, uid, gid, size), so `git status` sees every file as clean
-//! from stat alone and never has to read file contents.
+//! The synthesized index carries exactly the stat data the filesystem reports
+//! (inode, mtime, ctime, uid, gid, size), so `git status` sees every file as
+//! clean from stat alone and never has to read file contents.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -269,22 +273,20 @@ pub fn state_root(common_dir: &Path) -> PathBuf {
     common_dir.join("gitfold")
 }
 
-/// Takes the lock a mounted daemon holds (shared) and `remove`/`prune` take
-/// (exclusive) on `<common>/gitfold/.lock`, without waiting. Released when the
-/// returned file is closed, also when the process dies.
-pub fn lock(common_dir: &Path, exclusive: bool) -> Result<Option<fs::File>> {
+/// Takes the lock on `<common>/gitfold/.lock` that a mounted daemon holds for
+/// its life and `remove`/`prune` hold while working (exclusively, so one
+/// repository has at most one daemon, and none while those run), without
+/// waiting: `None` if it is taken. Released when the returned file is closed,
+/// also when the process dies.
+pub fn lock(common_dir: &Path) -> Result<Option<fs::File>> {
     let root = state_root(common_dir);
     fs::create_dir_all(&root)?;
     let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(root.join(".lock"))?;
-    let op = if exclusive {
-        libc::LOCK_EX
-    } else {
-        libc::LOCK_SH
-    };
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), op | libc::LOCK_NB) } != 0 {
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+    if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         let e = std::io::Error::last_os_error();
         if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
             return Ok(None);

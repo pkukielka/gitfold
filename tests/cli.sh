@@ -36,6 +36,9 @@ echo changed >>"$W1/a.txt"; rm "$W1/d/b.txt"; echo new >"$W1/new.txt"
 echo x >>"$W2/a.txt"; G "$W2" commit -qam x
 for _ in $(seq 50); do [ "$(cat "$COMMON/gitfold/two/base")" = "$(R rev-parse two)" ] && break; sleep 0.1; done
 ls "$MNT/@HEAD" >/dev/null                     # a snapshot registration
+mkdir -p "$T/mnt2"
+check "second mount of the repository refused" fails timeout 5 "$BIN" mount "$REPO" "$T/mnt2"
+check "second mount point not mounted" fails mountpoint -q "$T/mnt2"
 check "remove refused while mounted" fails "$BIN" remove "$REPO" two
 check "prune refused while mounted" fails "$BIN" prune "$REPO"
 unmount_fs

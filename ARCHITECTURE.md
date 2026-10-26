@@ -57,7 +57,8 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, markers, times, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, upper/, tmp/
+           .git/gitfold/.lock                held (shared) by a mounted daemon; remove/prune take it
            refs/gitfold/<id>                 keeps the workspace base from git gc
 ```
 
@@ -89,7 +90,8 @@ A workspace is opened on the first lookup of an existing local branch
 1. refuse (`EBUSY`) if another worktree has the branch checked out, or is
    rebasing or bisecting it;
 2. resume its state from `.git/gitfold/<id>/`, or create it with the branch tip
-   as base (`Workspace::open`; the base tree is loaded into the store);
+   as base (`Workspace::open`; the base tree is loaded into the store), and
+   point `refs/gitfold/<id>` at the base (`Workspace::pin_base`);
 3. register a linked worktree on the branch, writing the index only if the
    registration is new (from the branch tip; git owns it afterwards);
 4. add the name, start a prewarm walk and the workspace's sync thread, which
@@ -102,8 +104,8 @@ Then, per request (`fs/workspace/`):
   the base tree's entry unless a whiteout or an opaque ancestor hides it;
 - **write**: copy the file up (under `copy_lock`) on its first modification,
   then write the upper file;
-- **delete**: remove the upper file, and record a whiteout if a lower entry would
-  otherwise show through.
+- **delete**: record a whiteout if a lower entry would otherwise show through,
+  then remove the upper file.
 
 ## Code map
 
@@ -124,7 +126,8 @@ Then, per request (`fs/workspace/`):
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
-| `src/worktree.rs` | worktree registration, streaming index v4 writer |
+| `src/main.rs` | CLI (clap), mount options, `M_MMAP_THRESHOLD` |
+| `src/worktree.rs` | worktree registrations (snapshots, workspaces), streaming index v4 writer, base pin refs, git idle check, daemon lock, workspace ids |
 | `src/git.rs` | thread-local gitoxide handles, tree, blob and ref access |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces |
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
@@ -149,8 +152,9 @@ Then, per request (`fs/workspace/`):
 - **Stamp**: the mtime and ctime a lower file shows because a rebase or the
   unchanged-file cleanup dropped its upper copy (`times`).
 - **Idle** (git in a workspace): HEAD on the branch, no operation stopped
-  half-way (merge conflict, rebase, cherry-pick, revert, bisect) in the
-  worktree's admin directory, and no lock on the index, HEAD or the branch ref.
+  half-way (merge conflict, rebase, cherry-pick, revert, sequencer, bisect) in
+  the worktree's admin directory, and no lock on the index, HEAD, the branch
+  ref or `packed-refs` (`worktree::git_busy`).
 - **Lower**: the base tree, from the shared store.
 - **Upper**: every file that differs from the base, as real files in
   `.git/gitfold/<id>/upper`.
@@ -197,8 +201,8 @@ Then, per request (`fs/workspace/`):
 
 ## Invariants
 
-Break one of these and something fails, often silently. Each links to the
-decision that creates it.
+Break one of these and something fails, often silently. Most link to the
+decision that creates them.
 
 - **Index stat data equals `getattr`.** For every file the index records exactly
   the mtime, ctime, inode (low 32 bits), uid, gid, mode and size that `getattr`
@@ -229,8 +233,9 @@ decision that creates it.
   what gitfold itself changes outside a request (rebases, dropping unchanged
   upper files) must not change anything the kernel may have cached: content,
   size, mode, mtime, inode, the set of names. Only the ctime of a file copied up
-  by a rebase, the atime of a dropped file, and the times of upper directories
-  a rebase adds files to or removes them from change; git ignores all three.
+  by a rebase, the atime of a dropped file, and the times (and, for a directory
+  that becomes an upper one, the size) of directories a rebase creates in upper
+  or adds files to or removes them from change; git ignores all three.
   ([rebases](#workspaces-follow-their-branch-invisible-rebases),
   [caching](#kernel-caching-does-the-heavy-lifting))
 - **Names never disappear while mounted**, so their entries can be cached long;
@@ -242,23 +247,27 @@ decision that creates it.
   re-hash of that file.
   ([workspaces](#writable-workspaces-copy-on-write-inside-gitfold))
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
-  the layout of `.git/gitfold/<id>/` (`base`, `markers` and `times` record
-  formats, `upper/`),
-  the base-pinning ref `refs/gitfold/<id>`
-  and the path hash. Changing any of them needs a migration, or every existing
+  the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers` and `times`
+  record formats, `upper/`), the base-pinning ref `refs/gitfold/<id>`, the
+  `.git/gitfold/.lock` protocol, the registration names `gitfold-<sha12>` and
+  `gitfold-ws-<id>`, and the path hash. Changing any of them needs a migration, or every existing
   workspace's index stops matching (Chromium: 4.4 GB re-hashed).
 - **Workspace operations take `layers` before resolving a path**, and keep it
-  while acting on the result: mutations exclusively, reads, lookups and each
-  readdirplus page shared (`Workspace::page`). Resolving first lets a concurrent
+  while acting on the result: creating, removing and renaming exclusively;
+  writes, attribute changes, fsync, reads, lookups and each readdirplus page
+  shared (`Workspace::page`; concurrent copy-ups are serialized by
+  `copy_lock`). Resolving first lets a concurrent
   rename redirect a write or read to another file, and a page served without the
   lock could hand the kernel a node for a just-deleted name, cached for a year.
   `layers` holds everything the view is computed from except upper (base,
   markers, stamps), so a rebase, which takes it exclusively, is atomic for
   every request.
 - **Structural changes call `Workspace::changed` afterwards, still holding
-  `layers` exclusively** (create, remove, rename, and a copy-up turning a lower
-  file into an upper one). Invalidating first lets a concurrent readdir cache the
-  old listing as current. Plain writes and attribute changes don't: listings
+  `layers`**: exclusively for create, remove and rename; shared for a copy-up
+  turning a lower file into an upper one, where `page` reading the generation
+  before building a listing makes one built concurrently count as stale.
+  Invalidating first lets a concurrent readdir cache the old listing as
+  current. Plain writes and attribute changes don't: listings
   carry no stat data for upper entries and stat them when serving a page.
   ([listing cache](#writable-workspaces-copy-on-write-inside-gitfold))
 - **A workspace node is handed out together with the kernel reference it
@@ -291,10 +300,11 @@ decision that creates it.
   renamed onto.
 - **Encoding limits:** file ids fit in `u32` (the index stores the low 32 bits
   of the inode); dir index < `u32::MAX` (`u32::MAX` is the `.git` file);
-  snapshot slots must stay below bit 62 (asserted at < 2^29), workspace slots
-  below bit 62 too (asserted at < 2^18); workspace local ids use 44 bits, with
+  snapshot slots must stay below bit 62 (debug-asserted at < 2^29), workspace
+  slots below bit 62 too (debug-asserted at < 2^18); workspace local ids use 44 bits, with
   0 for the directory itself and all ones reserved for `.git`.
-- **There are no file handles.** `open` and `opendir` return `ENOSYS`, so reads
+- **There are no file handles.** `open` and `opendir` return `ENOSYS` (`open`
+  replies with a dummy handle 0 under `--kernel-open`), so reads
   and writes are addressed by inode, and all state is keyed by inode.
 - **Never hold the content-cache lock across decompression**; it serializes
   every read.
@@ -313,7 +323,7 @@ handle per thread.
 spawning `git cat-file` per file costs ~2.4 ms of process startup, while one
 long-lived reader fetched 200 random spark files in 37 ms. Decompression is not
 a bottleneck either: gitoxide inflates all 4.4 GB of Chromium's files at HEAD in
-0.76 s on 24 threads (`gitfold bench-read`).
+about 0.66 s on 24 threads (6.6 GB/s, `gitfold bench-read`).
 
 **Rejected:**
 
@@ -344,7 +354,7 @@ with one snapshot, 77 MB with four (HEAD, ~1 day, ~2 days and ~1 week older),
 **Rejected:**
 
 - *A node per entry* (separately allocated, holding its full path, child list,
-  hash-map slot and cached listing): ~610 bytes per entry, 390 MB per Chromium
+  hash-map slot and cached listing): ~610 bytes per entry, 342 MB per Chromium
   snapshot, nothing shared between snapshots. Four snapshots would need ~4 GB of
   heap, versus 77 MB now.
 - *`HashMap<(ObjectId, EntryKind), u32>` for file ids:* a copy of every object id
@@ -422,7 +432,7 @@ data `getattr` reports. The index is version 4, streamed.
 ctime, inode, uid, gid and size with the index. When they match, the file is
 clean without being read. With matching data, `git status` on spark reads 6
 file contents out of 27.6k, and on Chromium it is about 30% slower than native
-(1.15 s vs 0.88 s).
+(1.13 s vs 0.88 s on repeat runs).
 
 Version 4 prefix-compresses paths: each entry stores how many bytes to drop from
 the previous path plus the new suffix. Chromium's index is 38 MB instead of
@@ -438,7 +448,7 @@ nearby Chromium snapshot went from 225 ms (version 2, collect and sort) to
 - *Letting git build the index on first `git status`:* git would re-hash every
   file, reading all content (4.4 GB on Chromium).
 - *Skipping the index checksum (`index.skipHash`):* considered, not tried. It
-  would save ~15 ms per snapshot, but depends on how the reading git version
+  would save the SHA-1 over the index file, but depends on how the reading git version
   treats a missing checksum.
 
 ### Constant timestamps
@@ -465,9 +475,10 @@ The kernel looks names up one component at a time, so `Workspaces::resolve` walk
 them: for a non-`@` name, an existing branch is a workspace, a prefix of
 existing branches is a namespace; for an `@` name, a prefix of existing refs
 (below `refs/heads/`, `refs/remotes/`, `refs/tags/` or `refs/`) is a namespace,
-anything else is resolved as a rev. Root names with a component starting with
-`.` are rejected before any ref lookup (git forbids them in ref names, and tools
-probe `.git` and the like constantly).
+anything else is resolved as a rev. Non-`@` names with a component starting
+with `.` are rejected before any ref lookup (git forbids them in branch names,
+and tools probe `.git` and the like constantly); `@` names go to rev
+resolution, which logs a failure.
 
 **Why:** real slashes look like the branch names people type. Git forbids
 `feature` and `feature/x` coexisting as branches, so at most one prefix of a
@@ -491,7 +502,8 @@ be opened as a workspace.
 - *Layout:* a workspace is a linked worktree on its branch
   (`.git/worktrees/gitfold-ws-<id>`, HEAD `ref: refs/heads/<branch>`). Its state
   is `.git/gitfold/<id>/`: `base` (the commit of the lower layer, the branch's
-  last tip), `upper/` (every file that differs from base, as real files),
+  last tip), `branch` (the unescaped branch name, for `list`), `upper/` (every
+  file that differs from base, as real files),
   `markers` (whiteouts and opaque markers, an append-only log), `times`
   (stamps) and `tmp/` (copy-ups in progress); `refs/gitfold/<id>` keeps
   the base commit from `git gc`, since nothing else references it once the
@@ -568,10 +580,10 @@ Example: deleting `src/a.c` appends a whiteout for it; `mkdir src` after
   without a `stat`.
 
 Measured on Chromium: a workspace opens in 0.85 s (registration plus index) and
-prewarms in 1.4 s (vs 0.64 s for a snapshot: lookups go through the merged view
-and allocate nodes); GNU `find` 0.35 s, warm `rg` 0.41 s and `git status`
-1.17 s, all on par with a snapshot. Its node table costs ~67 MB of heap once
-prewarmed (~120 bytes per entry), against ~1-11 MB per additional snapshot.
+prewarms in 1.34 s (vs 0.64 s for a snapshot: lookups go through the merged
+view and allocate nodes); GNU `find` 0.34 s, warm `rg` 0.41 s and `git status`
+1.19 s, all on par with a snapshot. Its node table costs ~67 MB of heap once
+prewarmed (~120 bytes per entry), against ~2-11 MB per additional snapshot.
 
 ### Workspaces follow their branch: invisible rebases
 
@@ -658,8 +670,8 @@ it likes, and gitfold avoids every request it can:
 - 1-year entry and attribute TTLs for snapshots and workspaces; names in the root
   and in namespace directories also get a 1-year *entry* TTL in lookup replies,
   since they never disappear (`entry_with_ttls`; fuser's readdirplus takes one
-  TTL for both, so a listing gives them their directory's attribute TTL until
-  the next lookup);
+  TTL for both, so a listing gives them their own attribute TTL, 1 s for a
+  namespace directory, until the next lookup);
 - no open/release: `open` replies `ENOSYS` once and the kernel stops sending it
   (`FUSE_NO_OPEN_SUPPORT`);
 - no opendir/releasedir (`FUSE_NO_OPENDIR_SUPPORT`); listings stay cached;
@@ -720,7 +732,7 @@ stats every file.
 dentry. That matters most for `git status`, which `lstat`s every index entry
 before it reads any directory, so readdirplus can't help it and each entry would
 otherwise cost a separate lookup. The parallel walk takes 0.64 s for a Chromium
-snapshot (0.39 s before the stat was added) and 1.4 s for a workspace; before
+snapshot (0.39 s before the stat was added) and 1.34 s for a workspace; before
 prewarm, a cold serial `find` on a fresh mount took 2.75 s. Content
 prewarm takes 2.6-3.8 s for Chromium (24 vs 8 threads), after which the first
 `rg` takes 0.5 s instead of 2.9 s. It costs page cache equal to the tree size,
@@ -754,7 +766,8 @@ gets the speed with no correctness risk.
   (which is gitoxide's default anyway).
 - *glibc.* After large frees, glibc raises its mmap threshold dynamically, after
   which large blob buffers come from heap arenas that are never returned to the
-  OS (~600 MB retained after one pass over Chromium). gitfold pins
+  OS (904 MB of heap after one pass over Chromium, vs 296-385 MB with a fixed
+  threshold). gitfold pins
   `M_MMAP_THRESHOLD` to 128 KiB, calls `malloc_trim` after creating a snapshot,
   and an idle trimmer thread drops the content cache and trims once reads stop.
 
@@ -794,7 +807,7 @@ checkout" and "Running it"); this is the why and what it would take.
 
 - **Checkout filters are not applied** (`eol=crlf`, LFS, `ident`,
   `working-tree-encoding`, custom filters). Investigated: gitoxide provides the
-  whole pipeline; evaluating attributes for all of Chromium takes 89-94 ms in
+  whole pipeline; evaluating attributes for all of Chromium takes 94 ms in
   parallel (630 ms single-threaded) and can mostly be skipped with a pre-filter
   on the few patterns that enable a conversion; on Linux only 1 file in Chromium
   and 19 in Spark need converting. The work: compute converted sizes when a
@@ -808,7 +821,8 @@ checkout" and "Running it"); this is the why and what it would take.
 - **Upper files identical to the base are only noticed when written**: a file
   edited and then restored by hand is dropped, but one written just before an
   unmount or daemon restart (written paths are remembered in memory only), or
-  among more than 100,000 written while git was busy, stays in upper until it
+  among more than 100,000 written while git was busy or rebases kept failing,
+  stays in upper until it
   is next written. Only disk use is affected.
 - **Files in an opaque directory wait for the next rebase**: the cleanup of
   unchanged files doesn't look below one (a directory recreated over a deleted
@@ -834,12 +848,16 @@ checkout" and "Running it"); this is the why and what it would take.
   additional snapshot. Most of it is hash table slack (power-of-two capacities)
   and the names.
 - **Branch switching inside a workspace** works as in a worktree but leaves the
-  directory named after the old branch, with its state under the old id.
+  directory named after the old branch, with its state under the old id, and
+  the base stops following (syncing waits until HEAD is back on the original
+  branch).
 - **Workspaces are removed only while unmounted** (`gitfold remove`): the
   daemon holds their state in memory. Until then git treats the branch as
-  checked out. A daemon holds a shared `flock` on `.git/gitfold/.lock` for its
-  whole life (also while exiting after an unmount, and through bind mounts or
-  other mount namespaces); `remove` and `prune` take it exclusively or refuse.
+  checked out. A daemon holds an exclusive `flock` on `.git/gitfold/.lock` for
+  its whole life (also while exiting after an unmount, and through bind mounts
+  or other mount namespaces), so a repository has at most one daemon (two
+  would share, and corrupt, the stored workspace state); `remove` and `prune`
+  take the same lock or refuse.
   Daemons from before this lock existed are not detected.
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
@@ -847,8 +865,8 @@ checkout" and "Running it"); this is the why and what it would take.
   read the `d_ino` of `..`.
 - **Snapshots and workspaces are never unloaded** while mounted (kernel caches
   are reclaimable).
-- **Each snapshot adds ~190 MB of page cache on open**, mostly the kernel's
-  cached directory listings (at least one 4 KB page per directory, 46k
+- **Each snapshot adds ~195 MB of page cache on open**, mostly the kernel's
+  cached directory listings (at least one 4 KiB page per directory, 46k
   directories in Chromium).
 - **Errors reach callers only as errno:** a rev that does not resolve is
   `ENOENT` (the daemon log says why), a missing branch `ENOENT` (not logged), a

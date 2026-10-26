@@ -19,6 +19,8 @@
 //! - `markers`: persisted whiteouts and opaque markers.
 //! - `times`: timestamps of files dropped from upper.
 //! - `rebase`: moving the base to the branch tip.
+//! - `status`: a workspace's changes, read from its state directory (for
+//!   `list` and `remove`).
 //! - `write`: mutations and copy-up.
 
 mod markers;

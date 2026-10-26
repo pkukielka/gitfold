@@ -1,5 +1,5 @@
-//! Background walk of a freshly created snapshot through the mount itself, so
-//! the kernel's dentry/inode cache (and optionally page cache) is populated
+//! Background walk of a freshly opened snapshot or workspace through the mount,
+//! so the kernel's dentry/inode cache (and optionally page cache) is populated
 //! before the first agent command arrives.
 
 use std::fs;

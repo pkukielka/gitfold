@@ -51,7 +51,7 @@ chromium: 512k files, 4.36 GB of blobs, 64 GB pack. Snapshot creation 555 ms
 - Synthesized index with matching stat data: `git status` is clean without
   reading any content (read=6 for 27k files).
 
-## What did not matter (cold find on spark stays ~220-250 ms)
+## What did not matter (cold find on spark stays ~220-256 ms)
 
 - Worker thread count (1..24), readdirplus vs plain readdir vs auto,
   FUSE_NO_OPENDIR_SUPPORT, prebuilding the node table instead of decoding
@@ -73,9 +73,9 @@ snapshot is created (half the CPUs).
 
 | repo     | snapshot | meta prewarm | content prewarm (opt-in) |
 |----------|---------:|-------------:|-------------------------:|
-| spark    |    32 ms |        36 ms |    244 ms (200 MB, 8 thr) |
-| linux    |    92 ms |        67 ms |  1007 ms (1.6 GB, 8 thr)  |
-| chromium |   567 ms |       387 ms |  2630 ms (4.2 GB, 24 thr) |
+| spark    |    32 ms |        36 ms |    244 ms (210 MB, 8 thr) |
+| linux    |    92 ms |        67 ms |  1007 ms (1.67 GB, 8 thr) |
+| chromium |   567 ms |       387 ms |  2630 ms (4.36 GB, 24 thr) |
 
 chromium (512k files):
 
@@ -100,7 +100,7 @@ With `--prewarm content`, the first rg on chromium is 495 ms instead of 2868 ms.
 ### Findings
 
 - Decompression is not the bottleneck: `gitfold bench-read` decompresses all
-  of chromium's 4.2 GB in 0.76 s on 24 threads (5.7 GB/s; 571 MB/s on one
+  of chromium's 4.36 GB in 760 ms on 24 threads (5.7 GB/s; 571 MB/s on one
   thread). The earlier "contention" reading was wrong: blob_ms is summed
   across threads, not wall time.
 - Remaining cold content cost is per-file FUSE read round trips + page cache
@@ -126,19 +126,20 @@ creation and once reads go idle. `/tmp/gf-mem2.sh`-style run, chromium:
 | open @HEAD~100               |       85 MB |     +713 MB |    +388 MB |
 | open @HEAD~1000              |       90 MB |     +869 MB |    +582 MB |
 | open @HEAD~5000              |      102 MB |    +1036 MB |    +775 MB |
-| rg in @HEAD (2.9 s)          | 107 MB idle |    +1109 MB |   +5633 MB |
-| rg in @HEAD~100 (0.40 s)     | 108 MB idle |    +1109 MB |   +5677 MB |
-| rg in @HEAD~1000 (0.53 s)    | 107 MB idle |    +1112 MB |   +6078 MB |
-| rg in @HEAD~5000 (0.66 s)    | 107 MB idle |    +1119 MB |   +6838 MB |
+| rg in @HEAD (2900 ms)        | 107 MB idle |    +1109 MB |   +5633 MB |
+| rg in @HEAD~100 (400 ms)     | 108 MB idle |    +1109 MB |   +5677 MB |
+| rg in @HEAD~1000 (530 ms)    | 107 MB idle |    +1112 MB |   +6078 MB |
+| rg in @HEAD~5000 (660 ms)    | 107 MB idle |    +1119 MB |   +6838 MB |
 
-Before (per snapshot, no sharing): ~390 MB heap (1 GB after reads),
+Before (per snapshot, no sharing): ~390 MB heap (342 MB in the cleaner
+measurement below) (1 GB after reads),
 ~600 MB slab, +4.2 GB page cache once grepped. For these 4 snapshots that
 would be ~4 GB heap, ~2.4 GB slab, ~17 GB page cache.
 
-Per additional snapshot now: heap +1..11 MB, slab ~+160 MB (dentries and
+Per additional snapshot now: heap +2..12 MB, slab ~+160 MB (dentries and
 directory inodes stay per snapshot), page cache ~+190 MB on open (per-snapshot
 directory listing pages + its git index file) plus only content not seen in
-other snapshots when read. Snapshot creation for nearby commits ~0.23 s
+other snapshots when read. Snapshot creation for nearby commits ~230 ms
 (new trees 2-40 ms; rest is index synthesis: sort, write, SHA-1 of ~60 MB).
 
 Speed unchanged vs previous defaults (chromium warm: find 349 ms, rg 416 ms,
@@ -167,7 +168,7 @@ Chromium, 4 snapshots (HEAD, ~100, ~1000, ~5000):
 | open @HEAD~5000 |      102 MB |    77 MB |   171 ms (was 274 ms) |
 | idle after rg   |      107 MB |    82 MB |                       |
 
-git status unchanged with v4 (1.14-1.16 s warm). Per-snapshot page cache on
+git status unchanged with v4 (1140-1160 ms warm). Per-snapshot page cache on
 open (~195 MB) is dominated by the kernel's cached directory listings (>= one
 4 KB page per directory, 46k dirs), not the index.
 
@@ -219,14 +220,14 @@ old per-node design, by setting:
 | ... + blob cache 64 MB                               | 1015 MB |
 | MALLOC_ARENA_MAX=2 alone                             | 4073 MB |
 
-Speed with object and delta-base caches off: unchanged (cold rg 2.6 s vs 2.9 s,
+Speed with object and delta-base caches off: unchanged (cold rg 2600 ms vs 2900 ms,
 warm unchanged); bench-read 24 threads 6.6 GB/s vs 5.5 GB/s.
 
 glibc retention, shared store, 4 chromium snapshots: heap 904 MB after the
 first full rg; with a fixed M_MMAP_THRESHOLD 296-385 MB; with the idle trimmer
 107 MB once reads stop.
 
-Prewarm content, chromium: 3.8 s with 8 threads, 2.6 s with 24.
+Prewarm content, chromium: 3800 ms with 8 threads, 2600 ms with 24.
 
 After index buffer preallocation (latest build): nearby chromium snapshots
 97 ms (HEAD~100) and 116 ms (HEAD~1000); first snapshot 556-814 ms across runs
@@ -252,7 +253,7 @@ Fixes found while measuring:
 
 - Workspace readdir rebuilt the merged listing for every page the kernel asked
   for (quadratic in a 7.5k-entry directory) and stat-ed every entry: prewarm of
-  a spark workspace 6 s. Listing built once per directory and cached while
+  a spark workspace 6000 ms. Listing built once per directory and cached while
   paged, lower entries taken from the tree table without a stat: 111-162 ms.
 - Root and namespace directories (`feature/` for `feature/x`) had a zero TTL for
   both entry and attributes, so every path walk through `feature` was a lookup:
@@ -263,7 +264,7 @@ Fixes found while measuring:
 - The mount is now read-write (workspaces), and on a writable mount the kernel
   marks atime stale after each readdir/read, so the next stat goes to the daemon.
   Chromium first find after prewarm went 351 -> 759 ms, first git status
-  1.16 -> 1.29 s; prewarm now stats each directory (and file, for content
+  1160 -> 1290 ms; prewarm now stats each directory (and file, for content
   prewarm) after reading it: back to 352 ms and 1177 ms. `default_permissions`
   itself made no difference (63 ms vs 63 ms spark cold find without the fix).
 
@@ -272,7 +273,7 @@ git status 1177 / 1167 ms, Claude's grep 5443 / 4646 ms (native 471, 370, 908,
 4243 ms).
 
 Chromium workspace on a new branch at HEAD: open 845 ms (worktree registration
-+ index), prewarm 1434 ms; find (bfs) 90 / 86 ms for all 511,663 files; git
++ index), prewarm 1434 ms; find (bfs) 90 / 86 ms for all 511,663 regular files; git
 status (Claude's invocation) 1227 / 1226 ms; rg 3413 / 416 ms; an edit shows
 as ` M README.md`.
 
@@ -295,7 +296,7 @@ the branch tip when a registration is (re)created.
 
 Markers as an append-only log (compacted on open and in process): `rm -r` of
 spark's 7.5k-file `sql/hive/src/test/resources/golden` in a workspace takes
-199-226 ms; the log stays bounded (~130 KB right after, 72 bytes after the next
+199-226 ms; the log stays bounded (~130 kB right after, 72 bytes after the next
 open). The previous whole-file rewrite per change was quadratic.
 
 Chromium, one session, current build (first / repeat; native column from the
@@ -355,7 +356,7 @@ the rename. Spark speed unchanged (warm find 30 ms, rg 45 ms, git status 74 ms).
 
 ## 2026-10-26, fourth review round
 
-No critical or major findings. Minor fixes (now 64 checks): snapshot files and
+No critical or major findings. Minor fixes (tests/workspace.sh now 62 checks): snapshot files and
 directories report no write bits (`test -w` used to say yes on a mount that is
 no longer `ro`); listings are invalidated as soon as a copy-up or creation
 happens, even if the rest of the operation then fails.
@@ -370,8 +371,11 @@ workspace lock held):
 |------------------------------------------|----------:|--------:|----------:|----------:|
 | commit of 200 edited files               |         0 |     200 |  14.21 ms |  11.58 ms |
 | commit of 2,000 edited files             |         0 |   2,000 |  80.08 ms |  61.90 ms |
-| `reset --soft HEAD~303` (2,858 files)    |     2,857 |       0 | 408.17 ms | 404.34 ms |
+| `reset --soft HEAD~303` (2,858 changed)  |     2,857 |       0 | 408.17 ms | 404.34 ms |
 | `reset --soft` back to the tip           |         0 |   2,857 | 109.18 ms | 109.18 ms |
+
+Of the 2,858 paths the reset changed, 2,857 were files the view showed (copied
+up) and 1 a file only the older commit had (whited out).
 
 The first version synced the whole file system (`syncfs`) on every rebase: 549 ms
 for the 200-file commit. It now syncs only what the rebase created (files,

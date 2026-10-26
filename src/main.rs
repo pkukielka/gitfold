@@ -24,7 +24,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Mount a repository; access revisions as <mountpoint>/@<rev>/...
+    /// Mount a repository: revisions as <mountpoint>/@<rev>/..., branches as <mountpoint>/<branch>/...
     Mount {
         repo: PathBuf,
         mountpoint: PathBuf,
@@ -34,7 +34,7 @@ enum Command {
         /// Have the kernel send open/release for every file (slower; for comparison).
         #[arg(long)]
         kernel_open: bool,
-        /// Populate kernel caches in the background after a snapshot is created.
+        /// Populate kernel caches in the background after a snapshot or workspace is opened.
         #[arg(long, value_enum, default_value = "meta")]
         prewarm: prewarm::Prewarm,
         /// Prewarm threads (default: half the CPUs).

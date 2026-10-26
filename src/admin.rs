@@ -22,11 +22,17 @@ pub fn fs_name(common_dir: &Path) -> String {
     common_dir.display().to_string().replace(',', "_")
 }
 
-/// Holds the repository's daemon lock (shared) for the life of a mount, so
-/// `remove` and `prune` can tell it is in use; fails while one of them runs.
+/// Holds the repository's daemon lock for the life of a mount: two daemons
+/// would share, and corrupt, the stored workspace state, and `remove` and
+/// `prune` must not run meanwhile.
 pub fn mount_lock(common_dir: &Path) -> Result<fs::File> {
-    worktree::lock(common_dir, false)?
-        .context("a `gitfold remove` or `gitfold prune` of this repository is running")
+    worktree::lock(common_dir)?.with_context(|| {
+        format!(
+            "{} is already mounted (or a `gitfold remove`/`prune` of it is running); \
+             a repository can be mounted only once at a time",
+            common_dir.display()
+        )
+    })
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<()> {
@@ -44,7 +50,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<()> {
 /// workspace state in memory and owns the files below `.git/gitfold/`. Held
 /// until the returned file is dropped, so no mount starts meanwhile.
 fn exclusive(common_dir: &Path) -> Result<fs::File> {
-    worktree::lock(common_dir, true)?.with_context(|| {
+    worktree::lock(common_dir)?.with_context(|| {
         format!(
             "{} is in use by a gitfold daemon; unmount it first",
             common_dir.display()

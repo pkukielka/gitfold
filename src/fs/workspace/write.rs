@@ -1,9 +1,10 @@
 //! Workspace mutations: copy-up, writes, attribute changes, creating, removing
 //! and renaming entries.
 //!
-//! Each takes `layers` (exclusively, or shared for writes into one file)
-//! *before* resolving the node's path, so a concurrent rename can't redirect
-//! it, and calls `changed()` after changing anything, still under the lock.
+//! Each takes `layers` (exclusively to create, remove or rename; shared for
+//! writes and attribute changes) *before* resolving the node's path, so a
+//! concurrent rename can't redirect it, and calls `changed()` after any
+//! structural change (create, remove, rename, copy-up), still under the lock.
 
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, Metadata, OpenOptions};

@@ -21,6 +21,8 @@ pub const ROOT: u64 = 1;
 const FILE_BIT: u64 = 1 << 63;
 const WS_BIT: u64 = 1 << 62;
 const WS_LOCAL_BITS: u32 = 44;
+/// Mask of a workspace inode's `local` part; the all-ones `local` is the
+/// workspace's virtual `.git` file (`workspace::GITFILE_LOCAL`).
 pub const WS_LOCAL_MASK: u64 = (1 << WS_LOCAL_BITS) - 1;
 const GITFILE: u32 = u32::MAX;
 

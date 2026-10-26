@@ -1,8 +1,9 @@
 //! Whiteouts (deleted lower paths) and opaque markers (directories recreated
 //! over a whiteout), persisted as an append-only log in `markers`: a change
 //! costs one small append. Rewriting the whole set on every change made `rm -r`
-//! of a large lower directory quadratic. The log is compacted when opened, and a
-//! record cut short by a crash is ignored.
+//! of a large lower directory quadratic. The log is compacted when opened, and
+//! in process once it is mostly history; a record cut short by a crash is
+//! ignored.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};

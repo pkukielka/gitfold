@@ -1,7 +1,8 @@
-//! Names below the mount root that aren't single-component snapshots:
-//! writable branch workspaces (`<mount>/<branch>`) and namespace directories
-//! for names containing `/` (`<mount>/feature/` for branch `feature/x`,
-//! `<mount>/@origin/` for rev `origin/main`).
+//! Resolution of every name below the mount root (handing `@<rev>` to
+//! `snapshots`), and the registry of writable branch workspaces
+//! (`<mount>/<branch>`) and namespace directories for names containing `/`
+//! (`<mount>/feature/` for branch `feature/x`, `<mount>/@origin/` for rev
+//! `origin/main`).
 //!
 //! Git forbids `feature` and `feature/x` coexisting as branches, so at most one
 //! prefix of a path can be a branch: walking components, the first that is a

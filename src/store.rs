@@ -1,4 +1,4 @@
-//! Content-addressed tables shared by all snapshots of a mount.
+//! Content-addressed tables shared by all snapshots and workspaces of a mount.
 //!
 //! Every git tree is decoded once into a compact table, and every distinct
 //! (blob, mode) gets one file id. Snapshots of nearby commits share almost all

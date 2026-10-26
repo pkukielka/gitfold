@@ -1,5 +1,6 @@
-//! The `@<rev>` directories at the mount root: resolving names, creating
-//! snapshots (shared trees, worktree registration, git index) and listing them.
+//! The `@<rev>` directories (at the root or in `@` namespaces): resolving
+//! names, creating snapshots (shared trees, worktree registration, git index)
+//! and listing them.
 
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
