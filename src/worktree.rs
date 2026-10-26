@@ -113,6 +113,11 @@ fn push_varint(out: &mut Vec<u8>, mut value: u64) {
     out.extend_from_slice(&buf[pos..]);
 }
 
+/// Snapshot registrations are named `<SNAPSHOT_PREFIX><first SNAPSHOT_HEX hex
+/// digits of the commit>`.
+const SNAPSHOT_PREFIX: &str = "gitfold-";
+const SNAPSHOT_HEX: usize = 12;
+
 /// Creates `<common>/worktrees/gitfold-<sha>` with a detached HEAD at the commit
 /// and the given serialized index. Returns the admin dir; the mount's `.git`
 /// file must point at it.
@@ -122,9 +127,10 @@ pub fn register(
     index: &[u8],
     gitfile: &Path,
 ) -> Result<PathBuf> {
-    let dir = common_dir
-        .join("worktrees")
-        .join(format!("gitfold-{}", commit.id.to_hex_with_len(12)));
+    let dir = common_dir.join("worktrees").join(format!(
+        "{SNAPSHOT_PREFIX}{}",
+        commit.id.to_hex_with_len(SNAPSHOT_HEX)
+    ));
     write_admin(&dir, gitfile, index, &format!("{}\n", commit.id))?;
     Ok(dir)
 }
@@ -196,17 +202,112 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// not otherwise referenced once its branch moves on). Goes through `git
 /// update-ref`, which handles every ref backend (files, packed, reftable).
 pub fn pin(common_dir: &Path, name: &str, commit: &gix::ObjectId) -> Result<()> {
+    let commit = commit.to_string();
+    git(
+        common_dir,
+        &["update-ref", "-m", "gitfold: workspace base", name, &commit],
+    )
+}
+
+/// Deletes ref `name` (a workspace's base pin), if it exists.
+pub fn unpin(common_dir: &Path, name: &str) -> Result<()> {
+    if crate::git::resolve(name).is_err() {
+        return Ok(());
+    }
+    git(common_dir, &["update-ref", "-d", name])
+}
+
+/// The ref keeping workspace `id`'s base from `git gc`.
+pub fn pin_ref(id: &str) -> String {
+    format!("refs/gitfold/{id}")
+}
+
+fn git(common_dir: &Path, args: &[&str]) -> Result<()> {
     let status = std::process::Command::new("git")
         .arg("--git-dir")
         .arg(common_dir)
-        .args([
-            "update-ref",
-            "-m",
-            "gitfold: workspace base",
-            name,
-            &commit.to_string(),
-        ])
+        .args(args)
         .status()?;
-    anyhow::ensure!(status.success(), "git update-ref {name} failed ({status})");
+    anyhow::ensure!(status.success(), "git {} failed ({status})", args.join(" "));
     Ok(())
+}
+
+/// Files in a worktree's admin directory that mean a git operation is under
+/// way, or stopped half-way waiting for the user (conflicts, `rebase -i`,
+/// `bisect`).
+const BUSY: [&str; 9] = [
+    "index.lock",
+    "HEAD.lock",
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "sequencer",
+];
+
+/// Why git is not idle in the worktree with admin directory `admin` on
+/// `branch`, if it isn't: HEAD elsewhere (detached for a rebase or bisect, or
+/// switched away), an operation running or stopped half-way, or a ref locked.
+pub fn git_busy(common_dir: &Path, admin: &Path, branch: &str) -> Option<String> {
+    let head = fs::read_to_string(admin.join("HEAD")).unwrap_or_default();
+    if head.trim() != format!("ref: refs/heads/{branch}") {
+        return Some(format!("its HEAD is not on {branch} ({})", head.trim()));
+    }
+    let exists = |p: PathBuf| fs::symlink_metadata(p).is_ok();
+    if let Some(f) = BUSY.iter().find(|f| exists(admin.join(f))) {
+        return Some(format!("a git operation is in progress ({f})"));
+    }
+    let ref_lock = format!("refs/heads/{branch}.lock");
+    (exists(common_dir.join(ref_lock)) || exists(common_dir.join("packed-refs.lock")))
+        .then(|| "a ref is locked".to_string())
+}
+
+/// `<common>/gitfold`: the workspaces' state directories, by id.
+pub fn state_root(common_dir: &Path) -> PathBuf {
+    common_dir.join("gitfold")
+}
+
+/// Takes the lock a mounted daemon holds (shared) and `remove`/`prune` take
+/// (exclusive) on `<common>/gitfold/.lock`, without waiting. Released when the
+/// returned file is closed, also when the process dies.
+pub fn lock(common_dir: &Path, exclusive: bool) -> Result<Option<fs::File>> {
+    let root = state_root(common_dir);
+    fs::create_dir_all(&root)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join(".lock"))?;
+    let op = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    };
+    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), op | libc::LOCK_NB) } != 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
+            return Ok(None);
+        }
+        return Err(e.into());
+    }
+    Ok(Some(file))
+}
+
+/// A workspace's id, naming its state and registration directories: the branch
+/// with `%` and `/` escaped.
+pub fn workspace_id(branch: &str) -> String {
+    branch.replace('%', "%25").replace('/', "%2F")
+}
+
+/// The branch of workspace id `id` (inverse of `workspace_id`).
+pub fn workspace_branch(id: &str) -> String {
+    id.replace("%2F", "/").replace("%25", "%")
+}
+
+/// Whether `name` (in `<common>/worktrees/`) is a snapshot registration
+/// (`gitfold-<sha12>`, see `register`).
+pub fn is_snapshot_registration(name: &str) -> bool {
+    name.strip_prefix(SNAPSHOT_PREFIX)
+        .is_some_and(|hex| hex.len() == SNAPSHOT_HEX && hex.bytes().all(|b| b.is_ascii_hexdigit()))
 }

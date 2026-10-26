@@ -59,6 +59,10 @@ The binary is `target/release/gitfold`.
 
 ```
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>
+gitfold branch <REPO> <NAME> [--from <REV>]   # create a branch for a workspace
+gitfold list <REPO>                           # workspaces and their changes
+gitfold remove <REPO> <BRANCH> [--force]      # delete a workspace (unmounted)
+gitfold prune <REPO>                          # delete snapshot registrations
 ```
 
 `<REPO>` is the repository's work tree (or any path git accepts as the
@@ -120,13 +124,18 @@ first `rg` takes about 0.5 s instead of 3 s.
 
 ### Workspaces
 
-**Start.** Create a branch with git (gitfold only opens existing local
-branches) and open it:
+**Start.** Create a branch (gitfold only opens existing local branches) and
+open it:
 
 ```
-git -C ~/src/monorepo branch agent/task-17 origin/main
+gitfold branch ~/src/monorepo agent/task-17 --from origin/main
 cd ~/mnt/repo/agent/task-17
 ```
+
+`gitfold branch` runs `git branch`, refusing names that start with `@` (they
+would open as snapshots) and names whose earlier workspace is still stored (it
+would be resumed; `gitfold remove` it first). Creating the branch with git
+directly also works, without these checks.
 
 Like `git worktree add`, a branch that is checked out elsewhere (for example in
 your main checkout), or being rebased or bisected there, is refused with
@@ -152,10 +161,15 @@ committed files also keep their ctime, so commands chained after a commit
 (`git commit && git status`) see the same files either way. It keeps `upper/` small: committed files are dropped from it,
 and so are files git rewrote unchanged (`stash`, `rebase --abort`).
 
-**Finish.** Push or merge the branch from anywhere, then remove the workspace
-(see [Cleaning up](#cleaning-up)). Until it is removed, git treats the branch as
-checked out, even while unmounted: you can't check it out elsewhere or delete
-it.
+**Finish.** Push or merge the branch from anywhere, unmount, then remove the
+workspace with `gitfold remove <REPO> <BRANCH>`. It refuses while the repository
+is mounted, while a git operation is in progress or stopped half-way in the
+workspace (a merge with conflicts, `rebase -i`, a detached HEAD or another
+branch checked out in it), and if the workspace has uncommitted or staged
+changes (it lists them); `--force` discards them. `gitfold list <REPO>` shows how many
+files each workspace has changed and deleted. Until it is removed, git treats
+the branch as checked out, even while unmounted: you can't check it out
+elsewhere or delete it.
 
 **How it's stored.** The workspace id is the branch name with `%` and `/`
 escaped (`agent%2Ftask-17`). The worktree registration is
@@ -180,7 +194,9 @@ kept from `git gc` by the ref `refs/gitfold/<id>`. Don't modify
 - Reads and writes are addressed by path, so reading or writing a file that was
   deleted or replaced (renamed over) while open fails.
 - Writes go through the gitfold daemon, so writing many files (for example
-  build output) is slower than on a local disk. Not measured yet.
+  build output) is several times slower than on a local disk: creating Apache
+  Spark's 27,599 files takes 3.00 s instead of 0.53 s (see
+  [Performance](#performance)).
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
 
@@ -206,18 +222,31 @@ kept from `git gc` by the ref `refs/gitfold/<id>`. Don't modify
     kernel inode/dentry cache and ~190 MB of page cache when opened (mostly
     cached directory listings), plus page cache for file contents not already
     cached by another snapshot.
-  - A chromium workspace costs ~120 MB of daemon heap once prewarmed (its node
-    table: one entry per path the kernel has looked up; ~58 MB in total with
-    `--prewarm none`). Its unchanged files don't share page cache with
+  - A chromium workspace costs ~125 MB of daemon heap once prewarmed (~67 MB
+    of it the node table: one ~120-byte entry per path the kernel has looked
+    up; ~58 MB in total with `--prewarm none`). Its unchanged files don't share page cache with
     snapshots or other workspaces.
   - Kernel caches are reclaimable; if evicted, the next access is just slower.
 
 ### Cleaning up
 
 Worktree registrations are locked, so `git worktree prune` keeps them while
-unmounted; later mounts reuse them. Unmount first; then use the repository's
-absolute git directory (a relative one would make `rm` act on the current
-directory):
+unmounted; later mounts reuse them. With the repository unmounted (both commands
+refuse otherwise):
+
+- `gitfold prune <REPO>` deletes the snapshot registrations; snapshots are
+  registered again when opened.
+- `gitfold remove <REPO> <BRANCH>` deletes a workspace: its registration, its
+  stored changes and its base ref. Its commits stay on the branch. It refuses if
+  the workspace has uncommitted or staged changes or a git operation in
+  progress, unless `--force`. "Uncommitted" counts every file that differs
+  from the workspace's base (changed, new or deleted), including ignored build
+  output. If the branch moved since the workspace was last mounted, it refuses
+  until a mount lets the base catch up (or `--force`).
+
+The same by hand, for example to remove everything at once: unmount, then use
+the repository's absolute git directory (a relative one would make `rm` act on
+the current directory):
 
 ```
 common=$(git -C <REPO> rev-parse --path-format=absolute --git-common-dir)
@@ -269,7 +298,9 @@ git -C <REPO> for-each-ref --format='%(refname)' refs/gitfold \
 
 Chromium (512k files, 4.4 GB at HEAD, 64 GB pack), 24 cores, 62 GB RAM, pack
 and native checkout in page cache, gitfold after the default metadata prewarm;
-all columns from one session with the current build (first run / repeat).
+all columns from one session (first run / repeat); the workspace's daemon heap
+is from a later build with a smaller node table, which left the times
+unchanged (see [bench/RESULTS.md](bench/RESULTS.md)).
 "git status" is the exact invocation Claude Code issues itself
 (`--porcelain=v2 --untracked-files=normal --ignored=matching`, fsmonitor off).
 The workspace is a fresh one (no changes). Details and more repositories:
@@ -282,18 +313,34 @@ The workspace is a fresh one (no changes). Details and more repositories:
 | `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.36 / 0.35 s | 0.35 / 0.35 s |
 | `git status` | 0.86 / 0.88 s | 1.15 / 1.13 s | 1.20 / 1.17 s |
 | `rg` | 0.37 / 0.37 s | 2.98 / 0.40 s | 3.36 / 0.41 s |
-| daemon heap | | 59 MB (4 snapshots: 77-82 MB) | 177 MB |
-| writes | | | not measured |
+| daemon heap | | 59 MB (4 snapshots: 77-82 MB) | 125 MB |
 
 The slow first `rg` is the cost of decompressing and caching every file it
 reads; later reads come from the kernel page cache, which snapshots share for
 identical files (a second snapshot ~1 day older than one already grepped:
 0.40 s for its first `rg`).
 
+Writes, on Apache Spark (`bench/writes.sh`: a workspace vs a plain directory on
+the same ext4 disk; first / repeat):
+
+| workload | native | workspace |
+|---|---:|---:|
+| untar the checkout (27,599 files, 227 MiB) | 0.53 / 0.53 s | 3.00 / 2.80 s |
+| `rm -r` of it | 0.33 / 0.33 s | 1.23 / 1.23 s |
+| write a 1 GiB file | 0.40 / 0.39 s | 0.77 / 0.71 s |
+| `cp -r sql/` (21,094 files) | 0.48 / 0.46 s | 1.81 / 1.83 s |
+| append to 1,000 tracked files | 0.03 / 0.03 s | 0.11 / 0.04 s |
+
+Every file created costs about six requests to the daemon (lookup, create,
+write, tar's `utimes`, and the attribute reads that follow a write), so file creation is 4-6x
+slower than native; large writes are under 2x. The first appends to tracked
+files copy them into `upper/`.
+
 Benchmark scripts are in `bench/`: `bench.sh` compares native and mounted runs of
-the commands an agent issues, `probe.sh` isolates content reads.
-`tests/workspace.sh <repo>` runs an end-to-end test of workspaces on a scratch
-clone.
+the commands an agent issues, `probe.sh` isolates content reads, `writes.sh`
+measures write workloads. Tests: `tests/workspace.sh <repo>` (workspaces, on a
+scratch clone), `tests/rebase.sh` (git operations moving the branch) and
+`tests/cli.sh` (`branch`, `list`, `remove`, `prune`).
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works and why, including the
 code map.

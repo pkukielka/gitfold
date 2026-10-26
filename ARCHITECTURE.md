@@ -118,6 +118,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
+| `src/fs/workspace/status.rs` | a workspace's uncommitted changes, read from its state directory (for `list` and `remove`) |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
@@ -126,11 +127,13 @@ Then, per request (`fs/workspace/`):
 | `src/worktree.rs` | worktree registration, streaming index v4 writer |
 | `src/git.rs` | thread-local gitoxide handles, tree, blob and ref access |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces |
+| `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
 | `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM |
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
-| `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `RESULTS.md` (measurement log) |
+| `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
 | `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |
+| `tests/cli.sh` | end-to-end test of `branch`, `list`, `remove` and `prune` |
 | `tests/lib.sh` | helpers shared by the tests |
 
 ## Glossary
@@ -544,7 +547,7 @@ Example: deleting `src/a.c` appends a whiteout for it; `mkdir src` after
 - *Refusing a branch checked out elsewhere*, as `git worktree add` does: two
   checkouts of one branch go stale as soon as one commits.
 - *Implicit creation for existing branches only*: a lookup never creates a
-  branch, so a typo can't. New branches come from `git branch`.
+  branch, so a typo can't. New branches come from `gitfold branch` or `git branch`.
 
 **Rejected:**
 
@@ -567,8 +570,8 @@ Example: deleting `src/a.c` appends a whiteout for it; `mkdir src` after
 Measured on Chromium: a workspace opens in 0.85 s (registration plus index) and
 prewarms in 1.4 s (vs 0.64 s for a snapshot: lookups go through the merged view
 and allocate nodes); GNU `find` 0.35 s, warm `rg` 0.41 s and `git status`
-1.17 s, all on par with a snapshot. Its node table costs ~120 MB of heap once
-prewarmed (~215 bytes per entry), against ~1-11 MB per additional snapshot.
+1.17 s, all on par with a snapshot. Its node table costs ~67 MB of heap once
+prewarmed (~120 bytes per entry), against ~1-11 MB per additional snapshot.
 
 ### Workspaces follow their branch: invisible rebases
 
@@ -817,15 +820,27 @@ checkout" and "Running it"); this is the why and what it would take.
   are `EPERM`.
 - **No file handles in workspaces either**: reads and writes go by path, so I/O
   on a file that was unlinked or renamed over while open fails.
-- **Workspace writes go through the daemon** (no passthrough), so heavy write
-  loads such as build output are slower than on a local disk. Not measured yet.
-- **A workspace's node table costs ~215 bytes per entry the kernel has looked
-  up** (~120 MB for a prewarmed Chromium workspace), against a few MB per
-  additional snapshot. Storing names once and using dense ids would shrink it.
+- **Workspace writes go through the daemon** (no passthrough): creating files
+  is 4-6x slower than on a local disk (Spark's 27,599 files: 3.00 s vs
+  0.53 s), large writes under 2x. Each created file costs ~6 requests (lookup,
+  create, write, tar's `utimes`, attribute reads after the write); the daemon's own work per
+  request was already trimmed (no `mkdir` of every ancestor, no `stat` before
+  each write). `FUSE_WRITEBACK_CACHE` would batch writes and save the attribute
+  reads, at the cost of the kernel owning mtimes; passthrough on a second mount
+  point would give native speed. Creates take the workspace lock exclusively,
+  so parallel writers serialize there.
+- **A workspace's node table costs ~120 bytes per entry the kernel has looked
+  up** (~67 MB for a prewarmed Chromium workspace), against a few MB per
+  additional snapshot. Most of it is hash table slack (power-of-two capacities)
+  and the names.
 - **Branch switching inside a workspace** works as in a worktree but leaves the
   directory named after the old branch, with its state under the old id.
-- **Workspaces can only be removed by hand** (README "Cleaning up"); until then
-  git treats the branch as checked out.
+- **Workspaces are removed only while unmounted** (`gitfold remove`): the
+  daemon holds their state in memory. Until then git treats the branch as
+  checked out. A daemon holds a shared `flock` on `.git/gitfold/.lock` for its
+  whole life (also while exiting after an unmount, and through bind mounts or
+  other mount namespaces); `remove` and `prune` take it exclusively or refuse.
+  Daemons from before this lock existed are not detected.
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
   resolution uses the kernel's own parent links, so this only affects tools that
@@ -844,10 +859,14 @@ checkout" and "Running it"); this is the why and what it would take.
 ## Future work
 
 Workspaces were built in phases: phase 1 is the copy-on-write core, phase 2
-the [invisible rebases](#workspaces-follow-their-branch-invisible-rebases).
-Next:
+the [invisible rebases](#workspaces-follow-their-branch-invisible-rebases),
+phase 3 the management commands (`branch`, `list`, `remove`, `prune`), a
+compact node table and write measurements. Next:
 
-- **Phase 3: tooling and limits.** `gitfold branch <repo> <name> [--from <rev>]`
-  as a wrapper around `git branch`, and `gitfold remove` to drop a workspace; a
-  compact node table; measuring write-heavy loads (build output) and adding
-  passthrough on a second mount point if writes through the daemon are too slow.
+- **Faster writes.** `FUSE_WRITEBACK_CACHE` (fewer requests per file, but the
+  kernel then owns mtimes, which the index and rebases rely on), or passthrough
+  on a second mount point for build output. Worth it if agents' builds in
+  workspaces turn out too slow; see the write numbers in
+  [Limitations](#known-limitations).
+- **Parallel creates.** Creating an entry takes the workspace lock
+  exclusively; per-directory locking would let parallel writers proceed.

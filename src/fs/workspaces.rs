@@ -26,7 +26,7 @@ use crate::git;
 use crate::inode;
 use crate::prewarm::{self, Prewarm};
 use crate::store::Store;
-use crate::worktree::{self, IndexWriter, StatInfo};
+use crate::worktree::{self, IndexWriter, StatInfo, workspace_id};
 
 pub enum Entry {
     Workspace(Arc<Workspace>),
@@ -48,11 +48,6 @@ pub struct Workspaces {
     creating: Mutex<()>,
     /// Bumped whenever an entry is added, invalidating cached namespace listings.
     mtime: Mutex<SystemTime>,
-}
-
-/// Workspace directory names: the branch with `%` and `/` escaped.
-fn workspace_id(branch: &str) -> String {
-    branch.replace('%', "%25").replace('/', "%2F")
 }
 
 impl Workspaces {
@@ -208,7 +203,7 @@ impl Workspaces {
             error!("{what} for workspace {branch}: {e:#}");
             Errno::EIO
         };
-        let state_dir = self.common_dir.join("gitfold").join(&id);
+        let state_dir = worktree::state_root(&self.common_dir).join(&id);
         let new_base = if state_dir.join("base").exists() {
             None
         } else {

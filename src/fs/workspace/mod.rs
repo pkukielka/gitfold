@@ -24,6 +24,7 @@
 mod markers;
 mod nodes;
 mod rebase;
+pub mod status;
 mod times;
 mod write;
 
@@ -32,7 +33,7 @@ use std::fs::{self, File, Metadata};
 use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -44,7 +45,7 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::git;
 use crate::inode;
-use crate::store::Store;
+use crate::store::{Store, TEntry};
 use crate::worktree;
 use markers::Markers;
 use nodes::Nodes;
@@ -52,6 +53,14 @@ use times::{Stamp, Times};
 
 /// `local` of the virtual `.git` file in the workspace root.
 pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
+
+/// The base commit recorded in workspace state directory `state_dir`.
+fn read_base(state_dir: &Path) -> Result<git::Commit> {
+    let base_file = state_dir.join("base");
+    let hex = fs::read_to_string(&base_file)
+        .with_context(|| format!("reading {}", base_file.display()))?;
+    git::resolve(hex.trim())
+}
 
 /// What a path is in the merged view.
 pub enum Obj {
@@ -79,6 +88,16 @@ enum Lower {
     /// Submodule: an empty directory.
     Gitlink,
     File(u32),
+}
+
+impl Lower {
+    fn of(e: &TEntry) -> Lower {
+        match e.kind {
+            EntryKind::Tree => Lower::Tree(e.id),
+            EntryKind::Commit => Lower::Gitlink,
+            _ => Lower::File(e.id),
+        }
+    }
 }
 
 pub struct Workspace {
@@ -246,11 +265,7 @@ impl Workspace {
                 worktree::write_atomic(&base_file, format!("{}\n", base.id).as_bytes())?;
                 base
             }
-            None => {
-                let hex = fs::read_to_string(&base_file)
-                    .with_context(|| format!("reading {}", base_file.display()))?;
-                git::resolve(hex.trim())?
-            }
+            None => read_base(&state_dir)?,
         };
         let layers = Layers {
             base: base.id,
@@ -262,8 +277,8 @@ impl Workspace {
         let tmp = state_dir.join("tmp");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
-        let id = state_dir.file_name().unwrap_or_default().to_string_lossy();
-        let pin_ref = format!("refs/gitfold/{id}");
+        let pin_ref =
+            worktree::pin_ref(&state_dir.file_name().unwrap_or_default().to_string_lossy());
         Ok(Workspace {
             upper,
             common_dir,
@@ -317,12 +332,7 @@ impl Workspace {
         for comp in path.split(|b| *b == b'/') {
             let Lower::Tree(tree) = cur else { return None };
             let table = store.tree(tree);
-            let e = table.find(comp)?;
-            cur = match e.kind {
-                EntryKind::Tree => Lower::Tree(e.id),
-                EntryKind::Commit => Lower::Gitlink,
-                _ => Lower::File(e.id),
-            };
+            cur = Lower::of(table.find(comp)?);
         }
         Some(cur)
     }

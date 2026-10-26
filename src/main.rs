@@ -1,3 +1,4 @@
+mod admin;
 mod benchattrs;
 mod benchread;
 mod fs;
@@ -40,6 +41,28 @@ enum Command {
         #[arg(long)]
         prewarm_threads: Option<usize>,
     },
+    /// Create a branch to open as a workspace (<mountpoint>/<name>).
+    Branch {
+        repo: PathBuf,
+        name: String,
+        /// Start point (default: the current HEAD).
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// List the repository's workspaces and their uncommitted changes.
+    List { repo: PathBuf },
+    /// Delete a workspace: its registration, stored changes and base ref.
+    /// Its commits stay on the branch. The repository must not be mounted.
+    Remove {
+        repo: PathBuf,
+        branch: String,
+        /// Discard uncommitted changes.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Delete the snapshot registrations (recreated when opened again). The
+    /// repository must not be mounted.
+    Prune { repo: PathBuf },
     /// Evaluate checkout attributes for every file of a revision.
     #[command(hide = true)]
     BenchAttrs { repo: PathBuf, rev: String },
@@ -72,13 +95,17 @@ fn main() -> Result<()> {
             let mountpoint = mountpoint::check(&mountpoint)?;
             mountpoint::unmount_on_signal(mountpoint.clone());
             let common_dir = git::init(&repo)?;
+            // Held until the daemon exits (see `admin::mount_lock`).
+            let _lock = admin::mount_lock(&common_dir)?;
             let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
             let mut config = Config::default();
             config.mount_options = vec![
                 // Read-write: workspaces are writable; snapshots have no write bits, and
                 // answer EROFS for what the kernel lets through.
                 MountOption::DefaultPermissions,
-                MountOption::FSName("gitfold".into()),
+                // The common dir, for people reading the mount table (`remove` detects
+                // mounts by the lock).
+                MountOption::FSName(admin::fs_name(&common_dir)),
                 MountOption::Subtype("gitfold".into()),
             ];
             config.n_threads = Some(threads.unwrap_or(cpus));
@@ -94,6 +121,14 @@ fn main() -> Result<()> {
             );
             fuser::mount(fs, &mountpoint, &config)?;
         }
+        Command::Branch { repo, name, from } => admin::branch(&repo, &name, from.as_deref())?,
+        Command::List { repo } => admin::list(&repo)?,
+        Command::Remove {
+            repo,
+            branch,
+            force,
+        } => admin::remove(&repo, &branch, force)?,
+        Command::Prune { repo } => admin::prune(&repo)?,
         Command::BenchAttrs { repo, rev } => {
             git::init(&repo)?;
             benchattrs::run(&rev)?;

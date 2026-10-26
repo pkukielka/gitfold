@@ -24,7 +24,7 @@ mod content;
 mod snapshots;
 mod stats;
 mod view;
-mod workspace;
+pub mod workspace;
 mod workspaces;
 
 use std::ffi::OsStr;
@@ -231,6 +231,7 @@ impl Filesystem for GitFold {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        bump(&self.counters.setattr);
         let result = self.writable(ino).and_then(|(_, ws, local)| {
             if uid.is_some_and(|u| u != self.stat.uid) || gid.is_some_and(|g| g != self.stat.gid) {
                 return Err(Errno::EPERM);
@@ -282,6 +283,7 @@ impl Filesystem for GitFold {
         umask: u32,
         reply: ReplyEntry,
     ) {
+        bump(&self.counters.create);
         let result = self.new_entry(parent, |ws, local| {
             ws.mkdir(&self.store, local, name.as_bytes(), mode & !umask)
         });
@@ -289,6 +291,7 @@ impl Filesystem for GitFold {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        bump(&self.counters.remove);
         let result = self
             .writable(parent)
             .and_then(|(_, ws, local)| ws.unlink(&self.store, local, name.as_bytes()));
@@ -296,6 +299,7 @@ impl Filesystem for GitFold {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        bump(&self.counters.remove);
         let result = self
             .writable(parent)
             .and_then(|(_, ws, local)| ws.rmdir(&self.store, local, name.as_bytes()));
@@ -310,6 +314,7 @@ impl Filesystem for GitFold {
         target: &Path,
         reply: ReplyEntry,
     ) {
+        bump(&self.counters.create);
         let result = self.new_entry(parent, |ws, local| {
             ws.symlink(&self.store, local, link_name.as_bytes(), target)
         });
@@ -326,6 +331,7 @@ impl Filesystem for GitFold {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
+        bump(&self.counters.rename);
         let result = (|| {
             if flags.contains(RenameFlags::RENAME_EXCHANGE) {
                 return Err(Errno::EINVAL);
@@ -390,6 +396,7 @@ impl Filesystem for GitFold {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        bump(&self.counters.create);
         let result = self.new_entry(parent, |ws, local| {
             ws.create(&self.store, local, name.as_bytes(), mode & !umask)
         });
@@ -442,6 +449,7 @@ impl Filesystem for GitFold {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        bump(&self.counters.write);
         let result = self
             .writable(ino)
             .and_then(|(_, ws, local)| ws.write(&self.store, local, offset, data));

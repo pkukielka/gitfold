@@ -17,6 +17,9 @@ pub(super) enum Kind {
     Opaque,
 }
 
+/// A set of paths below the workspace root.
+pub(super) type PathSet = BTreeSet<Vec<u8>>;
+
 pub(super) struct Markers {
     pub(super) whiteouts: BTreeSet<Vec<u8>>,
     pub(super) opaque: BTreeSet<Vec<u8>>,
@@ -38,6 +41,22 @@ const fn op(kind: Kind, present: bool) -> u8 {
 
 impl Markers {
     pub(super) fn open(path: &Path) -> io::Result<Markers> {
+        let (whiteouts, opaque) = Self::read(path)?;
+        let log = OpenOptions::new().create(true).append(true).open(path)?;
+        let mut markers = Markers {
+            whiteouts,
+            opaque,
+            path: path.to_path_buf(),
+            log,
+            appended: 0,
+        };
+        markers.compact()?;
+        Ok(markers)
+    }
+
+    /// The (whiteouts, opaque markers) recorded in the log at `path`, without
+    /// opening it for changes.
+    pub(super) fn read(path: &Path) -> io::Result<(PathSet, PathSet)> {
         let (mut whiteouts, mut opaque) = (BTreeSet::new(), BTreeSet::new());
         let data = match fs::read(path) {
             Ok(data) => data,
@@ -58,16 +77,7 @@ impl Markers {
                 _ => false,
             };
         }
-        let log = OpenOptions::new().create(true).append(true).open(path)?;
-        let mut markers = Markers {
-            whiteouts,
-            opaque,
-            path: path.to_path_buf(),
-            log,
-            appended: 0,
-        };
-        markers.compact()?;
-        Ok(markers)
+        Ok((whiteouts, opaque))
     }
 
     /// Rewrites the log as the live markers only.

@@ -6,10 +6,10 @@
 //! it, and calls `changed()` after changing anything, still under the lock.
 
 use std::ffi::{CString, OsStr};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File, Metadata, OpenOptions};
 use std::io;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -159,12 +159,21 @@ impl Workspace {
         // A copy-up turns a lower entry into an upper one, even if the write then
         // fails (listings stat upper entries when serving them, so plain writes
         // need no invalidation).
-        if self.copy_up(store, &layers, &path, false)? {
-            self.changed();
-        }
-        let file = OpenOptions::new()
-            .write(true)
-            .open(self.upper_path(&path))?;
+        let open = || {
+            OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(self.upper_path(&path))
+        };
+        let file = match open() {
+            Err(e) if not_found(&e) => {
+                if self.copy_up(store, &layers, &path, false)? {
+                    self.changed();
+                }
+                open()?
+            }
+            file => file?,
+        };
         file.write_all_at(data, offset)?;
         Ok(data.len() as u32)
     }
@@ -235,44 +244,42 @@ impl Workspace {
         if parent == 0 && name == b".git" {
             return Err(Errno::EPERM);
         }
-        if !self.resolve_in(store, layers, parent_path)?.is_dir() {
+        let parent_obj = self.resolve_in(store, layers, parent_path)?;
+        if !parent_obj.is_dir() {
             return Err(Errno::ENOTDIR);
         }
         let path = join(parent_path, name);
-        if self.resolve_in(store, layers, &path).is_ok() {
+        // An upper entry makes the creation itself fail with EEXIST.
+        if self.has_lower(store, layers, &path) {
             return Err(Errno::EEXIST);
         }
-        self.ensure_upper_dir(parent_path)?;
+        if !matches!(parent_obj, Obj::Upper(_)) {
+            self.ensure_upper_dir(parent_path)?;
+        }
         Ok(path)
     }
 
-    /// Creates `name` in `parent` with `make(upper path)` and gives it `mode`;
-    /// returns its local id (with the kernel's reference counted) and object.
+    /// Creates `name` in `parent` with `make(upper path)`, which returns the new
+    /// entry's metadata; returns its local id (with the kernel's reference
+    /// counted) and object.
     fn new_entry(
         &self,
         store: &Store,
         parent: u64,
         name: &[u8],
-        mode: Option<u32>,
-        make: impl FnOnce(&Path) -> io::Result<()>,
+        make: impl FnOnce(&Path) -> io::Result<Metadata>,
     ) -> Result<(u64, Obj), Errno> {
         let mut layers = self.layers.write();
         let parent_path = self.path(parent)?;
         let path = self.new_entry_path(store, &layers, &parent_path, parent, name)?;
         let upper = self.upper_path(&path);
-        make(&upper)?;
-        // The entry exists from here on, whatever fails below.
-        self.changed();
         self.touched(&path);
-        let obj = self.resolve_in(store, &layers, &path)?;
-        // The requested mode (already masked by the caller's umask), without the
-        // daemon's umask applied on top; symlinks have none.
-        if let (Some(mode), Obj::Upper(meta)) = (mode, &obj)
-            && !meta.file_type().is_symlink()
-        {
-            fs::set_permissions(&upper, fs::Permissions::from_mode(mode & 0o7777))?;
+        let made = make(&upper);
+        if made.is_ok() || upper.symlink_metadata().is_ok() {
+            // The entry exists from here on, whatever fails below.
+            self.changed();
         }
-        let obj = self.resolve_in(store, &layers, &path)?;
+        let obj = Obj::Upper(made?);
         // A directory recreated over a deleted lower one must not show its old content.
         if layers.markers.set(Kind::Whiteout, &path, false)? && obj.is_dir() {
             layers.markers.set(Kind::Opaque, &path, true)?;
@@ -287,9 +294,16 @@ impl Workspace {
         name: &[u8],
         mode: u32,
     ) -> Result<(u64, Obj), Errno> {
-        self.new_entry(store, parent, name, Some(mode), |path| {
-            let file = OpenOptions::new().write(true).create_new(true).open(path);
-            file.map(drop)
+        self.new_entry(store, parent, name, |path| {
+            let file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(mode & 0o7777)
+                .open(path)?;
+            // The requested mode (already masked by the caller's umask), without
+            // the daemon's umask applied on top.
+            file.set_permissions(fs::Permissions::from_mode(mode & 0o7777))?;
+            file.metadata()
         })
     }
 
@@ -300,8 +314,10 @@ impl Workspace {
         name: &[u8],
         mode: u32,
     ) -> Result<(u64, Obj), Errno> {
-        self.new_entry(store, parent, name, Some(mode), |path| {
-            fs::DirBuilder::new().create(path)
+        self.new_entry(store, parent, name, |path| {
+            fs::DirBuilder::new().create(path)?;
+            fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))?;
+            fs::symlink_metadata(path)
         })
     }
 
@@ -312,8 +328,10 @@ impl Workspace {
         name: &[u8],
         target: &Path,
     ) -> Result<(u64, Obj), Errno> {
-        self.new_entry(store, parent, name, None, |path| {
-            std::os::unix::fs::symlink(target, path)
+        // Symlinks have no mode of their own.
+        self.new_entry(store, parent, name, |path| {
+            std::os::unix::fs::symlink(target, path)?;
+            fs::symlink_metadata(path)
         })
     }
 

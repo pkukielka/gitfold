@@ -385,3 +385,44 @@ stash, amend, resets, recreated directories, file/directory type changes, a
 rebase retried after failed copies, a stale opaque marker, bisect, an external
 `update-ref`, 20 chained `commit && status && cat` runs racing the rebases),
 all passing.
+
+## 2026-10-26, phase 3: compact node table, writes
+
+Node table: one hash table of 32-byte records keyed by local id, names in one
+shared buffer (compacted when mostly garbage), and a (parent, name) index of
+local ids only, replacing a map of boxed nodes plus a per-directory map of
+boxed names. Chromium workspace, daemon anonymous memory after prewarm
+(558,320 entries), two runs each:
+
+| build                    | anonymous memory (MB) | node table (MB, minus 58 MB baseline) |
+|--------------------------|----------------------:|--------------------------------------:|
+| before                   | 182.2 / 181.8         | ~124 (~222 B/entry)                   |
+| names inline, flat index | 148.9 / 148.5         | ~91 (~163 B/entry)                    |
+| final                    | 125.0 / 125.1         | ~67 (~120 B/entry)                    |
+
+56% of Chromium's names are longer than 23 bytes, so inline names alone saved
+little. Speed unchanged (before / after, ms, two runs): GNU find 345 347 /
+346 344, git status 1203 1172 / 1202 1188, rg 4132 1413 / 4040 1412 (this `rg` is `rg -q` of a never-matching pattern
+on the mount path, not `bench.sh`'s invocation, hence the slower repeat).
+
+Writes (`bench/writes.sh ~/work/spark`, ms, two runs each; native is a plain
+directory on the same ext4 disk):
+
+| workload                            | native  | workspace (before) | workspace |
+|-------------------------------------|--------:|-------------------:|----------:|
+| untar the checkout (27,599 files, 227 MiB) | 525 530 | 3448 3354          | 2997 2801 |
+| rm -r of it                         | 326 329 | 1301 1218          | 1234 1231 |
+| write a 1 GiB file                  | 397 391 | 766 722            | 772 711   |
+| cp -r sql/ (21,094 files)           | 479 462 | 2240 2171          | 1810 1832 |
+| append to 1000 files                | 31 30   | 111 44             | 114 43    |
+
+"Before": creating a file `mkdir`ed every ancestor directory in upper (each
+failing with EEXIST) and stat-ed the new path three times; a write stat-ed the
+file before opening it. Now a create is a stat of the parent, open, fchmod and
+fstat, and a write opens first (`O_NOFOLLOW`), copying up only if the upper file is missing (ENOENT/ENOTDIR). In a
+separate run with counters (untar of `sql/` and `cp -r sql/`: 46,113 created
+files and directories) the daemon counted per created entry 1.0 lookups, 1
+create, 1.2 writes, 0.5 setattrs (tar's utimes) and 2.4 getattrs (the kernel
+re-reads attributes after a write), ~6 requests; during that untar (2,513 ms)
+it was busy 1,780 ms, mostly in system calls. Writes are already up to 1 MB per request (the kernel's
+`max_pages` limit).

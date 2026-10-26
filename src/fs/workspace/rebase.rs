@@ -37,6 +37,7 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -49,23 +50,8 @@ use super::times::Stamp;
 use super::{Layers, Lower, Workspace, ancestors, join, not_found};
 use crate::git::{self, Commit};
 use crate::inode;
-use crate::store::{EMPTY_TREE, Store, TEntry};
+use crate::store::{EMPTY_TREE, FileRec, Store, TEntry};
 use crate::worktree;
-
-/// Files in the worktree's admin directory that mean a git operation is under
-/// way, or stopped half-way waiting for the user (conflicts, `rebase -i`,
-/// `bisect`): the branch tip is then not a state to move to.
-const BUSY: [&str; 9] = [
-    "index.lock",
-    "HEAD.lock",
-    "rebase-merge",
-    "rebase-apply",
-    "MERGE_HEAD",
-    "CHERRY_PICK_HEAD",
-    "REVERT_HEAD",
-    "BISECT_LOG",
-    "sequencer",
-];
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
 /// build writing while a rebase waits for conflict resolution, say) they are
@@ -257,15 +243,7 @@ impl Workspace {
     /// Whether the workspace's HEAD is on its branch and no git operation is
     /// running or stopped half-way in it.
     fn git_idle(&self) -> bool {
-        let head = fs::read_to_string(self.admin.join("HEAD")).unwrap_or_default();
-        if head.trim() != format!("ref: refs/heads/{}", self.branch) {
-            return false; // detached (rebase, bisect) or switched away
-        }
-        let ref_lock = format!("refs/heads/{}.lock", self.branch);
-        let exists = |p: std::path::PathBuf| fs::symlink_metadata(p).is_ok();
-        !(BUSY.iter().any(|f| exists(self.admin.join(f)))
-            || exists(self.common_dir.join(ref_lock))
-            || exists(self.common_dir.join("packed-refs.lock")))
+        worktree::git_busy(&self.common_dir, &self.admin, &self.branch).is_none()
     }
 
     fn rebase(&self, store: &Store, new: &Commit) -> Result<()> {
@@ -547,24 +525,27 @@ impl Workspace {
             Err(e) if not_found(&e) => return Ok(None), // dropped or replaced already
             Err(e) => return Err(e),
         };
-        let data = if rec.kind == EntryKind::Link {
-            if !meta.file_type().is_symlink() {
-                return Ok(None);
-            }
-            fs::read_link(&upper)?.as_os_str().as_bytes().to_vec()
-        } else {
-            if !meta.is_file()
-                || meta.len() != rec.size
-                || meta.mode() & 0o7777 != rec.perm().into()
-            {
-                return Ok(None);
-            }
-            fs::read(&upper)?
-        };
-        let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &data)
-            .map_err(io::Error::other)?;
-        Ok((oid == rec.oid).then(|| Seen::of(&meta)))
+        Ok(matches_stored(&upper, &meta, &rec)?.then(|| Seen::of(&meta)))
     }
+}
+
+/// Whether the file at `path` (with metadata `meta`) has the content and mode
+/// of stored file `rec`.
+pub(super) fn matches_stored(path: &Path, meta: &fs::Metadata, rec: &FileRec) -> io::Result<bool> {
+    let data = if rec.kind == EntryKind::Link {
+        if !meta.file_type().is_symlink() {
+            return Ok(false);
+        }
+        fs::read_link(path)?.as_os_str().as_bytes().to_vec()
+    } else {
+        if !meta.is_file() || meta.len() != rec.size || meta.mode() & 0o7777 != rec.perm().into() {
+            return Ok(false);
+        }
+        fs::read(path)?
+    };
+    let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &data)
+        .map_err(io::Error::other)?;
+    Ok(oid == rec.oid)
 }
 
 fn show(path: &[u8]) -> String {
