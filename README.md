@@ -275,14 +275,16 @@ Don't modify `.git/gitfold/` while mounted.
   printing its path (`--log` to choose): one line per new snapshot commit,
   workspace, prewarm and workspace rebase, and operation counters on exit. `RUST_LOG=warn` for only problems. With `--foreground` it
   stays in the foreground and logs to stderr, for service managers.
-- **Stop it with `gitfold unmount <MOUNTPOINT>`.** If the mount is busy (a
-  shell's working directory is inside it), it is detached at once and the
-  daemon exits when the last process leaves, so `cd` out before `gitfold
-  remove` or `prune`; otherwise `unmount` waits until the daemon has exited,
-  and they can follow right away. Before exiting, the daemon brings every open
-  workspace's base up to its branch tip. Ctrl-C (in the foreground), SIGTERM,
-  SIGHUP and `fusermount3 -u <MOUNTPOINT>` stop it as well; a second SIGINT or
-  SIGTERM exits immediately.
+- **Stop it with `gitfold unmount <MOUNTPOINT>`.** It waits until the daemon
+  has exited, so `gitfold remove` or `prune` can follow right away. If the
+  mount is busy (say a `git maintenance run --auto` a commit started), it is
+  detached and `unmount` names the processes using it and waits for them to
+  leave, however long that takes (an editor or another terminal inside it too).
+  Only if `unmount` or a process it runs under (your shell) is itself inside
+  the mount does it return at once: the daemon exits when you `cd` out. Before
+  exiting, the daemon brings every open workspace's base up to its branch tip.
+  Ctrl-C (in the foreground), SIGTERM, SIGHUP and `fusermount3 -u <MOUNTPOINT>`
+  stop it as well; a second SIGINT or SIGTERM exits immediately.
 - Only `kill -9` (or a crash) leaves the mount behind: accesses then fail with
   `Transport endpoint is not connected`, and `gitfold unmount <MOUNTPOINT>`
   cleans it up. `gitfold mount` detects such stale mounts, and mount points

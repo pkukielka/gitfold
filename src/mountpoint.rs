@@ -108,19 +108,34 @@ pub enum Unmounted {
 
 /// Unmounts `mountpoint`, or detaches it if it is busy.
 pub fn unmount_or_detach(mountpoint: &Path) -> Result<Unmounted> {
+    if unmount(mountpoint)? {
+        return Ok(Unmounted::Done);
+    }
+    detach(mountpoint)?;
+    Ok(Unmounted::Detached)
+}
+
+/// Unmounts `mountpoint`; false if it is busy (then still mounted).
+pub fn unmount(mountpoint: &Path) -> Result<bool> {
     let out = fusermount(&["-u"], mountpoint)?;
     if out.status.success() {
-        return Ok(Unmounted::Done);
+        return Ok(true);
     }
     let error = String::from_utf8_lossy(&out.stderr);
     if !error.contains("busy") {
         bail!("{}", error.trim());
     }
+    Ok(false)
+}
+
+/// Detaches `mountpoint` (a lazy unmount): it disappears at once, and the
+/// daemon serves the processes still using it until the last one leaves.
+pub fn detach(mountpoint: &Path) -> Result<()> {
     let out = fusermount(&["-u", "-z"], mountpoint)?;
     if !out.status.success() {
         bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
     }
-    Ok(Unmounted::Detached)
+    Ok(())
 }
 
 /// Runs fusermount3, or FUSE 2's fusermount only if fusermount3 isn't installed.
@@ -169,4 +184,90 @@ fn unescape(s: &str) -> String {
         .replace("\\011", "\t")
         .replace("\\012", "\n")
         .replace("\\134", "\\")
+}
+
+/// A process using a mount.
+pub struct User {
+    pub pid: u32,
+    /// Its command line, shortened.
+    pub command: String,
+}
+
+/// The processes of this user (only they can use the mount) using something
+/// below `mountpoint`: their working or root directory, an open file or a
+/// mapped one. Read before detaching: after it, their paths no longer resolve
+/// to the mount point.
+pub fn users(mountpoint: &Path) -> Vec<User> {
+    let (Ok(procs), Ok(mount)) = (fs::read_dir("/proc"), fs::metadata(mountpoint)) else {
+        return Vec::new();
+    };
+    let uid = unsafe { libc::getuid() };
+    let below = |p: &Path| p.starts_with(mountpoint);
+    // A link to the mount point itself may be the directory under the mount
+    // (entered before mounting): the device tells. Stat-ing goes through the
+    // mount, which the daemon still serves.
+    let in_mount = |link: &Path| {
+        fs::read_link(link).is_ok_and(|p| {
+            p.starts_with(mountpoint)
+                && (p != mountpoint || fs::metadata(link).is_ok_and(|m| m.dev() == mount.dev()))
+        })
+    };
+    let mut users = Vec::new();
+    for proc in procs.flatten() {
+        let Some(pid) = proc.file_name().to_str().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        if proc.metadata().map_or(true, |m| m.uid() != uid) {
+            continue;
+        }
+        let dir = proc.path();
+        let uses = ["cwd", "root", "exe"]
+            .iter()
+            .any(|n| in_mount(&dir.join(n)))
+            || fs::read_dir(dir.join("fd"))
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|fd| in_mount(&fd.path()))
+            || fs::read_to_string(dir.join("maps")).is_ok_and(|maps| {
+                maps.lines()
+                    .filter_map(|l| l.find('/').map(|at| Path::new(&l[at..])))
+                    .any(below)
+            });
+        if uses {
+            let cmdline = fs::read(dir.join("cmdline")).unwrap_or_default();
+            let mut command = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            command = command.trim().to_string();
+            if command.is_empty() {
+                // It cleared its command line.
+                command = fs::read_to_string(dir.join("comm")).unwrap_or_default();
+                command = format!("[{}]", command.trim());
+            }
+            if command.chars().count() > 80 {
+                command = command.chars().take(77).collect::<String>() + "...";
+            }
+            users.push(User { pid, command });
+        }
+    }
+    users
+}
+
+/// This process and its ancestors (its parent, the parent's parent, ...).
+pub fn self_and_ancestors() -> Vec<u32> {
+    let mut pid = std::process::id();
+    let mut pids = vec![pid];
+    while let Some(ppid) = parent(pid) {
+        pids.push(ppid);
+        pid = ppid;
+    }
+    pids
+}
+
+/// The parent of process `pid`, if it has one (and is visible here).
+fn parent(pid: u32) -> Option<u32> {
+    // pid (comm) state ppid ...; comm may contain spaces and parentheses.
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let at = stat.rfind(')')?;
+    let ppid = stat[at + 1..].split_whitespace().nth(1)?.parse().ok()?;
+    (ppid > 0).then_some(ppid)
 }

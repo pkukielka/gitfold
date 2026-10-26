@@ -907,6 +907,10 @@ checkout" and "Running it"); this is the why and what it would take.
   lock file `.git/gitfold/.lock` is used instead, as earlier builds did, and
   an existing one is always locked too, so their daemons are still seen;
   daemons of builds before any lock are not.
+  `gitfold unmount` waits for this lock, also when the mount was busy and had
+  to be detached (it lists the processes using it, from `/proc`, first),
+  except when it or a process it runs under (its shell, `make`, ...) is
+  inside the mount: it would wait for itself.
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
   resolution uses the kernel's own parent links, so this only affects tools that

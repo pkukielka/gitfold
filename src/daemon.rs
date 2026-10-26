@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::admin;
-use crate::mountpoint::{self, Unmounted};
+use crate::mountpoint;
 use crate::worktree;
 
 /// How long `mount` waits for the daemon to mount.
@@ -100,23 +100,46 @@ pub fn start(mountpoint: &Path, log: &Path) -> Result<()> {
     }
 }
 
-/// `gitfold unmount`: unmounts, detaching the mount if it is busy (a shell
-/// inside it), and waits for the daemon to exit (after it brought workspace
-/// bases up to date), so `remove` and `prune` can follow right away.
+/// `gitfold unmount`: unmounts, detaching the mount if it is busy, and waits
+/// for the daemon to exit (after it brought workspace bases up to date), so
+/// `remove` and `prune` can follow right away. A busy mount is waited for too
+/// (say a `git maintenance run --auto` started by a commit), unless this
+/// process or one it runs under (its shell, `make`, ...) is inside it: that
+/// would wait forever.
 pub fn unmount(mountpoint: &Path) -> Result<()> {
     let mountpoint = mountpoint::canonical(mountpoint)?;
     let shown = mountpoint.display();
     let Some(source) = mountpoint::gitfold_source(&mountpoint)? else {
         bail!("{shown} is not a gitfold mount");
     };
+    // Not one of the processes using it.
+    std::env::set_current_dir("/")?;
     // Prewarm walkers keep the mount busy, which would make this only detach it.
     crate::prewarm::stop_below(&mountpoint);
-    if let Unmounted::Detached = mountpoint::unmount_or_detach(&mountpoint)? {
-        println!(
-            "{shown} is in use (a shell inside?): detached it. gitfold exits, and \
-             `gitfold remove` works, once the last process using it leaves (`cd` out)"
-        );
-        return Ok(());
+    let detached = !mountpoint::unmount(&mountpoint)?;
+    if detached {
+        // Read while still mounted, so their paths still resolve.
+        let users = mountpoint::users(&mountpoint);
+        mountpoint::detach(&mountpoint)?;
+        let ours = mountpoint::self_and_ancestors();
+        if users.iter().any(|u| ours.contains(&u.pid)) {
+            println!(
+                "{shown} is in use by this command or a process it runs under: detached it. \
+                 gitfold exits, and `gitfold remove` works, once the last process \
+                 using it leaves (`cd` out)"
+            );
+            return Ok(());
+        }
+        println!("{shown} is in use: detached it; waiting for gitfold to exit once these leave:");
+        for u in &users {
+            println!("  {} {}", u.pid, u.command);
+        }
+        if users.is_empty() {
+            println!(
+                "  (none visible here: in another mount namespace, a container or a sandbox?)"
+            );
+        }
+        println!("Close them or `cd` out; Ctrl-C is safe: gitfold still exits once they leave.");
     }
     // The daemon holds the lock of its repository until it has exited.
     let common_dir = admin::common_dir_of_source(&source);
@@ -125,7 +148,8 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
         return Ok(());
     }
     let started = Instant::now();
-    let mut told = 0;
+    // After detaching, the wait is for the processes listed.
+    let mut told = if detached { 2 } else { 0 };
     while worktree::lock(&common_dir)?.is_none() {
         let waited = started.elapsed();
         if told == 0 && waited > Duration::from_secs(2) {

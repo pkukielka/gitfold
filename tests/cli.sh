@@ -250,6 +250,25 @@ echo bg >>"$MNT/bg/a.txt"; G "$MNT/bg" commit -qam bg      # then unmount at onc
 check "unmount" "$BIN" unmount "$MNT"
 check "unmounted" sh -c "! mountpoint -q '$MNT'"
 check "remove right after commit + unmount" "$BIN" remove "$REPO" bg
+check "branch bg3" "$BIN" branch "$REPO" bg3
+cd "$MNT"   # the directory under the mount: not a user of it
+"$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
+( cd "$MNT/bg3" && exec sleep 5 ) & HOLDER=$!   # like the `git maintenance` a commit starts
+for _ in $(seq 100); do [ "$(cat /proc/$HOLDER/comm 2>/dev/null)" = sleep ] && break; sleep 0.02; done
+out=$("$BIN" unmount "$MNT" 2>&1)
+cd /
+eq "unmount names a process using the mount" yes "$(grep -q "sleep 5" <<<"$out" && echo yes)"
+eq "and waits until gitfold exits" "unmounted $MNT" "$(tail -1 <<<"$out")"
+check "remove right after a busy unmount" "$BIN" remove "$REPO" bg3
+wait
+check "branch bg4" "$BIN" branch "$REPO" bg4
+"$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
+cp "$BIN" "$MNT/bg4/gitfold-copy"
+out=$(timeout 20 "$MNT/bg4/gitfold-copy" unmount "$MNT" 2>&1)
+eq "unmount run from inside the mount doesn't wait for itself" yes "$(grep -q 'in use by this command' <<<"$out" && echo yes)"
+for _ in $(seq 100); do flock -n "$COMMON" true 2>/dev/null && break; sleep 0.1; done
+check "and gitfold exits after it" flock -n "$COMMON" true
+check "remove bg4" "$BIN" remove "$REPO" bg4 --force
 check "branch bg2" "$BIN" branch "$REPO" bg2
 "$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
 ( cd "$MNT/bg2"; "$BIN" unmount "$MNT" >"$T/busy.out" 2>&1; sleep 0.5 )
