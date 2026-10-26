@@ -178,10 +178,11 @@ unchanged (`stash`, `rebase --abort`).
 **Finish.** Push or merge the branch from anywhere, unmount, then remove the
 workspace with `gitfold remove <REPO> <BRANCH>` (see
 [Cleaning up](#cleaning-up) for when it refuses). `gitfold list <REPO>` shows
-how many files each workspace has changed and deleted, with a note if its
-branch was deleted or its base is behind the branch tip (mount once to update
-it). Until it is removed, git treats the branch as checked out, even while
-unmounted: you can't check it out elsewhere or delete it.
+how many files each workspace has changed and deleted, and how many ignored
+files (build output) it holds, with a note if its branch was deleted or its
+base is behind the branch tip (mount once to update it). Until it is removed,
+git treats the branch as checked out, even while unmounted: you can't check it
+out elsewhere or delete it.
 
 **How it's stored.** The workspace id is the branch name with `%` and `/`
 escaped (`agent%2Ftask-17`). The worktree registration is
@@ -255,10 +256,16 @@ refuse while any of its workspaces or snapshots is mounted):
   the workspace has uncommitted or staged changes (it lists them), or a git
   operation is in progress or stopped half-way in it (a merge with conflicts,
   `rebase -i`, a detached HEAD or another branch checked out), unless
-  `--force`, which discards them. "Uncommitted" counts every file that differs
-  from the workspace's base (changed, new or deleted), including ignored build
-  output. If the branch moved since the workspace was last mounted, it refuses
-  until a mount lets the base catch up (or `--force`).
+  `--force`, which discards them. "Uncommitted" is roughly what `git status`
+  would show: files that differ from the workspace's base (changed, new or
+  deleted; of a mode, only the executable bit counts). Untracked files git
+  ignores (build output, by `.gitignore`, `.git/info/exclude` or
+  `core.excludesFile`, by default `~/.config/git/ignore`) don't count: they are
+  deleted with the workspace, as `git worktree remove` does, and `remove` says
+  how many (without `--force`). An untracked nested repository counts as one
+  change unless ignored. If the branch moved since the workspace was
+  last mounted, it refuses until a mount lets the base catch up (or
+  `--force`).
 
 The same by hand (bash), for example to remove everything at once: unmount,
 then use the repository's absolute git directory (a relative one would make `rm` act on

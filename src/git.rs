@@ -4,6 +4,7 @@
 //! derived from one shared `ThreadSafeRepository`.
 
 use std::cell::RefCell;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -125,4 +126,42 @@ pub fn any_ref_under(prefixes: &[String]) -> bool {
 
 pub fn is_bare() -> bool {
     with_repo(|repo| repo.is_bare())
+}
+
+/// The global ignore file git uses in the repository or worktree with git
+/// directory `git_dir`: `core.excludesFile` as git itself reads it there
+/// (worktree config, conditional includes, `~`), none if it is set but empty,
+/// else git's default `$XDG_CONFIG_HOME/git/ignore` (`~/.config/git/ignore`).
+/// Anything else is an error, not a reason to fall back: a fallback could
+/// ignore more than git does.
+pub fn excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args(["config", "--path", "--get", "core.excludesFile"])
+        .output()?;
+    match out.status.code() {
+        Some(0) => {
+            let value = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+            let path = PathBuf::from(std::ffi::OsStr::from_bytes(value));
+            // Git resolves a relative one in the work tree, which isn't there
+            // unmounted.
+            anyhow::ensure!(
+                value.is_empty() || path.is_absolute(),
+                "core.excludesFile is a relative path ({}), which gitfold can't resolve",
+                path.display()
+            );
+            Ok((!value.is_empty()).then_some(path))
+        }
+        // Unset. As for git, an empty environment variable counts as unset too.
+        Some(1) => {
+            let mut env = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+            Ok(gix::path::env::xdg_config("ignore", &mut env))
+        }
+        _ => Err(anyhow!(
+            "git config core.excludesFile in {}: {}",
+            git_dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
 }

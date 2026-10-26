@@ -49,7 +49,7 @@ enum Command {
         #[arg(long)]
         from: Option<String>,
     },
-    /// List the repository's workspaces and their uncommitted changes.
+    /// List the repository's workspaces, their uncommitted changes and ignored files.
     List { repo: PathBuf },
     /// Delete a workspace: its registration, stored changes and base ref.
     /// Its commits stay on the branch. The repository must not be mounted.

@@ -143,16 +143,17 @@ pub fn list(repo: &Path) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<40} {:>8} {:>8}  {:<12} note",
-        "branch", "changed", "deleted", "base"
+        "{:<40} {:>8} {:>8} {:>8}  {:<12} note",
+        "branch", "changed", "deleted", "ignored", "base"
     );
     for w in list {
-        match status::status(&store, &w.state_dir) {
+        match status::status(&store, &common_dir, &w.state_dir) {
             Ok(s) => println!(
-                "{:<40} {:>8} {:>8}  {:<12} {}",
+                "{:<40} {:>8} {:>8} {:>8}  {:<12} {}",
                 w.branch,
                 s.changed.len(),
                 s.deleted.len(),
+                s.ignored,
                 s.base.to_hex_with_len(12).to_string(),
                 base_note(&w.branch, &s.base)
             ),
@@ -187,8 +188,10 @@ pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
     if !force && admin.join("index").exists() && !index_matches_head(&admin)? {
         bail!("workspace {branch} has staged changes; commit them, or use --force to discard them");
     }
+    let mut ignored = 0;
     if !force && state_dir.join("base").exists() {
-        let s = status::status(&Store::default(), &state_dir)?;
+        let s = status::status(&Store::default(), &common_dir, &state_dir)?;
+        ignored = s.ignored;
         // Changes are measured against the base; behind the tip, a file edited
         // back to the base's content would look unchanged.
         let note = base_note(branch, &s.base);
@@ -216,7 +219,10 @@ pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
     remove_dir(&admin)?;
     remove_dir(&state_dir)?;
     worktree::unpin(&common_dir, &worktree::pin_ref(&id))?;
-    println!("removed workspace {branch}");
+    match ignored {
+        0 => println!("removed workspace {branch}"),
+        n => println!("removed workspace {branch} (and {n} ignored files in it)"),
+    }
     Ok(())
 }
 

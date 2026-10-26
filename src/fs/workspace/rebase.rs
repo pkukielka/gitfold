@@ -525,20 +525,38 @@ impl Workspace {
             Err(e) if not_found(&e) => return Ok(None), // dropped or replaced already
             Err(e) => return Err(e),
         };
-        Ok(matches_stored(&upper, &meta, &rec)?.then(|| Seen::of(&meta)))
+        Ok(matches_stored(&upper, &meta, &rec, ModeCheck::Exact)?.then(|| Seen::of(&meta)))
     }
+}
+
+/// How `matches_stored` compares modes.
+#[derive(Clone, Copy)]
+pub(super) enum ModeCheck {
+    /// All permission bits, as shown in the mount (an invisible rebase needs it).
+    Exact,
+    /// Only the executable bit, as git records it.
+    Git,
 }
 
 /// Whether the file at `path` (with metadata `meta`) has the content and mode
 /// of stored file `rec`.
-pub(super) fn matches_stored(path: &Path, meta: &fs::Metadata, rec: &FileRec) -> io::Result<bool> {
+pub(super) fn matches_stored(
+    path: &Path,
+    meta: &fs::Metadata,
+    rec: &FileRec,
+    modes: ModeCheck,
+) -> io::Result<bool> {
     let data = if rec.kind == EntryKind::Link {
         if !meta.file_type().is_symlink() {
             return Ok(false);
         }
         fs::read_link(path)?.as_os_str().as_bytes().to_vec()
     } else {
-        if !meta.is_file() || meta.len() != rec.size || meta.mode() & 0o7777 != rec.perm().into() {
+        let same_mode = match modes {
+            ModeCheck::Exact => meta.mode() & 0o7777 == rec.perm().into(),
+            ModeCheck::Git => (meta.mode() & 0o100 != 0) == (rec.kind == EntryKind::BlobExecutable),
+        };
+        if !meta.is_file() || meta.len() != rec.size || !same_mode {
             return Ok(false);
         }
         fs::read(path)?

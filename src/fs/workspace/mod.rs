@@ -237,6 +237,12 @@ fn ancestors(path: &[u8]) -> impl Iterator<Item = &[u8]> {
         .map(|(i, _)| &path[..i])
 }
 
+/// Whether the lower entry at `path` is hidden by a whiteout on it or an
+/// ancestor, or by an opaque ancestor.
+fn hidden(whiteouts: &markers::PathSet, opaque: &markers::PathSet, path: &[u8]) -> bool {
+    whiteouts.contains(path) || ancestors(path).any(|p| whiteouts.contains(p) || opaque.contains(p))
+}
+
 fn not_found(e: &io::Error) -> bool {
     e.kind() == ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
 }
@@ -342,9 +348,7 @@ impl Workspace {
     /// Whether the lower entry at `path` is hidden by a whiteout or an opaque
     /// ancestor.
     fn lower_hidden(layers: &Layers, path: &[u8]) -> bool {
-        layers.markers.whiteouts.contains(path)
-            || ancestors(path)
-                .any(|p| layers.markers.whiteouts.contains(p) || layers.markers.opaque.contains(p))
+        hidden(&layers.markers.whiteouts, &layers.markers.opaque, path)
     }
 
     /// The lower entry at `path`, unless hidden.
