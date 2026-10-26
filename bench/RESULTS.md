@@ -457,6 +457,6 @@ lives in upper.
 
 Large build outputs cost little (full build +17%); the incremental rebuild is
 2.1x, mostly relinking the debug binary through the daemon. Many small files
-are the expensive case: untarring Spark's 27,599 files takes 3.00 s vs 0.53 s
+are the expensive case: untarring Spark's 27,599 files takes 2997 ms vs 525 ms
 (see "phase 3"), which is what a `node_modules` install looks like (`npm` was
 not available to measure directly).
