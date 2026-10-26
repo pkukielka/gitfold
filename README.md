@@ -189,8 +189,8 @@ escaped (`agent%2Ftask-17`). The worktree registration is
 `.git/worktrees/gitfold-ws-<id>`; the changes are in `.git/gitfold/<id>/`:
 `upper/` holds every file that differs from the workspace's base (the branch's
 last tip, see above), as real files; `markers` records deleted files so they
-stay deleted; `times` the timestamps of files dropped from upper (committed, or restored
-unchanged); `base` is that commit, kept from `git gc` by the ref
+stay deleted; `times` the timestamps of files dropped from upper (committed,
+or restored unchanged); `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress.
 Don't modify `.git/gitfold/` while mounted.
 
@@ -209,9 +209,11 @@ Don't modify `.git/gitfold/` while mounted.
   are.
 - Reads and writes are addressed by path, so reading or writing a file that was
   deleted or replaced (renamed over) while open fails.
-- Writes go through the gitfold daemon, so writing many files (for example
-  build output) is several times slower than on a local disk: creating Apache
-  Spark's 27,599 files takes 3.00 s instead of 0.53 s (see
+- Writes go through the gitfold daemon. Creating many small files is several
+  times slower than on a local disk: untarring Apache Spark's 27,599 files
+  takes 3.00 s instead of 0.53 s, which is what a `node_modules` install looks
+  like. Builds cost much less: a full `cargo build` of gitfold takes 15.99 s
+  instead of 13.64 s, an incremental one 3.91 s instead of 1.85 s (see
   [Performance](#performance)).
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
@@ -271,8 +273,8 @@ refuse while any of its workspaces or snapshots is mounted):
   `--force`).
 
 The same by hand (bash), for example to remove everything at once: unmount,
-then use the repository's absolute git directory (a relative one would make `rm` act on
-the current directory):
+then use the repository's absolute git directory (a relative one would make
+`rm` act on the current directory):
 
 ```
 common=$(git -C <REPO> rev-parse --path-format=absolute --git-common-dir)
@@ -362,9 +364,19 @@ repeat):
 | append to 1,000 tracked files | 0.03 / 0.03 s | 0.11 / 0.04 s |
 
 Every file created costs about six requests to the daemon (lookup, create,
-write, tar's `utimes`, and the attribute reads that follow a write), so file creation is 4-6x
-slower than native; large writes are under 2x. The first appends to tracked
-files copy them into `upper/`.
+write, tar's `utimes`, and the attribute reads that follow a write), so file
+creation is 4-6x slower than native; large writes are under 2x. The first
+appends to tracked files copy them into `upper/`.
+
+Builds write fewer, larger files, so they suffer much less. `cargo build`
+(debug, offline) of gitfold itself, a workspace vs a native clone; `target/`
+is 715 MB in 1,677 files:
+
+| build | native | workspace |
+|---|---:|---:|
+| full | 13.64 s | 15.99 s |
+| incremental (one source file touched) | 1.85 s | 3.91 s |
+| no-op | 0.17 s | 0.36 s |
 
 Benchmark scripts are in `bench/`: `bench.sh` compares native and mounted runs of
 the commands an agent issues, `probe.sh` isolates content reads, `writes.sh`

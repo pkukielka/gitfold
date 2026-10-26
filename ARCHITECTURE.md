@@ -854,15 +854,17 @@ checkout" and "Running it"); this is the why and what it would take.
   daemon lifts the owner's bit for its own reopen and restores it, under a lock
   every `stat` of an upper file takes too, so nobody sees the lifted mode
   (`Workspace::open_upper`).
-- **Workspace writes go through the daemon** (no passthrough): creating files
-  is 4-6x slower than on a local disk (Spark's 27,599 files: 3.00 s vs
-  0.53 s), large writes under 2x. Each created file costs ~6 requests (lookup,
-  create, write, tar's `utimes`, attribute reads after the write); the daemon's own work per
-  request was already trimmed (no `mkdir` of every ancestor, no `stat` before
-  each write). `FUSE_WRITEBACK_CACHE` would batch writes and save the attribute
-  reads, at the cost of the kernel owning mtimes; passthrough on a second mount
-  point would give native speed. Creates take the workspace lock exclusively,
-  so parallel writers serialize there.
+- **Workspace writes go through the daemon** (no passthrough): creating many
+  small files is 4-6x slower than on a local disk (Spark's 27,599 files:
+  3.00 s vs 0.53 s, the shape of a `node_modules` install), large writes under
+  2x, and builds in between: a full `cargo build` of gitfold takes 15.99 s vs
+  13.64 s (+17%), an incremental one 3.91 s vs 1.85 s. Each created file costs
+  ~6 requests (lookup, create, write, tar's `utimes`, attribute reads after the
+  write); the daemon's own work per request was already trimmed (no `mkdir` of
+  every ancestor, no `stat` before each write). `FUSE_WRITEBACK_CACHE` would
+  batch writes and save the attribute reads, at the cost of the kernel owning
+  mtimes; passthrough on a second mount point would give native speed. Creates
+  take the workspace lock exclusively, so parallel writers serialize there.
 - **A workspace's node table costs ~120 bytes per entry the kernel has looked
   up** (~67 MB for a prewarmed Chromium workspace), against a few MB per
   additional snapshot. Most of it is hash table slack (power-of-two capacities)
@@ -906,8 +908,10 @@ compact node table and write measurements. Next:
 
 - **Faster writes.** `FUSE_WRITEBACK_CACHE` (fewer requests per file, but the
   kernel then owns mtimes, which the index and rebases rely on), or passthrough
-  on a second mount point for build output. Worth it if agents' builds in
-  workspaces turn out too slow; see the write numbers in
+  on a second mount point for build output. Builds measured cost little (a
+  full `cargo build` +17%); installs of many small files (`node_modules`) are
+  the slow case, where opt-in symlinks to real directories for named ignored
+  directories would be the cheap fix. See the write numbers in
   [Limitations](#known-limitations).
 - **Parallel creates.** Creating an entry takes the workspace lock
   exclusively; per-directory locking would let parallel writers proceed.
