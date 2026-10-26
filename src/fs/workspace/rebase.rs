@@ -46,7 +46,7 @@ use gix::objs::tree::EntryKind;
 use log::info;
 
 use super::markers::Kind;
-use super::times::Stamp;
+use super::times::{Stamp, shown_mtime};
 use super::{Layers, Lower, Workspace, ancestors, join, not_found};
 use crate::git::{self, Commit};
 use crate::inode;
@@ -395,7 +395,7 @@ impl Workspace {
                     }
                     // A lower file N changes: keep it as it shows.
                     Some(o) if !o.is_dir() => {
-                        let shown = stamp.map_or(inode::file_time(), |s| s.mtime);
+                        let shown = shown_mtime(stamp);
                         self.copy_file(store, &path, o.id, false, Some(shown))
                             .map_err(|e| anyhow!("copying up {}: {e:?}", show(&path)))?;
                         plan.created.push(path.clone());
@@ -491,7 +491,7 @@ impl Workspace {
 
     /// Syncs the files and directories step 1 created, and the directories
     /// holding them, so they are durable before the base that relies on them is.
-    fn sync_created(&self, created: &[Vec<u8>]) -> io::Result<()> {
+    pub(super) fn sync_created(&self, created: &[Vec<u8>]) -> io::Result<()> {
         // One flush of the whole file system beats thousands of fsyncs (a 2,857-file
         // rebase: 0.40 s vs 2.26 s), though it also writes out others' data.
         if created.len() > SYNCFS_ABOVE {

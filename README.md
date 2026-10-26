@@ -199,9 +199,12 @@ Don't modify `.git/gitfold/` while mounted.
 - Moving the branch far without changing the files (`reset --soft` to an old
   commit) copies every file that differs into `upper/`, during which the
   workspace's file operations wait: 0.40 s to copy 2,857 files in Apache Spark.
-- Renaming a directory from the base commit, or onto one, returns `EXDEV`, as
-  overlayfs does. `mv` then copies and deletes, but `git mv` of such a directory
-  fails. Renaming files, and directories you created, works directly.
+- Renaming a directory from the base commit copies its files into `upper/`
+  first, while the workspace's file operations wait (0.23 s for a 7,500-file,
+  19 MB directory in Apache Spark). Above 10,000 files or 100 MiB, or if the
+  copy fails, it returns `EXDEV` instead, as overlayfs does: `mv` then copies
+  and deletes, but `git mv` of such a directory fails. Renaming files, and
+  directories you created, works directly.
 - Hard links and special files (`mknod`) are not supported (`EPERM`); symlinks
   are.
 - Reads and writes are addressed by path, so reading or writing a file that was

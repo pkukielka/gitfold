@@ -160,8 +160,8 @@ Then, per request (`fs/workspace/`):
 - **Upper**: every file that differs from the base, as real files in
   `.git/gitfold/<id>/upper`.
 - **Whiteout**: a recorded deleted lower path, so it stays hidden.
-- **Opaque**: a directory recreated over a whiteout; its lower children stay
-  hidden.
+- **Opaque**: a directory recreated over a whiteout, or a lower directory
+  copied into upper by a rename; its lower children stay hidden.
 - **Copy-up**: copying a lower file to upper before its first modification.
 - **Workspace id**: the branch name with `%` and `/` escaped
   (`feature%2Flogin`); names `.git/worktrees/gitfold-ws-<id>` and
@@ -285,7 +285,9 @@ decision that creates them.
   before the reply, `fsync` is passed through, and markers are appended before
   the reply. Order matters where two things change: a whiteout is logged
   *before* the upper file is removed (the upper copy wins until then), copy-ups
-  are written in `tmp/` (cleared on open) and renamed into place, `base` is
+  are written in `tmp/` (cleared on open) and renamed into place,
+  copy-on-rename syncs its copies before marking the directory opaque and
+  clears the whiteouts below only after the marker, `base` is
   written atomically last when a workspace is created, and a worktree
   registration's HEAD is written last (a directory without HEAD, or without an
   index, is rewritten). A rebase first prepares what is valid under both bases,
@@ -515,7 +517,9 @@ be opened as a workspace.
 - *Writes:* a file is copied up on its first write (or created empty for a
   truncation to zero), under `copy_lock`, written in `tmp/` and renamed into
   place. Deleting a lower entry appends a whiteout; a directory recreated over
-  one becomes opaque.
+  one becomes opaque. Renaming a directory with lower content first copies it
+  up and makes it opaque (copy-on-rename, see below); renaming onto an empty
+  lower directory makes that one opaque.
 - *Inodes* are `ws(slot, local)` with `local` = FNV-1a of the path at first
   lookup (probing on collision), kept through renames by a node table of
   (parent, name), counted per kernel reference and freed on `forget`.
@@ -564,10 +568,15 @@ Example: deleting `src/a.c` appends a whiteout for it; `mkdir src` after
 
 **Rejected:**
 
-- *Renaming lower directories by copying their subtree:* renaming a directory
-  with lower content, or onto one, returns `EXDEV` instead, as overlayfs does
-  without `redirect_dir`. `mv` falls back to copy and delete; `git mv` doesn't
-  and fails. Worth revisiting if agents hit it.
+- *Redirects for renamed lower directories* (as overlayfs' `redirect_dir`: a
+  marker saying `new/` shows the base's `old/`): every lookup, listing, copy-up,
+  rebase and status check would have to follow them, the rebase also moving
+  them along with the base, and the marker format would change. Instead a
+  renamed directory with lower content is copied into upper first
+  (`Workspace::materialize`), up to 10,000 files or 100 MiB (0.23 s for 7,500
+  files, 19 MB); above that, `EXDEV`, which `mv` handles by copying but
+  `git mv` doesn't. The copies are ordinary upper files, so rebases drop them
+  once the rename is committed.
 - *Rewriting the marker sets on every change:* quadratic `rm -r` (see above).
 - *Diff storage in `~/.local/share`:* orphaned diffs pile up when repositories
   move or are deleted.
@@ -599,7 +608,8 @@ skipped), in three steps that each leave a consistent view:
    with the mtime it showed; a path absent from the view that N adds gets a
    whiteout; a lower directory N removes or replaces with a file becomes an
    upper directory (opaque over N's file), its files copied up the same way;
-   in an opaque directory (one recreated over a deleted one) where N has a
+   in an opaque directory (one recreated over a deleted one, or renamed with
+   lower content) where N has a
    directory, N's entries that upper doesn't have are whited out. These are
    synced before step 2.
 2. *Switch*: record stamps for the upper files identical to N's (content and
@@ -780,7 +790,7 @@ gets the speed with no correctness risk.
 | Escaped slashes in names, one-component revs | not what people type; `@origin/main` unreachable | [names](#names-with-slashes-one-directory-per-component) |
 | Shared content inodes or per-mount counters for workspace files | writes must keep the inode; counters invalidate git's index on remount | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
 | Opens + passthrough for writes | warm snapshot reads ~4x slower (or a second mount point) | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
-| Copying lower directory subtrees on rename | `EXDEV` instead, like overlayfs | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
+| Redirects for renamed lower directories | every lookup, listing and rebase would follow them; copy-on-rename up to a limit instead | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
 | Diff in `~/.local/share` | orphaned diffs | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
 | Workspace listing rebuilt per readdir page | quadratic: 6 s vs 0.16 s prewarm | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
 | Rewriting whiteout/opaque sets on every change | quadratic `rm -r`; append-only log instead | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
@@ -827,11 +837,13 @@ checkout" and "Running it"); this is the why and what it would take.
   is next written. Only disk use is affected.
 - **Files in an opaque directory wait for the next rebase**: the cleanup of
   unchanged files doesn't look below one (a directory recreated over a deleted
-  one); a rebase removes the marker where the new base has a directory, and
+  one, or one copied up by a rename); a rebase removes the marker where the new base has a directory, and
   over a file of the new base the directory stays opaque. Only disk use is
   affected.
-- **Renaming a directory with lower content, or onto one, returns `EXDEV`** in
-  workspaces (`git mv` of such a directory fails); hard links and special files
+- **Renaming a directory with more than 10,000 files or 100 MiB of lower
+  content returns `EXDEV`** in workspaces (`git mv` of such a directory
+  fails), as does one whose copy fails; smaller ones are copied into upper
+  while the workspace's file operations wait. Hard links and special files
   are `EPERM`.
 - **No file handles in workspaces either**: reads and writes go by path, so I/O
   on a file that was unlinked or renamed over while open fails. Writing (or

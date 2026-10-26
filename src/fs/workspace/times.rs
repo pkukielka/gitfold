@@ -103,3 +103,9 @@ impl Times {
         Ok(())
     }
 }
+
+/// The mtime a lower file with stamp `stamp` shows: the stamp's, else the
+/// constant of unchanged files.
+pub(super) fn shown_mtime(stamp: Option<Stamp>) -> SystemTime {
+    stamp.map_or(crate::inode::file_time(), |s| s.mtime)
+}

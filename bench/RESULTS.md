@@ -430,3 +430,13 @@ create, 1.2 writes, 0.5 setattrs (tar's utimes) and 2.4 getattrs (the kernel
 re-reads attributes after a write), ~6 requests; during that untar (2,513 ms)
 it was busy 1,780 ms, mostly in system calls. Writes are already up to 1 MB per request (the kernel's
 `max_pages` limit).
+
+## 2026-10-26, copy-on-rename
+
+Renaming a workspace directory with lower content used to return EXDEV (`git mv`
+of a directory from the base commit failed). It is now copied into upper first,
+up to 10,000 files or 100 MiB. Spark, `rename(2)` of `sql/hive/src/test/resources/golden`
+(7,500 files, 19 MB) in a fresh workspace, `--prewarm none`: 234 ms; `git
+status --porcelain` right after: 663 ms (7,507 lines: the old files deleted,
+the new directory untracked; nothing staged). `sql/` (21,094 files)
+still returns EXDEV.

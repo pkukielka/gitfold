@@ -19,7 +19,8 @@ use fuser::Errno;
 use gix::objs::tree::EntryKind;
 
 use super::markers::Kind;
-use super::{Layers, Obj, Workspace, join, not_found};
+use super::times::shown_mtime;
+use super::{Entry, Layers, Lower, Obj, Workspace, join, not_found};
 use crate::git;
 use crate::store::Store;
 
@@ -27,6 +28,20 @@ use crate::store::Store;
 /// directory showed as before (lower directories are 0755), independent of the
 /// daemon's umask.
 const DIR_MODE: u32 = 0o755;
+
+/// Limits of copy-on-rename (see `Workspace::materialize`): renaming a directory
+/// with more lower content returns EXDEV.
+const COPY_ON_RENAME_FILES: usize = 10_000;
+const COPY_ON_RENAME_BYTES: u64 = 100 << 20;
+
+/// What copy-on-rename copies: lower files (path, file id) and lower
+/// directories (also empty ones and submodules), parents first.
+#[derive(Default)]
+struct CopyPlan {
+    files: Vec<(Vec<u8>, u32)>,
+    dirs: Vec<Vec<u8>>,
+    bytes: u64,
+}
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -109,6 +124,10 @@ impl Workspace {
 
     /// Makes sure directory `path` (visible in the merged view) exists in upper.
     pub(super) fn ensure_upper_dir(&self, path: &[u8]) -> Result<(), Errno> {
+        // Usually it exists: one stat instead of a mkdir per component.
+        if fs::symlink_metadata(self.upper_path(path)).is_ok_and(|m| m.is_dir()) {
+            return Ok(());
+        }
         let mut prefix: Vec<u8> = Vec::new();
         for comp in path.split(|b| *b == b'/').filter(|c| !c.is_empty()) {
             if !prefix.is_empty() {
@@ -429,12 +448,133 @@ impl Workspace {
         self.remove(store, parent, name, false)
     }
 
+    /// Makes directory `path` one held entirely in upper, so it can be renamed
+    /// like any upper directory: its visible lower content is copied up (files
+    /// keeping the mtime they showed), synced, then the directory is marked
+    /// opaque. EXDEV, copying nothing, if that content exceeds the
+    /// copy-on-rename limits; also EXDEV, with the partial copies removed, if
+    /// copying fails (`mv` then copies by itself).
+    ///
+    /// Until the opaque marker, the copies change nothing visible but the ctime
+    /// of those files and the times (and size) of directories that become
+    /// upper ones. The marker goes after the copies are durable and before
+    /// clearing the whiteouts below it, which it makes moot.
+    fn materialize(&self, store: &Store, layers: &mut Layers, path: &[u8]) -> Result<(), Errno> {
+        let mut plan = CopyPlan::default();
+        self.plan_copy(store, layers, path, &mut plan)?;
+        let mut created = Vec::new();
+        let copied = self.copy_plan(store, layers, path, &plan, &mut created);
+        if let Err(e) = copied.and_then(|()| Ok(self.sync_created(&created)?)) {
+            log::warn!("copy-on-rename of {}: {e:?}", String::from_utf8_lossy(path));
+            for p in created.iter().rev() {
+                let upper = self.upper_path(p);
+                let _ = fs::remove_file(&upper).or_else(|_| fs::remove_dir(&upper));
+            }
+            return Err(Errno::EXDEV);
+        }
+        // Listings name lower files that are upper ones from here on.
+        self.changed();
+        for (file, _) in &plan.files {
+            layers.times.set(file, None); // no longer lower files
+        }
+        layers.times.save()?;
+        layers.markers.set(Kind::Opaque, path, true)?;
+        for p in layers.markers.below(Kind::Whiteout, path) {
+            layers.markers.set(Kind::Whiteout, &p, false)?;
+        }
+        self.changed();
+        Ok(())
+    }
+
+    /// Collects the lower entries visible below directory `path` into `plan`;
+    /// EXDEV as soon as they exceed the copy-on-rename limits. Upper
+    /// subdirectories are only entered if they merge a lower one.
+    fn plan_copy(
+        &self,
+        store: &Store,
+        layers: &Layers,
+        path: &[u8],
+        plan: &mut CopyPlan,
+    ) -> Result<(), Errno> {
+        for (name, entry) in self.entries(store, layers, path)? {
+            let child = join(path, &name);
+            match entry {
+                Entry::LowerFile(id) => {
+                    plan.bytes += store.file(id).map_or(0, |f| f.size);
+                    plan.files.push((child, id));
+                    if plan.files.len() > COPY_ON_RENAME_FILES || plan.bytes > COPY_ON_RENAME_BYTES
+                    {
+                        return Err(Errno::EXDEV);
+                    }
+                }
+                // Also a submodule: an empty directory.
+                Entry::LowerDir => {
+                    plan.dirs.push(child.clone());
+                    self.plan_copy(store, layers, &child, plan)?;
+                }
+                Entry::Upper
+                    if matches!(
+                        self.visible_lower(store, layers, &child),
+                        Some(Lower::Tree(_))
+                    ) && self.is_upper_dir(&child) =>
+                {
+                    self.plan_copy(store, layers, &child, plan)?
+                }
+                Entry::Upper => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Carries out `plan` for directory `path`, recording what it creates
+    /// (directories before what they hold) in `created`.
+    fn copy_plan(
+        &self,
+        store: &Store,
+        layers: &Layers,
+        path: &[u8],
+        plan: &CopyPlan,
+        created: &mut Vec<Vec<u8>>,
+    ) -> Result<(), Errno> {
+        let mkdir = |dir: &[u8], created: &mut Vec<Vec<u8>>| -> Result<(), Errno> {
+            let upper = self.upper_path(dir);
+            match fs::DirBuilder::new().create(&upper) {
+                Ok(()) => {
+                    created.push(dir.to_vec());
+                    fs::set_permissions(&upper, fs::Permissions::from_mode(DIR_MODE))?;
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+            Ok(())
+        };
+        let parent = &path[..path.iter().rposition(|b| *b == b'/').unwrap_or(0)];
+        self.ensure_upper_dir(parent)?;
+        mkdir(path, created)?;
+        for dir in &plan.dirs {
+            mkdir(dir, created)?;
+        }
+        for (file, id) in &plan.files {
+            let shown = shown_mtime(layers.times.get(file));
+            self.copy_file(store, file, *id, false, Some(shown))?;
+            created.push(file.clone());
+        }
+        Ok(())
+    }
+
+    /// Whether `path` is a directory (not a symlink to one) in upper.
+    fn is_upper_dir(&self, path: &[u8]) -> bool {
+        fs::symlink_metadata(self.upper_path(path)).is_ok_and(|m| m.is_dir())
+    }
+
     pub fn rmdir(&self, store: &Store, parent: u64, name: &[u8]) -> Result<(), Errno> {
         self.remove(store, parent, name, true)
     }
 
-    /// Renames within the workspace. Directories that have lower content return
-    /// EXDEV (like overlayfs without redirect_dir); `mv` then copies and deletes.
+    /// Renames within the workspace. A directory with lower content is first
+    /// copied into upper (`materialize`), up to `COPY_ON_RENAME_FILES` files and
+    /// `COPY_ON_RENAME_BYTES`; above that, or if copying fails, EXDEV (like
+    /// overlayfs without redirect_dir), and `mv` copies and deletes by itself.
     pub fn rename(
         &self,
         store: &Store,
@@ -456,9 +596,8 @@ impl Workspace {
         }
         let src_obj = self.resolve_in(store, &layers, &src)?;
         let src_has_lower = self.has_lower(store, &layers, &src);
-        if src_obj.is_dir() && src_has_lower && !layers.markers.opaque.contains(&src) {
-            return Err(Errno::EXDEV);
-        }
+        // Every check on the destination before copying anything.
+        let mut replace_lower_dir = false;
         match self.resolve_in(store, &layers, &dst) {
             Ok(_) if noreplace => return Err(Errno::EEXIST),
             Ok(dst_obj) => {
@@ -469,12 +608,27 @@ impl Workspace {
                         Errno::ENOTDIR
                     });
                 }
-                if dst_obj.is_dir() && self.has_lower(store, &layers, &dst) {
-                    return Err(Errno::EXDEV);
+                if dst_obj.is_dir() {
+                    if !self.entries(store, &layers, &dst)?.is_empty() {
+                        return Err(Errno::ENOTEMPTY);
+                    }
+                    replace_lower_dir = self.has_lower(store, &layers, &dst);
                 }
             }
             Err(e) if e == Errno::ENOENT => {}
             Err(e) => return Err(e),
+        }
+        if src_obj.is_dir() && src_has_lower && !layers.markers.opaque.contains(&src) {
+            self.materialize(store, &mut layers, &src)?;
+        }
+        if replace_lower_dir {
+            // Empty in the view: nothing to copy, just an opaque upper directory.
+            self.ensure_upper_dir(&dst)?;
+            layers.markers.set(Kind::Opaque, &dst, true)?;
+            for p in layers.markers.below(Kind::Whiteout, &dst) {
+                layers.markers.set(Kind::Whiteout, &p, false)?;
+            }
+            self.changed();
         }
         self.copy_up(store, &layers, &src, false)?;
         self.ensure_upper_dir(&dst_parent)?;

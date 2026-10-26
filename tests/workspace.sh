@@ -59,8 +59,27 @@ echo "== renames"
 mv "$W/CONTRIBUTING.md" "$W/CONTRIB2.md"
 check "renamed file at new path" cmp "$W/CONTRIB2.md" "$REPO/CONTRIBUTING.md"
 check "renamed file gone from old path" test ! -e "$W/CONTRIBUTING.md"
-mv "$W/dev" "$W/dev2"
-check "renamed lower dir (EXDEV fallback)" test -d "$W/dev2" -a ! -e "$W/dev"
+ren() { perl -e 'rename($ARGV[0], $ARGV[1]) or die "$!\n"' "$@"; }   # rename(2), no fallback
+rm "$W/dev/README.md"                                  # a deletion inside the directory
+before=$(stat -c %Y "$W/dev/merge_spark_pr.py")
+check "rename(2) of a lower dir (copy-on-rename)" ren "$W/dev" "$W/dev2"
+check "renamed lower dir at new path, gone from old" test -d "$W/dev2" -a ! -e "$W/dev"
+check "content intact" cmp "$W/dev2/merge_spark_pr.py" "$REPO/dev/merge_spark_pr.py"
+check "deleted file stays deleted" test ! -e "$W/dev2/README.md"
+eq "copied files keep their mtime" "$before" "$(stat -c %Y "$W/dev2/merge_spark_pr.py")"
+out=$(ren "$W/sql" "$W/sql2" 2>&1)
+eq "over the limit (21k files): EXDEV" "Invalid cross-device link" "$out"
+check "nothing copied for it" test ! -e "$REPO/.git/gitfold/test1/upper/sql"
+chmod 555 "$REPO/.git/gitfold/test1/tmp"              # copies fail
+out=$(ren "$W/bin" "$W/bin2" 2>&1)
+eq "a failed copy-on-rename is EXDEV" "Invalid cross-device link" "$out"
+check "and leaves no partial copy" test ! -e "$REPO/.git/gitfold/test1/upper/bin"
+chmod 755 "$REPO/.git/gitfold/test1/tmp"
+mkdir "$W/full"; touch "$W/full/x"
+out=$(ren "$W/conf" "$W/full" 2>&1)
+eq "onto a non-empty directory: ENOTEMPTY" "Directory not empty" "$out"
+check "checked before copying anything" test ! -e "$REPO/.git/gitfold/test1/upper/conf"
+rm -r "$W/full"
 mv "$W/newdir" "$W/newdir2"
 eq "renamed upper dir keeps content" "new" "$(cat "$W/newdir2/sub/f.txt")"
 
@@ -68,6 +87,10 @@ echo "== git inside the workspace"
 git -C "$W" add -A >/dev/null 2>&1
 check "git commit" git -C "$W" -c user.name=t -c user.email=t@t commit -q -m "workspace test"
 eq "status clean after commit" "" "$(git -C "$W" status --porcelain)"
+check "git mv of a lower directory" git -C "$W" mv core/src/main/resources core/src/main/res2
+eq "git sees it as renames only" "R" "$(git -C "$W" status --porcelain | cut -c1 | sort -u)"
+check "commit the move" git -C "$W" -c user.name=t -c user.email=t@t commit -q -m "git mv"
+eq "status clean after it" "" "$(git -C "$W" status --porcelain)"
 eq "branch moved in repo" "$(git -C "$W" rev-parse HEAD)" "$(git -C "$REPO" rev-parse test1)"
 eq "commit content" "appended" "$(git -C "$REPO" show test1:README.md | tail -1)"
 check "deletion committed" sh -c "! git -C '$REPO' cat-file -e test1:NOTICE"
