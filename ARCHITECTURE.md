@@ -130,7 +130,8 @@ Then, per request (`fs/workspace/`):
 | `src/git.rs` | thread-local gitoxide handles, tree, blob and ref access |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces |
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
-| `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM |
+| `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
+| `src/daemon.rs` | `mount` in the background (detached, log file), `unmount` |
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
@@ -629,7 +630,10 @@ lock and drops those a `stat` under the exclusive lock shows unchanged since
 coarse ticks, so a write right after the hash could leave the `stat` as it
 was).
 Then it points `refs/gitfold/<id>` at the base, retrying on every pass until
-that succeeds.
+that succeeds. The daemon also syncs every open workspace when it exits
+(`Workspaces::sync_all`), and `gitfold remove` catches a workspace up offline if
+its branch moved while unmounted, so its change count is measured against the
+tip.
 
 Example: `git commit -am fix` of 3 edited files; within a second the base is
 the new commit, the 3 files leave `upper/`, and `stat` shows the same inode,

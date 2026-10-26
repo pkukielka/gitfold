@@ -44,7 +44,7 @@ unmount() { fusermount3 -u "$MNT" 2>/dev/null || true; sleep 0.3; }
 remount() {
     unmount
     mkdir -p "$MNT"
-    "$BIN" mount $GF_FLAGS "$REPO" "$MNT" >/tmp/gf-bench.log 2>&1 &
+    "$BIN" mount --foreground $GF_FLAGS "$REPO" "$MNT" >/tmp/gf-bench.log 2>&1 &
     for _ in $(seq 100); do mountpoint -q "$MNT" && break; sleep 0.05; done
     local s; s=$(date +%s%N)
     stat "$MNT/@HEAD" >/dev/null # registers worktree + synthesizes index

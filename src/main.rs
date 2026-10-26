@@ -1,6 +1,7 @@
 mod admin;
 mod benchattrs;
 mod benchread;
+mod daemon;
 mod fs;
 mod git;
 mod inode;
@@ -24,10 +25,18 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Mount a repository: revisions as <mountpoint>/@<rev>/..., branches as <mountpoint>/<branch>/...
+    /// Mount a repository: revisions as <mountpoint>/@<rev>/..., branches as
+    /// <mountpoint>/<branch>/... Runs in the background until `gitfold unmount`.
     Mount {
         repo: PathBuf,
         mountpoint: PathBuf,
+        /// Stay in the foreground, logging to stderr (for service managers).
+        #[arg(long)]
+        foreground: bool,
+        /// Log file in the background (default:
+        /// ~/.local/state/gitfold/<mount point>.log).
+        #[arg(long)]
+        log: Option<PathBuf>,
         /// FUSE worker threads (default: number of CPUs).
         #[arg(long)]
         threads: Option<usize>,
@@ -41,6 +50,9 @@ enum Command {
         #[arg(long)]
         prewarm_threads: Option<usize>,
     },
+    /// Unmount, even while a shell is inside the mount, and wait for gitfold to
+    /// exit.
+    Unmount { mountpoint: PathBuf },
     /// Create a branch to open as a workspace (<mountpoint>/<name>).
     Branch {
         repo: PathBuf,
@@ -82,19 +94,40 @@ fn main() -> Result<()> {
     // returned to the OS (~600 MB retained after one pass over chromium). A fixed
     // threshold keeps large buffers mmapped, so freeing them returns the memory.
     unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) };
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,fuser=error"))
+        .init();
     match Cli::parse().command {
         Command::Mount {
             repo,
             mountpoint,
+            foreground,
+            log,
             threads,
             kernel_open,
             prewarm,
             prewarm_threads,
         } => {
             let mountpoint = mountpoint::check(&mountpoint)?;
+            if !foreground {
+                let log = match log {
+                    Some(log) => std::path::absolute(log)?,
+                    None => daemon::default_log(&mountpoint)?,
+                };
+                daemon::start(&mountpoint, &log)?;
+                println!(
+                    "mounted at {} (log: {})",
+                    mountpoint.display(),
+                    log.display()
+                );
+                println!("unmount with: gitfold unmount {}", mountpoint.display());
+                return Ok(());
+            }
             mountpoint::unmount_on_signal(mountpoint.clone());
-            let common_dir = git::init(&repo)?;
+            // Absolute: the repository handle keeps the path it was opened with.
+            let common_dir = git::init(&std::path::absolute(&repo)?)?;
+            // Paths are resolved: don't keep the caller's directory busy (it may be
+            // on another mount the user wants to unmount).
+            std::env::set_current_dir("/")?;
             // Held until the daemon exits (see `admin::mount_lock`).
             let _lock = admin::mount_lock(&common_dir)?;
             let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
@@ -121,6 +154,7 @@ fn main() -> Result<()> {
             );
             fuser::mount(fs, &mountpoint, &config)?;
         }
+        Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
         Command::Branch { repo, name, from } => admin::branch(&repo, &name, from.as_deref())?,
         Command::List { repo } => admin::list(&repo)?,
         Command::Remove {

@@ -86,6 +86,19 @@ impl Workspaces {
         })
     }
 
+    /// Brings every open workspace's base up to the branch tip (see
+    /// `Workspace::sync`), so the state left behind at unmount is current.
+    pub fn sync_all(&self, store: &Store) {
+        let list = self.list.read();
+        for (path, entry) in list.iter() {
+            if let Entry::Workspace(ws) = entry
+                && let Err(e) = ws.sync(store)
+            {
+                warn!("workspace {path}: moving the base to the branch tip at unmount: {e:#}");
+            }
+        }
+    }
+
     pub fn is_namespace(&self, slot: u32) -> bool {
         matches!(
             self.list.read().get(slot as usize),

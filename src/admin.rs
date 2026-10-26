@@ -2,12 +2,13 @@
 //! mounting it: `branch`, `list`, `remove`, `prune`.
 
 use std::fs;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::fs::workspace::status;
+use crate::fs::workspace::{Workspace, status};
 use crate::git;
 use crate::store::Store;
 use crate::worktree::{self, workspace_branch, workspace_id};
@@ -15,11 +16,43 @@ use crate::worktree::{self, workspace_branch, workspace_id};
 /// How many paths an error message lists before "and N more".
 const SHOWN_PATHS: usize = 10;
 
-/// The source a mount of `common_dir` shows in the mount table (`FSName`), for
-/// people reading it. Mount options are comma-separated, so commas can't appear
-/// in it.
+/// The source a mount of `common_dir` shows in the mount table (`FSName`): the
+/// path, with `%`, `,` (mount options are comma-separated), `\` (fusermount
+/// strips it) and non-ASCII bytes percent-escaped, so it reads back exactly.
+/// `gitfold unmount` reads it back to wait for the daemon.
 pub fn fs_name(common_dir: &Path) -> String {
-    common_dir.display().to_string().replace(',', "_")
+    let mut name = String::new();
+    for &b in common_dir.as_os_str().as_bytes() {
+        if matches!(b, b'%' | b',' | b'\\') || !b.is_ascii() {
+            name.push_str(&format!("%{b:02X}"));
+        } else {
+            name.push(b as char);
+        }
+    }
+    name
+}
+
+/// The git common directory of a mount with source `source` (see `fs_name`).
+pub fn common_dir_of_source(source: &str) -> PathBuf {
+    let s = source.as_bytes();
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let hex = source
+            .get(i + 1..i + 3)
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(b) if s[i] == b'%' => {
+                bytes.push(b);
+                i += 3;
+            }
+            _ => {
+                bytes.push(s[i]);
+                i += 1;
+            }
+        }
+    }
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
 }
 
 /// Holds the repository's daemon lock for the life of a mount: two daemons
@@ -191,15 +224,39 @@ pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
     }
     let mut ignored = 0;
     if !force && state_dir.join("base").exists() {
-        let s = status::status(&Store::default(), &common_dir, &state_dir)?;
+        let store = Store::default();
+        let mut s = status::status(&store, &common_dir, &state_dir)?;
+        // Changes are measured against the base; behind the tip (the branch moved
+        // after the daemon last saw it), a file edited back to the base's content
+        // would look unchanged. Catch up as the daemon would have.
+        let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
+        if tip.is_some_and(|tip| tip.id != s.base) {
+            let catch_up = || {
+                let ws = Workspace::open(
+                    &store,
+                    common_dir.clone(),
+                    state_dir.clone(),
+                    admin.clone(),
+                    branch,
+                    None,
+                    Vec::new(),
+                )?;
+                ws.sync(&store)
+            };
+            catch_up().map_err(|e| {
+                anyhow::anyhow!(
+                    "workspace {branch}: its base is behind the branch tip and catching up \
+                     failed ({e:#}); mount it, open it once, or use --force"
+                )
+            })?;
+            s = status::status(&store, &common_dir, &state_dir)?;
+        }
         ignored = s.ignored;
-        // Changes are measured against the base; behind the tip, a file edited
-        // back to the base's content would look unchanged.
         let note = base_note(branch, &s.base);
         ensure!(
             note.is_empty() || note == "branch deleted",
-            "workspace {branch}: {note}, so its changes can't be told; mount it once, \
-             or use --force"
+            "workspace {branch}: {note}, so its changes can't be told; mount it, open \
+             it once, or use --force"
         );
         if !s.changed.is_empty() || !s.deleted.is_empty() {
             let mut msg = format!(

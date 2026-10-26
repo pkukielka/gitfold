@@ -189,6 +189,7 @@ impl Filesystem for GitFold {
     }
 
     fn destroy(&mut self) {
+        self.workspaces.sync_all(&self.store);
         self.counters.log(self.store.stats());
     }
 

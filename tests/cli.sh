@@ -108,7 +108,7 @@ check "recreating it refused" fails "$BIN" branch "$REPO" five
 check "remove the leftover" "$BIN" remove "$REPO" five --force
 check "recreating it works then" "$BIN" branch "$REPO" five
 
-echo "== staged-only changes and a base behind the tip"
+echo "== staged-only changes, and the base after a commit"
 check "branch six" "$BIN" branch "$REPO" six
 mount_fs
 W6=$MNT/six
@@ -119,10 +119,10 @@ eq "staged change refused" yes "$(grep -q 'staged changes' <<<"$out" && echo yes
 mount_fs
 G "$W6" reset -q; echo c >>"$W6/a.txt"; G "$W6" commit -qam c   # then unmount at once
 unmount_fs
-out=$("$BIN" remove "$REPO" six 2>&1)
-eq "base behind the tip refused" yes "$(grep -q 'behind the branch tip' <<<"$out" && echo yes)"
-mount_fs; ls "$W6" >/dev/null; sleep 2.5; unmount_fs   # the base catches up
-check "removable once the base caught up" "$BIN" remove "$REPO" six
+eq "the base caught up at unmount" "$(R rev-parse six)" "$(cat "$COMMON/gitfold/six/base")"
+c2=$(R commit-tree "six^{tree}" -p six -m 'moved while unmounted')
+R update-ref refs/heads/six "$c2"                                  # base now behind the tip
+check "remove catches up offline and removes" "$BIN" remove "$REPO" six
 
 echo "== ignored files"
 printf 'target/\n*.log\n!keep.log\n' >"$REPO/.gitignore"; echo t >"$REPO/tracked.log"
@@ -239,6 +239,49 @@ sleep 0.3
 check "an earlier build's lock file is honoured" fails "$BIN" prune "$T/plain"
 wait $OLD
 check "free again" "$BIN" prune "$T/plain"
+
+echo "== background mount and unmount"
+check "branch bg" "$BIN" branch "$REPO" bg
+out=$("$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" 2>&1)
+eq "mount returns once mounted" yes "$(mountpoint -q "$MNT" && echo yes)"
+eq "and says how to unmount" yes "$(grep -q "gitfold unmount $MNT" <<<"$out" && echo yes)"
+check "usable at once" test -f "$MNT/bg/a.txt"
+echo bg >>"$MNT/bg/a.txt"; G "$MNT/bg" commit -qam bg      # then unmount at once
+check "unmount" "$BIN" unmount "$MNT"
+check "unmounted" sh -c "! mountpoint -q '$MNT'"
+check "remove right after commit + unmount" "$BIN" remove "$REPO" bg
+check "branch bg2" "$BIN" branch "$REPO" bg2
+"$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
+( cd "$MNT/bg2"; "$BIN" unmount "$MNT" >"$T/busy.out" 2>&1; sleep 0.5 )
+eq "unmount with a shell inside detaches" yes "$(grep -q 'detached it' "$T/busy.out" && echo yes)"
+for _ in $(seq 100); do flock -n "$COMMON" true 2>/dev/null && break; sleep 0.1; done
+check "the daemon exits once the shell leaves" flock -n "$COMMON" true
+check "a failed background mount reports the error" sh -c "! '$BIN' mount '$T/nonexistent' '$MNT' 2>&1 | grep -q mounted"
+"$BIN" mount --foreground "$REPO" "$MNT" >>"$LOG" 2>&1 & FG=$!
+for _ in $(seq 100); do mountpoint -q "$MNT" && break; sleep 0.05; done
+kill -HUP $FG; wait $FG
+check "SIGHUP unmounts a foreground daemon cleanly" sh -c "! mountpoint -q '$MNT'"
+check "remove bg2" "$BIN" remove "$REPO" bg2 --force
+
+echo "== unmount: paths, odd repository names, the daemon's directory"
+"$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
+eq "the daemon doesn't keep the caller's directory" "/" \
+    "$(for p in $(pgrep -x gitfold); do grep -qa "$T" /proc/$p/cmdline 2>/dev/null && readlink /proc/$p/cwd; done | sort -u)"
+check "unmount with a trailing slash" "$BIN" unmount "$MNT/"
+ln -s "$MNT" "$T/mntlink"
+"$BIN" mount --log "$T/bg.log" "$REPO" "$T/mntlink" >/dev/null 2>&1
+check "mounted through a symlink" mountpoint -q "$MNT"
+check "unmount through the symlink" "$BIN" unmount "$T/mntlink"
+git clone -q "$REPO" "$T/r,c"; git -C "$T/r,c" branch c1
+"$BIN" mount --log "$T/bg.log" "$T/r,c" "$MNT" >/dev/null 2>&1
+echo c >>"$MNT/c1/a.txt"; G "$MNT/c1" commit -qam c
+check "unmount of a repository with a comma in its path" "$BIN" unmount "$MNT"
+check "remove right after it" "$BIN" remove "$T/r,c" c1
+( cd "$T" && "$BIN" mount --log "$T/bg.log" repo mnt >/dev/null 2>&1 )
+check "a relative repository path works" test -f "$MNT/@HEAD/a.txt"
+check "unmount" "$BIN" unmount "$MNT"
+check "arguments after -- work" "$BIN" mount --log "$T/bg.log" -- "$REPO" "$MNT"
+check "unmount" "$BIN" unmount "$MNT"
 
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"

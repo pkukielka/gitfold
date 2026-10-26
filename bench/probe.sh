@@ -6,7 +6,7 @@ REPO=$1; PAT=$2; shift 2
 M=/tmp/gf-probe; BIN=$(dirname "$0")/../target/release/gitfold
 mkdir -p $M
 if mountpoint -q $M; then echo "$M already mounted" >&2; exit 1; fi
-"$BIN" mount "$@" "$REPO" $M >/tmp/gf-probe.log 2>&1 &
+"$BIN" mount --foreground "$@" "$REPO" $M >/tmp/gf-probe.log 2>&1 &
 trap 'cd /; fusermount3 -u $M || fusermount3 -uz $M; sleep 0.3; grep -o "ops:.*" /tmp/gf-probe.log || true' EXIT
 for _ in $(seq 100); do mountpoint -q $M && break; sleep 0.05; done
 mountpoint -q $M

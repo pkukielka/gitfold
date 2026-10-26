@@ -13,7 +13,7 @@ eq() { # description, expected, actual
 }
 
 mount_fs() {
-    "$BIN" mount "$REPO" "$MNT" >>"$LOG" 2>&1 &
+    "$BIN" mount --foreground "$REPO" "$MNT" >>"$LOG" 2>&1 &
     PID=$!
     for _ in $(seq 100); do mountpoint -q "$MNT" && return; sleep 0.05; done
     echo "mount failed"; cat "$LOG"; exit 1
