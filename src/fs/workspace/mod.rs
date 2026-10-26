@@ -31,7 +31,7 @@ mod times;
 mod write;
 
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File, Metadata};
+use std::fs::{self, Metadata};
 use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
@@ -124,6 +124,9 @@ pub struct Workspace {
     nodes: Mutex<Nodes>,
     /// Serializes copy-ups, which writers do under a shared `layers`.
     copy_lock: Mutex<()>,
+    /// Held exclusively to change an upper file's mode, shared to `stat` one,
+    /// so the mode `open_upper` lifts briefly is never seen (see there).
+    modes: RwLock<()>,
     /// Copy-ups are written here and renamed into place, so a half-written copy
     /// is never visible in upper (or left there by a crash).
     tmp: PathBuf,
@@ -194,7 +197,7 @@ impl Page<'_> {
         Ok(match entry {
             Entry::Upper => {
                 let path = self.ws.upper_path(&join(&self.listing.dir, name));
-                Obj::Upper(fs::symlink_metadata(path)?)
+                Obj::Upper(self.ws.upper_meta(&path)?)
             }
             Entry::LowerDir => Obj::LowerDir,
             Entry::LowerFile(file_id) => Obj::LowerFile {
@@ -300,6 +303,7 @@ impl Workspace {
             layers: RwLock::new(layers),
             nodes: Mutex::new(Nodes::default()),
             copy_lock: Mutex::new(()),
+            modes: RwLock::new(()),
             tmp,
             generation: AtomicU64::new(0),
             listings: Mutex::new(HashMap::new()),
@@ -359,8 +363,14 @@ impl Workspace {
         Self::lower(store, layers, path)
     }
 
+    /// `lstat` of an upper file, never seeing a mode `open_upper` lifted.
+    fn upper_meta(&self, path: &Path) -> io::Result<Metadata> {
+        let _modes = self.modes.read();
+        fs::symlink_metadata(path)
+    }
+
     fn resolve_in(&self, store: &Store, layers: &Layers, path: &[u8]) -> Result<Obj, Errno> {
-        match fs::symlink_metadata(self.upper_path(path)) {
+        match self.upper_meta(&self.upper_path(path)) {
             Ok(meta) => return Ok(Obj::Upper(meta)),
             Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => return Err(Errno::ENOENT),
             Err(e) if e.kind() == ErrorKind::NotFound => {}
@@ -510,7 +520,7 @@ impl Workspace {
         let path = self.path(local)?;
         match self.resolve_in(store, &layers, &path)? {
             Obj::Upper(meta) if meta.is_file() => {
-                let file = File::open(self.upper_path(&path))?;
+                let file = self.open_upper(&self.upper_path(&path), false)?;
                 let mut buf = vec![0; size as usize];
                 let mut done = 0;
                 while done < buf.len() {

@@ -6,6 +6,7 @@ set -uo pipefail
 
 SRC=$(realpath "$1")
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
+TESTS=$(realpath "$(dirname "$0")")
 T=/tmp/gf-ws-test
 REPO=$T/repo
 MNT=$T/mnt
@@ -135,6 +136,23 @@ eq "mkdir mode without the daemon's umask" "775" "$(stat -c %a "$W/m775")"
 rm "$W/scalastyle-config.xml"
 unmount_fs; mount_fs
 check "deletion survives remount" test ! -e "$W/scalastyle-config.xml"
+
+echo "== read-only files"
+( exec 3>"$W/ro1"; chmod 444 "$W/ro1"; echo data >&3 )        # written after chmod
+eq "write through a descriptor opened before chmod 444" data "$(cat "$W/ro1")"
+eq "mode kept" 444 "$(stat -c %a "$W/ro1")"
+mkdir -p "$T/rosrc/sub"; echo r >"$T/rosrc/sub/r"; chmod 444 "$T/rosrc/sub/r"
+tar -C "$T/rosrc" -cf "$T/ro.tar" sub
+check "tar extracts read-only files" tar -C "$W" -xf "$T/ro.tar"
+eq "their content" r "$(cat "$W/sub/r")"
+check "a read-only file can't be opened for writing" sh -c "! echo x >>'$W/ro1'"
+chmod 644 "$W/ro1" "$W/sub/r"; rm -r "$W/ro1" "$W/sub"
+printf data >"$W/wo"; ( exec 3<"$W/wo"; chmod 200 "$W/wo"; cat <&3 >"$T/wo.out" )
+eq "read through a descriptor opened before chmod 200" data "$(cat "$T/wo.out")"
+eq "write-only mode kept" 200 "$(stat -c %a "$W/wo")"
+eq "the lifted mode is never visible to others" "0 444" \
+    "$(perl "$TESTS/race-modes.pl" "$W/race")"
+chmod 644 "$W/wo" "$W/race"; rm "$W/wo" "$W/race"
 
 echo "== names and protection"
 check "branch with slash" test -d "$MNT/feature/x/core"

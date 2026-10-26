@@ -63,6 +63,50 @@ fn timespec(t: Option<SystemTime>) -> libc::timespec {
 }
 
 impl Workspace {
+    /// Opens upper file `path` for writing (`write`) or reading, never through
+    /// a symlink.
+    ///
+    /// There are no file handles, so every read and write reopens the file by
+    /// path, also for a caller whose descriptor predates the file losing that
+    /// permission: `tar` and git create files with mode 0444 and then write
+    /// them, and a file created with mode 0200 can still be read through its
+    /// descriptor. The kernel already checked the caller's right (at open, or
+    /// at truncate(2)), so the owner's missing bit is lifted for the open and
+    /// restored. That happens holding `modes` exclusively, and every `stat` of
+    /// an upper file holds it shared (`Workspace::upper_meta`), so nobody sees,
+    /// and the kernel never caches, the lifted mode; chmod takes it too, so a
+    /// concurrent one isn't undone.
+    pub(super) fn open_upper(&self, path: &Path, write: bool) -> io::Result<File> {
+        let open = || {
+            OpenOptions::new()
+                .read(!write)
+                .write(write)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(path)
+        };
+        let denied = match open() {
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => e,
+            file => return file,
+        };
+        let _modes = self.modes.write();
+        let mode = match fs::symlink_metadata(path) {
+            Ok(meta) if meta.is_file() => meta.permissions().mode() & 0o7777,
+            _ => return Err(denied),
+        };
+        let bit = if write { 0o200 } else { 0o400 };
+        if mode & bit != 0 {
+            return open(); // a chmod came in between
+        }
+        if fs::set_permissions(path, fs::Permissions::from_mode(mode | bit)).is_err() {
+            return Err(denied);
+        }
+        let file = open();
+        if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
+            log::error!("restoring the mode of {}: {e}", path.display());
+        }
+        file
+    }
+
     /// Makes sure directory `path` (visible in the merged view) exists in upper.
     pub(super) fn ensure_upper_dir(&self, path: &[u8]) -> Result<(), Errno> {
         let mut prefix: Vec<u8> = Vec::new();
@@ -160,12 +204,8 @@ impl Workspace {
         // A copy-up turns a lower entry into an upper one, even if the write then
         // fails (listings stat upper entries when serving them, so plain writes
         // need no invalidation).
-        let open = || {
-            OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open(self.upper_path(&path))
-        };
+        let upper = self.upper_path(&path);
+        let open = || self.open_upper(&upper, true);
         let file = match open() {
             Err(e) if not_found(&e) => {
                 if self.copy_up(store, &layers, &path, false)? {
@@ -186,7 +226,8 @@ impl Workspace {
         if let Obj::Upper(meta) = self.resolve_in(store, &layers, &path)?
             && meta.is_file()
         {
-            File::open(self.upper_path(&path))?.sync_all()?;
+            self.open_upper(&self.upper_path(&path), false)?
+                .sync_all()?;
         }
         Ok(())
     }
@@ -215,16 +256,14 @@ impl Workspace {
             if is_link {
                 return Err(Errno::EINVAL);
             }
-            OpenOptions::new()
-                .write(true)
-                .open(&target)?
-                .set_len(size)?;
+            self.open_upper(&target, true)?.set_len(size)?;
         }
         // Never follow a symlink: its target may be anywhere on the host. Linux
         // symlinks have no mode of their own, so chmod on one is a no-op.
         if let Some(mode) = mode
             && !is_link
         {
+            let _modes = self.modes.write(); // see `open_upper`
             fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))?;
         }
         if atime.is_some() || mtime.is_some() {

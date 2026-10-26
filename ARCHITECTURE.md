@@ -137,6 +137,7 @@ Then, per request (`fs/workspace/`):
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
 | `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |
 | `tests/cli.sh` | end-to-end test of `branch`, `list`, `remove` and `prune` |
+| `tests/race-modes.pl` | helper of `tests/workspace.sh`: lifted modes must stay invisible |
 | `tests/lib.sh` | helpers shared by the tests |
 
 ## Glossary
@@ -833,7 +834,12 @@ checkout" and "Running it"); this is the why and what it would take.
   workspaces (`git mv` of such a directory fails); hard links and special files
   are `EPERM`.
 - **No file handles in workspaces either**: reads and writes go by path, so I/O
-  on a file that was unlinked or renamed over while open fails.
+  on a file that was unlinked or renamed over while open fails. Writing (or
+  reading) through a descriptor to a file without that permission (created
+  with mode 0444, as `tar` and git do, or chmod'ed after opening) works: the
+  daemon lifts the owner's bit for its own reopen and restores it, under a lock
+  every `stat` of an upper file takes too, so nobody sees the lifted mode
+  (`Workspace::open_upper`).
 - **Workspace writes go through the daemon** (no passthrough): creating files
   is 4-6x slower than on a local disk (Spark's 27,599 files: 3.00 s vs
   0.53 s), large writes under 2x. Each created file costs ~6 requests (lookup,
