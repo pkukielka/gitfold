@@ -152,6 +152,7 @@ fn main() -> Result<()> {
             ];
             config.n_threads = Some(threads.unwrap_or(cpus));
             config.clone_fd = true;
+            let names = std::sync::Arc::new(fs::NameChanges::default());
             let fs = fs::GitFold::new(
                 common_dir,
                 mountpoint.clone(),
@@ -160,8 +161,11 @@ fn main() -> Result<()> {
                     prewarm,
                     prewarm_threads: prewarm_threads.unwrap_or((cpus / 2).max(1)),
                 },
+                names.clone(),
             );
-            fuser::mount(fs, &mountpoint, &config)?;
+            let session = fuser::Session::new(fs, &mountpoint, &config)?;
+            names.set_notifier(session.notifier());
+            session.run()?;
         }
         Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
         Command::Branch { repo, name, from } => admin::branch(&repo, &name, from.as_deref())?,

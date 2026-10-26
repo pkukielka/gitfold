@@ -467,3 +467,34 @@ The comparison the README leads with, on the Chromium bench clone (pack in page
 cache): `git worktree add --detach <dir> HEAD` took 17299 ms, and 17218 ms on a
 repeat after removing it; the worktree uses 5,634 MiB of disk. A gitfold
 workspace of the same commit opens in 845 ms and copies nothing.
+
+## 2026-10-26, negative entries and long TTLs for the root
+
+Reported from a large corporate repository: warm `rg` ~10x slower than native,
+most of its `stat` calls failing (per-directory probes of `.gitignore`,
+`.ignore`, `.git`). Lookups of missing names answered ENOENT, which the kernel
+doesn't cache, and the root's zero attribute TTL made every absolute path
+through the mount refresh the root's attributes (`default_permissions`
+re-checks every directory on the way).
+
+Spark snapshot, one process stat-ing `.ignore`, `.gitignore` and `.git` in each
+of its 3,558 directories by absolute path, or by relative path from the
+snapshot root, three runs per fresh mount (`--prewarm none`):
+
+| build           | absolute paths (ms) | relative paths (ms) | lookups (3 runs) |
+|-----------------|--------------------:|--------------------:|-----------------:|
+| before          | 222 191 187         | 145 111 112         | 35,568           |
+| after           | 155 16 17           | 150 13 12           | 14,234           |
+| native checkout | 12 11 12            | 9 9 9               |                  |
+
+After, only the first run asks the daemon (3,557 directories plus 10,674
+missing names). An intermediate build with negative entries but the old root
+TTL took 109 ms by absolute path vs 12 ms by relative path: one `getattr` of
+the root per absolute path.
+
+The root and namespace directories now get 1-year TTLs like everything else;
+the daemon invalidates their attributes and listings (fuser's notifier) when a
+lookup adds a name. Negative entries are cached forever in snapshots and
+workspaces, and for dot names in the root and namespaces too. `rg --files` of
+the snapshot (ripgrep 15.2, default options) was already near native (24-27 ms
+vs 20-26 ms) both before and after: this ripgrep doesn't probe every directory.

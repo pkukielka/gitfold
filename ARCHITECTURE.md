@@ -121,6 +121,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/status.rs` | a workspace's uncommitted changes and ignored files, read from its state directory (for `list` and `remove`) |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
+| `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
@@ -240,8 +241,11 @@ decision that creates them.
   ([rebases](#workspaces-follow-their-branch-invisible-rebases),
   [caching](#kernel-caching-does-the-heavy-lifting))
 - **Names never disappear while mounted**, so their entries can be cached long;
-  only listings grow. The root's and namespaces' mtime changes whenever an entry
-  is added below them, which is what invalidates the kernel's cached listing.
+  only listings grow. When a lookup adds a name to the root or a namespace
+  directory, the daemon invalidates those directories' cached attributes and
+  listings (`fs::names`); their mtime changes too, dropping a listing that was
+  in flight. Their negative entries are cached only for dot names.
+  ([caching](#kernel-caching-does-the-heavy-lifting))
 - **Workspace local ids come from the path.** The index written with a new
   registration uses the same path hash (`inode::path_local`), so it matches
   `stat` after any remount; a rename or a hash collision only costs git a
@@ -684,11 +688,12 @@ showed (their ctime is the copy's), and `git status` lists them as staged, as in
 the mount or invisibly (rebases), so the kernel may cache everything as long as
 it likes, and gitfold avoids every request it can:
 
-- 1-year entry and attribute TTLs for snapshots and workspaces; names in the root
-  and in namespace directories also get a 1-year *entry* TTL in lookup replies,
-  since they never disappear (`entry_with_ttls`; fuser's readdirplus takes one
-  TTL for both, so a listing gives them their own attribute TTL, 1 s for a
-  namespace directory, until the next lookup);
+- 1-year entry and attribute TTLs for everything, the root and namespace
+  directories included (see below);
+- negative entries: a lookup of a missing name answers inode 0 with a 1-year
+  entry TTL in snapshots and workspaces, so the kernel remembers the absence
+  (in the root and namespace directories only for dot names: other names
+  can appear later);
 - no open/release: `open` replies `ENOSYS` once and the kernel stops sending it
   (`FUSE_NO_OPEN_SUPPORT`);
 - no opendir/releasedir (`FUSE_NO_OPENDIR_SUPPORT`); listings stay cached;
@@ -705,17 +710,25 @@ it likes, and gitfold avoids every request it can:
   35 ms).
 - Without opendir, warm Chromium `find` went from 0.84 s to 0.35 s (faster than
   native 0.47 s) and `git status` from 1.60 s to 1.15 s.
-- **The root and namespace directories are the exception:** they list names
-  created on demand. Whether the kernel caches a directory's listing is decided
-  by flags returned from `opendir`; with `opendir` disabled it caches every
-  listing, theirs included. So their mtime changes whenever an entry is added
-  (the kernel drops a cached listing when it sees a new mtime) and their
-  attributes are short-lived: zero TTL for the root, which is what you `ls`
-  right after opening something; 1 s for namespace directories, because the
-  kernel re-checks their permissions on every path walk through them and a zero
-  TTL doubled `getattr` traffic in workspaces below them (64k vs 34k for three
-  `rg` runs). Giving their entries a zero TTL too, as an earlier version did,
-  turned every path walk through `feature/` into a lookup (30,469 vs 52).
+- **The root and namespace directories list names created on demand.** With
+  `opendir` disabled the kernel caches every listing, theirs included. Earlier
+  versions gave them short attribute TTLs (zero for the root, 1 s for
+  namespaces) so a changed mtime would drop the cached listing. But with
+  `default_permissions` the kernel re-checks permissions on every directory a
+  path walks through, refreshing expired attributes: every absolute path
+  through the mount cost a `getattr` of the root. Probing 3,558 Spark
+  directories for `.ignore`, `.gitignore` and `.git` took 109 ms by absolute
+  path vs 12 ms by relative path. Now they have 1-year TTLs too, and when a
+  lookup adds a name the daemon tells the kernel to drop their attributes and
+  listings (`Notifier::inval_inode`, from a thread of its own;
+  `fs::names`; their new mtime drops a listing that was in flight meanwhile):
+  16 ms by absolute path (native 11 ms). A zero entry TTL for their names, as an
+  even earlier version had, turned every path walk through `feature/` into a
+  lookup (30,469 vs 52).
+- **Negative entries:** without them, tools that probe every directory for
+  `.gitignore`, `.ignore` or `.git` (`rg` with some versions and options) asked
+  the daemon on every run: the probe above sent 35,568 lookups over three runs,
+  with negative entries 14,234 (only the first run asks).
 - **The mount is read-write** (for workspaces; snapshots report no write bits,
   so the kernel refuses writes there, and `EROFS` covers what it lets through).
   On a writable mount the kernel marks a directory's or file's atime stale
@@ -806,7 +819,7 @@ gets the speed with no correctness risk.
 | Diff in `~/.local/share` | orphaned diffs | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
 | Workspace listing rebuilt per readdir page | quadratic: 6 s vs 0.16 s prewarm | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
 | Rewriting whiteout/opaque sets on every change | quadratic `rm -r`; append-only log instead | [workspaces](#writable-workspaces-copy-on-write-inside-gitfold) |
-| Zero entry TTL for namespace names; zero attribute TTL for namespaces | a lookup per path walk; doubled getattr | [caching](#kernel-caching-does-the-heavy-lifting) |
+| Zero entry TTL for namespace names; zero or short attribute TTLs for the root and namespaces | a lookup per path walk; a getattr of the root per absolute path | [caching](#kernel-caching-does-the-heavy-lifting) |
 | Go + go-git | slow object database on large repos | [FUSE](#fuse-reading-straight-from-the-object-database) |
 | Node per entry, hash inodes | 610 B/entry, no sharing | [store](#shared-content-addressed-store) |
 | `HashMap` keyed by object id for file ids | ~35 MB vs ~5 MB | [store](#shared-content-addressed-store) |

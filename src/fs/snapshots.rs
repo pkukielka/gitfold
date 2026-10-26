@@ -92,6 +92,11 @@ impl Snapshots {
             .ok_or(Errno::ENOENT)
     }
 
+    /// How many names the root has; only grows.
+    pub fn name_count(&self) -> usize {
+        self.root.lock().names.len()
+    }
+
     pub fn root_mtime(&self) -> SystemTime {
         self.root.lock().mtime
     }

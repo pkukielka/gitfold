@@ -18,9 +18,11 @@
 //! - `workspaces`: branch workspaces and namespace directories by name.
 //! - `workspace`: one workspace: lower/upper merged view and its mutations.
 //! - `content`: content kept between the reads of one file.
+//! - `names`: telling the kernel when names in the root or a namespace changed.
 //! - `stats`: operation counters.
 
 mod content;
+mod names;
 mod snapshots;
 mod stats;
 mod view;
@@ -46,6 +48,7 @@ use crate::prewarm::Prewarm;
 use crate::store::Store;
 use crate::worktree::StatInfo;
 use content::ContentCache;
+pub use names::NameChanges;
 use snapshots::Snapshots;
 use stats::{Counters, IoTimer, bump};
 use view::Content;
@@ -53,17 +56,13 @@ use workspace::{Obj, Workspace};
 use workspaces::Workspaces;
 
 /// Snapshots never change, and workspaces change only through this file system
-/// (which the kernel sees); let the kernel cache them "forever".
+/// (which the kernel sees); let the kernel cache them "forever". The root and
+/// namespace directories gain names on first lookup; the kernel is told then
+/// (see `names`).
 const IMMUTABLE_TTL: Duration = Duration::from_secs(365 * 24 * 3600);
-/// The root lists entries created on demand. The kernel caches its listing
-/// (there is no opendir to opt out) until it sees its mtime change, so its
-/// attributes must never be cached.
-const ROOT_TTL: Duration = Duration::ZERO;
-/// Namespace directories (`feature/` for `feature/x`) too, but every path walk
-/// through them re-checks their permissions (`default_permissions`), which with
-/// a zero TTL doubled getattr traffic in workspaces below them. A new entry may
-/// take this long to show up in their listing.
-const NAMESPACE_TTL: Duration = Duration::from_secs(1);
+/// Not cached: negative entries for names in the root and namespace directories
+/// that can appear later (a branch created after a failed lookup).
+const NO_CACHE: Duration = Duration::ZERO;
 
 pub struct Options {
     /// Let the kernel skip open/release round trips (`FUSE_NO_OPEN_SUPPORT`).
@@ -80,10 +79,16 @@ pub struct GitFold {
     workspaces: Workspaces,
     content: ContentCache,
     counters: Counters,
+    names: Arc<NameChanges>,
 }
 
 impl GitFold {
-    pub fn new(common_dir: PathBuf, mount_point: PathBuf, opts: Options) -> Self {
+    pub fn new(
+        common_dir: PathBuf,
+        mount_point: PathBuf,
+        opts: Options,
+        names: Arc<NameChanges>,
+    ) -> Self {
         let stat = StatInfo {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
@@ -107,6 +112,7 @@ impl GitFold {
                 opts.prewarm_threads,
             ),
             content: ContentCache::new(),
+            names,
             counters: Counters::default(),
         }
     }
@@ -195,12 +201,28 @@ impl Filesystem for GitFold {
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         bump(&self.counters.lookup);
-        match self.lookup_attr(parent, name.as_bytes()) {
-            // Names never go away while mounted, so the entry can be cached long even
-            // where attributes can't (root and namespace directories, whose mtime
-            // tells the kernel when their listings changed).
-            Ok(attr) => {
-                reply.entry_with_ttls(self.ttl(attr.ino.0), &IMMUTABLE_TTL, &attr, Generation(0))
+        let names_dir = self.is_names_dir(parent.0);
+        let names_before = names_dir.then(|| self.name_count());
+        let result = self.lookup_attr(parent, name.as_bytes());
+        // The lookup opened a snapshot or workspace: listings of names changed.
+        // Queued before replying, so the kernel hears of it as soon as possible.
+        if names_before.is_some_and(|before| self.name_count() != before) {
+            self.names.changed(self.names_dirs());
+        }
+        match result {
+            // Names never go away while mounted.
+            Ok(attr) => reply.entry(&IMMUTABLE_TTL, &attr, Generation(0)),
+            // A negative entry (inode 0): cached forever in snapshots and workspaces
+            // (their names change only through this mount, which the kernel sees)
+            // and for dot names everywhere (never refs, nor revs), not at all for
+            // other names in the root and namespace directories. Without it, tools
+            // probing every directory for `.gitignore`, `.ignore` or `.git` (rg) ask
+            // again on every run.
+            Err(Errno::ENOENT) => {
+                let cached = !names_dir || name.as_bytes().starts_with(b".");
+                let ttl = if cached { &IMMUTABLE_TTL } else { &NO_CACHE };
+                let negative = self.negative_attr();
+                reply.entry_with_ttls(&NO_CACHE, ttl, &negative, Generation(0))
             }
             Err(e) => reply.error(e),
         }
@@ -209,7 +231,7 @@ impl Filesystem for GitFold {
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         bump(&self.counters.getattr);
         match self.attr(ino.0) {
-            Ok(attr) => reply.attr(self.ttl(ino.0), &attr),
+            Ok(attr) => reply.attr(&IMMUTABLE_TTL, &attr),
             Err(e) => reply.error(e),
         }
     }
@@ -536,7 +558,7 @@ impl Filesystem for GitFold {
                 INodeNo(child),
                 next,
                 OsStr::from_bytes(name),
-                self.ttl(child),
+                &IMMUTABLE_TTL,
                 &attr,
                 Generation(0),
             )

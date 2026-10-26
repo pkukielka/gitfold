@@ -72,6 +72,11 @@ impl Workspaces {
         }
     }
 
+    /// How many workspaces and namespace directories there are; only grows.
+    pub fn len(&self) -> usize {
+        self.list.read().len()
+    }
+
     pub fn mtime(&self) -> SystemTime {
         *self.mtime.lock()
     }
@@ -97,6 +102,15 @@ impl Workspaces {
                 warn!("workspace {path}: moving the base to the branch tip at unmount: {e:#}");
             }
         }
+    }
+
+    /// Inodes of the namespace directories.
+    pub fn namespace_inodes(&self) -> Vec<u64> {
+        let list = self.list.read();
+        (list.iter().enumerate())
+            .filter(|(_, (_, entry))| matches!(entry, Entry::Namespace))
+            .map(|(slot, _)| inode::ws(slot as u32, 0))
+            .collect()
     }
 
     pub fn is_namespace(&self, slot: u32) -> bool {

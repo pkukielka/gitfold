@@ -283,6 +283,27 @@ check "unmount" "$BIN" unmount "$MNT"
 check "arguments after -- work" "$BIN" mount --log "$T/bg.log" -- "$REPO" "$MNT"
 check "unmount" "$BIN" unmount "$MNT"
 
+echo "== names that appear later, and negative entries"
+mount_fs
+R branch ns/a
+ls "$MNT" >/dev/null; ls "$MNT/ns" >/dev/null
+check "missing branch absent" test ! -e "$MNT/later"
+check "missing rev absent" test ! -e "$MNT/@later-tag"
+check "missing namespaced branch absent" test ! -e "$MNT/ns/b"
+R branch later; R tag later-tag; R branch ns/b
+check "branch created afterwards opens" test -f "$MNT/later/a.txt"
+check "tag created afterwards opens" test -f "$MNT/@later-tag/a.txt"
+check "root listing shows them" sh -c "ls '$MNT' | grep -qx later && ls '$MNT' | grep -qx @later-tag"
+check "namespace listing shows a new branch" sh -c "test -d '$MNT/ns/b' && ls '$MNT/ns' | grep -qx b"
+check "dot names stay absent in the root" test ! -e "$MNT/.git"
+check "missing file in a workspace" test ! -e "$MNT/later/new.txt"
+echo n >"$MNT/later/new.txt"
+check "created after its negative lookup" test -f "$MNT/later/new.txt"
+check "missing file in a snapshot stays missing" test ! -e "$MNT/@later-tag/.ignore"
+unmount_fs
+check "remove later" "$BIN" remove "$REPO" later --force
+check "remove ns/b" "$BIN" remove "$REPO" ns/b --force
+
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"
 exit $((FAILS > 0))

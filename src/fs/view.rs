@@ -3,14 +3,14 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use fuser::{Errno, FileAttr, FileType, INodeNo};
 use gix::objs::tree::EntryKind;
 use log::error;
 
+use super::GitFold;
 use super::workspace::{GITFILE_LOCAL, Obj, Read, Workspace};
-use super::{GitFold, IMMUTABLE_TTL, NAMESPACE_TTL, ROOT_TTL};
 use crate::git;
 use crate::inode::{self, Ino};
 
@@ -113,7 +113,9 @@ impl GitFold {
         }
     }
 
-    /// mtime of the root and namespace directories, whose listings grow.
+    /// mtime of the root and namespace directories, whose listings grow. Still
+    /// needed besides the invalidation (`names`): a listing in flight when a
+    /// name was added can be cached after it; the new mtime drops it.
     fn names_mtime(&self) -> SystemTime {
         self.snapshots.root_mtime().max(self.workspaces.mtime())
     }
@@ -127,14 +129,33 @@ impl GitFold {
         })
     }
 
-    pub(super) fn ttl(&self, ino: u64) -> &'static Duration {
+    /// Attributes of a negative lookup reply: inode 0 means "no such name".
+    pub(super) fn negative_attr(&self) -> FileAttr {
+        self.make_attr(0, FileType::RegularFile, 0, 0, inode::file_time())
+    }
+
+    /// Whether `ino` is the root or a namespace directory: one whose names are
+    /// added by lookups (see `names`).
+    pub(super) fn is_names_dir(&self, ino: u64) -> bool {
         match inode::decode(ino) {
-            Some(Ino::Root) => &ROOT_TTL,
-            Some(Ino::Ws { slot, local: 0 }) if self.workspaces.is_namespace(slot) => {
-                &NAMESPACE_TTL
-            }
-            _ => &IMMUTABLE_TTL,
+            Some(Ino::Root) => true,
+            Some(Ino::Ws { slot, local: 0 }) => self.workspaces.is_namespace(slot),
+            _ => false,
         }
+    }
+
+    /// The root and every namespace directory, the root first (it is what gets
+    /// listed right after opening something).
+    pub(super) fn names_dirs(&self) -> Vec<u64> {
+        let mut dirs = vec![inode::ROOT];
+        dirs.extend(self.workspaces.namespace_inodes());
+        dirs
+    }
+
+    /// How many names the root and namespace directories hold together; only
+    /// grows, so a change means a lookup added one.
+    pub(super) fn name_count(&self) -> usize {
+        self.snapshots.name_count() + self.workspaces.len()
     }
 
     pub(super) fn attr(&self, ino: u64) -> Result<FileAttr, Errno> {

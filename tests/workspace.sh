@@ -144,7 +144,7 @@ eq "no phantom entries after delete/list races" "0 0" "$phantoms $(ls "$W/churn"
 rmdir "$W/churn"
 check "rm of the virtual .git refused" sh -c "! rm '$W/.git' 2>/dev/null"
 check "mkfifo in a snapshot refused" sh -c "! mkfifo '$MNT/@HEAD/fifo'"
-check "chmod in a snapshot is EROFS" sh -c "chmod 600 '$MNT/@HEAD/README.md' 2>&1 | grep -qi read-only"
+check "chmod in a snapshot is EROFS" sh -c "LC_ALL=C chmod 600 '$MNT/@HEAD/README.md' 2>&1 | grep -qi read-only"
 
 echo "== crash leftovers and umask"
 unmount_fs
