@@ -1,6 +1,7 @@
 mod admin;
 mod benchattrs;
 mod benchread;
+mod control;
 mod daemon;
 mod fs;
 mod git;
@@ -63,11 +64,13 @@ enum Command {
     },
     /// List the repository's workspaces, their uncommitted changes and ignored files.
     List { repo: PathBuf },
-    /// Delete a workspace: its registration, stored changes and base ref.
-    /// Its commits stay on the branch. The repository must not be mounted.
+    /// Delete a workspace (its registration, stored changes and base ref; its
+    /// commits stay on the branch), or a snapshot's registration (@<rev>).
+    /// Works mounted too, unless the workspace or snapshot is in use.
     Remove {
         repo: PathBuf,
-        branch: String,
+        /// A branch, or @<rev> for a snapshot.
+        name: String,
         /// Discard uncommitted changes.
         #[arg(long)]
         force: bool,
@@ -154,7 +157,7 @@ fn main() -> Result<()> {
             config.clone_fd = true;
             let names = std::sync::Arc::new(fs::NameChanges::default());
             let fs = fs::GitFold::new(
-                common_dir,
+                common_dir.clone(),
                 mountpoint.clone(),
                 fs::Options {
                     no_open: !kernel_open,
@@ -163,18 +166,26 @@ fn main() -> Result<()> {
                 },
                 names.clone(),
             );
+            // Before mounting, so `remove` finds it once the mount is up. Without it
+            // only removals need an unmount.
+            let listener = control::bind(&common_dir)
+                .inspect_err(|e| log::warn!("{e:#}; `gitfold remove` will need an unmount"))
+                .ok();
+            let removal = fs.removal();
             let session = fuser::Session::new(fs, &mountpoint, &config)?;
             names.set_notifier(session.notifier());
+            // After the notifier is set: a removal tells the kernel.
+            if let Some(listener) = listener {
+                control::serve(listener, move |request| match request {
+                    control::Request::Remove { name, force } => removal.remove(&name, force),
+                })?;
+            }
             session.run()?;
         }
         Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
         Command::Branch { repo, name, from } => admin::branch(&repo, &name, from.as_deref())?,
         Command::List { repo } => admin::list(&repo)?,
-        Command::Remove {
-            repo,
-            branch,
-            force,
-        } => admin::remove(&repo, &branch, force)?,
+        Command::Remove { repo, name, force } => admin::remove(&repo, &name, force)?,
         Command::Prune { repo } => admin::prune(&repo)?,
         Command::Prewarm {
             root,

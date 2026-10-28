@@ -10,9 +10,10 @@
 //! namespace reading wins over git's shorthand (`origin` for `origin/HEAD`), or
 //! `origin/main` would be unreachable; `origin/HEAD` is then `@origin/HEAD`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -34,6 +35,14 @@ pub enum Entry {
     /// A directory holding the next component of longer names, e.g. `feature`
     /// or `@origin`.
     Namespace,
+    /// A workspace being removed (`Workspaces::remove`): its inodes answer
+    /// EBUSY, which the kernel doesn't cache, unlike ENOENT (a negative entry
+    /// for a file that exists, if the removal is refused). Forgets still reach
+    /// it.
+    Removing(Arc<Workspace>),
+    /// A removed workspace: its slot (so its inodes) is never reused, and its
+    /// inodes the kernel still holds answer ENOENT.
+    Removed,
 }
 
 pub struct Workspaces {
@@ -47,6 +56,8 @@ pub struct Workspaces {
     by_path: Mutex<HashMap<String, u32>>,
     /// Serializes workspace creation.
     creating: Mutex<()>,
+    /// Branches whose workspace is being removed: not opened meanwhile.
+    removing: Mutex<HashSet<String>>,
     /// Bumped whenever an entry is added, invalidating cached namespace listings.
     mtime: Mutex<SystemTime>,
 }
@@ -68,11 +79,13 @@ impl Workspaces {
             list: RwLock::new(Vec::new()),
             by_path: Mutex::new(HashMap::new()),
             creating: Mutex::new(()),
+            removing: Mutex::new(HashSet::new()),
             mtime: Mutex::new(SystemTime::now()),
         }
     }
 
-    /// How many workspaces and namespace directories there are; only grows.
+    /// How many workspaces and namespace directories were added; only grows
+    /// (removed ones keep their slot).
     pub fn len(&self) -> usize {
         self.list.read().len()
     }
@@ -88,6 +101,8 @@ impl Workspaces {
         Ok(match entry {
             Entry::Workspace(ws) => Ok(ws.clone()),
             Entry::Namespace => Err(path.clone()),
+            Entry::Removing(_) => return Err(Errno::EBUSY),
+            Entry::Removed => return Err(Errno::ENOENT),
         })
     }
 
@@ -125,6 +140,7 @@ impl Workspaces {
     pub fn children(&self, prefix: &str) -> Vec<(u64, Vec<u8>)> {
         let list = self.list.read();
         (list.iter().enumerate())
+            .filter(|(_, (_, entry))| !matches!(entry, Entry::Removing(_) | Entry::Removed))
             .filter_map(|(slot, (path, _))| {
                 let rest = super::child_name(prefix, path.as_bytes())?;
                 Some((inode::ws(slot as u32, 0), rest.to_vec()))
@@ -139,6 +155,108 @@ impl Workspaces {
         self.by_path.lock().insert(path.to_string(), slot);
         *self.mtime.lock() = SystemTime::now();
         slot
+    }
+
+    /// The open workspace of `branch`.
+    pub fn get_open(&self, branch: &str) -> Option<Arc<Workspace>> {
+        let slot = *self.by_path.lock().get(branch)?;
+        match &self.list.read()[slot as usize].1 {
+            Entry::Workspace(ws) => Some(ws.clone()),
+            _ => None,
+        }
+    }
+
+    /// The workspace in `slot`, also while being removed: for forgets, which
+    /// must not be lost if the removal is refused.
+    pub fn get_for_forget(&self, slot: u32) -> Option<Arc<Workspace>> {
+        match &self.list.read().get(slot as usize)?.1 {
+            Entry::Workspace(ws) | Entry::Removing(ws) => Some(ws.clone()),
+            _ => None,
+        }
+    }
+
+    /// The inode of the directory holding `path` (the root or a namespace),
+    /// and `path`'s last component.
+    pub fn parent_and_leaf<'a>(&self, path: &'a str) -> (u64, &'a str) {
+        let Some((parent, leaf)) = path.rsplit_once('/') else {
+            return (inode::ROOT, path);
+        };
+        let slot = self.by_path.lock().get(parent).copied();
+        (slot.map_or(inode::ROOT, |slot| inode::ws(slot, 0)), leaf)
+    }
+
+    pub fn common_dir(&self) -> &Path {
+        &self.common_dir
+    }
+
+    pub fn mount_point(&self) -> &Path {
+        &self.mount_point
+    }
+
+    /// Removes the workspace of `branch` if `remove` succeeds: `remove(open)`
+    /// deletes its stored state, given the workspace if it is open. An open one
+    /// is taken out first, so no request reaches it (requests in flight finish
+    /// first, and its sync thread stops), then `refuse_if_used()` may refuse,
+    /// and it is put back if either fails. Meanwhile lookups of `branch` answer
+    /// EBUSY, so it isn't opened again. Returns `remove`'s result and whether
+    /// it was open.
+    pub fn remove<T>(
+        &self,
+        branch: &str,
+        refuse_if_used: impl FnOnce() -> anyhow::Result<()>,
+        remove: impl FnOnce(Option<&Workspace>) -> anyhow::Result<T>,
+    ) -> anyhow::Result<(T, bool)> {
+        let taken = self.take(branch)?;
+        let ws = taken.as_ref().map(|(_, ws)| ws);
+        let result = match ws {
+            Some(ws) => settle(branch, ws, refuse_if_used),
+            None => Ok(()),
+        }
+        .and_then(|()| remove(ws.map(|ws| &**ws)));
+        let _creating = self.creating.lock();
+        self.removing.lock().remove(branch);
+        let open = taken.is_some();
+        if let Some((slot, ws)) = taken {
+            let entry = &mut self.list.write()[slot as usize].1;
+            if result.is_ok() {
+                *entry = Entry::Removed;
+            } else {
+                ws.removing.store(false, Ordering::Release);
+                *entry = Entry::Workspace(ws);
+                self.by_path.lock().insert(branch.to_string(), slot);
+            }
+            // Listings without it (taken out) or with it (removed) are stale.
+            *self.mtime.lock() = SystemTime::now();
+        }
+        result.map(|t| (t, open))
+    }
+
+    /// Marks `branch` as being removed, and takes its workspace out of the
+    /// registry if open.
+    fn take(&self, branch: &str) -> anyhow::Result<Option<(u32, Arc<Workspace>)>> {
+        let _creating = self.creating.lock();
+        anyhow::ensure!(
+            self.removing.lock().insert(branch.to_string()),
+            "workspace {branch} is already being removed"
+        );
+        let Some(slot) = self.by_path.lock().get(branch).copied() else {
+            return Ok(None);
+        };
+        let entry = &mut self.list.write()[slot as usize].1;
+        let ws = match std::mem::replace(entry, Entry::Removed) {
+            Entry::Workspace(ws) => {
+                *entry = Entry::Removing(ws.clone());
+                ws
+            }
+            other => {
+                *entry = other;
+                self.removing.lock().remove(branch);
+                anyhow::bail!("{branch} is a namespace directory, not a workspace");
+            }
+        };
+        self.by_path.lock().remove(branch);
+        ws.removing.store(true, Ordering::Release);
+        Ok(Some((slot, ws)))
     }
 
     /// Resolves a name below the mount root (`path` has no leading `/`; names
@@ -219,6 +337,9 @@ impl Workspaces {
         if let Some(&slot) = self.by_path.lock().get(branch) {
             return Ok(inode::ws(slot, 0));
         }
+        if self.removing.lock().contains(branch) {
+            return Err(Errno::EBUSY);
+        }
         let id = workspace_id(branch);
         let admin = worktree::ws_admin_dir(&self.common_dir, &id);
         if let Some(other) = self.checked_out_elsewhere(branch, &admin) {
@@ -285,6 +406,9 @@ impl Workspaces {
     }
 }
 
+/// How long removing a workspace waits for requests in flight in it.
+const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
+
 /// How often workspaces check whether their branch moved (see `workspace::rebase`).
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -298,6 +422,9 @@ fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
             loop {
                 thread::sleep(SYNC_INTERVAL);
                 let Some(ws) = ws.upgrade() else { return };
+                if ws.removing.load(Ordering::Acquire) {
+                    continue;
+                }
                 match ws.sync(&store) {
                     Ok(()) => last_error.clear(),
                     Err(e) => {
@@ -314,4 +441,23 @@ fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
     if let Err(e) = spawned {
         error!("workspace {branch}: can't start its sync thread: {e}");
     }
+}
+
+/// Waits until requests in flight in taken-out workspace `ws` (of `branch`)
+/// finished (the sync thread's too; the registry holds one reference, the
+/// caller another), then asks `refuse_if_used`.
+fn settle(
+    branch: &str,
+    ws: &Arc<Workspace>,
+    refuse_if_used: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    while Arc::strong_count(ws) > 2 && started.elapsed() < IN_FLIGHT_WAIT {
+        thread::sleep(Duration::from_millis(10));
+    }
+    anyhow::ensure!(
+        Arc::strong_count(ws) <= 2,
+        "workspace {branch} is busy; try again"
+    );
+    refuse_if_used()
 }

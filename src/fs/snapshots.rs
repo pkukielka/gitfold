@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime};
 
+use anyhow::Context;
 use fuser::Errno;
 use gix::ObjectId;
 use log::{error, info, warn};
@@ -43,8 +44,8 @@ pub struct Snapshots {
     stat: StatInfo,
     prewarm: Prewarm,
     prewarm_threads: usize,
-    /// Indexed by slot.
-    list: RwLock<Vec<Arc<Snapshot>>>,
+    /// Indexed by slot; `None` once removed (slots, so inodes, aren't reused).
+    list: RwLock<Vec<Option<Arc<Snapshot>>>>,
     root: Mutex<Root>,
     /// Serializes snapshot creation.
     creating: Mutex<()>,
@@ -81,6 +82,7 @@ impl Snapshots {
             .read()
             .get(slot as usize)
             .cloned()
+            .flatten()
             .ok_or(Errno::ENOENT)
     }
 
@@ -92,9 +94,65 @@ impl Snapshots {
             .ok_or(Errno::ENOENT)
     }
 
-    /// How many names the root has; only grows.
+    /// How many names were added to the root; only grows.
     pub fn name_count(&self) -> usize {
-        self.root.lock().names.len()
+        self.list.read().len()
+    }
+
+    /// Removes snapshot `name` (`@<rev>`), then calls
+    /// `remove_registration(commit, shared)`: its commit (if not open, what
+    /// `resolve()` gives), and whether another open name shows that commit. An
+    /// open one leaves the root first, then `refuse_if_used()` may refuse; its
+    /// inodes stay valid until all succeeded, and it is put back if not. No
+    /// snapshot is opened meanwhile. Returns `remove_registration`'s result
+    /// and whether it was open.
+    pub fn remove<T>(
+        &self,
+        name: &[u8],
+        resolve: impl FnOnce() -> Option<ObjectId>,
+        refuse_if_used: impl FnOnce() -> anyhow::Result<()>,
+        remove_registration: impl FnOnce(&ObjectId, bool) -> anyhow::Result<T>,
+    ) -> anyhow::Result<(T, bool)> {
+        let _creating = self.creating.lock();
+        let slot = {
+            let mut root = self.root.lock();
+            let at = root.names.iter().position(|(n, _)| n == name);
+            at.map(|at| {
+                root.mtime = SystemTime::now();
+                root.names.remove(at).1
+            })
+        };
+        let result = (|| {
+            let open = match slot {
+                Some(slot) => {
+                    refuse_if_used()?;
+                    Some(
+                        self.get(slot)
+                            .map_err(|_| anyhow::anyhow!("snapshot gone"))?
+                            .commit,
+                    )
+                }
+                None => None,
+            };
+            let commit = open
+                .or_else(resolve)
+                .with_context(|| format!("no snapshot {}", String::from_utf8_lossy(name)))?;
+            let shared = (self.list.read().iter().enumerate()).any(|(i, s)| {
+                Some(i as u32) != slot && s.as_ref().is_some_and(|s| s.commit == commit)
+            });
+            remove_registration(&commit, shared)
+        })();
+        if let Some(slot) = slot {
+            match result {
+                Ok(_) => self.list.write()[slot as usize] = None,
+                Err(_) => {
+                    let mut root = self.root.lock();
+                    root.names.push((name.to_vec(), slot));
+                    root.mtime = SystemTime::now();
+                }
+            }
+        }
+        result.map(|t| (t, slot.is_some()))
     }
 
     pub fn root_mtime(&self) -> SystemTime {
@@ -147,7 +205,7 @@ impl Snapshots {
         let path = self.mount_point.join(OsStr::from_bytes(name));
         // Another name may already resolve to the same commit: new slot (own
         // directory inodes), same directory table and worktree.
-        let existing = (self.list.read().iter())
+        let existing = (self.list.read().iter().flatten())
             .find(|s| s.commit == commit.id)
             .cloned();
         let snapshot = match existing {
@@ -160,7 +218,7 @@ impl Snapshots {
         };
         let slot = {
             let mut list = self.list.write();
-            list.push(Arc::new(snapshot));
+            list.push(Some(Arc::new(snapshot)));
             (list.len() - 1) as u32
         };
         {

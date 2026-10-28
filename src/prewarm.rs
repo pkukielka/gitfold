@@ -34,9 +34,9 @@ struct Stats {
     bytes: AtomicU64,
 }
 
-/// Walker processes running (pids), so they can be stopped before unmounting;
-/// `None` once stopping began, so no new one starts.
-static WALKERS: Mutex<Option<Vec<u32>>> = Mutex::new(Some(Vec::new()));
+/// Walker processes running (pid, root), so they can be stopped before
+/// unmounting; `None` once stopping began, so no new one starts.
+static WALKERS: Mutex<Option<Vec<(u32, PathBuf)>>> = Mutex::new(Some(Vec::new()));
 
 /// Starts the walk of `root` as a separate `gitfold prewarm` process. Not in
 /// the daemon itself: a daemon killed with SIGKILL while its own threads wait
@@ -66,13 +66,13 @@ pub fn spawn(root: PathBuf, mode: Prewarm, threads: usize) {
         Err(e) => return warn!("prewarm of {}: {e}", root.display()),
     };
     let pid = child.id();
-    running.push(pid);
+    running.push((pid, root));
     drop(walkers);
     // Reaped here, so it doesn't stay a zombie.
     std::thread::spawn(move || {
         let _ = child.wait();
         if let Some(running) = WALKERS.lock().as_mut() {
-            running.retain(|p| *p != pid);
+            running.retain(|(p, _)| *p != pid);
         }
     });
 }
@@ -80,8 +80,18 @@ pub fn spawn(root: PathBuf, mode: Prewarm, threads: usize) {
 /// Stops the running walkers, and any later one from starting: they keep the
 /// mount busy, which would make an unmount only detach it.
 pub fn stop_all() {
-    let pids = WALKERS.lock().take().unwrap_or_default();
-    terminate(pids.iter().map(|p| *p as libc::pid_t).collect());
+    let walkers = WALKERS.lock().take().unwrap_or_default();
+    terminate(walkers.iter().map(|(p, _)| *p as libc::pid_t).collect());
+}
+
+/// Stops this daemon's walkers of `path` or below (a workspace or snapshot
+/// being removed).
+pub fn stop_under(path: &Path) {
+    let pids = (WALKERS.lock().iter().flatten())
+        .filter(|(_, root)| root.starts_with(path))
+        .map(|(p, _)| *p as libc::pid_t)
+        .collect();
+    terminate(pids);
 }
 
 /// Stops the walkers of this user working below `mountpoint` (`gitfold

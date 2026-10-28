@@ -119,7 +119,7 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     let detached = !mountpoint::unmount(&mountpoint)?;
     if detached {
         // Read while still mounted, so their paths still resolve.
-        let users = mountpoint::users(&mountpoint);
+        let users = mountpoint::users(&mountpoint, &mountpoint);
         mountpoint::detach(&mountpoint)?;
         let ours = mountpoint::self_and_ancestors();
         if users.iter().any(|u| ours.contains(&u.pid)) {
@@ -132,7 +132,7 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
         }
         println!("{shown} is in use: detached it; waiting for gitfold to exit once these leave:");
         for u in &users {
-            println!("  {} {}", u.pid, u.command);
+            println!("  {u}");
         }
         if users.is_empty() {
             println!(

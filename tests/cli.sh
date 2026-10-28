@@ -41,7 +41,8 @@ ls "$MNT/@HEAD" >/dev/null                     # a snapshot registration
 mkdir -p "$T/mnt2"
 check "second mount of the repository refused" fails timeout 5 "$BIN" mount "$REPO" "$T/mnt2"
 check "second mount point not mounted" fails mountpoint -q "$T/mnt2"
-check "remove refused while mounted" fails "$BIN" remove "$REPO" two
+out=$("$BIN" remove "$REPO" agent/one 2>&1)
+eq "remove of a workspace with changes refused while mounted" yes "$(grep -q uncommitted <<<"$out" && echo yes)"
 check "prune refused while mounted" fails "$BIN" prune "$REPO"
 check "the git common directory is what is locked" fails flock -n "$COMMON" true
 unmount_fs
@@ -355,6 +356,80 @@ eq "git status is clean there" "" "$(G "$MNT/@unsorted" status --porcelain)"
 unmount_fs
 R worktree remove --force "$T/plain-ct"
 check "remove cachetree" "$BIN" remove "$REPO" cachetree --force
+
+echo "== remove while mounted"
+R branch live1; R branch live2; R branch nsx/live3; R branch live4; R branch live5
+# Many files, for removals racing lookups below.
+git init -q "$T/many"; mkdir "$T/many/d"
+for i in $(seq 3000); do echo $i >"$T/many/d/f$i"; done
+G "$T/many" add -A; G "$T/many" commit -qm many; R fetch -q "$T/many" HEAD:many
+MAIN=$(R rev-parse main)
+SNAPREG=$COMMON/worktrees/gitfold-$(R rev-parse --short=12 main)
+mount_fs
+cat "$MNT/live5/a.txt" >/dev/null   # stored, not open in the next mount
+unmount_fs
+mount_fs
+check "remove a stored workspace that isn't open" "$BIN" remove "$REPO" live5
+check "its state is gone too" test ! -e "$COMMON/gitfold/live5"
+cat "$MNT/live1/a.txt" "$MNT/live2/a.txt" "$MNT/nsx/live3/a.txt" "$MNT/live4/a.txt" "$MNT/@main/a.txt" "$MNT/@$MAIN/a.txt" >/dev/null
+check "remove an idle workspace while mounted" "$BIN" remove "$REPO" live1
+check "it leaves the listing" sh -c "! ls '$MNT' | grep -qx live1"
+check "its state is gone" test ! -e "$COMMON/gitfold/live1"
+check "its registration and base ref too" sh -c "test ! -e '$COMMON/worktrees/gitfold-ws-live1' && ! git -C '$REPO' rev-parse -q --verify refs/gitfold/live1"
+echo x >>"$MNT/live2/a.txt"
+check "uncommitted changes refused" fails "$BIN" remove "$REPO" live2
+check "the refused workspace stays usable" sh -c "echo y >>'$MNT/live2/a.txt' && grep -q y '$MNT/live2/a.txt'"
+check "and in the listing" sh -c "ls '$MNT' | grep -qx live2"
+out=$(cd "$MNT/live2" && "$BIN" remove "$REPO" live2 --force 2>&1)
+eq "removing the workspace it runs in refused" yes "$(grep -q 'in use' <<<"$out" && echo yes)"
+check "--force discards changes" "$BIN" remove "$REPO" live2 --force
+( cd "$MNT/nsx/live3" && exec sleep 30 ) & HOLDER=$!
+for _ in $(seq 100); do [ "$(cat /proc/$HOLDER/comm 2>/dev/null)" = sleep ] && break; sleep 0.02; done
+out=$("$BIN" remove "$REPO" nsx/live3 2>&1)
+eq "a workspace in use refused, naming the process" yes "$(grep -q 'sleep 30' <<<"$out" && echo yes)"
+kill $HOLDER; wait $HOLDER 2>/dev/null
+check "removed once the process left" "$BIN" remove "$REPO" nsx/live3
+check "it leaves its namespace" sh -c "! ls '$MNT/nsx' | grep -qx live3"
+out=$("$BIN" remove "$REPO" @main 2>&1)
+eq "a snapshot sharing its commit keeps the registration" yes "$(grep -q stays <<<"$out" && test -d "$SNAPREG" && echo yes)"
+check "the snapshot leaves the listing" sh -c "! ls '$MNT' | grep -qx @main"
+check "the other name still works" test -f "$MNT/@$MAIN/a.txt"
+check "removing the last name removes the registration" "$BIN" remove "$REPO" "@$MAIN"
+check "registration gone" test ! -e "$SNAPREG"
+check "a missing workspace refused" fails "$BIN" remove "$REPO" nonexistent
+for name in .. . ""; do
+    check "'$name' refused while mounted" fails "$BIN" remove "$REPO" "$name"
+done
+check "and nothing deleted" sh -c "test -d '$COMMON/objects' && test -d '$COMMON/gitfold/live4'"
+( exec 9<"$MNT/live4/a.txt"; exec sleep 30 ) & HOLDER=$!
+for _ in $(seq 100); do [ "$(cat /proc/$HOLDER/comm 2>/dev/null)" = sleep ] && break; sleep 0.02; done
+out=$("$BIN" remove "$REPO" live4 2>&1)
+eq "a file open in a workspace refuses its removal" yes "$(grep -q 'sleep 30' <<<"$out" && echo yes)"
+kill $HOLDER; wait $HOLDER 2>/dev/null
+check "removed once it was closed" "$BIN" remove "$REPO" live4
+out=$("$BIN" remove "$REPO" @main 2>&1)
+eq "a snapshot not open, without a registration" yes "$(grep -q 'no registration' <<<"$out" && echo yes)"
+echo x >>"$MNT/many/d/f1"
+( failed=0; for i in $(seq 2 3000); do stat "$MNT/many/d/f$i" >/dev/null 2>&1 || failed=$((failed+1)); done
+  echo $failed >"$T/failed" ) & WALK=$!
+for _ in 1 2 3 4 5; do "$BIN" remove "$REPO" many >/dev/null 2>&1; done
+wait $WALK
+eq "refused removals don't fail requests racing them" 0 "$(cat "$T/failed")"
+missing=0; for i in $(seq 2 3000); do test -e "$MNT/many/d/f$i" || missing=$((missing+1)); done
+eq "nor leave files missing" 0 "$missing"
+check "a removed workspace opens again, fresh" sh -c "test -f '$MNT/live1/a.txt' && test -z \"\$(git -C '$MNT/live1' status --porcelain)\""
+check "a removed snapshot opens again" test -f "$MNT/@main/a.txt"
+kill -9 $PID; wait $PID 2>/dev/null
+"$BIN" unmount "$MNT" >/dev/null 2>&1
+mount_fs
+cat "$MNT/many/d/f1" >/dev/null
+check "after a crash, the new daemon takes requests (a stale socket replaced)" "$BIN" remove "$REPO" many --force
+check "it removed it from the mount" sh -c "! ls '$MNT' | grep -qx many"
+unmount_fs
+check "a snapshot registration removed unmounted" sh -c "'$BIN' remove '$REPO' @main && test ! -e '$SNAPREG'"
+check "'..' refused unmounted" fails "$BIN" remove "$REPO" ..
+check "remove live1" "$BIN" remove "$REPO" live1
+R branch -q -D live1 live2 nsx/live3 live4 live5 many
 
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"

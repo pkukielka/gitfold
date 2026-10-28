@@ -133,6 +133,8 @@ pub struct Workspace {
     /// Bumped by every change; cached listings of older generations are stale.
     generation: AtomicU64,
     listings: Mutex<HashMap<u64, (u64, Arc<Listing>)>>,
+    /// Being removed (`Workspaces::remove`): the sync thread leaves it alone.
+    pub removing: AtomicBool,
     /// Paths of upper files written since the last check for ones identical to
     /// the base again (see `rebase`).
     touched: Mutex<HashSet<Vec<u8>>>,
@@ -307,6 +309,7 @@ impl Workspace {
             tmp,
             generation: AtomicU64::new(0),
             listings: Mutex::new(HashMap::new()),
+            removing: AtomicBool::new(false),
             touched: Mutex::new(HashSet::new()),
         })
     }

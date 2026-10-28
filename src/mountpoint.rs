@@ -193,23 +193,37 @@ pub struct User {
     pub command: String,
 }
 
+impl std::fmt::Display for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{} {}", self.pid, self.command)
+    }
+}
+
 /// The processes of this user (only they can use the mount) using something
-/// below `mountpoint`: their working or root directory, an open file or a
-/// mapped one. Read before detaching: after it, their paths no longer resolve
-/// to the mount point.
-pub fn users(mountpoint: &Path) -> Vec<User> {
-    let (Ok(procs), Ok(mount)) = (fs::read_dir("/proc"), fs::metadata(mountpoint)) else {
+/// at or below `path` in the mount at `mountpoint`: their working or root
+/// directory, an open file or a mapped one. Read before detaching: after it,
+/// their paths no longer resolve to the mount point. Nothing below the mount
+/// point is looked up through the mount.
+pub fn users(mountpoint: &Path, path: &Path) -> Vec<User> {
+    let Ok(procs) = fs::read_dir("/proc") else {
         return Vec::new();
     };
+    // Only needed (and only stat-ed: through the mount) for links to the
+    // mount point itself, never for a path below it.
+    let mount_dev = std::cell::OnceCell::new();
     let uid = unsafe { libc::getuid() };
-    let below = |p: &Path| p.starts_with(mountpoint);
+    let below = |p: &Path| p.starts_with(path);
     // A link to the mount point itself may be the directory under the mount
-    // (entered before mounting): the device tells. Stat-ing goes through the
-    // mount, which the daemon still serves.
+    // (entered before mounting): the device tells. Stat-ing it goes through
+    // the mount root, which the daemon still serves.
     let in_mount = |link: &Path| {
         fs::read_link(link).is_ok_and(|p| {
-            p.starts_with(mountpoint)
-                && (p != mountpoint || fs::metadata(link).is_ok_and(|m| m.dev() == mount.dev()))
+            p.starts_with(path)
+                && (p != mountpoint || {
+                    let dev =
+                        mount_dev.get_or_init(|| fs::metadata(mountpoint).map(|m| m.dev()).ok());
+                    fs::metadata(link).is_ok_and(|m| Some(m.dev()) == *dev)
+                })
         })
     };
     let mut users = Vec::new();

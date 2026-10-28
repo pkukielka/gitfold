@@ -160,12 +160,17 @@ pub fn register(
     index: &[u8],
     gitfile: &Path,
 ) -> Result<PathBuf> {
-    let dir = common_dir.join("worktrees").join(format!(
-        "{SNAPSHOT_PREFIX}{}",
-        commit.id.to_hex_with_len(SNAPSHOT_HEX)
-    ));
+    let dir = snapshot_admin_dir(common_dir, &commit.id);
     write_admin(&dir, gitfile, index, &format!("{}\n", commit.id))?;
     Ok(dir)
+}
+
+/// Admin directory of the snapshot registration of `commit`.
+pub fn snapshot_admin_dir(common_dir: &Path, commit: &ObjectId) -> PathBuf {
+    common_dir.join("worktrees").join(format!(
+        "{SNAPSHOT_PREFIX}{}",
+        commit.to_hex_with_len(SNAPSHOT_HEX)
+    ))
 }
 
 /// Admin directory of the workspace with directory name `id`:

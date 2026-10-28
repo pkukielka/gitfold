@@ -8,6 +8,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 
+use crate::control;
 use crate::fs::workspace::{Workspace, status};
 use crate::git;
 use crate::store::Store;
@@ -198,13 +199,98 @@ pub fn list(repo: &Path) -> Result<()> {
 }
 
 /// `gitfold remove`: deletes a workspace (its registration, state and base
-/// pin). Its commits stay on the branch.
-pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
+/// pin; its commits stay on the branch), or a snapshot registration
+/// (`@<rev>`). While mounted, the daemon does it (see `control`).
+pub fn remove(repo: &Path, name: &str, force: bool) -> Result<()> {
+    check_name(name)?;
     let common_dir = git::init(repo)?;
-    let _lock = exclusive(&common_dir)?;
+    let lock = worktree::lock(&common_dir)?;
+    let done = match (lock, name.strip_prefix('@')) {
+        (None, _) => {
+            let request = control::Request::Remove {
+                name: name.to_string(),
+                force,
+            };
+            control::request(&common_dir, &request)?.with_context(|| {
+                format!(
+                    "{} is locked by a gitfold daemon that doesn't take removal requests (one \
+                     starting or exiting, or an older gitfold), or by a `gitfold remove` or \
+                     `prune` running; retry, or unmount it first",
+                    common_dir.display()
+                )
+            })?
+        }
+        (Some(_), Some(rev)) => {
+            let commit = git::resolve(rev).with_context(|| format!("no snapshot @{rev}"))?;
+            remove_snapshot_registration(&common_dir, rev, &commit.id, false)?
+        }
+        (Some(_), None) => remove_workspace(&Store::default(), &common_dir, name, force)?,
+    };
+    println!("{done}");
+    Ok(())
+}
+
+/// Refuses what can name neither a workspace (a valid branch name) nor a
+/// snapshot (`@<rev>`): a name like `..` would point the removal elsewhere.
+pub fn check_name(name: &str) -> Result<()> {
+    let valid = match name.strip_prefix('@') {
+        Some(rev) => !rev.is_empty(),
+        None => {
+            gix::validate::reference::name(format!("refs/heads/{name}").as_str().into()).is_ok()
+        }
+    };
+    ensure!(valid, "{name:?} is neither a branch name nor @<rev>");
+    Ok(())
+}
+
+/// Deletes the registration of the snapshot of `commit` (named `@<rev>`)
+/// unless `in_use`; returns what was done.
+pub fn remove_snapshot_registration(
+    common_dir: &Path,
+    rev: &str,
+    commit: &gix::ObjectId,
+    in_use: bool,
+) -> Result<String> {
+    let admin = worktree::snapshot_admin_dir(common_dir, commit);
+    Ok(if in_use {
+        format!("the registration of @{rev} stays: another open snapshot shows {commit}")
+    } else if admin.exists() {
+        remove_dir(&admin)?;
+        format!("removed the registration of snapshot @{rev}")
+    } else {
+        format!("no registration of snapshot @{rev} ({commit}) to remove")
+    })
+}
+
+/// Deletes the workspace of `branch` (registration, state and base pin)
+/// unless it has uncommitted changes or a git operation in progress (`force`
+/// skips the checks). Returns what was done.
+pub fn remove_workspace(
+    store: &Store,
+    common_dir: &Path,
+    branch: &str,
+    force: bool,
+) -> Result<String> {
+    let ignored = check_workspace(store, common_dir, branch, force, None)?;
+    delete_workspace(common_dir, branch, ignored)
+}
+
+/// Fails if the workspace of `branch` doesn't exist, or (unless `force`) has
+/// uncommitted changes or a git operation in progress; returns how many
+/// ignored files it holds. `open`: the workspace, if the daemon has it open
+/// (its base kept at the branch tip), else it is opened to catch up if needed.
+pub fn check_workspace(
+    store: &Store,
+    common_dir: &Path,
+    branch: &str,
+    force: bool,
+    open: Option<&Workspace>,
+) -> Result<usize> {
+    // `..` would point it at the git directory itself.
+    check_name(branch)?;
     let id = workspace_id(branch);
-    let state_dir = worktree::state_root(&common_dir).join(&id);
-    let admin = worktree::ws_admin_dir(&common_dir, &id);
+    let state_dir = worktree::state_root(common_dir).join(&id);
+    let admin = worktree::ws_admin_dir(common_dir, &id);
     ensure!(
         state_dir.exists() || admin.exists(),
         "no workspace for branch {branch}"
@@ -213,7 +299,7 @@ pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
     // detached HEAD) would be lost with its admin directory.
     if !force
         && admin.exists()
-        && let Some(why) = worktree::git_busy(&common_dir, &admin, branch)
+        && let Some(why) = worktree::git_busy(common_dir, &admin, branch)
     {
         bail!("workspace {branch}: {why}; finish it, or use --force to discard it");
     }
@@ -224,24 +310,26 @@ pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
     }
     let mut ignored = 0;
     if !force && state_dir.join("base").exists() {
-        let store = Store::default();
-        let mut s = status::status(&store, &common_dir, &state_dir)?;
+        let mut s = status::status(store, common_dir, &state_dir)?;
         // Changes are measured against the base; behind the tip (the branch moved
         // after the daemon last saw it), a file edited back to the base's content
         // would look unchanged. Catch up as the daemon would have.
         let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
         if tip.is_some_and(|tip| tip.id != s.base) {
             let catch_up = || {
+                if let Some(ws) = open {
+                    return ws.sync(store);
+                }
                 let ws = Workspace::open(
-                    &store,
-                    common_dir.clone(),
+                    store,
+                    common_dir.to_path_buf(),
                     state_dir.clone(),
                     admin.clone(),
                     branch,
                     None,
                     Vec::new(),
                 )?;
-                ws.sync(&store)
+                ws.sync(store)
             };
             catch_up().map_err(|e| {
                 anyhow::anyhow!(
@@ -249,7 +337,7 @@ pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
                      failed ({e:#}); mount it, open it once, or use --force"
                 )
             })?;
-            s = status::status(&store, &common_dir, &state_dir)?;
+            s = status::status(store, common_dir, &state_dir)?;
         }
         ignored = s.ignored;
         let note = base_note(branch, &s.base);
@@ -272,16 +360,25 @@ pub fn remove(repo: &Path, branch: &str, force: bool) -> Result<()> {
             bail!("{msg}\ncommit them, or use --force to discard them");
         }
     }
+    Ok(ignored)
+}
+
+/// Deletes the workspace of `branch` (checked by `check_workspace`, which
+/// counted `ignored` files in it); returns what was done.
+pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Result<String> {
+    check_name(branch)?;
+    let id = workspace_id(branch);
+    let state_dir = worktree::state_root(common_dir).join(&id);
+    let admin = worktree::ws_admin_dir(common_dir, &id);
     // The registration first: without it, the state alone is resumed correctly
     // (the registration is recreated); the reverse is not.
     remove_dir(&admin)?;
     remove_dir(&state_dir)?;
-    worktree::unpin(&common_dir, &worktree::pin_ref(&id))?;
-    match ignored {
-        0 => println!("removed workspace {branch}"),
-        n => println!("removed workspace {branch} (and {n} ignored files in it)"),
-    }
-    Ok(())
+    worktree::unpin(common_dir, &worktree::pin_ref(&id))?;
+    Ok(match ignored {
+        0 => format!("removed workspace {branch}"),
+        n => format!("removed workspace {branch} (and {n} ignored files in it)"),
+    })
 }
 
 /// `gitfold prune`: deletes the snapshot registrations (recreated on demand).

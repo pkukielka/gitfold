@@ -19,10 +19,12 @@
 //! - `workspace`: one workspace: lower/upper merged view and its mutations.
 //! - `content`: content kept between the reads of one file.
 //! - `names`: telling the kernel when names in the root or a namespace changed.
+//! - `removal`: removing a workspace or snapshot while mounted.
 //! - `stats`: operation counters.
 
 mod content;
 mod names;
+mod removal;
 mod snapshots;
 mod stats;
 mod view;
@@ -49,6 +51,7 @@ use crate::store::Store;
 use crate::worktree::StatInfo;
 use content::ContentCache;
 pub use names::NameChanges;
+pub use removal::Removal;
 use snapshots::Snapshots;
 use stats::{Counters, IoTimer, bump};
 use view::Content;
@@ -75,11 +78,13 @@ pub struct GitFold {
     no_open: bool,
     stat: StatInfo,
     store: Arc<Store>,
-    snapshots: Snapshots,
-    workspaces: Workspaces,
+    snapshots: Arc<Snapshots>,
+    workspaces: Arc<Workspaces>,
     content: ContentCache,
     counters: Counters,
     names: Arc<NameChanges>,
+    /// See `Removal::closed`.
+    removals_closed: Arc<parking_lot::Mutex<bool>>,
 }
 
 impl GitFold {
@@ -97,23 +102,37 @@ impl GitFold {
             no_open: opts.no_open,
             stat,
             store: Arc::default(),
-            snapshots: Snapshots::new(
+            snapshots: Arc::new(Snapshots::new(
                 common_dir.clone(),
                 mount_point.clone(),
                 stat,
                 opts.prewarm,
                 opts.prewarm_threads,
-            ),
-            workspaces: Workspaces::new(
+            )),
+            workspaces: Arc::new(Workspaces::new(
                 common_dir,
                 mount_point,
                 stat,
                 opts.prewarm,
                 opts.prewarm_threads,
-            ),
+            )),
             content: ContentCache::new(),
             names,
+            removals_closed: Arc::default(),
             counters: Counters::default(),
+        }
+    }
+
+    /// What removes workspaces and snapshots while mounted.
+    pub fn removal(&self) -> Removal {
+        Removal {
+            common_dir: self.workspaces.common_dir().to_path_buf(),
+            mount_point: self.workspaces.mount_point().to_path_buf(),
+            store: self.store.clone(),
+            snapshots: self.snapshots.clone(),
+            workspaces: self.workspaces.clone(),
+            names: self.names.clone(),
+            closed: self.removals_closed.clone(),
         }
     }
 
@@ -195,6 +214,8 @@ impl Filesystem for GitFold {
     }
 
     fn destroy(&mut self) {
+        // Waits for a removal in progress.
+        *self.removals_closed.lock() = true;
         self.workspaces.sync_all(&self.store);
         self.counters.log(self.store.stats());
     }
@@ -210,7 +231,7 @@ impl Filesystem for GitFold {
             self.names.changed(&self.names_dirs());
         }
         match result {
-            // Names never go away while mounted.
+            // Names go away only through `gitfold remove`, which tells the kernel.
             Ok(attr) => reply.entry(&IMMUTABLE_TTL, &attr, Generation(0)),
             // A negative entry (inode 0): cached forever in snapshots and workspaces
             // (their names change only through this mount, which the kernel sees)
@@ -504,13 +525,21 @@ impl Filesystem for GitFold {
     ) {
         let result = match self.ws_entry(ino.0) {
             Some((ws, local)) => ws.fsync(&self.store, local),
+            // Being removed: not synced.
+            None if matches!(inode::decode(ino.0), Some(inode::Ino::Ws { .. })) => {
+                self.attr(ino.0).map(|_| ())
+            }
             None => Ok(()), // snapshot content is in git already
         };
         reply_empty(result, reply)
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
-        if let Some((ws, local)) = self.ws_entry(ino.0) {
+        if let Some(inode::Ino::Ws { slot, local }) = inode::decode(ino.0)
+            && local != 0
+            && local != workspace::GITFILE_LOCAL
+            && let Some(ws) = self.workspaces.get_for_forget(slot)
+        {
             ws.forget(local, nlookup);
         }
     }

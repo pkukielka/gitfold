@@ -61,13 +61,14 @@ build.
    git commit -am "Fix" && git push -u origin HEAD
    ```
 
-4. **Stop** the mount (from outside it), and remove the workspace when you no
-   longer need it (its commits stay on the branch):
+4. **Clean up** the workspace when you no longer need it (its commits stay on
+   the branch), mounted or not, and **stop** the mount when you are done with it
+   (both from outside the mount):
 
    ```
    cd ~
-   gitfold unmount ~/mnt/repo
    gitfold remove ~/src/monorepo my-task
+   gitfold unmount ~/mnt/repo
    ```
 
 The rest of this page is reference: [How it works](#how-it-works) ·
@@ -114,7 +115,7 @@ gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold branch <REPO> <NAME> [--from <REV>]   # create a branch for a workspace
 gitfold list <REPO>                           # workspaces and their changes
-gitfold remove <REPO> <BRANCH> [--force]      # delete a workspace (unmounted)
+gitfold remove <REPO> <BRANCH> [--force]      # delete a workspace (or a snapshot: @<rev>)
 gitfold prune <REPO>                          # delete snapshot registrations
 ```
 
@@ -223,8 +224,8 @@ so commands chained after a commit (`git commit && git status`) see the same
 files either way, and committed files, as well as files git rewrote unchanged
 (`stash`, `rebase --abort`), stop taking space in `upper/`.
 
-**Finish.** Push or merge the branch from anywhere, unmount, then remove the
-workspace with `gitfold remove <REPO> <BRANCH>` (see
+**Finish.** Push or merge the branch from anywhere, then remove the workspace
+with `gitfold remove <REPO> <BRANCH>`, mounted or not (see
 [Cleaning up](#cleaning-up) for when it refuses). `gitfold list <REPO>` shows
 how many files each workspace has changed and deleted, and how many ignored
 files (build output) it holds, with a note if its branch was deleted or its
@@ -305,11 +306,15 @@ Don't modify `.git/gitfold/` while mounted.
 ### Cleaning up
 
 Worktree registrations are locked, so `git worktree prune` keeps them while
-unmounted; later mounts reuse them. With the repository unmounted (both commands
-refuse while any of its workspaces or snapshots is mounted):
+unmounted; later mounts reuse them.
 
 - `gitfold prune <REPO>` deletes the snapshot registrations; snapshots are
-  registered again when opened.
+  registered again when opened. It refuses while the repository is mounted.
+- `gitfold remove <REPO> @<rev>` deletes one snapshot's registration
+  (unmounted: of what `<rev>` names now). While mounted it also closes the
+  snapshot (it leaves the mount root; opening it again registers it again), and
+  keeps the registration while another open name (`@main` and `@<its hash>`)
+  shows the same commit.
 - `gitfold remove <REPO> <BRANCH>` deletes a workspace: its registration, its
   stored changes and its base ref. Its commits stay on the branch. It refuses if
   the workspace has uncommitted or staged changes (it lists them), or a git
@@ -323,8 +328,13 @@ refuse while any of its workspaces or snapshots is mounted):
   deleted with the workspace, as `git worktree remove` does, and `remove` says
   how many (without `--force`). An untracked nested repository counts as one
   change unless ignored. If the branch moved since the workspace was
-  last mounted, it refuses until a mount lets the base catch up (or
-  `--force`).
+  last mounted, its base catches up first, as a mount would.
+- `remove` works while the repository is mounted: the daemon does the removal,
+  and the name leaves the mount at once (the branch, if it still exists, opens
+  again as a fresh workspace). It refuses while a process of yours uses the
+  workspace or snapshot (its working directory, an open or mapped file), naming
+  it; processes in another container or sandbox (mount namespace) aren't seen,
+  but the checks for uncommitted changes still apply.
 
 The same by hand (bash), for example to remove everything at once: unmount,
 then use the repository's absolute git directory (a relative one would make

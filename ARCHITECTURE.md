@@ -133,6 +133,8 @@ Then, per request (`fs/workspace/`):
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
 | `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
 | `src/daemon.rs` | `mount` in the background (detached, log file), `unmount` |
+| `src/control.rs` | the daemon's control socket (`remove` while mounted) |
+| `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
@@ -240,11 +242,13 @@ decision that creates them.
   or adds files to or removes them from change; git ignores all three.
   ([rebases](#workspaces-follow-their-branch-invisible-rebases),
   [caching](#kernel-caching-does-the-heavy-lifting))
-- **Names never disappear while mounted**, so their entries can be cached long;
-  only listings grow. When a lookup adds a name to the root or a namespace
-  directory, the daemon invalidates those directories' cached attributes and
-  listings (`fs::names`); their mtime changes too, dropping a listing that was
-  in flight. Their negative entries are cached only for dot names.
+- **Names disappear only through `gitfold remove`**, so their entries can be
+  cached long; otherwise listings only grow. A removal tells the kernel to drop
+  the entry (`Notifier::inval_entry`) and its directory's listing. When a
+  lookup adds a name to the root or a namespace directory, the daemon
+  invalidates those directories' cached attributes and listings (`fs::names`);
+  their mtime changes too, dropping a listing that was in flight. Their
+  negative entries are cached only for dot names.
   ([caching](#kernel-caching-does-the-heavy-lifting))
 - **Workspace local ids come from the path.** The index written with a new
   registration uses the same path hash (`inode::path_local`), so it matches
@@ -913,13 +917,36 @@ checkout" and "Running it"); this is the why and what it would take.
   directory named after the old branch, with its state under the old id, and
   the base stops following (syncing waits until HEAD is back on the original
   branch).
-- **Workspaces are removed only while unmounted** (`gitfold remove`): the
-  daemon holds their state in memory. Until then git treats the branch as
-  checked out. A daemon holds an exclusive `flock` on the git common
+- **While mounted, the daemon removes workspaces and snapshots** (`gitfold
+  remove`): it holds their state in memory. The command asks it over a Unix
+  socket at `.git/gitfold/.control` (`control.rs`), which the repository's
+  permissions guard (an abstract socket name could be taken by any local user);
+  it is reached as `/proc/self/fd/<dir>/.control`, since socket paths are
+  limited to 107 bytes, and the daemon answers only its own user. Without an
+  answer (an older daemon, one starting), `remove` asks for an unmount; a
+  daemon being unmounted (detached while busy, or exiting) refuses, and exits
+  only after a removal in progress. For an open workspace, the daemon first
+  runs the checks while it is live (after stopping its prewarm walker): whether
+  a process of this user uses it (from `/proc`), then those of the offline
+  `remove`; refusals almost always happen here, before anything else changes.
+  One that isn't open is only checked once, while lookups of its name answer
+  `EBUSY` (it can't be opened alongside). Then it takes the workspace out of
+  its registry, so no request reaches it (waiting up to 5 s for requests in
+  flight), runs all the checks again (what changed meanwhile counts), puts it
+  back if any fails, else deletes its state and has the kernel drop the entry.
+  While taken out, requests into it answer `EBUSY`, which the kernel doesn't
+  cache (an `ENOENT` would leave negative entries for files that exist, if the
+  removal is refused), and so do lookups of its name; other workspaces open as
+  usual. A snapshot only leaves the root meanwhile (its inodes keep working),
+  and holds off opening snapshots for the `/proc` scan and stopping its prewarm
+  walker. Removed slots aren't reused: inodes the kernel still holds answer
+  `ENOENT`, and a reopened branch gets new ones. A refused removal doesn't
+  restart a prewarm walk it stopped. 
+  A daemon holds an exclusive `flock` on the git common
   directory itself (nothing is created for it) for its whole life, also while
   exiting after an unmount, and through bind mounts or other mount namespaces,
   so a repository has at most one daemon (two would share, and corrupt, the
-  stored workspace state); `remove` and `prune` take the same lock or refuse.
+  stored workspace state); `prune` and an offline `remove` take the same lock.
   Where directories can't be flocked (NFS without `local_lock=flock`), the
   lock file `.git/gitfold/.lock` is used instead, as earlier builds did, and
   an existing one is always locked too, so their daemons are still seen;
