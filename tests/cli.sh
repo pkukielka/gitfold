@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end test of the workspace management commands: branch, list, remove,
-# prune.
+# End-to-end test of the workspace management commands: branch, list, changes,
+# remove, prune.
 # usage: tests/cli.sh
 # Creates /tmp/gf-cli-test/{repo,mnt}; removes them at the end unless KEEP=1.
 set -uo pipefail
@@ -46,6 +46,14 @@ eq "from inside a workspace" "$L" "$(cd "$W1/d" && "$BIN" list 2>&1)"
 eq "-C after the command too" "$L" "$("$BIN" list -C "$REPO" 2>&1)"
 check "outside any repository, an error naming the directory" sh -c "cd / && '$BIN' list 2>&1 | grep -q 'no git repository at or above /$'"
 eq "from inside .git" "$L" "$(cd "$REPO/.git" && "$BIN" list 2>&1)"
+EXPECT=$(printf 'M\ta.txt\nD\td/b.txt\nA\tnew.txt')
+eq "changes while mounted: modified, deleted, added, by path" "$EXPECT" "$("$BIN" -C "$REPO" changes agent/one 2>&1)"
+eq "changes -z: NUL-terminated" "M	a.txt|D	d/b.txt|A	new.txt|" "$("$BIN" -C "$REPO" changes -z agent/one | tr '\0' '|')"
+eq "a committed workspace has none" "" "$("$BIN" -C "$REPO" changes two 2>&1)"
+check "an unknown workspace refused" fails "$BIN" -C "$REPO" changes nope
+eq "in a workspace, it's that one's" "$EXPECT" "$(cd "$W1" && "$BIN" changes 2>&1)"
+eq "from a subdirectory of it too" "$EXPECT" "$(cd "$W1/d" && "$BIN" changes 2>&1)"
+check "outside a workspace, the branch must be named" sh -c "cd '$REPO' && '$BIN' changes 2>&1 | grep -q 'not in a gitfold workspace'"
 mkdir -p "$T/mnt2"
 check "second mount of the repository refused" fails timeout 5 "$BIN" mount "$REPO" "$T/mnt2"
 check "second mount point not mounted" fails mountpoint -q "$T/mnt2"
@@ -57,6 +65,26 @@ unmount_fs
 out=$("$BIN" -C "$REPO" list 2>/dev/null)
 eq "workspace with changes" "2 1" "$(echo "$out" | awk '$1 == "agent/one" { print $2, $3 }')"
 eq "committed workspace is clean" "0 0" "$(echo "$out" | awk '$1 == "two" { print $2, $3 }')"
+eq "changes unmounted: the same" "$EXPECT" "$("$BIN" -C "$REPO" changes agent/one 2>&1)"
+
+echo "== changes: edge cases"
+R branch ch; R branch fresh
+mount_fs
+WC=$MNT/ch
+rm -r "$WC/d"; echo x >"$WC/d"                  # a file where the base has a directory
+ln -s a.txt "$WC/link"; chmod +x "$WC/a.txt"
+echo '*.log' >"$WC/.gitignore"; echo l >"$WC/x.log"
+echo t >"$WC/t	b"
+EXPECT=$(printf 'A\t.gitignore\nM\ta.txt\nA\td\nD\td/b.txt\nD\td/c.txt\nA\tlink\nA\t"t\\tb"')
+eq "file over a directory, symlink, exec bit, ignored file left out, quoted tab" "$EXPECT" "$("$BIN" -C "$REPO" changes ch 2>&1)"
+eq "-z leaves the path as is" "yes" "$("$BIN" -C "$REPO" changes -z ch | tr '\0' '\n' | grep -qx "A	t	b" && echo yes)"
+eq "a branch never opened has no changes" "" "$("$BIN" -C "$REPO" changes fresh 2>&1)"
+check "an invalid name refused" fails "$BIN" -C "$REPO" changes ..
+unmount_fs
+R update-ref refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m moved)"
+out=$("$BIN" -C "$REPO" changes ch 2>&1 >/dev/null)
+eq "a branch moved since: a note on stderr" yes "$(grep -q 'base behind the branch tip' <<<"$out" && echo yes)"
+"$BIN" -C "$REPO" remove --force ch >/dev/null; R branch -q -D ch fresh
 
 echo "== remove"
 check "uncommitted changes refused" fails "$BIN" -C "$REPO" remove agent/one

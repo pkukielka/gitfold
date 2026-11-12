@@ -90,6 +90,19 @@ enum Command {
     /// For each: how many files it changed and deleted, how many ignored files
     /// it holds, its base commit, and notes (branch deleted, base behind).
     List,
+    /// List a workspace's uncommitted changes (A/M/D per path), without git status.
+    ///
+    /// Against its base, untracked files included and ignored ones not, whatever
+    /// is staged (as `git add -A` and `git diff --cached --name-status`): one
+    /// path per line, `A` added, `M` modified, `D` deleted, quoted as git quotes
+    /// paths. Read from the workspace's stored state, mounted or not.
+    Changes {
+        /// The workspace's branch (default: the workspace you are in).
+        branch: Option<String>,
+        /// End each line with NUL instead of a newline, paths unquoted.
+        #[arg(short = 'z')]
+        nul: bool,
+    },
     /// Delete a workspace, or a snapshot's registration.
     ///
     /// A workspace: its registration, stored changes and base ref (its commits
@@ -281,6 +294,11 @@ fn main() -> Result<()> {
             prewarm,
         } => cli::manage::branch(&repo()?, &branch, from.as_deref(), prewarm)?,
         Command::List => cli::manage::list(&repo()?)?,
+        Command::Changes { branch, nul } => {
+            let repo = repo()?;
+            let branch = cli::branch_or_current(branch, &repo)?;
+            cli::manage::changes(&repo, &branch, nul)?
+        }
         Command::Remove {
             name,
             force,

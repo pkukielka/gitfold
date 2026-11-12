@@ -138,7 +138,7 @@ Then, per request (`fs/workspace/`):
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
 | `src/daemon/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
-| `src/cli/manage.rs` | `branch`, `list`, `remove` and `prune` commands |
+| `src/cli/manage.rs` | `branch`, `list`, `changes`, `remove`, `prune` and `prewarm` commands |
 | `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/fs/workspace/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
