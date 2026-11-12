@@ -113,6 +113,7 @@ gitfold writes into the repository: worktree registrations under
 ```
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
+gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
 gitfold branch <REPO> <NAME> [--from <REV>]   # create a branch for a workspace
 gitfold list <REPO>                           # workspaces and their changes
 gitfold remove <REPO> <BRANCH> [--force]      # delete a workspace (or a snapshot: @<rev>)
@@ -294,6 +295,12 @@ Don't modify `.git/gitfold/` while mounted.
   exiting, the daemon brings every open workspace's base up to its branch tip.
   Ctrl-C (in the foreground), SIGTERM, SIGHUP and `fusermount3 -u <MOUNTPOINT>`
   stop it as well; a second SIGINT or SIGTERM exits immediately.
+- **After upgrading gitfold,** a mount keeps running the build it was started
+  with. `gitfold version <MOUNTPOINT>` prints both builds and exits with 1 if
+  they differ (or the daemon is too old to say); unmount and mount again to
+  upgrade. `gitfold --version` names the build: the version and, built from a
+  git checkout, the commit (with `-dirty.<hash of the changes>` for uncommitted
+  ones).
 - Only `kill -9` (or a crash) leaves the mount behind: accesses then fail with
   `Transport endpoint is not connected`, and `gitfold unmount <MOUNTPOINT>`
   cleans it up. `gitfold mount` detects such stale mounts, and mount points

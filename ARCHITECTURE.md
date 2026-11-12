@@ -132,10 +132,11 @@ Then, per request (`fs/workspace/`):
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
 | `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
-| `src/daemon.rs` | `mount` in the background (detached, log file), `unmount` |
-| `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping prewarm for `unmount`) |
+| `src/daemon.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
+| `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping prewarm for `unmount`; its version) |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
+| `build.rs` | the build's version (crate version, git commit, a hash of uncommitted changes), for `--version` and `gitfold version` |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
 | `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |

@@ -22,7 +22,7 @@ use std::time::Duration;
 use crate::refusal::Refusal;
 use crate::worktree;
 use anyhow::{Context, Result, bail};
-use log::{info, warn};
+use log::{debug, warn};
 
 /// The answer to a request the daemon doesn't know.
 const UNKNOWN: &str = "unknown request";
@@ -44,6 +44,8 @@ pub enum Request {
     /// Stop prewarm walks, running and queued, for the rest of the daemon's
     /// life: an unmount follows.
     StopPrewarm,
+    /// Which gitfold build the daemon runs (`crate::VERSION`).
+    Version,
 }
 
 impl Request {
@@ -55,6 +57,7 @@ impl Request {
                 format!("{verb}\n{}\n{name}\n", *force as u8)
             }
             Request::StopPrewarm => "stop-prewarm\n".to_string(),
+            Request::Version => "version\n".to_string(),
         }
         .into_bytes()
     }
@@ -68,6 +71,7 @@ impl Request {
                 check: verb == "check-remove",
             }),
             ["stop-prewarm", ""] => Ok(Request::StopPrewarm),
+            ["version", ""] => Ok(Request::Version),
             _ => bail!(UNKNOWN),
         }
     }
@@ -172,7 +176,7 @@ pub fn serve(
                 };
                 let reply = match answer {
                     Ok(message) => {
-                        info!("{message}");
+                        debug!("control: {message}");
                         format!("ok\n{message}")
                     }
                     // The kind of a refusal on a line of its own, last, so the
