@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use fuser::{Config, MountOption};
 
 #[derive(Parser)]
-#[command(about = "Git revisions as a filesystem")]
+#[command(about = "Git revisions as a filesystem", version = VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -58,6 +58,9 @@ enum Command {
     /// Unmount, even while a shell is inside the mount, and wait for gitfold to
     /// exit.
     Unmount { mountpoint: PathBuf },
+    /// Print this gitfold's version and, given a mount point, the version its
+    /// daemon runs; exits with 1 if they differ (remount to upgrade).
+    Version { mountpoint: Option<PathBuf> },
     /// Create a branch to open as a workspace (<mountpoint>/<name>).
     Branch {
         repo: PathBuf,
@@ -116,6 +119,10 @@ enum Command {
     },
 }
 
+/// This build: the crate version and, if built from a git checkout, the
+/// commit (see `build.rs`).
+pub const VERSION: &str = env!("GITFOLD_VERSION");
+
 fn main() -> Result<()> {
     // Blob buffers are short-lived and often large. glibc raises its mmap threshold
     // after such frees, after which big buffers come from arenas that are never
@@ -160,6 +167,11 @@ fn main() -> Result<()> {
             std::env::set_current_dir("/")?;
             // Held until the daemon exits (see `admin::mount_lock`).
             let _lock = admin::mount_lock(&common_dir)?;
+            log::info!(
+                "gitfold {VERSION}: mounting {} at {}",
+                common_dir.display(),
+                mountpoint.display()
+            );
             let cpus = std::thread::available_parallelism().map_or(8, |n| n.get());
             let mut config = Config::default();
             config.mount_options = vec![
@@ -197,10 +209,14 @@ fn main() -> Result<()> {
                 control::serve(listener, move |request| match request {
                     control::Request::Remove { name, force, check } => match check {
                         true => removal.check(&name, force),
-                        false => removal.remove(&name, force),
+                        false => removal
+                            .remove(&name, force)
+                            .inspect(|done| log::info!("{done}")),
                     },
+                    control::Request::Version => Ok(VERSION.to_string()),
                     control::Request::StopPrewarm => {
                         prewarm::stop_all();
+                        log::info!("prewarm stopped for the unmount");
                         Ok("prewarm stopped for the unmount".into())
                     }
                 })?;
@@ -208,6 +224,7 @@ fn main() -> Result<()> {
             session.run()?;
         }
         Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
+        Command::Version { mountpoint } => daemon::version(mountpoint.as_deref())?,
         Command::Branch {
             repo,
             name,

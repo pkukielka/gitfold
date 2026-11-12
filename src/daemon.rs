@@ -101,6 +101,42 @@ pub fn start(mountpoint: &Path, log: &Path) -> Result<()> {
     }
 }
 
+/// `gitfold version`: this build's version and, for `mountpoint`, its
+/// daemon's. Fails if they differ or the daemon can't tell (an older one).
+pub fn version(mountpoint: Option<&Path>) -> Result<()> {
+    println!("gitfold {}", crate::VERSION);
+    let Some(mountpoint) = mountpoint else {
+        return Ok(());
+    };
+    let mountpoint = mountpoint::canonical(mountpoint)?;
+    let shown = mountpoint.display();
+    let Some(source) = mountpoint::gitfold_source(&mountpoint)? else {
+        bail!("{shown} is not a gitfold mount");
+    };
+    let common_dir = admin::common_dir_of_source(&source);
+    let answer = control::request(&common_dir, &control::Request::Version, Some(WAIT));
+    let daemon = match answer {
+        Ok(Some(daemon)) => daemon,
+        Ok(None) => bail!("the daemon of {shown} doesn't answer (starting, exiting, or older)"),
+        // Requests are answered one at a time: a removal may be running.
+        Err(e) if timed_out(&e) => bail!(
+            "the daemon of {shown} didn't answer within {} s (busy with a removal?)",
+            WAIT.as_secs()
+        ),
+        Err(e) => bail!("the daemon of {shown} can't tell its version: {e:#}"),
+    };
+    println!("daemon {daemon}");
+    if daemon != crate::VERSION {
+        bail!(
+            "the daemon of {shown} runs another gitfold build: unmount and mount again to upgrade"
+        );
+    }
+    Ok(())
+}
+
+/// How long `version` and `unmount` wait for the daemon to answer.
+const WAIT: Duration = Duration::from_secs(3);
+
 /// `gitfold unmount`: unmounts, detaching the mount if it is busy, and waits
 /// for the daemon to exit (after it brought workspace bases up to date), so
 /// `remove` and `prune` can follow right away. A busy mount is waited for too
@@ -122,7 +158,7 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     // Briefly: a daemon that is stopped, hung or busy with a removal must not
     // keep it from unmounting.
     let stop = control::Request::StopPrewarm;
-    let _ = control::request(&common_dir, &stop, Some(Duration::from_secs(3)));
+    let _ = control::request(&common_dir, &stop, Some(WAIT));
     crate::prewarm::stop_below(&mountpoint);
     let detached = !mountpoint::unmount(&mountpoint)?;
     if detached {
@@ -174,4 +210,16 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     }
     println!("unmounted {shown}");
     Ok(())
+}
+
+/// Whether `e` is a read that timed out.
+fn timed_out(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<std::io::Error>())
+        .any(|e| {
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+        })
 }
