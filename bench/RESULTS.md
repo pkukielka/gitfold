@@ -568,3 +568,18 @@ workspace 124, 123, 134 and 298 MB.
 git's untracked cache) is now as fast as native on the first run and faster
 on the repeat: 1145 / 1131 ms for a snapshot and 1200 / 1171 ms for a
 workspace before the cache tree.
+
+## 2026-11-12, partial clones: finding missing objects
+
+A partial clone's tree load tries every child to list everything missing at
+once. gitoxide rescans the pack directory (under a store-wide lock) on every
+lookup that misses, so with handles left at the default refresh mode each
+absent blob cost a rescan. 60,000 files, `blob:none` clone, unreachable
+remote, time until the open fails (the walk, then a fast-failing fetch):
+
+| packs | refresh on every miss | refresh once, then none |
+|------:|----------------------:|------------------------:|
+| 1     | 2,250 ms (review)     | 1,288 ms                |
+| 41    | 19,342 / 19,204 ms    | 1,284 / 1,268 ms        |
+
+Every fetch adds a pack, so the old cost grew with use.

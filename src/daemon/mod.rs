@@ -1,7 +1,17 @@
-//! Mount point checks and clean shutdown.
+//! The daemon's lifecycle around its mount: mount point checks, the mount
+//! table, unmounting (fusermount), signals, and the mount's source name.
+//!
+//! - `procs`: processes using a mount.
+//! - `control`: the control socket.
+//! - `prewarm`: walks of what was opened.
+
+pub mod control;
+pub mod prewarm;
+pub mod procs;
 
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -84,7 +94,7 @@ pub fn unmount_on_signal(mountpoint: PathBuf) {
             signalled = true;
             info!("signal {sig}: unmounting {}", mountpoint.display());
             // Walkers keep the mount busy; stop them so it unmounts rather than detaches.
-            crate::prewarm::stop_all();
+            prewarm::stop_all();
             match unmount_or_detach(&mountpoint) {
                 Ok(Unmounted::Done) => {}
                 Ok(Unmounted::Detached) => {
@@ -157,7 +167,7 @@ pub fn is_mounted(path: &Path) -> bool {
     }
 }
 
-/// The source of the gitfold mount at `path` (`admin::fs_name` of the
+/// The source of the gitfold mount at `path` (`fs_name` of the
 /// repository's git common directory), or `None` if no gitfold mount is there.
 pub fn gitfold_source(path: &Path) -> Result<Option<String>> {
     let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
@@ -186,102 +196,41 @@ fn unescape(s: &str) -> String {
         .replace("\\134", "\\")
 }
 
-/// A process using a mount.
-pub struct User {
-    pub pid: u32,
-    /// Its command line, shortened.
-    pub command: String,
-}
-
-impl std::fmt::Display for User {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{} {}", self.pid, self.command)
-    }
-}
-
-/// The processes of this user (only they can use the mount) using something
-/// at or below `path` in the mount at `mountpoint`: their working or root
-/// directory, an open file or a mapped one. Read before detaching: after it,
-/// their paths no longer resolve to the mount point. Nothing below the mount
-/// point is looked up through the mount.
-pub fn users(mountpoint: &Path, path: &Path) -> Vec<User> {
-    let Ok(procs) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    // Only needed (and only stat-ed: through the mount) for links to the
-    // mount point itself, never for a path below it.
-    let mount_dev = std::cell::OnceCell::new();
-    let uid = unsafe { libc::getuid() };
-    let below = |p: &Path| p.starts_with(path);
-    // A link to the mount point itself may be the directory under the mount
-    // (entered before mounting): the device tells. Stat-ing it goes through
-    // the mount root, which the daemon still serves.
-    let in_mount = |link: &Path| {
-        fs::read_link(link).is_ok_and(|p| {
-            p.starts_with(path)
-                && (p != mountpoint || {
-                    let dev =
-                        mount_dev.get_or_init(|| fs::metadata(mountpoint).map(|m| m.dev()).ok());
-                    fs::metadata(link).is_ok_and(|m| Some(m.dev()) == *dev)
-                })
-        })
-    };
-    let mut users = Vec::new();
-    for proc in procs.flatten() {
-        let Some(pid) = proc.file_name().to_str().and_then(|s| s.parse().ok()) else {
-            continue;
-        };
-        if proc.metadata().map_or(true, |m| m.uid() != uid) {
-            continue;
-        }
-        let dir = proc.path();
-        let uses = ["cwd", "root", "exe"]
-            .iter()
-            .any(|n| in_mount(&dir.join(n)))
-            || fs::read_dir(dir.join("fd"))
-                .into_iter()
-                .flatten()
-                .flatten()
-                .any(|fd| in_mount(&fd.path()))
-            || fs::read_to_string(dir.join("maps")).is_ok_and(|maps| {
-                maps.lines()
-                    .filter_map(|l| l.find('/').map(|at| Path::new(&l[at..])))
-                    .any(below)
-            });
-        if uses {
-            let cmdline = fs::read(dir.join("cmdline")).unwrap_or_default();
-            let mut command = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-            command = command.trim().to_string();
-            if command.is_empty() {
-                // It cleared its command line.
-                command = fs::read_to_string(dir.join("comm")).unwrap_or_default();
-                command = format!("[{}]", command.trim());
-            }
-            if command.chars().count() > 80 {
-                command = command.chars().take(77).collect::<String>() + "...";
-            }
-            users.push(User { pid, command });
+/// The source a mount of `common_dir` shows in the mount table (`FSName`): the
+/// path, with `%`, `,` (mount options are comma-separated), `\` (fusermount
+/// strips it) and non-ASCII bytes percent-escaped, so it reads back exactly.
+/// `gitfold unmount` reads it back to wait for the daemon.
+pub fn fs_name(common_dir: &Path) -> String {
+    let mut name = String::new();
+    for &b in common_dir.as_os_str().as_bytes() {
+        if matches!(b, b'%' | b',' | b'\\') || !b.is_ascii() {
+            name.push_str(&format!("%{b:02X}"));
+        } else {
+            name.push(b as char);
         }
     }
-    users
+    name
 }
 
-/// This process and its ancestors (its parent, the parent's parent, ...).
-pub fn self_and_ancestors() -> Vec<u32> {
-    let mut pid = std::process::id();
-    let mut pids = vec![pid];
-    while let Some(ppid) = parent(pid) {
-        pids.push(ppid);
-        pid = ppid;
+/// The git common directory of a mount with source `source` (see `fs_name`).
+pub fn common_dir_of_source(source: &str) -> PathBuf {
+    let s = source.as_bytes();
+    let mut bytes = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let hex = source
+            .get(i + 1..i + 3)
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match hex {
+            Some(b) if s[i] == b'%' => {
+                bytes.push(b);
+                i += 3;
+            }
+            _ => {
+                bytes.push(s[i]);
+                i += 1;
+            }
+        }
     }
-    pids
-}
-
-/// The parent of process `pid`, if it has one (and is visible here).
-pub fn parent(pid: u32) -> Option<u32> {
-    // pid (comm) state ppid ...; comm may contain spaces and parentheses.
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let at = stat.rfind(')')?;
-    let ppid = stat[at + 1..].split_whitespace().nth(1)?.parse().ok()?;
-    (ppid > 0).then_some(ppid)
+    PathBuf::from(std::ffi::OsString::from_vec(bytes))
 }

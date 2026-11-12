@@ -50,7 +50,7 @@ pub fn status(store: &Store, common_dir: &Path, state_dir: &Path) -> Result<Stat
         .file_name()
         .context("state dir")?
         .to_string_lossy();
-    let admin = crate::worktree::ws_admin_dir(common_dir, &id);
+    let admin = crate::git::worktree::ws_admin_dir(common_dir, &id);
     let config_dir = if admin.exists() {
         admin
     } else {

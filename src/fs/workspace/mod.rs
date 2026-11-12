@@ -26,6 +26,7 @@
 mod markers;
 mod nodes;
 mod rebase;
+pub mod retire;
 pub mod status;
 mod times;
 mod write;
@@ -46,9 +47,9 @@ use gix::objs::tree::EntryKind;
 use parking_lot::{Mutex, RwLock};
 
 use crate::git;
+use crate::git::worktree;
 use crate::inode;
 use crate::store::{Store, TEntry};
-use crate::worktree;
 use markers::Markers;
 use nodes::Nodes;
 use times::{Stamp, Times};
@@ -57,7 +58,7 @@ use times::{Stamp, Times};
 pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
 
 /// The base commit recorded in workspace state directory `state_dir`.
-fn read_base(state_dir: &Path) -> Result<git::Commit> {
+pub(crate) fn read_base(state_dir: &Path) -> Result<git::Commit> {
     let base_file = state_dir.join("base");
     let hex = fs::read_to_string(&base_file)
         .with_context(|| format!("reading {}", base_file.display()))?;
@@ -264,25 +265,24 @@ impl Workspace {
         new_base: Option<git::Commit>,
         gitfile: Vec<u8>,
     ) -> Result<Workspace> {
-        let upper = state_dir.join("upper");
-        fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
-        let base_file = state_dir.join("base");
+        let created = new_base.is_some();
         let base = match new_base {
-            Some(base) => {
-                // For people looking at the state directory; the id is escaped.
-                worktree::write_atomic(
-                    &state_dir.join("branch"),
-                    format!("{branch}\n").as_bytes(),
-                )?;
-                // Written last and atomically: its presence means "workspace exists".
-                worktree::write_atomic(&base_file, format!("{}\n", base.id).as_bytes())?;
-                base
-            }
+            Some(base) => base,
             None => read_base(&state_dir)?,
         };
+        // Loaded first (a partial clone fetches): a failed open leaves no state.
+        let base_tree = store.load_tree(base.tree)?;
+        let upper = state_dir.join("upper");
+        fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
+        if created {
+            // For people looking at the state directory; the id is escaped.
+            worktree::write_atomic(&state_dir.join("branch"), format!("{branch}\n").as_bytes())?;
+            // Written last and atomically: its presence means "workspace exists".
+            worktree::write_atomic(&state_dir.join("base"), format!("{}\n", base.id).as_bytes())?;
+        }
         let layers = Layers {
             base: base.id,
-            base_tree: store.load_tree(base.tree)?,
+            base_tree,
             markers: Markers::open(&state_dir.join("markers"))?,
             times: Times::open(&state_dir.join("times"))?,
         };

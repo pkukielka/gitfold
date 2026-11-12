@@ -126,21 +126,28 @@ Then, per request (`fs/workspace/`):
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
+| `src/refusal.rs` | why `remove` refused (typed, with its own exit code), carried over the control socket |
 | `src/main.rs` | CLI (clap), mount options, `M_MMAP_THRESHOLD` |
-| `src/worktree.rs` | worktree registrations (snapshots, workspaces), streaming index v4 writer (with cache tree), base pin refs, git idle check, daemon lock, workspace ids |
-| `src/git.rs` | thread-local gitoxide handles, tree, blob and ref access |
-| `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
-| `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
-| `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
-| `src/daemon.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
-| `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access |
+| `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
+| `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check, workspace ids |
+| `src/git/lock.rs` | the repository lock, held by a mounted daemon and by `remove`/`prune` |
+| `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remote |
+| `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |
+| `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
+| `src/daemon/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
+| `src/cli/manage.rs` | `branch`, `list`, `remove` and `prune` commands |
+| `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
-| `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
+| `src/fs/workspace/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
+| `src/bench/` | hidden `bench-read` and `bench-attrs` commands |
 | `build.rs` | the build's version (crate version and a hash of its sources; the git commit for `--version`), for `gitfold version` |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
 | `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |
 | `tests/cli.sh` | end-to-end test of `branch`, `list`, `remove` and `prune` |
+| `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
 | `tests/race-modes.pl` | helper of `tests/workspace.sh`: lifted modes must stay invisible |
 | `tests/lib.sh` | helpers shared by the tests |
 
@@ -209,6 +216,10 @@ Then, per request (`fs/workspace/`):
 Break one of these and something fails, often silently. Most link to the
 decision that creates them.
 
+- **Nothing incomplete enters the store.** A tree with anything missing below
+  it (a partial clone) isn't stored, so a load after a fetch finds the gaps
+  filled rather than a half-decoded tree. ([partial
+  clones](#partial-clones-fetching-what-a-load-misses))
 - **Index stat data equals `getattr`.** For every file the index records exactly
   the mtime, ctime, inode (low 32 bits), uid, gid, mode and size that `getattr`
   reports. Any change to attributes (timestamps, sizes after checkout filters,
@@ -871,6 +882,73 @@ gets the speed with no correctness risk.
   `M_MMAP_THRESHOLD` to 128 KiB, calls `malloc_trim` after creating a snapshot,
   and an idle trimmer thread drops the content cache and trims once reads stop.
 
+### Partial clones: fetching what a load misses
+
+**What:** in a partial clone (`blob:none`, `tree:0`) gitoxide finds no lazy
+fetch; a tree load (`Store::load_tree_local`) tries every child, collects what
+is missing and fails with `git::Missing` listing all of it, without storing
+anything incomplete. `Store::load_tree` goes through `promisor::load_tree`,
+which fetches the list from the promisor remote and loads again, in rounds (a
+fetched tree can reveal more). So every load fetches: snapshot and workspace
+opens, a workspace's base following its branch, status for `remove` and `list`.
+Opens load before taking their creation lock (a snapshot its commit tree, a
+workspace its tip and stored base, after the cheap refusals), so a slow fetch
+doesn't hold up other opens; a failed open leaves no state. Fetches take a lock
+per root tree: opens of the same commit wait for one fetch, others fetch in
+parallel.
+
+**Why** (from a fork running it on a 1.4M-file `blob:none` monorepo for weeks,
+reported): without it a workspace on a fetched branch failed to open (`EIO`),
+as did `remove` of it; 13% of the head tree's blobs were missing, and a plain
+`git fetch` of a branch brought none of its changed files' blobs.
+
+- **The fetch is git's own lazy fetch** (promisor-remote.c): `git -c
+  fetch.negotiationAlgorithm=noop fetch <remote> --no-tags
+  --no-write-fetch-head --recurse-submodules=no --filter=blob:none --stdin`,
+  ids on stdin. `blob:none` whatever the clone's filter: a wanted tree comes
+  with all its trees, a wanted blob despite the filter, so a `tree:0` clone
+  opens in two rounds, not one per tree level. It updates no refs; each fetch
+  writes its own pack.
+- **Stopped on a stall, not on a total time:** a fork's first version capped a
+  fetch at 300 s; a multi-GB download never finished, and restarted after every
+  backoff. Now any stderr output (`--progress`) counts as progress; 120 s
+  without it stops the fetch: SIGTERM to its process group (git removes its
+  lock files), then SIGKILL, so ssh, index-pack or pack-objects don't linger
+  holding the pipe. No prompts (`GIT_TERMINAL_PROMPT=0`), messages untranslated
+  (`LC_ALL=C`, for the error's `fatal:` line), trace variables removed (a
+  system-wide trace logged every fetch).
+- **Backoff:** a tree whose fetch failed is refused for 30 s, checked before
+  loading (the sync thread retries every second), lifted as soon as what it
+  missed is there. The refusal is logged at debug level, the failure once.
+- **The remote** is git's choice: the first remote in config file order with
+  `promisor` (alone, or `= true`) or a `partialclonefilter` (gitoxide's remote
+  list is sorted by name, so the config sections are walked), the one
+  `extensions.partialClone` names last (and only with `repositoryformatversion
+  = 1`), as git moves it to the end.
+- **Finding what is missing doesn't rescan packs per miss.** gitoxide rescans
+  the pack directory, under a store-wide lock, whenever an object isn't found,
+  and a partial clone's walk misses once per absent blob: 60k missing blobs
+  with 41 packs took 19.3 s to find. The walk uses handles with refresh off
+  (`git::with_repo_no_refresh`), after one explicit refresh (`refresh_packs`,
+  so a fetch's new pack is seen): 1.3 s. A missing object is one lookup
+  (`try_find_header`, `try_find_object`). Every fetch adds a pack; the object
+  database's slot table is sized for many ([memory hygiene](#memory-hygiene)).
+- **The fetch's process group:** the daemon (no terminal) runs it in its own
+  group, so a stall stops ssh and index-pack with it; from a terminal (`gitfold
+  list`, `remove`) it stays in the foreground group, so ssh can ask for a
+  passphrase; without one, nothing may ask either (`GIT_ASKPASS=true`,
+  `SSH_ASKPASS_REQUIRE=never`: a desktop's ssh-askpass would block it until the
+  stall limit). `--no-auto-maintenance`: a `gc --auto` repack would otherwise
+  run inside the stall window, silently, and be killed. A fetch whose stderr a
+  helper keeps open is still seen to end. At unmount bases move to their tip
+  only if it is here: a hanging remote must not hold up the unmount (the next
+  mount, or `remove`, catches up). An empty list is never fetched: `git fetch`
+  would fall back to the remote's refspecs, everything (the fork's notes: 27M
+  objects, 47 GB).
+**Rejected:** fetching per object as reads need it (one fetch per file; the
+fork's notes: the store needs every blob's size anyway); a global fetch lock (a
+slow fetch stalled every open, reads included); a total time limit (above).
+
 ## Rejected ideas (index)
 
 | idea | why not | where |
@@ -905,6 +983,17 @@ gets the speed with no correctness risk.
 User-visible effects are listed in README ("Workspaces", "Differences from a
 checkout" and "Running it"); this is the why and what it would take.
 
+- **Partial clones** fetch a commit's every missing blob at open, as a checkout
+  would (sizes need the blobs): laziness ends at the commit. Only the first
+  promisor remote is tried (git tries them all), every failure gets the same 30
+  s backoff (a permanently refused object too), the remote is read once per
+  mount, and nothing guards the disk against a huge fetch. Fetch locks are per
+  root tree: two commits opened at once download what they share twice.
+  `@<sha>` of a commit the clone lacks isn't fetched (`ENOENT`). A `gitfold
+  remove` while mounted fetches on the daemon's single control thread, so
+  `version` or another `remove` waits meanwhile. If a branch moves between an
+  open's preload and its creation lock, that open fetches under the lock. A
+  daemon killed mid-fetch can leave git's `.keep` file pinning a pack.
 - **Checkout filters are not applied** (`eol=crlf`, LFS, `ident`,
   `working-tree-encoding`, custom filters). Investigated: gitoxide provides the
   whole pipeline; evaluating attributes for all of Chromium takes 94 ms in
@@ -962,7 +1051,7 @@ checkout" and "Running it"); this is the why and what it would take.
   branch).
 - **While mounted, the daemon removes workspaces and snapshots** (`gitfold
   remove`): it holds their state in memory. The command asks it over a Unix
-  socket at `.git/gitfold/.control` (`control.rs`), which the repository's
+  socket at `.git/gitfold/.control` (`src/daemon/control.rs`), which the repository's
   permissions guard (an abstract socket name could be taken by any local user);
   it is reached as `/proc/self/fd/<dir>/.control`, since socket paths are
   limited to 107 bytes, and the daemon answers only its own user. A refusal's
@@ -1016,7 +1105,7 @@ checkout" and "Running it"); this is the why and what it would take.
 - **Errors reach callers only as errno:** a rev that does not resolve is
   `ENOENT` (the daemon log says why), a missing branch `ENOENT` (not logged), a
   branch checked out elsewhere `EBUSY` (logged). Signals unmount cleanly
-  (`mountpoint.rs`), but `kill -9` still leaves a stale mount for
+  (`src/daemon/mod.rs`), but `kill -9` still leaves a stale mount for
   `fusermount3 -u`.
 
 ## Future work

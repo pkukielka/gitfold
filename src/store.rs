@@ -7,6 +7,7 @@
 
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 use anyhow::Result;
 use gix::ObjectId;
@@ -16,8 +17,9 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 
 use crate::git;
+use crate::git::index::IndexWriter;
+use crate::git::promisor;
 use crate::inode;
-use crate::worktree::IndexWriter;
 
 /// Tree id of an empty table, used for submodules.
 pub const EMPTY_TREE: u32 = 0;
@@ -138,6 +140,23 @@ struct Trees {
     ids: gix::hashtable::HashMap<ObjectId, u32>,
 }
 
+/// What one `load_tree` found missing.
+#[derive(Default)]
+struct Gaps {
+    /// Set once anything is: until then, no lock is taken.
+    any: std::sync::atomic::AtomicBool,
+    objects: parking_lot::Mutex<std::collections::HashSet<ObjectId>>,
+    /// Trees that aren't complete (missing, or with something missing below).
+    trees: parking_lot::Mutex<std::collections::HashSet<ObjectId>>,
+}
+
+impl Gaps {
+    fn add(&self, oid: ObjectId) {
+        self.objects.lock().insert(oid);
+        self.any.store(true, AtomicOrdering::Relaxed);
+    }
+}
+
 #[derive(Default)]
 struct Files {
     recs: Vec<FileRec>,
@@ -209,12 +228,46 @@ impl Store {
     }
 
     /// Returns the id of a tree, decoding it (and, in parallel, any subtrees not
-    /// seen before) on first use.
+    /// seen before) on first use; on a partial clone, fetching what is missing
+    /// (`promisor::load_tree`).
     pub fn load_tree(&self, oid: ObjectId) -> Result<u32> {
+        promisor::load_tree(self, oid)
+    }
+
+    /// `load_tree` without fetching: if objects are missing, fails with
+    /// `git::Missing` listing all of them, so one fetch can bring them; a tree
+    /// that isn't complete is never stored.
+    pub fn load_tree_local(&self, oid: ObjectId) -> Result<u32> {
         if let Some(&id) = self.trees.read().ids.get(&oid) {
             return Ok(id);
         }
-        let mut raw = git::tree_entries(oid)?;
+        // Once per load, not once per missing object (see `with_repo_no_refresh`).
+        git::refresh_packs();
+        let gaps = Gaps::default();
+        match self.walk_tree(oid, &gaps)? {
+            Some(id) => Ok(id),
+            None => {
+                let missing = gaps.objects.into_inner().into_iter().collect();
+                Err(git::Missing(missing).into())
+            }
+        }
+    }
+
+    /// `load_tree` of `oid`, `None` if it isn't complete: the missing objects
+    /// are then recorded in `gaps`, and the incomplete trees too, so a subtree
+    /// that appears at many paths is walked once.
+    fn walk_tree(&self, oid: ObjectId, gaps: &Gaps) -> Result<Option<u32>> {
+        if let Some(&id) = self.trees.read().ids.get(&oid) {
+            return Ok(Some(id));
+        }
+        if gaps.any.load(AtomicOrdering::Relaxed) && gaps.trees.lock().contains(&oid) {
+            return Ok(None);
+        }
+        let Some(mut raw) = git::tree_entries(oid)? else {
+            gaps.add(oid);
+            gaps.trees.lock().insert(oid);
+            return Ok(None);
+        };
         let order = |a: &git::Entry, b: &git::Entry| {
             tree_order(
                 &a.name,
@@ -228,13 +281,24 @@ impl Store {
             .all(|w| order(&w[0], &w[1]) == Ordering::Less);
         // Git already stores trees in this order; sorting keeps malformed trees searchable.
         raw.sort_unstable_by(order);
-        let ids: Vec<u32> = raw
+        // Every child is tried, so all that is missing is known at once.
+        let ids: Vec<Option<u32>> = raw
             .par_iter()
             .map(|e| match e.kind {
-                EntryKind::Tree => self.load_tree(e.oid),
-                kind => self.file_id(e.oid, kind),
+                EntryKind::Tree => self.walk_tree(e.oid, gaps),
+                kind => {
+                    let id = self.file_id(e.oid, kind)?;
+                    if id.is_none() {
+                        gaps.add(e.oid);
+                    }
+                    Ok(id)
+                }
             })
             .collect::<Result<_>>()?;
+        let Some(ids) = ids.into_iter().collect::<Option<Vec<u32>>>() else {
+            gaps.trees.lock().insert(oid);
+            return Ok(None);
+        };
 
         let mut names = Vec::with_capacity(raw.iter().map(|e| e.name.len()).sum());
         let mut entries = Vec::with_capacity(raw.len());
@@ -272,29 +336,34 @@ impl Store {
 
         let mut trees = self.trees.write();
         if let Some(&id) = trees.ids.get(&oid) {
-            return Ok(id); // decoded concurrently by another thread
+            return Ok(Some(id)); // decoded concurrently by another thread
         }
         let id = trees.tables.len() as u32;
         trees.tables.push(Arc::new(table));
         trees.oids.push(oid);
         trees.ids.insert(oid, id);
-        Ok(id)
+        Ok(Some(id))
     }
 
-    fn file_id(&self, oid: ObjectId, kind: EntryKind) -> Result<u32> {
+    /// The file id of blob (or submodule commit) `oid`; `None` if the blob
+    /// isn't in the object database.
+    fn file_id(&self, oid: ObjectId, kind: EntryKind) -> Result<Option<u32>> {
         let hash = file_hash(&oid, kind);
         if let Some(id) = self.files.read().find(hash, &oid, kind) {
-            return Ok(id);
+            return Ok(Some(id));
         }
         // Gitlink commits usually are not in this repository's object database.
         let size = if kind == EntryKind::Commit {
             0
         } else {
-            git::object_size(oid)?
+            let Some(size) = git::object_size(oid)? else {
+                return Ok(None);
+            };
+            size
         };
         let mut files = self.files.write();
         if let Some(id) = files.find(hash, &oid, kind) {
-            return Ok(id); // added concurrently by another thread
+            return Ok(Some(id)); // added concurrently by another thread
         }
         let Files { recs, ids } = &mut *files;
         let id = recs.len() as u32;
@@ -303,7 +372,7 @@ impl Store {
             let f = &recs[id as usize];
             file_hash(&f.oid, f.kind)
         });
-        Ok(id)
+        Ok(Some(id))
     }
 
     /// Lays out the directories of a snapshot rooted at `root` (breadth first).

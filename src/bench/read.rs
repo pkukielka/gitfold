@@ -24,7 +24,7 @@ pub fn run(rev: &str, threads: &[usize]) -> Result<()> {
     })?;
     let total: u64 = blobs
         .par_iter()
-        .map(|&oid| git::object_size(oid))
+        .map(|&oid| git::object_size(oid)?.ok_or_else(|| anyhow::anyhow!("{oid} is missing")))
         .sum::<Result<_>>()?;
     println!("{} blobs, {} MB", blobs.len(), total >> 20);
     for &n in threads {

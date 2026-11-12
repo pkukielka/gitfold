@@ -1,5 +1,5 @@
 //! Removing a workspace or snapshot while mounted (requests from `gitfold
-//! remove` through the control socket, see `crate::control`).
+//! remove` through the control socket, see `crate::daemon::control`).
 //!
 //! Names otherwise never disappear while mounted (their entries are cached for
 //! a year), so a removal tells the kernel to drop the entry, and refuses while
@@ -16,10 +16,11 @@ use super::NameChanges;
 use super::snapshots::Snapshots;
 use super::workspace::Workspace;
 use super::workspaces::Workspaces;
-use crate::admin;
+use crate::daemon::{self, prewarm, procs};
+use crate::fs::workspace::retire;
+use crate::git;
 use crate::refusal::Refusal;
 use crate::store::Store;
-use crate::{git, mountpoint, prewarm};
 
 pub struct Removal {
     pub(super) common_dir: PathBuf,
@@ -61,7 +62,7 @@ impl Removal {
                         resolve,
                         refuse_if_used,
                         |commit, shared| {
-                            admin::remove_snapshot_registration(
+                            retire::remove_snapshot_registration(
                                 &self.common_dir,
                                 rev,
                                 commit,
@@ -111,7 +112,7 @@ impl Removal {
     ) -> Result<(String, bool)> {
         let (store, common_dir) = (&*self.store, &self.common_dir);
         let check =
-            |ws: Option<&Workspace>| admin::check_workspace(store, common_dir, branch, force, ws);
+            |ws: Option<&Workspace>| retire::check_workspace(store, common_dir, branch, force, ws);
         if let Some(open) = self.workspaces.get_open(branch) {
             // Changes first, as `check` reports them.
             check(Some(&open))?;
@@ -120,7 +121,7 @@ impl Removal {
         }
         self.workspaces.remove(branch, refuse_if_used, |ws| {
             let ignored = check(ws)?;
-            admin::delete_workspace(common_dir, branch, ignored)
+            retire::delete_workspace(common_dir, branch, ignored)
         })
     }
 
@@ -138,7 +139,7 @@ impl Removal {
             let commit =
                 commit.ok_or_else(|| Refusal::NotFound.error(format!("no snapshot {name}")))?;
             let shared = self.snapshots.open_names_of(&commit) > usize::from(open.is_some());
-            return admin::remove_snapshot_registration(
+            return retire::remove_snapshot_registration(
                 &self.common_dir,
                 rev,
                 &commit,
@@ -149,7 +150,7 @@ impl Removal {
         let (store, common_dir) = (&*self.store, &self.common_dir);
         // Not open: checked while it can't be opened (catching up may write).
         let closed = self.workspaces.check_closed(name, || {
-            admin::check_workspace(store, common_dir, name, force, None)
+            retire::check_workspace(store, common_dir, name, force, None)
         })?;
         let ignored = match closed {
             Some(ignored) => ignored,
@@ -160,7 +161,7 @@ impl Removal {
                 })?;
                 // Changes first, both reported: a shell sitting in it must not
                 // hide uncommitted work from the check.
-                let changes = admin::check_workspace(store, common_dir, name, force, Some(&open));
+                let changes = retire::check_workspace(store, common_dir, name, force, Some(&open));
                 match (changes, self.refuse_if_used(&path, name)) {
                     (Ok(ignored), Ok(())) => ignored,
                     (Err(changes), Err(used))
@@ -172,13 +173,13 @@ impl Removal {
                 }
             }
         };
-        Ok(admin::removable_workspace(name, ignored))
+        Ok(retire::removable_workspace(name, ignored))
     }
 
     /// Refuses once the mount is being unmounted (`closed`), or detached
     /// (unmounted while busy): who uses what can't be told any more.
     fn refuse_if_unmounting(&self, closed: bool) -> Result<()> {
-        if closed || mountpoint::gitfold_source(&self.mount_point)?.is_none() {
+        if closed || daemon::gitfold_source(&self.mount_point)?.is_none() {
             let shown = self.mount_point.display();
             return Err(Refusal::InUse.error(format!("{shown} is being unmounted")));
         }
@@ -190,9 +191,9 @@ impl Removal {
     /// count: its prewarm walkers (stopped by a removal), also one just started
     /// and not listed yet; nothing else it starts uses the mount.
     fn refuse_if_used(&self, path: &Path, name: &str) -> Result<()> {
-        let daemon = std::process::id();
-        let mut users = mountpoint::users(&self.mount_point, path);
-        users.retain(|u| mountpoint::parent(u.pid) != Some(daemon));
+        let daemon_pid = std::process::id();
+        let mut users = procs::users(&self.mount_point, path);
+        users.retain(|u| procs::parent(u.pid) != Some(daemon_pid));
         if users.is_empty() {
             return Ok(());
         }

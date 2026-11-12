@@ -48,10 +48,10 @@ use log::info;
 use super::markers::Kind;
 use super::times::{Stamp, shown_mtime};
 use super::{Layers, Lower, Workspace, ancestors, join, not_found};
+use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::store::{EMPTY_TREE, FileRec, Store, TEntry};
-use crate::worktree;
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
 /// build writing while a rebase waits for conflict resolution, say) they are
@@ -129,19 +129,36 @@ impl Workspace {
     /// to the base (git rewrites unchanged files in `stash`, `rebase --abort`,
     /// `checkout -- .` ...), and keeps the base pinned.
     pub fn sync(&self, store: &Store) -> Result<()> {
+        self.sync_with(store, true)
+    }
+
+    /// `sync` at unmount: without fetching (a partial clone), so an unreachable
+    /// or hanging remote doesn't hold up the unmount; a base whose tip isn't
+    /// here stays behind, for the next mount or `remove` to catch up.
+    pub fn sync_at_unmount(&self, store: &Store) -> Result<()> {
+        self.sync_with(store, false)
+    }
+
+    fn sync_with(&self, store: &Store, fetch: bool) -> Result<()> {
         if !self.git_idle() {
             self.limit_touched();
             return Ok(());
         }
         let tip = git::resolve(&format!("refs/heads/{}", self.branch))?;
         let rebased = if tip.id != self.layers.read().base {
-            let rebased = self.rebase(store, &tip);
+            let rebased = self.rebase(store, &tip, fetch);
             self.rebase_failed
                 .store(rebased.is_err(), Ordering::Relaxed);
             rebased
         } else {
             Ok(())
         };
+        // The rebase may have fetched (a partial clone) for long: git may have
+        // started meanwhile.
+        if !self.git_idle() {
+            self.limit_touched();
+            return rebased;
+        }
         let dropped = if rebased.is_ok() {
             self.drop_unchanged(store)
         } else {
@@ -246,9 +263,18 @@ impl Workspace {
         worktree::git_busy(&self.common_dir, &self.admin, &self.branch).is_none()
     }
 
-    fn rebase(&self, store: &Store, new: &Commit) -> Result<()> {
+    fn rebase(&self, store: &Store, new: &Commit, fetch: bool) -> Result<()> {
         let started = Instant::now();
-        let new_tree = store.load_tree(new.tree)?;
+        let new_tree = match fetch {
+            true => store.load_tree(new.tree)?,
+            false => store.load_tree_local(new.tree)?,
+        };
+        // The load may have fetched (a partial clone) for long: if git started
+        // or the branch moved meanwhile, the next sync sees to it.
+        let tip = git::resolve(&format!("refs/heads/{}", self.branch))?;
+        if !self.git_idle() || tip.id != new.id {
+            return Ok(());
+        }
         let mut layers = self.layers.write();
         let locked = Instant::now();
         let old = layers.base;

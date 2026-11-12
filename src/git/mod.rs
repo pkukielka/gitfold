@@ -2,6 +2,16 @@
 //!
 //! `gix::Repository` is not `Sync`, so each thread lazily gets its own handle
 //! derived from one shared `ThreadSafeRepository`.
+//!
+//! - `index`: the git index gitfold writes.
+//! - `worktree`: worktree registrations, base pins, git's busy state.
+//! - `lock`: the repository lock.
+//! - `promisor`: partial clones, fetching what loads miss.
+
+pub mod index;
+pub mod lock;
+pub mod promisor;
+pub mod worktree;
 
 use std::cell::RefCell;
 use std::os::unix::ffi::OsStrExt;
@@ -27,6 +37,8 @@ static REPO: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
 
 thread_local! {
     static LOCAL: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
+    /// The same, without rescanning packs on a miss (see `with_repo_no_refresh`).
+    static LOCAL_NO_REFRESH: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
 }
 
 /// Opens the repository at `path` and returns its common git dir (`.git`).
@@ -61,6 +73,31 @@ pub fn with_repo<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
     })
 }
 
+/// `with_repo`, with a handle that doesn't look for new packs when an object
+/// isn't found: gitoxide otherwise rescans the pack directory (under a global
+/// lock) on every miss, and a tree walk in a partial clone misses once per
+/// absent blob. Call `refresh_packs` first to see packs added since.
+pub fn with_repo_no_refresh<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
+    LOCAL_NO_REFRESH.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let repo = slot.get_or_insert_with(|| {
+            let mut repo = REPO.get().expect("git::init not called").to_thread_local();
+            repo.object_cache_size(0);
+            repo.objects.refresh_never();
+            repo
+        });
+        f(repo)
+    })
+}
+
+/// Makes packs added since (a fetch, a repack) visible to all handles: a
+/// lookup that misses rescans the pack directory once.
+pub fn refresh_packs() {
+    // No object has this id.
+    let none = ObjectId::from_hex(b"0000000000000000000000000000000000000001").expect("hex");
+    with_repo(|repo| repo.has_object(none));
+}
+
 pub struct Commit {
     pub id: ObjectId,
     pub tree: ObjectId,
@@ -76,32 +113,62 @@ pub fn resolve(spec: &str) -> Result<Commit> {
     })
 }
 
+/// Objects a tree load needed that the object database doesn't have (a
+/// partial clone: see `promisor`).
+#[derive(Debug)]
+pub struct Missing(pub Vec<ObjectId>);
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match &self.0[..] {
+            [one] => write!(f, "object {one} is missing"),
+            many => write!(f, "{} objects are missing (first: {})", many.len(), many[0]),
+        }
+    }
+}
+
+impl std::error::Error for Missing {}
+
+/// Whether `oid` is absent from the object database. gitoxide reports a lookup
+/// that failed for another reason (a pack it couldn't read) as absent too, so
+/// this means "maybe fetchable", not "certainly not there".
+pub fn is_missing(oid: ObjectId) -> bool {
+    with_repo(|repo| !repo.has_object(oid))
+}
+
 pub struct Entry {
     pub name: Vec<u8>,
     pub kind: EntryKind,
     pub oid: ObjectId,
 }
 
-/// Lists one tree level.
-pub fn tree_entries(tree: ObjectId) -> Result<Vec<Entry>> {
-    with_repo(|repo| {
-        let tree = repo.find_tree(tree)?;
+/// Lists one tree level; `None` if the tree isn't in the object database
+/// (as of the last `refresh_packs`).
+pub fn tree_entries(tree: ObjectId) -> Result<Option<Vec<Entry>>> {
+    with_repo_no_refresh(|repo| {
+        let Some(object) = repo.try_find_object(tree)? else {
+            return Ok(None);
+        };
+        let tree = object.try_into_tree()?;
         let decoded = tree.decode()?;
-        Ok(decoded
-            .entries
-            .iter()
-            .map(|e| Entry {
-                name: e.filename.to_vec(),
-                kind: e.mode.kind(),
-                oid: e.oid.to_owned(),
-            })
-            .collect())
+        Ok(Some(
+            decoded
+                .entries
+                .iter()
+                .map(|e| Entry {
+                    name: e.filename.to_vec(),
+                    kind: e.mode.kind(),
+                    oid: e.oid.to_owned(),
+                })
+                .collect(),
+        ))
     })
 }
 
-/// Uncompressed size of an object, without decompressing it.
-pub fn object_size(oid: ObjectId) -> Result<u64> {
-    with_repo(|repo| Ok(repo.find_header(oid)?.size()))
+/// Uncompressed size of an object, without decompressing it; `None` if it
+/// isn't in the object database (as of the last `refresh_packs`).
+pub fn object_size(oid: ObjectId) -> Result<Option<u64>> {
+    with_repo_no_refresh(|repo| Ok(repo.try_find_header(oid)?.map(|h| h.size())))
 }
 
 pub static BLOB_NS: AtomicU64 = AtomicU64::new(0);

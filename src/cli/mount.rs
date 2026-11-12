@@ -12,10 +12,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
-use crate::admin;
-use crate::control;
-use crate::mountpoint;
-use crate::worktree;
+use crate::daemon::control;
+use crate::daemon::{self, procs};
+use crate::git::worktree;
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
@@ -72,7 +71,7 @@ pub fn start(mountpoint: &Path, log: &Path) -> Result<()> {
     let mut child = command.spawn().context("starting the daemon")?;
     let started = Instant::now();
     loop {
-        if mountpoint::is_mounted(mountpoint) {
+        if daemon::is_mounted(mountpoint) {
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
@@ -109,12 +108,12 @@ pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
     let Some(mountpoint) = mountpoint else {
         return Ok(0);
     };
-    let mountpoint = mountpoint::canonical(mountpoint)?;
+    let mountpoint = daemon::canonical(mountpoint)?;
     let shown = mountpoint.display();
-    let Some(source) = mountpoint::gitfold_source(&mountpoint)? else {
+    let Some(source) = daemon::gitfold_source(&mountpoint)? else {
         bail!("{shown} is not a gitfold mount");
     };
-    let common_dir = admin::common_dir_of_source(&source);
+    let common_dir = daemon::common_dir_of_source(&source);
     let answer = control::request(&common_dir, &control::Request::Version, Some(WAIT));
     let (code, message) = match answer {
         Ok(Some(daemon)) => {
@@ -167,9 +166,9 @@ const WAIT: Duration = Duration::from_secs(3);
 /// process or one it runs under (its shell, `make`, ...) is inside it: that
 /// would wait forever.
 pub fn unmount(mountpoint: &Path) -> Result<()> {
-    let mountpoint = mountpoint::canonical(mountpoint)?;
+    let mountpoint = daemon::canonical(mountpoint)?;
     let shown = mountpoint.display();
-    let Some(source) = mountpoint::gitfold_source(&mountpoint)? else {
+    let Some(source) = daemon::gitfold_source(&mountpoint)? else {
         bail!("{shown} is not a gitfold mount");
     };
     // Not one of the processes using it.
@@ -177,24 +176,24 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     // Prewarm walkers keep the mount busy, which would make this only detach it.
     // The daemon stops them, and starts no more; killing them from here is for
     // daemons without the request (it would start queued ones meanwhile).
-    let common_dir = admin::common_dir_of_source(&source);
+    let common_dir = daemon::common_dir_of_source(&source);
     // Briefly: a daemon that is stopped, hung or busy with a removal must not
     // keep it from unmounting.
     let stop = control::Request::StopPrewarm;
     let _ = control::request(&common_dir, &stop, Some(WAIT));
-    crate::prewarm::stop_below(&mountpoint);
+    daemon::prewarm::stop_below(&mountpoint);
     // If it doesn't go ahead, the mount stays: let the daemon walk again.
     let resume = |e: anyhow::Error| {
         let resume = control::Request::ResumePrewarm;
         let _ = control::request(&common_dir, &resume, Some(WAIT));
         e
     };
-    let detached = !mountpoint::unmount(&mountpoint).map_err(resume)?;
+    let detached = !daemon::unmount(&mountpoint).map_err(resume)?;
     if detached {
         // Read while still mounted, so their paths still resolve.
-        let users = mountpoint::users(&mountpoint, &mountpoint);
-        mountpoint::detach(&mountpoint).map_err(resume)?;
-        let ours = mountpoint::self_and_ancestors();
+        let users = procs::users(&mountpoint, &mountpoint);
+        daemon::detach(&mountpoint).map_err(resume)?;
+        let ours = procs::self_and_ancestors();
         if users.iter().any(|u| ours.contains(&u.pid)) {
             println!(
                 "{shown} is in use by this command or a process it runs under: detached it. \
@@ -222,7 +221,7 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     let started = Instant::now();
     // After detaching, the wait is for the processes listed.
     let mut told = if detached { 2 } else { 0 };
-    while worktree::lock(&common_dir)?.is_none() {
+    while crate::git::lock::lock(&common_dir)?.is_none() {
         let waited = started.elapsed();
         if told == 0 && waited > Duration::from_secs(2) {
             println!("waiting for gitfold to exit (bringing workspace bases up to date)...");

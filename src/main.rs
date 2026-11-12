@@ -1,22 +1,19 @@
-mod admin;
-mod benchattrs;
-mod benchread;
-mod control;
+mod bench;
+mod cli;
 mod daemon;
 mod fs;
 mod git;
 mod inode;
-mod mountpoint;
-mod prewarm;
 mod refusal;
 mod store;
-mod worktree;
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use fuser::{Config, MountOption};
+
+use daemon::{control, prewarm};
 
 #[derive(Parser)]
 #[command(about = "Git revisions as a filesystem", version = LONG_VERSION)]
@@ -147,13 +144,13 @@ fn main() -> Result<()> {
             prewarm_threads,
             prewarm_walks,
         } => {
-            let mountpoint = mountpoint::check(&mountpoint)?;
+            let mountpoint = daemon::check(&mountpoint)?;
             if !foreground {
                 let log = match log {
                     Some(log) => std::path::absolute(log)?,
-                    None => daemon::default_log(&mountpoint)?,
+                    None => cli::mount::default_log(&mountpoint)?,
                 };
-                daemon::start(&mountpoint, &log)?;
+                cli::mount::start(&mountpoint, &log)?;
                 println!(
                     "mounted at {} (log: {})",
                     mountpoint.display(),
@@ -162,15 +159,15 @@ fn main() -> Result<()> {
                 println!("unmount with: gitfold unmount {}", mountpoint.display());
                 return Ok(());
             }
-            mountpoint::unmount_on_signal(mountpoint.clone());
+            daemon::unmount_on_signal(mountpoint.clone());
             prewarm::set_max_walks(prewarm_walks as usize);
             // Absolute: the repository handle keeps the path it was opened with.
             let common_dir = git::init(&std::path::absolute(&repo)?)?;
             // Paths are resolved: don't keep the caller's directory busy (it may be
             // on another mount the user wants to unmount).
             std::env::set_current_dir("/")?;
-            // Held until the daemon exits (see `admin::mount_lock`).
-            let _lock = admin::mount_lock(&common_dir)?;
+            // Held until the daemon exits (see `git::lock::mount_lock`).
+            let _lock = git::lock::mount_lock(&common_dir)?;
             log::info!(
                 "gitfold {VERSION}: mounting {} at {}",
                 common_dir.display(),
@@ -184,7 +181,7 @@ fn main() -> Result<()> {
                 MountOption::DefaultPermissions,
                 // The common dir, for people reading the mount table (`remove` detects
                 // mounts by the lock).
-                MountOption::FSName(admin::fs_name(&common_dir)),
+                MountOption::FSName(daemon::fs_name(&common_dir)),
                 MountOption::Subtype("gitfold".into()),
             ];
             config.n_threads = Some(threads.unwrap_or(cpus));
@@ -233,8 +230,8 @@ fn main() -> Result<()> {
             }
             session.run()?;
         }
-        Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
-        Command::Version { mountpoint } => match daemon::version(mountpoint.as_deref())? {
+        Command::Unmount { mountpoint } => cli::mount::unmount(&mountpoint)?,
+        Command::Version { mountpoint } => match cli::mount::version(mountpoint.as_deref())? {
             0 => {}
             code => std::process::exit(code),
         },
@@ -243,8 +240,8 @@ fn main() -> Result<()> {
             name,
             from,
             prewarm,
-        } => admin::branch(&repo, &name, from.as_deref(), prewarm)?,
-        Command::List { repo } => admin::list(&repo)?,
+        } => cli::manage::branch(&repo, &name, from.as_deref(), prewarm)?,
+        Command::List { repo } => cli::manage::list(&repo)?,
         Command::Remove {
             repo,
             name,
@@ -253,12 +250,12 @@ fn main() -> Result<()> {
             wait,
         } => {
             let wait = std::time::Duration::from_secs(wait);
-            if let Err(e) = admin::remove(&repo, &name, force, check, wait) {
+            if let Err(e) = cli::manage::remove(&repo, &name, force, check, wait) {
                 eprintln!("Error: {e:?}");
                 std::process::exit(refusal::Refusal::of(&e).map_or(1, |r| r.exit_code()));
             }
         }
-        Command::Prune { repo } => admin::prune(&repo)?,
+        Command::Prune { repo } => cli::manage::prune(&repo)?,
         Command::Prewarm {
             root,
             mode,
@@ -266,11 +263,11 @@ fn main() -> Result<()> {
         } => prewarm::run(root, mode, threads)?,
         Command::BenchAttrs { repo, rev } => {
             git::init(&repo)?;
-            benchattrs::run(&rev)?;
+            bench::attrs::run(&rev)?;
         }
         Command::BenchRead { repo, rev, threads } => {
             git::init(&repo)?;
-            benchread::run(&rev, &threads)?;
+            bench::read::run(&rev, &threads)?;
         }
     }
     Ok(())
