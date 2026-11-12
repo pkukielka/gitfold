@@ -21,9 +21,10 @@ Goals:
 - **Look like a normal checkout to an agent.** Agents run `git status`,
   `git diff`, `find`, `grep`/`rg` and read files. Claude Code, for example, runs
   all searches through Bash (its `grep` is an embedded ugrep using ordinary
-  syscalls) and periodically runs
-  `git status --porcelain=v2 --untracked-files=normal --ignored=matching` itself
-  with fsmonitor disabled. There is no API to hook into: the filesystem must be
+  syscalls) and after every Bash command runs
+  `git status --porcelain --untracked-files=normal` itself with fsmonitor
+  disabled (with its "bash edit diff" feature on, also an `--ignored=matching`
+  variant). There is no API to hook into: the filesystem must be
   fast at plain `stat`, `readdir` and `read`.
 - **Any Linux distribution, no root.**
 - **Writable branches** (copy-on-write, diff persisted on disk) without giving up
@@ -514,6 +515,15 @@ agents don't rely on mtimes in a read-only tree. Workspaces use the same
 constant for unchanged (lower) entries, so their index can be synthesized the
 same way; changed (upper) files are real files and report their real times,
 and keep them once dropped from upper.
+
+Git's untracked cache works on this: it trusts a directory's listing while its
+mtime is unchanged and older than the index. A lower directory's names change
+only by becoming an upper one (real times from then on); an invisible rebase
+changes no names. Checked against uncached runs: files and directories added
+and removed in lower and upper directories, `.gitignore` edits, commits,
+`stash -u`, `clean`, a rebase. Lower directories, dated 2020-01-01, are never
+too recent to trust ("racy"), unlike a fresh native checkout's in its first
+second.
 
 ### Names with slashes: one directory per component
 

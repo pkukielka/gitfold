@@ -380,11 +380,33 @@ So do a workspace's base following a branch that moved, and the checks of
 
 - Workspaces an agent only reads a few files in are cheaper without the prewarm
   walk: give their branch prewarm mode `none` (see [Usage](#usage)).
-- Claude Code (reported): it runs `git status` with `--ignored=matching`, which
-  git doesn't serve from its untracked cache, so each such run lists the whole
-  workspace. For read-only sessions, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`
-  and `CLAUDE_CODE_BASH_EDIT_DIFF=0` (or `bashEditDiffEnabled: false` in its
-  settings) cut the git commands it runs.
+- **Claude Code's git scans** (measured with Claude Code 2.1.322 and a git
+  wrapper logging every call):
+  - After every Bash command it runs `git --no-optional-locks status
+    --porcelain --untracked-files=normal --ignore-submodules=dirty`, with
+    fsmonitor and hooks off, killed after about 2 s
+    ([anthropics/claude-code#97752](https://github.com/anthropics/claude-code/issues/97752)):
+    about 9 per 8-command session, seconds each on a 1.4M-file tree. No
+    Claude Code setting controls it (`CLAUDE_CODE_BASH_EDIT_DIFF=0`
+    doesn't). It has no `--ignored`, so git's untracked cache can serve it:
+    run `git config core.untrackedCache true` once in the repository (the
+    config is shared by all its workspaces). The cache itself lives in each
+    workspace's index, so run a plain `git status` once in each workspace to
+    fill it (the scan, with `--no-optional-locks`, never writes it). On a
+    spark workspace (27.6k files) it went from 41 ms to 19 ms, listing no
+    directory. Its results matched uncached runs across additions and
+    removals, `.gitignore` edits, commits, `stash -u`, `clean` and invisible
+    rebases, and unchanged directories (dated 2020-01-01) are trusted at
+    once, unlike those of a fresh checkout.
+  - A `--ignored=matching` variant, which git doesn't serve from the
+    untracked cache (each run lists the whole workspace), comes only from its
+    "bash edit diff" feature (`CLAUDE_CODE_BASH_EDIT_DIFF`, or
+    `bashEditDiffEnabled` in its settings), which a server-side flag can keep
+    off by default (it was in these runs). `CLAUDE_CODE_BASH_EDIT_DIFF=0`
+    keeps it off.
+  - `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING` changes none of these scans.
+  - For read-only sessions, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` also cuts
+    the git commands it runs.
 - Orchestrators tearing down agent workspaces can use `gitfold remove`'s exit
   codes, `--check` and `--wait SECS` (see [Cleaning up](#cleaning-up)), and
   `gitfold version <MOUNTPOINT>` to find mounts still running an old build

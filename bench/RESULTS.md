@@ -5,8 +5,8 @@ checkout are in page cache in all runs. "cold" = fresh mount (kernel FUSE
 caches empty), "warm" = repeated run on the same mount. `bench/bench.sh`.
 
 Commands are what a coding agent runs: Claude Code's `grep` (embedded ugrep,
-`-G --ignore-files --hidden -I`), `rg`, `find`, and the exact `git status`
-invocation Claude Code issues itself (fsmonitor disabled).
+`-G --ignore-files --hidden -I`), `rg`, `find`, and the `--ignored=matching`
+`git status` Claude Code runs with its bash edit diff on (fsmonitor disabled).
 
 ## 2026-10-25, read-only prototype (no-open, readdirplus, prebuilt node table)
 
@@ -564,7 +564,7 @@ snapshot 63 MB after find, 64 MB after git status, 73 MB after Claude grep,
 216 MB right after rg (the content cache, trimmed once reads stop);
 workspace 124, 123, 134 and 298 MB.
 
-`git status` (Claude Code's invocation, `--ignored=matching`, so without
+`git status` (Claude Code's bash-edit-diff invocation, `--ignored=matching`, so without
 git's untracked cache) is now as fast as native on the first run and faster
 on the repeat: 1145 / 1131 ms for a snapshot and 1200 / 1171 ms for a
 workspace before the cache tree.
@@ -583,3 +583,21 @@ remote, time until the open fails (the walk, then a fast-failing fetch):
 | 41    | 19,342 / 19,204 ms    | 1,284 / 1,268 ms        |
 
 Every fetch adds a pack, so the old cost grew with use.
+
+## 2026-11-12, Claude Code's per-command scan with git's untracked cache
+
+After every Bash command Claude Code runs `git --no-optional-locks status
+--porcelain --untracked-files=normal --ignore-submodules=dirty` (fsmonitor
+and hooks off); it has no `--ignored`, so the untracked cache can serve it.
+On a spark workspace (27.6k files, 3,558 directories), warm, 10 runs each:
+
+| core.untrackedCache                   | per scan | directories listed (`opendir`) |
+|---------------------------------------|---------:|-------------------------------:|
+| false                                 |    41 ms |                          3,558 |
+| true (filled by a plain `git status`) |    19 ms |                              0 |
+
+The scan never writes the cache (`--no-optional-locks`). With
+`--ignored=matching` git bypasses the cache and lists every directory.
+Results matched uncached runs after additions and removals in lower and
+upper directories, `.gitignore` edits, commits, `stash -u`, `clean` and an
+invisible rebase.
