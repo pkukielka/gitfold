@@ -483,6 +483,11 @@ cat "$MNT/pw2/d/f1" >/dev/null
 for _ in $(seq 200); do grep -q "prewarm done for $MNT/pw2" "$T/pw3.log" && break; sleep 0.05; done
 check "a walker killed from outside doesn't stop later walks" grep -q "prewarm done for $MNT/pw2" "$T/pw3.log"
 check "unmount" "$BIN" unmount "$MNT"
+G "$PW" config branch.pw1.gitfoldPrewarm content
+"$BIN" mount --prewarm none --log "$T/pw4.log" "$PW" "$MNT" >/dev/null 2>&1
+cat "$MNT/pw1/d/f1" >/dev/null; sleep 0.5
+check "--prewarm none for the mount wins over a branch's mode" sh -c "! grep -q 'prewarm of' '$T/pw4.log'"
+check "unmount" "$BIN" unmount "$MNT"
 for b in pw1 pw2 pw3 pw4; do "$BIN" remove "$PW" "$b" >/dev/null; done
 G "$PW" branch -q -D pw4
 check "the opt-out goes with the branch" fails G "$PW" config --get branch.pw4.gitfoldPrewarm

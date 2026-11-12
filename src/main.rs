@@ -70,7 +70,8 @@ enum Command {
         #[arg(long)]
         from: Option<String>,
         /// Prewarm mode for this workspace, kept across remounts (in git
-        /// config, branch.<name>.gitfoldPrewarm).
+        /// config, branch.<name>.gitfoldPrewarm); a mount's `--prewarm none`
+        /// still wins.
         #[arg(long, value_enum)]
         prewarm: Option<prewarm::Prewarm>,
     },

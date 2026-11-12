@@ -163,12 +163,12 @@ Options:
 | `--threads N` | number of CPUs | FUSE worker threads. |
 | `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |
 
-A workspace can have its own prewarm mode, kept across remounts in the
-branch's git config: `gitfold branch <REPO> <NAME> --prewarm none`, or
-`git config branch.<NAME>.gitfoldPrewarm none` for an existing branch (read
-when the workspace opens). `none` suits workspaces an agent only reads a few
-files in: a walk of a 1.4M-file tree costs about 1.26M FUSE requests and 100
-CPU-seconds of the daemon.
+A workspace can have its own prewarm mode, kept across remounts in the branch's
+git config: `gitfold branch <REPO> <NAME> --prewarm none`, or `git config
+branch.<NAME>.gitfoldPrewarm none` for an existing branch (read when the
+workspace opens; `--prewarm none` for the whole mount still wins). `none` suits
+workspaces an agent only reads a few files in: a walk of a 1.4M-file tree costs
+about 1.26M FUSE requests and 100 CPU-seconds of the daemon.
 
 ### Snapshots
 

@@ -807,8 +807,9 @@ fails, `gitfold unmount` lets them start again; a walker killed from outside
 with SIGTERM (what `gitfold unmount` sends, for daemons without the request)
 only drops the queue. A workspace's own mode, if set
 (`branch.<name>.gitfoldPrewarm`, git config, so it stays with the branch),
-overrides `--prewarm`. `meta` (default) lists every directory and stats it
-afterwards (see the read-write mount note under
+overrides `--prewarm`, except `--prewarm none`, which turns prewarm off for the
+whole mount. `meta` (default) lists every directory and stats it afterwards
+(see the read-write mount note under
 [caching](#kernel-caching-does-the-heavy-lifting)); `content` also reads and
 stats every file.
 
