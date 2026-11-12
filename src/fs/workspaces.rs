@@ -25,12 +25,12 @@ use parking_lot::{Mutex, RwLock};
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
 use super::workspace::Workspace;
+use crate::daemon::prewarm::{self, Prewarm};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
 use crate::git::worktree::{self, workspace_id};
 use crate::inode;
-use crate::prewarm::{self, Prewarm};
 use crate::refusal::Refusal;
 use crate::store::Store;
 

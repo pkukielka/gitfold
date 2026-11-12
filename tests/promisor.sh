@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test of partial clones (`--filter=blob:none`): gitfold fetches
-# what a tree load finds missing from the promisor remote (src/promisor.rs).
+# what a tree load finds missing from the promisor remote (src/git/promisor.rs).
 # All local: a bare file:// remote that allows filters and raw-SHA wants.
 # usage: tests/promisor.sh
 # Creates /tmp/gf-pc-test; removes it at the end unless KEEP=1.

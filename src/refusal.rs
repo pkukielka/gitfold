@@ -1,5 +1,5 @@
 //! Why `gitfold remove` refused, as a typed error: each kind has its own exit
-//! code, and survives the control socket (see `control`).
+//! code, and survives the control socket (see `daemon::control`).
 
 /// Why `remove` refused. Each has its own exit code, so scripts can tell them
 /// apart (1 is any other error, 2 a usage error).

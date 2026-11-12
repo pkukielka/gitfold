@@ -126,17 +126,22 @@ Then, per request (`fs/workspace/`):
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
+| `src/refusal.rs` | why `remove` refused (typed, with its own exit code), carried over the control socket |
 | `src/main.rs` | CLI (clap), mount options, `M_MMAP_THRESHOLD` |
-| `src/worktree.rs` | worktree registrations (snapshots, workspaces), streaming index v4 writer (with cache tree), base pin refs, git idle check, daemon lock, workspace ids |
-| `src/git.rs` | thread-local gitoxide handles, tree, blob and ref access |
-| `src/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remote |
-| `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
-| `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
-| `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
-| `src/daemon.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
-| `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access |
+| `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
+| `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check, workspace ids |
+| `src/git/lock.rs` | the repository lock, held by a mounted daemon and by `remove`/`prune` |
+| `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remote |
+| `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |
+| `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
+| `src/daemon/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
+| `src/cli/manage.rs` | `branch`, `list`, `remove` and `prune` commands |
+| `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
-| `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
+| `src/fs/workspace/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
+| `src/bench/` | hidden `bench-read` and `bench-attrs` commands |
 | `build.rs` | the build's version (crate version and a hash of its sources; the git commit for `--version`), for `gitfold version` |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
@@ -1046,7 +1051,7 @@ checkout" and "Running it"); this is the why and what it would take.
   branch).
 - **While mounted, the daemon removes workspaces and snapshots** (`gitfold
   remove`): it holds their state in memory. The command asks it over a Unix
-  socket at `.git/gitfold/.control` (`control.rs`), which the repository's
+  socket at `.git/gitfold/.control` (`src/daemon/control.rs`), which the repository's
   permissions guard (an abstract socket name could be taken by any local user);
   it is reached as `/proc/self/fd/<dir>/.control`, since socket paths are
   limited to 107 bytes, and the daemon answers only its own user. A refusal's
@@ -1100,7 +1105,7 @@ checkout" and "Running it"); this is the why and what it would take.
 - **Errors reach callers only as errno:** a rev that does not resolve is
   `ENOENT` (the daemon log says why), a missing branch `ENOENT` (not logged), a
   branch checked out elsewhere `EBUSY` (logged). Signals unmount cleanly
-  (`mountpoint.rs`), but `kill -9` still leaves a stale mount for
+  (`src/daemon/mod.rs`), but `kill -9` still leaves a stale mount for
   `fusermount3 -u`.
 
 ## Future work

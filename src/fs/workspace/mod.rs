@@ -26,6 +26,7 @@
 mod markers;
 mod nodes;
 mod rebase;
+pub mod retire;
 pub mod status;
 mod times;
 mod write;

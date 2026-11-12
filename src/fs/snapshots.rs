@@ -14,12 +14,12 @@ use gix::ObjectId;
 use log::{error, info, warn};
 use parking_lot::{Mutex, RwLock};
 
+use crate::daemon::prewarm::{self, Prewarm};
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
 use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
-use crate::prewarm::{self, Prewarm};
 use crate::refusal::Refusal;
 use crate::store::{DirRec, Store};
 
