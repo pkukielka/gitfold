@@ -293,11 +293,15 @@ appears, so the first `ls` of a new snapshot can take as long as that download.
 So do a workspace's base following a branch that moved, and the checks of
 `gitfold remove` and `list`.
 
+- The remote must let clients fetch objects by id, as git's own lazy fetch
+  needs: hosting services do; a plain `git daemon` or ssh remote needs
+  `uploadpack.allowAnySHA1InWant` (or `allowReachableSHA1InWant`) and
+  `uploadpack.allowFilter`. Otherwise the fetch fails with `not our ref`.
 - The whole commit is fetched, as a checkout would: gitfold needs every file's
   size to show it.
 - The remote is the one git would pick: the first in config file order with
-  `promisor = true` or a `partialclonefilter`, else
-  `extensions.partialClone`'s.
+  `promisor = true` or a `partialclonefilter`, the one
+  `extensions.partialClone` names last.
 - The daemon has no terminal to ask for credentials: use an ssh agent or a
   credential helper (`gitfold list` and `remove` run from a terminal let ssh
   ask). A fetch that fails (unreachable remote, refused) fails the open with

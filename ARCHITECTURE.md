@@ -931,10 +931,15 @@ as did `remove` of it; 13% of the head tree's blobs were missing, and a plain
 - **The fetch's process group:** the daemon (no terminal) runs it in its own
   group, so a stall stops ssh and index-pack with it; from a terminal (`gitfold
   list`, `remove`) it stays in the foreground group, so ssh can ask for a
-  passphrase. `--no-auto-maintenance`: a `gc --auto` repack would otherwise run
-  inside the stall window, silently, and be killed. A fetch whose stderr a
-  helper keeps open is still seen to end.
-
+  passphrase; without one, nothing may ask either (`GIT_ASKPASS=true`,
+  `SSH_ASKPASS_REQUIRE=never`: a desktop's ssh-askpass would block it until the
+  stall limit). `--no-auto-maintenance`: a `gc --auto` repack would otherwise
+  run inside the stall window, silently, and be killed. A fetch whose stderr a
+  helper keeps open is still seen to end. At unmount bases move to their tip
+  only if it is here: a hanging remote must not hold up the unmount (the next
+  mount, or `remove`, catches up). An empty list is never fetched: `git fetch`
+  would fall back to the remote's refspecs, everything (the fork's notes: 27M
+  objects, 47 GB).
 **Rejected:** fetching per object as reads need it (one fetch per file; the
 fork's notes: the store needs every blob's size anyway); a global fetch lock (a
 slow fetch stalled every open, reads included); a total time limit (above).

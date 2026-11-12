@@ -115,9 +115,16 @@ impl Workspaces {
         let list = self.list.read();
         for (path, entry) in list.iter() {
             if let Entry::Workspace(ws) = entry
-                && let Err(e) = ws.sync(store)
+                && let Err(e) = ws.sync_at_unmount(store)
             {
-                warn!("workspace {path}: moving the base to the branch tip at unmount: {e:#}");
+                match e.chain().any(|c| c.is::<git::Missing>()) {
+                    true => {
+                        info!("workspace {path}: base left behind the branch tip at unmount: {e:#}")
+                    }
+                    false => warn!(
+                        "workspace {path}: moving the base to the branch tip at unmount: {e:#}"
+                    ),
+                }
             }
         }
     }

@@ -42,7 +42,9 @@ mountpoint -q "$MNT" 2>/dev/null && "$BIN" unmount "$MNT" >/dev/null
 rm -rf "$T"; mkdir -p "$MNT" "$HOME" "$XDG_CONFIG_HOME"
 git init -q "$T/seed"
 (cd "$T/seed" && mkdir -p a/b c && for i in $(seq 40); do
-    echo "f$i" >a/f$i; echo "g$i" >a/b/g$i; echo "h$i" >c/h$i; done)
+    echo "f$i" >a/f$i; echo "g$i" >a/b/g$i; echo "h$i" >c/h$i; done
+    # One blob at 4 paths, 3 of them in one repeated subtree.
+    for d in d1 d2 d3; do mkdir $d; echo same >$d/same; done; echo same >same)
 S add -A; S commit -qm one
 # Every blob unique to its commit, so each commit has its own to fetch.
 for n in two three four five; do echo "f1 $n" >"$T/seed/a/f1"; echo "c $n" >"$T/seed/c/$n"; S add -A; S commit -qm "$n"; done
@@ -53,7 +55,7 @@ REPO=$T/repo; clone "$REPO"
 C branch -q ws1 HEAD~1; C branch -q ws2 HEAD~4
 
 echo "== opens fetch once"
-eq "a blob:none clone misses the blobs" 120 "$(missing HEAD~4)"
+eq "a blob:none clone misses the blobs" 121 "$(missing HEAD~4)"
 remount
 eq "a snapshot opens" f1 "$(cat "$MNT/@HEAD~4/a/f1")"
 eq "with one fetch" 1 "$(fetches)"
@@ -128,6 +130,20 @@ GIT_NO_LAZY_FETCH=1 C rev-list --objects --missing=print "u1^{tree}" | sed -n 's
 eq "fetched by hand, the workspace opens within the backoff" "f1 five" "$(cat "$MNT/u1/a/f1" 2>&1)"
 eq "without gitfold fetching" 1 "$(fetches)"
 
+echo "== an unmount doesn't wait for a hanging remote"
+REPO=$T/hang; clone "$REPO"; C branch -q h1 HEAD~2
+remount
+cat "$MNT/h1/a/f1" >/dev/null
+hook 'sleep 8.37'
+C update-ref refs/heads/h1 HEAD   # never fetched: the sync thread fetches, and hangs
+sleep 1.5
+s=$(date +%s%N)
+cd /; "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
+eq "the unmount doesn't fetch" yes "$([ $(( ($(date +%s%N) - s) / 1000000 )) -lt 5000 ] && echo yes)"
+check "and says why the base stayed" grep -q "base left behind the branch tip at unmount" "$LOG"
+no_hook
+for _ in $(seq 100); do ps -eo args= | awk '$1 == "sleep" && $2 == "8.37"' | grep -q . || break; sleep 0.1; done
+
 echo "== tree:0 clones"
 REPO=$T/tree0; rm -rf "$REPO"
 git clone -q --no-checkout --filter=tree:0 "file://$T/remote.git" "$REPO"
@@ -190,6 +206,8 @@ remount
 check "no promisor remote: the open fails" fails cat "$MNT/@HEAD/c/five"
 check "without fetching" sh -c "! grep -q 'fetch' '$LOG'"
 eq "the missing objects reported once" 1 "$(grep -c "objects are missing" "$LOG")"
+DISTINCT=$(C ls-tree -r HEAD | awk '$2 == "blob" { print $3 }' | sort -u | wc -l)
+eq "each missing object once (a repeated subtree walked once)" "$DISTINCT" "$(grep -o "[0-9]* objects are missing" "$LOG" | cut -d" " -f1)"
 
 cd /; "$BIN" unmount "$MNT" >/dev/null; wait "$PID" 2>/dev/null
 

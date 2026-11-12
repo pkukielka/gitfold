@@ -213,6 +213,11 @@ pub fn remote() -> Option<String> {
 
 /// Fetches objects `ids` from the promisor remote.
 fn fetch(ids: &[ObjectId]) -> Result<()> {
+    // With nothing on stdin, git would fetch the remote's refspecs instead:
+    // everything (a full-history download).
+    if ids.is_empty() {
+        bail!("nothing to fetch");
+    }
     let remote = remote().ok_or_else(|| anyhow!("no promisor remote to fetch from"))?;
     let started = Instant::now();
     let git_dir = git::with_repo(|repo| repo.common_dir().to_path_buf());
@@ -262,7 +267,12 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
     // the foreground group, where ssh can ask for a passphrase.
     let group = std::fs::File::open("/dev/tty").is_err();
     if group {
-        command.process_group(0);
+        // Nor any program to ask, like a desktop's ssh-askpass, which would
+        // block it until the stall limit.
+        command
+            .process_group(0)
+            .env("GIT_ASKPASS", "true")
+            .env("SSH_ASKPASS_REQUIRE", "never");
     }
     let mut child = command.spawn()?;
     let pid = child.id() as libc::pid_t;
