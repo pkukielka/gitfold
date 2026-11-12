@@ -103,6 +103,9 @@ gitfold writes into the repository: worktree registrations under
   mode gitfold depends on.
 - git with linked worktree and index v4 support (any git from the last decade;
   tested with 2.49).
+- A full clone, or a partial clone (`git clone --filter=blob:none`, or
+  `tree:0`) whose promisor remote gitfold can fetch from without a prompt (an
+  ssh agent, a credential helper); see [Partial clones](#partial-clones).
 - To build: Rust 1.88 or newer (edition 2024; developed with 1.99), or Nix on
   x86_64-linux (`flake.nix` provides a dev shell with the toolchain). Without
   installing, the binary is `target/release/gitfold` after
@@ -278,6 +281,29 @@ Don't modify `.git/gitfold/` while mounted.
   [Performance](#performance)).
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
+
+### Partial clones
+
+In a partial clone the object database lacks blobs (`blob:none`) or trees
+(`tree:0`), which git fetches on demand. gitfold does the same: opening a
+snapshot or workspace fetches what its commit misses from the promisor remote,
+in one `git fetch` (the one git's own lazy fetch runs), before the directory
+appears, so the first `ls` of a new snapshot can take as long as that download.
+So do a workspace's base following a branch that moved, and the checks of
+`gitfold remove` and `list`.
+
+- The whole commit is fetched, as a checkout would: gitfold needs every file's
+  size to show it.
+- The remote is the one git would pick: the first in config file order with
+  `promisor = true` or a `partialclonefilter`, else
+  `extensions.partialClone`'s.
+- No terminal is asked for credentials: use an ssh agent or a credential
+  helper. A fetch that fails (unreachable remote, refused) fails the open with
+  `EIO` and is logged once; the same commit is refused for 30 s, unless its
+  objects arrive meanwhile (`git fetch` by hand).
+- A fetch that prints nothing (no progress) for 120 s is stopped, with its ssh
+  and index-pack; one making progress may take as long as it needs.
+  `GITFOLD_FETCH_STALL_SECS` changes the limit.
 
 ## Running it
 
@@ -492,8 +518,9 @@ is 715 MB in 1,677 files:
 Benchmark scripts are in `bench/`: `bench.sh` compares native and mounted runs of
 the commands an agent issues, `probe.sh` isolates content reads, `writes.sh`
 measures write workloads. Tests: `tests/workspace.sh <repo>` (workspaces, on a
-scratch clone), `tests/rebase.sh` (git operations moving the branch) and
-`tests/cli.sh` (`branch`, `list`, `remove`, `prune`). Build with `--release`
+scratch clone), `tests/rebase.sh` (git operations moving the branch),
+`tests/cli.sh` (`branch`, `list`, `remove`, `prune`) and `tests/promisor.sh`
+(partial clones). Build with `--release`
 first; the tests use scratch directories under `/tmp` (kept with `KEEP=1`);
 `bench.sh` must run inside Claude Code (it uses Claude Code's grep and needs
 `CLAUDE_CODE_EXECPATH`).
