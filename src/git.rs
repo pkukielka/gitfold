@@ -76,6 +76,34 @@ pub fn resolve(spec: &str) -> Result<Commit> {
     })
 }
 
+/// Objects a tree load needed that the object database doesn't have (a
+/// partial clone: see `promisor`).
+#[derive(Debug)]
+pub struct Missing(pub Vec<ObjectId>);
+
+impl std::fmt::Display for Missing {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match &self.0[..] {
+            [one] => write!(f, "object {one} is missing"),
+            many => write!(f, "{} objects are missing (first: {})", many.len(), many[0]),
+        }
+    }
+}
+
+impl std::error::Error for Missing {}
+
+/// The missing objects `e` reports, if that is what it is.
+pub fn missing(e: &anyhow::Error) -> Option<&Missing> {
+    e.chain().find_map(|c| c.downcast_ref::<Missing>())
+}
+
+/// Whether `oid` is absent from the object database. gitoxide reports a lookup
+/// that failed for another reason (a pack it couldn't read) as absent too, so
+/// this means "maybe fetchable", not "certainly not there".
+pub fn is_missing(oid: ObjectId) -> bool {
+    with_repo(|repo| !repo.has_object(oid))
+}
+
 pub struct Entry {
     pub name: Vec<u8>,
     pub kind: EntryKind,

@@ -138,6 +138,14 @@ struct Trees {
     ids: gix::hashtable::HashMap<ObjectId, u32>,
 }
 
+/// What one `load_tree` found missing.
+#[derive(Default)]
+struct Gaps {
+    objects: parking_lot::Mutex<std::collections::HashSet<ObjectId>>,
+    /// Trees that aren't complete (missing, or with something missing below).
+    trees: parking_lot::Mutex<std::collections::HashSet<ObjectId>>,
+}
+
 #[derive(Default)]
 struct Files {
     recs: Vec<FileRec>,
@@ -209,12 +217,39 @@ impl Store {
     }
 
     /// Returns the id of a tree, decoding it (and, in parallel, any subtrees not
-    /// seen before) on first use.
+    /// seen before) on first use. If objects are missing (a partial clone),
+    /// fails with `git::Missing` listing all of them, so one fetch can bring
+    /// them; a tree that isn't complete is never stored.
     pub fn load_tree(&self, oid: ObjectId) -> Result<u32> {
-        if let Some(&id) = self.trees.read().ids.get(&oid) {
-            return Ok(id);
+        let gaps = Gaps::default();
+        match self.walk_tree(oid, &gaps)? {
+            Some(id) => Ok(id),
+            None => {
+                let missing = gaps.objects.into_inner().into_iter().collect();
+                Err(git::Missing(missing).into())
+            }
         }
-        let mut raw = git::tree_entries(oid)?;
+    }
+
+    /// `load_tree` of `oid`, `None` if it isn't complete: the missing objects
+    /// are then recorded in `gaps`, and the incomplete trees too, so a subtree
+    /// that appears at many paths is walked once.
+    fn walk_tree(&self, oid: ObjectId, gaps: &Gaps) -> Result<Option<u32>> {
+        if let Some(&id) = self.trees.read().ids.get(&oid) {
+            return Ok(Some(id));
+        }
+        if gaps.trees.lock().contains(&oid) {
+            return Ok(None);
+        }
+        let mut raw = match git::tree_entries(oid) {
+            Ok(raw) => raw,
+            Err(_) if git::is_missing(oid) => {
+                gaps.objects.lock().insert(oid);
+                gaps.trees.lock().insert(oid);
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
         let order = |a: &git::Entry, b: &git::Entry| {
             tree_order(
                 &a.name,
@@ -228,13 +263,25 @@ impl Store {
             .all(|w| order(&w[0], &w[1]) == Ordering::Less);
         // Git already stores trees in this order; sorting keeps malformed trees searchable.
         raw.sort_unstable_by(order);
-        let ids: Vec<u32> = raw
+        // Every child is tried, so all that is missing is known at once.
+        let ids: Vec<Option<u32>> = raw
             .par_iter()
             .map(|e| match e.kind {
-                EntryKind::Tree => self.load_tree(e.oid),
-                kind => self.file_id(e.oid, kind),
+                EntryKind::Tree => self.walk_tree(e.oid, gaps),
+                kind => match self.file_id(e.oid, kind) {
+                    Ok(id) => Ok(Some(id)),
+                    Err(_) if git::is_missing(e.oid) => {
+                        gaps.objects.lock().insert(e.oid);
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
+                },
             })
             .collect::<Result<_>>()?;
+        let Some(ids) = ids.into_iter().collect::<Option<Vec<u32>>>() else {
+            gaps.trees.lock().insert(oid);
+            return Ok(None);
+        };
 
         let mut names = Vec::with_capacity(raw.iter().map(|e| e.name.len()).sum());
         let mut entries = Vec::with_capacity(raw.len());
@@ -272,13 +319,13 @@ impl Store {
 
         let mut trees = self.trees.write();
         if let Some(&id) = trees.ids.get(&oid) {
-            return Ok(id); // decoded concurrently by another thread
+            return Ok(Some(id)); // decoded concurrently by another thread
         }
         let id = trees.tables.len() as u32;
         trees.tables.push(Arc::new(table));
         trees.oids.push(oid);
         trees.ids.insert(oid, id);
-        Ok(id)
+        Ok(Some(id))
     }
 
     fn file_id(&self, oid: ObjectId, kind: EntryKind) -> Result<u32> {
