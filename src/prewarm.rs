@@ -41,22 +41,20 @@ struct Stats {
 pub const BRANCH_KEY: &str = "gitfoldPrewarm";
 
 /// The prewarm mode set for the workspace of `branch` (`git config
-/// branch.<branch>.gitfoldPrewarm none|meta|content`), if any. Read when it
-/// opens, so a change counts from the next open.
+/// branch.<branch>.gitfoldPrewarm none|meta|content`), if any, in the
+/// repository's config file (not included ones). Read when it opens, so a
+/// change counts from the next open.
 pub fn for_branch(common_dir: &Path, branch: &str) -> Option<Prewarm> {
-    let key = format!("branch.{branch}.{BRANCH_KEY}");
-    let out = Command::new("git")
-        .arg("--git-dir")
-        .arg(common_dir)
-        .args(["config", "--get", &key])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&out.stdout);
+    // The repository's own config file, read now (the daemon's repository
+    // handle has the config from mount time); where `git config` writes it.
+    let path = common_dir.join("config");
+    let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok()?;
+    let value = config.string_by("branch", Some(branch.as_bytes().into()), BRANCH_KEY)?;
+    let value = value.to_string();
     Prewarm::from_str(value.trim(), true)
-        .inspect_err(|_| warn!("{key}: {:?} is not none, meta or content", value.trim()))
+        .inspect_err(|_| {
+            warn!("branch.{branch}.{BRANCH_KEY}: {value:?} is not none, meta or content")
+        })
         .ok()
 }
 
