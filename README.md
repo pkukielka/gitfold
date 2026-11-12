@@ -335,9 +335,8 @@ Don't modify `.git/gitfold/` while mounted.
 - Claude Code (reported): it runs `git status` with `--ignored=matching`, which
   git doesn't serve from its untracked cache, so each such run lists the whole
   workspace. For read-only sessions, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`
-  keeps git status out of its prompts, and
-  `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING=1` turns off the file snapshots its
-  rewind restores from, which a session that changes nothing doesn't need.
+  and `CLAUDE_CODE_BASH_EDIT_DIFF=0` (or `bashEditDiffEnabled: false` in its
+  settings) cut the git commands it runs.
 - Orchestrators tearing down agent workspaces can use `gitfold remove`'s exit
   codes, `--check` and `--wait SECS` (see [Cleaning up](#cleaning-up)), and
   `gitfold version <MOUNTPOINT>` to find mounts still running an old build
