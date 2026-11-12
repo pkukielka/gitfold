@@ -299,8 +299,11 @@ pub fn git_busy(common_dir: &Path, admin: &Path, branch: &str) -> Option<String>
     }
     let ref_lock = format!("refs/heads/{branch}.lock");
     (exists(common_dir.join(ref_lock)) || exists(common_dir.join("packed-refs.lock")))
-        .then(|| "a ref is locked".to_string())
+        .then(|| REF_LOCKED.to_string())
 }
+
+/// What `git_busy` says while a ref is locked (git updating it).
+pub const REF_LOCKED: &str = "a ref is locked";
 
 /// `<common>/gitfold`: the workspaces' state directories, by id.
 pub fn state_root(common_dir: &Path) -> PathBuf {

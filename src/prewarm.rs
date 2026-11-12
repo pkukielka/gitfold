@@ -173,6 +173,11 @@ fn start_queued(walks: &mut Walks) {
     }
 }
 
+/// The pids of this daemon's running walkers.
+pub fn walker_pids() -> Vec<u32> {
+    WALKS.lock().running.iter().map(|(p, _)| *p).collect()
+}
+
 /// Stops the running walkers, and any later one from starting: they keep the
 /// mount busy, which would make an unmount only detach it.
 pub fn stop_all() {

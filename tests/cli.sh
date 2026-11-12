@@ -484,6 +484,43 @@ timeout 10 "$BIN" unmount "$MNT" >/dev/null 2>&1
 check "unmounts without the daemon's answer" sh -c "! mountpoint -q '$MNT'"
 kill -CONT $PID; wait $PID 2>/dev/null
 
+echo "== remove: exit codes, --check, --wait"
+R branch ec1; R branch ec2
+code() { "$@" >/dev/null 2>&1; echo $?; }
+eq "not found: exit code 3" 3 "$(code "$BIN" remove "$REPO" nope)"
+eq "--check of a missing workspace: 3" 3 "$(code "$BIN" remove "$REPO" nope --check)"
+mount_fs
+cat "$MNT/ec1/a.txt" >/dev/null
+unmount_fs
+eq "--check unmounted: 0" 0 "$(code "$BIN" remove "$REPO" ec1 --check)"
+check "and nothing removed" test -d "$COMMON/gitfold/ec1"
+mount_fs
+cat "$MNT/ec1/a.txt" "$MNT/ec2/a.txt" "$MNT/@main/a.txt" >/dev/null
+echo x >>"$MNT/ec2/a.txt"
+eq "mounted, not found: 3" 3 "$(code "$BIN" remove "$REPO" nope)"
+eq "uncommitted changes: 4" 4 "$(code "$BIN" remove "$REPO" ec2)"
+eq "--check of a workspace with changes: 4" 4 "$(code "$BIN" remove "$REPO" ec2 --check)"
+eq "--check of a removable workspace: 0" 0 "$(code "$BIN" remove "$REPO" ec1 --check)"
+check "--check removes nothing" sh -c "test -d '$COMMON/gitfold/ec1' && ls '$MNT' | grep -qx ec1"
+eq "--check of a snapshot: 0" 0 "$(code "$BIN" remove "$REPO" @main --check)"
+check "and leaves it open" sh -c "ls '$MNT' | grep -qx @main"
+( cd "$MNT/ec1" && exec sleep 60 ) & HOLDER=$!
+for _ in $(seq 100); do [ "$(cat /proc/$HOLDER/comm 2>/dev/null)" = sleep ] && break; sleep 0.02; done
+eq "in use: 5" 5 "$(code "$BIN" remove "$REPO" ec1)"
+eq "--check of a workspace in use: 5" 5 "$(code "$BIN" remove "$REPO" ec1 --check)"
+check "the refusal's kind isn't shown" sh -c "! '$BIN' remove '$REPO' ec1 2>&1 | grep -q refusal:"
+eq "--wait gives up: 5" 5 "$(code "$BIN" remove "$REPO" ec1 --wait 1)"
+( "$BIN" remove "$REPO" ec1 --wait 30 >/dev/null 2>&1; echo $? >"$T/waited" ) & WAITER=$!
+sleep 1
+kill $HOLDER; wait $HOLDER 2>/dev/null
+wait $WAITER
+eq "--wait retries until it is free" 0 "$(cat "$T/waited")"
+check "and it is gone" test ! -e "$COMMON/gitfold/ec1"
+unmount_fs
+eq "unmounted, changes: 4" 4 "$(code "$BIN" remove "$REPO" ec2)"
+check "remove ec2 --force" "$BIN" remove "$REPO" ec2 --force
+R branch -q -D ec1 ec2
+
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"
 exit $((FAILS > 0))

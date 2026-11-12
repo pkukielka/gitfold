@@ -27,6 +27,7 @@ use super::workspace::Workspace;
 use crate::git;
 use crate::inode;
 use crate::prewarm::{self, Prewarm};
+use crate::refusal::Refusal;
 use crate::store::Store;
 use crate::worktree::{self, IndexWriter, StatInfo, workspace_id};
 
@@ -167,6 +168,28 @@ impl Workspaces {
         prewarm::spawn(self.mount_point.join(branch), mode, self.prewarm_threads);
     }
 
+    /// Runs `check` for the workspace of `branch` unless something is open
+    /// under that name (then `None`), while it can't be opened: lookups of it
+    /// answer EBUSY.
+    pub fn check_closed<T>(
+        &self,
+        branch: &str,
+        check: impl FnOnce() -> anyhow::Result<T>,
+    ) -> anyhow::Result<Option<T>> {
+        {
+            let _creating = self.creating.lock();
+            if self.by_path.lock().contains_key(branch) {
+                return Ok(None);
+            }
+            if !self.removing.lock().insert(branch.to_string()) {
+                return Err(Refusal::InUse.error(format!("workspace {branch} is being removed")));
+            }
+        }
+        let result = check();
+        self.removing.lock().remove(branch);
+        result.map(Some)
+    }
+
     /// The open workspace of `branch`.
     pub fn get_open(&self, branch: &str) -> Option<Arc<Workspace>> {
         let slot = *self.by_path.lock().get(branch)?;
@@ -245,10 +268,11 @@ impl Workspaces {
     /// registry if open.
     fn take(&self, branch: &str) -> anyhow::Result<Option<(u32, Arc<Workspace>)>> {
         let _creating = self.creating.lock();
-        anyhow::ensure!(
-            self.removing.lock().insert(branch.to_string()),
-            "workspace {branch} is already being removed"
-        );
+        if !self.removing.lock().insert(branch.to_string()) {
+            return Err(
+                Refusal::InUse.error(format!("workspace {branch} is already being removed"))
+            );
+        }
         let Some(slot) = self.by_path.lock().get(branch).copied() else {
             return Ok(None);
         };
@@ -261,7 +285,9 @@ impl Workspaces {
             other => {
                 *entry = other;
                 self.removing.lock().remove(branch);
-                anyhow::bail!("{branch} is a namespace directory, not a workspace");
+                return Err(Refusal::NotFound.error(format!(
+                    "{branch} is a namespace directory, not a workspace"
+                )));
             }
         };
         self.by_path.lock().remove(branch);
@@ -465,9 +491,8 @@ fn settle(
     while Arc::strong_count(ws) > 2 && started.elapsed() < IN_FLIGHT_WAIT {
         thread::sleep(Duration::from_millis(10));
     }
-    anyhow::ensure!(
-        Arc::strong_count(ws) <= 2,
-        "workspace {branch} is busy; try again"
-    );
+    if Arc::strong_count(ws) > 2 {
+        return Err(Refusal::InUse.error(format!("workspace {branch} is busy; try again")));
+    }
     refuse_if_used()
 }

@@ -343,6 +343,15 @@ unmounted; later mounts reuse them.
   workspace or snapshot (its working directory, an open or mapped file), naming
   it; processes in another container or sandbox (mount namespace) aren't seen,
   but the checks for uncommitted changes still apply.
+- For scripts: `remove` exits with 3 if there is no such workspace or snapshot,
+  4 if it has uncommitted or staged changes, a git operation stopped in it, or
+  changes that can't be told (its base couldn't catch up), 5 if it is in use (a
+  process, a git command updating a ref, an unmount in progress), and 1 on any
+  other error. `--check` only checks: it exits as `remove` would and removes
+  nothing (it may bring the workspace's stored base up to its branch tip, as
+  mounting would). `--wait SECS` retries while it is in use, for up to SECS
+  seconds. While mounted, these need a daemon of this version (remount after
+  upgrading).
 
 The same by hand (bash), for example to remove everything at once: unmount,
 then use the repository's absolute git directory (a relative one would make
