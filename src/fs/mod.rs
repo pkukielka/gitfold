@@ -123,6 +123,11 @@ impl GitFold {
         }
     }
 
+    /// The workspaces, for `gitfold prewarm` (`Workspaces::prewarm_now`).
+    pub fn workspaces(&self) -> Arc<Workspaces> {
+        self.workspaces.clone()
+    }
+
     /// What removes workspaces and snapshots while mounted.
     pub fn removal(&self) -> Removal {
         Removal {

@@ -194,12 +194,12 @@ unmount_fs
 "$BIN" mount --foreground --prewarm content --prewarm-threads 1 "$REPO" "$MNT" >>"$LOG" 2>&1 & KPID=$!
 for _ in $(seq 100); do mountpoint -q "$MNT" && break; sleep 0.05; done
 ls "$MNT/@HEAD" >/dev/null; sleep 0.3                    # a walker is reading
-check "a prewarm walker runs as its own process" pgrep -f "[g]itfold prewarm $MNT/@HEAD"
+check "a prewarm walker runs as its own process" pgrep -f "[g]itfold prewarm-walk $MNT/@HEAD"
 kill -9 $KPID; wait $KPID 2>/dev/null
 timeout 10 stat "$MNT" >/dev/null 2>&1; rc=$?
 eq "the mount fails instead of hanging" yes "$([ $rc -ne 124 ] && echo yes)"
-for _ in $(seq 50); do pgrep -f "[g]itfold prewarm $MNT" >/dev/null || break; sleep 0.1; done
-check "the walker exits" sh -c "! pgrep -f '[g]itfold prewarm $MNT' >/dev/null"
+for _ in $(seq 50); do pgrep -f "[g]itfold prewarm-walk $MNT" >/dev/null || break; sleep 0.1; done
+check "the walker exits" sh -c "! pgrep -f '[g]itfold prewarm-walk $MNT' >/dev/null"
 check "gitfold unmount cleans up the stale mount" "$BIN" unmount "$MNT"
 "$BIN" mount --log "$T/bg.log" --prewarm content --prewarm-threads 1 "$REPO" "$MNT" >/dev/null
 ls "$MNT/@HEAD" >/dev/null; sleep 0.2                    # a slow walk is running

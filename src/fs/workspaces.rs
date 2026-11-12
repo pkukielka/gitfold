@@ -25,7 +25,7 @@ use parking_lot::{Mutex, RwLock};
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
 use super::workspace::Workspace;
-use crate::daemon::prewarm::{self, Prewarm};
+use crate::daemon::prewarm::{self, Prewarm, Spawned};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
@@ -176,6 +176,42 @@ impl Workspaces {
         }
         let mode = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm);
         prewarm::spawn(self.mount_point.join(branch), mode, self.prewarm_threads);
+    }
+
+    /// `gitfold prewarm`: walks the workspace of `branch` in its mode (just set)
+    /// if it is open, from the start (a walk in another mode may be running),
+    /// or stops walking it for `none`. Says what it did.
+    pub fn prewarm_now(&self, branch: &str) -> String {
+        let path = self.mount_point.join(branch);
+        if self.get_open(branch).is_none() {
+            return format!("{branch} isn't open: walked when it opens");
+        }
+        match prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm) {
+            Prewarm::None => match prewarm::stop_under(&path) {
+                true => format!("stopped walking {}", path.display()),
+                false => format!("{} isn't being walked", path.display()),
+            },
+            _ if self.prewarm == Prewarm::None => {
+                "this mount walks nothing (--prewarm none): remount to walk".to_string()
+            }
+            mode => {
+                prewarm::stop_under(&path);
+                let spawned = prewarm::spawn(path.clone(), mode, self.prewarm_threads);
+                let mode = clap::ValueEnum::to_possible_value(&mode).expect("not skipped");
+                let (path, mode) = (path.display(), mode.get_name());
+                match spawned {
+                    Spawned::Now => format!("walking {path} ({mode})"),
+                    Spawned::Queued => format!("{path} queued for a walk ({mode})"),
+                    Spawned::Paused => {
+                        format!(
+                            "walks are stopped for an unmount: {path} is walked ({mode}) if it fails"
+                        )
+                    }
+                    // Started meanwhile, by another request.
+                    Spawned::Known => format!("{path} is being walked"),
+                }
+            }
+        }
     }
 
     /// Runs `check` for the workspace of `branch` unless something is open

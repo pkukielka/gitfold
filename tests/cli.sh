@@ -479,7 +479,7 @@ check "--prewarm-walks 0 refused" fails "$BIN" mount --foreground --prewarm-walk
 cat "$MNT/pw1/d/f1" "$MNT/pw2/d/f1" >/dev/null
 WALKER=
 for _ in $(seq 100); do
-    WALKER=$(ps -eo pid=,args= | awk -v r="$MNT/pw1" '$2 == "gitfold" && $3 == "prewarm" && $4 == r { print $1 }')
+    WALKER=$(ps -eo pid=,args= | awk -v r="$MNT/pw1" '$2 == "gitfold" && $3 == "prewarm-walk" && $4 == r { print $1 }')
     [ -n "$WALKER" ] && break; sleep 0.02
 done
 check "pw1's walker found" test -n "$WALKER"
@@ -495,6 +495,37 @@ G "$PW" config branch.pw1.gitfoldPrewarm content
 "$BIN" mount --prewarm none --log "$T/pw4.log" "$PW" "$MNT" >/dev/null 2>&1
 cat "$MNT/pw1/d/f1" >/dev/null; sleep 0.5
 check "--prewarm none for the mount wins over a branch's mode" sh -c "! grep -q 'prewarm of' '$T/pw4.log'"
+check "unmount" "$BIN" unmount "$MNT"
+echo "== gitfold prewarm: a mode applied to an open workspace"
+"$BIN" mount --log "$T/pw5.log" "$PW" "$MNT" >/dev/null 2>&1
+cat "$MNT/pw4/d/f1" >/dev/null; sleep 0.5
+check "pw4 (none) opened unwalked" sh -c "! grep -q 'prewarm of $MNT/pw4' '$T/pw5.log'"
+eq "prewarm meta: walks it at once" "walking $MNT/pw4 (meta)" "$("$BIN" prewarm "$PW" pw4 meta 2>&1)"
+for _ in $(seq 200); do grep -q "prewarm done for $MNT/pw4" "$T/pw5.log" && break; sleep 0.05; done
+check "walked" grep -q "prewarm done for $MNT/pw4" "$T/pw5.log"
+eq "and kept in git config" meta "$(G "$PW" config --get branch.pw4.gitfoldPrewarm)"
+eq "a workspace not open: walked when it opens" "pw3 isn't open: walked when it opens" "$("$BIN" prewarm "$PW" pw3 meta 2>&1)"
+check "an unknown branch refused" fails "$BIN" prewarm "$PW" nope meta
+check "unmount" "$BIN" unmount "$MNT"
+eq "unmounted: only set" "set; pw4 is walked when opened" "$("$BIN" prewarm "$PW" pw4 none 2>&1)"
+eq "set" none "$(G "$PW" config --get branch.pw4.gitfoldPrewarm)"
+G "$PW" config --unset branch.pw3.gitfoldPrewarm
+
+echo "== an interrupted unmount: prewarm resumes, stopped walks too"
+mkdir -p "$T/fakebin"; printf '#!/bin/sh\nexec sleep 30\n' >"$T/fakebin/fusermount3"; chmod +x "$T/fakebin/fusermount3"
+GITFOLD_PREWARM_RESUME_SECS=2 "$BIN" mount --prewarm content --prewarm-threads 1 --prewarm-walks 1 \
+    --log "$T/pw6.log" "$PW" "$MNT" >/dev/null 2>&1
+cat "$MNT/pw1/d/f1" "$MNT/pw2/d/f1" >/dev/null
+for _ in $(seq 100); do grep -q "prewarm of $MNT/pw1: started" "$T/pw6.log" && break; sleep 0.02; done
+setsid env PATH="$T/fakebin:$PATH" "$BIN" unmount "$MNT" >/dev/null 2>&1 & UM=$!
+for _ in $(seq 100); do grep -q "prewarm stopped for the unmount" "$T/pw6.log" && break; sleep 0.05; done
+check "pw1's walk was running when it stopped" sh -c "! grep -q 'prewarm done for $MNT/pw1' '$T/pw6.log'"
+kill -KILL -- -$UM; wait $UM 2>/dev/null
+check "the unmount killed before unmounting" mountpoint -q "$MNT"
+for _ in $(seq 200); do grep -q "prewarm done for $MNT/pw2" "$T/pw6.log" && break; sleep 0.05; done
+check "prewarm resumed by itself" grep -q "prewarm resumed: still mounted 2 s after an unmount stopped it" "$T/pw6.log"
+check "the stopped walk restarted" grep -q "prewarm done for $MNT/pw1" "$T/pw6.log"
+check "the queued one too" grep -q "prewarm done for $MNT/pw2" "$T/pw6.log"
 check "unmount" "$BIN" unmount "$MNT"
 for b in pw1 pw2 pw3 pw4; do "$BIN" remove "$PW" "$b" >/dev/null; done
 G "$PW" branch -q -D pw4
