@@ -102,11 +102,12 @@ pub fn start(mountpoint: &Path, log: &Path) -> Result<()> {
 }
 
 /// `gitfold version`: this build's version and, for `mountpoint`, its
-/// daemon's. Fails if they differ or the daemon can't tell (an older one).
-pub fn version(mountpoint: Option<&Path>) -> Result<()> {
+/// daemon's. Returns the exit code: 0 the same build, 3 another build
+/// (remount to upgrade), 4 a daemon too old to tell, 5 no answer (busy).
+pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
     println!("gitfold {}", crate::VERSION);
     let Some(mountpoint) = mountpoint else {
-        return Ok(());
+        return Ok(0);
     };
     let mountpoint = mountpoint::canonical(mountpoint)?;
     let shown = mountpoint.display();
@@ -115,23 +116,31 @@ pub fn version(mountpoint: Option<&Path>) -> Result<()> {
     };
     let common_dir = admin::common_dir_of_source(&source);
     let answer = control::request(&common_dir, &control::Request::Version, Some(WAIT));
-    let daemon = match answer {
-        Ok(Some(daemon)) => daemon,
-        Ok(None) => bail!("the daemon of {shown} doesn't answer (starting, exiting, or older)"),
+    let (code, message) = match answer {
+        Ok(Some(daemon)) => {
+            println!("daemon {daemon}");
+            if daemon == crate::VERSION {
+                return Ok(0);
+            }
+            (
+                3,
+                "runs another gitfold build: unmount and mount again to upgrade".to_string(),
+            )
+        }
+        Ok(None) => (5, "doesn't answer (starting or exiting)".to_string()),
         // Requests are answered one at a time: a removal may be running.
-        Err(e) if timed_out(&e) => bail!(
-            "the daemon of {shown} didn't answer within {} s (busy with a removal?)",
-            WAIT.as_secs()
-        ),
-        Err(e) => bail!("the daemon of {shown} can't tell its version: {e:#}"),
+        Err(e) if timed_out(&e) => {
+            let wait = WAIT.as_secs();
+            (
+                5,
+                format!("didn't answer within {wait} s (busy with a removal?)"),
+            )
+        }
+        Err(e) if control::is_older_daemon(&e) => (4, format!("can't tell its version: {e:#}")),
+        Err(e) => return Err(e.context(format!("asking the daemon of {shown}"))),
     };
-    println!("daemon {daemon}");
-    if daemon != crate::VERSION {
-        bail!(
-            "the daemon of {shown} runs another gitfold build: unmount and mount again to upgrade"
-        );
-    }
-    Ok(())
+    eprintln!("the daemon of {shown} {message}");
+    Ok(code)
 }
 
 /// How long `version` and `unmount` wait for the daemon to answer.

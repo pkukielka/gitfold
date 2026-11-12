@@ -59,7 +59,8 @@ enum Command {
     /// exit.
     Unmount { mountpoint: PathBuf },
     /// Print this gitfold's version and, given a mount point, the version its
-    /// daemon runs; exits with 1 if they differ (remount to upgrade).
+    /// daemon runs. Exit codes: 0 the same build, 3 another build (remount to
+    /// upgrade), 4 a daemon too old to tell, 5 no answer (busy), 1 other errors.
     Version { mountpoint: Option<PathBuf> },
     /// Create a branch to open as a workspace (<mountpoint>/<name>).
     Branch {
@@ -224,7 +225,10 @@ fn main() -> Result<()> {
             session.run()?;
         }
         Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
-        Command::Version { mountpoint } => daemon::version(mountpoint.as_deref())?,
+        Command::Version { mountpoint } => match daemon::version(mountpoint.as_deref())? {
+            0 => {}
+            code => std::process::exit(code),
+        },
         Command::Branch {
             repo,
             name,

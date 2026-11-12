@@ -299,10 +299,11 @@ Don't modify `.git/gitfold/` while mounted.
   Ctrl-C (in the foreground), SIGTERM, SIGHUP and `fusermount3 -u <MOUNTPOINT>`
   stop it as well; a second SIGINT or SIGTERM exits immediately.
 - **After upgrading gitfold,** a mount keeps running the build it was started
-  with. `gitfold version <MOUNTPOINT>` prints both builds and exits with 1 if
-  they differ (or the daemon is too old to say); unmount and mount again to
-  upgrade. `gitfold --version` names the build: the version and, built from a
-  git checkout, the commit (with `-dirty.<hash of the changes>` for uncommitted
+  with. `gitfold version <MOUNTPOINT>` prints both builds and exits with 3 if
+  they differ (unmount and mount again to upgrade), 4 if the daemon is too old
+  to say, and 5 if it doesn't answer within 3 s (busy, say with a removal).
+  `gitfold --version` names the build: the version and, built from a git
+  checkout, the commit (with `-dirty.<hash of the changes>` for uncommitted
   ones).
 - Only `kill -9` (or a crash) leaves the mount behind: accesses then fail with
   `Transport endpoint is not connected`, and `gitfold unmount <MOUNTPOINT>`

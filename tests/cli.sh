@@ -535,6 +535,10 @@ eq "the daemon runs the same build" "$("$BIN" --version | sed 's/^gitfold //')" 
 check "version of a mount exits 0" "$BIN" version "$MNT"
 check "version of a non-mount fails" fails "$BIN" version "$T"
 check "the daemon logged its version" grep -q "gitfold .*: mounting" "$LOG"
+kill -STOP $PID
+rc=$("$BIN" version "$MNT" >/dev/null 2>&1; echo $?)
+kill -CONT $PID
+eq "a daemon that doesn't answer: exit code 5 (not a mismatch)" 5 "$rc"
 unmount_fs
 
 echo "== $FAILS failure(s)"

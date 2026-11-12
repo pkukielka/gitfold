@@ -24,6 +24,26 @@ use crate::worktree;
 use anyhow::{Context, Result, bail};
 use log::{debug, warn};
 
+/// The daemon answered that it doesn't know the request.
+#[derive(Debug)]
+pub struct OlderDaemon;
+
+impl std::fmt::Display for OlderDaemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(
+            "the gitfold daemon doesn't know this request: it runs an older gitfold (remount \
+             to upgrade it)",
+        )
+    }
+}
+
+impl std::error::Error for OlderDaemon {}
+
+/// Whether `e` says the daemon runs an older gitfold (see `OlderDaemon`).
+pub fn is_older_daemon(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<OlderDaemon>().is_some())
+}
+
 /// The answer to a request the daemon doesn't know.
 const UNKNOWN: &str = "unknown request";
 
@@ -122,10 +142,7 @@ pub fn request(
             });
             match kind {
                 Some((text, refusal)) => Err(refusal.error(text)),
-                None if message == UNKNOWN => bail!(
-                    "the gitfold daemon doesn't know this request: it runs an older gitfold \
-                     (remount to upgrade it)"
-                ),
+                None if message == UNKNOWN => Err(anyhow::Error::new(OlderDaemon)),
                 None => bail!("{message}"),
             }
         }
