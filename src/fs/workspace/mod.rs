@@ -57,7 +57,7 @@ use times::{Stamp, Times};
 pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
 
 /// The base commit recorded in workspace state directory `state_dir`.
-fn read_base(state_dir: &Path) -> Result<git::Commit> {
+pub(crate) fn read_base(state_dir: &Path) -> Result<git::Commit> {
     let base_file = state_dir.join("base");
     let hex = fs::read_to_string(&base_file)
         .with_context(|| format!("reading {}", base_file.display()))?;

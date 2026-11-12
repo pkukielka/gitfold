@@ -23,10 +23,12 @@ use log::{error, info, warn};
 use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
+use super::snapshots::load_failed;
 use super::workspace::Workspace;
 use crate::git;
 use crate::inode;
 use crate::prewarm::{self, Prewarm};
+use crate::promisor;
 use crate::refusal::Refusal;
 use crate::store::Store;
 use crate::worktree::{self, IndexWriter, StatInfo, workspace_id};
@@ -323,6 +325,9 @@ impl Workspaces {
             return Err(Errno::ENOENT);
         }
         if git::branch_exists(path) {
+            // Cheap refusals first: before loading (and fetching) its trees.
+            self.refuse_open(path)?;
+            self.preload(store, path)?;
             return self.open_workspace(store, path);
         }
         if git::any_ref_under(&[format!("refs/heads/{path}/")]) {
@@ -368,25 +373,49 @@ impl Workspaces {
         })
     }
 
-    fn open_workspace(&self, store: &Arc<Store>, branch: &str) -> Result<u64, Errno> {
-        let _creating = self.creating.lock();
-        if let Some(&slot) = self.by_path.lock().get(branch) {
-            return Ok(inode::ws(slot, 0));
+    /// Loads the trees opening the workspace of `branch` needs (its tip and, if
+    /// it resumes, its stored base), before `open_workspace` takes the creation
+    /// lock: a partial clone fetches what is missing, which can take long.
+    /// Failing here leaves no state behind.
+    fn preload(&self, store: &Store, branch: &str) -> Result<(), Errno> {
+        let state_dir = worktree::state_root(&self.common_dir).join(workspace_id(branch));
+        let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
+        let base = super::workspace::read_base(&state_dir).ok();
+        for commit in tip.iter().chain(&base) {
+            store
+                .load_tree(commit.tree)
+                .map_err(|e| load_failed(&format!("loading workspace {branch}"), e))?;
         }
+        Ok(())
+    }
+
+    /// EBUSY if the workspace of `branch` can't be opened now: it is being
+    /// removed, or the branch is checked out elsewhere (git allows one checkout
+    /// per branch).
+    fn refuse_open(&self, branch: &str) -> Result<(), Errno> {
         if self.removing.lock().contains(branch) {
             return Err(Errno::EBUSY);
         }
-        let id = workspace_id(branch);
-        let admin = worktree::ws_admin_dir(&self.common_dir, &id);
+        let admin = worktree::ws_admin_dir(&self.common_dir, &workspace_id(branch));
         if let Some(other) = self.checked_out_elsewhere(branch, &admin) {
             warn!(
                 "branch {branch} is already checked out in {other}; create another branch from it"
             );
             return Err(Errno::EBUSY);
         }
+        Ok(())
+    }
+
+    fn open_workspace(&self, store: &Arc<Store>, branch: &str) -> Result<u64, Errno> {
+        let _creating = self.creating.lock();
+        if let Some(&slot) = self.by_path.lock().get(branch) {
+            return Ok(inode::ws(slot, 0));
+        }
+        self.refuse_open(branch)?;
+        let id = workspace_id(branch);
+        let admin = worktree::ws_admin_dir(&self.common_dir, &id);
         let fail = |what: &str, e: anyhow::Error| {
-            error!("{what} for workspace {branch}: {e:#}");
-            Errno::EIO
+            load_failed(&format!("{what} for workspace {branch}"), e)
         };
         let state_dir = worktree::state_root(&self.common_dir).join(&id);
         let new_base = if state_dir.join("base").exists() {
@@ -463,6 +492,9 @@ fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
                 }
                 match ws.sync(&store) {
                     Ok(()) => last_error.clear(),
+                    Err(e) if promisor::is_backoff(&e) => {
+                        log::debug!("workspace {branch}: moving the base to the branch tip: {e:#}");
+                    }
                     Err(e) => {
                         let e = format!("{e:#}");
                         if e != last_error {

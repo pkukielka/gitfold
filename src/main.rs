@@ -8,6 +8,7 @@ mod git;
 mod inode;
 mod mountpoint;
 mod prewarm;
+mod promisor;
 mod refusal;
 mod store;
 mod worktree;

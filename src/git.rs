@@ -92,11 +92,6 @@ impl std::fmt::Display for Missing {
 
 impl std::error::Error for Missing {}
 
-/// The missing objects `e` reports, if that is what it is.
-pub fn missing(e: &anyhow::Error) -> Option<&Missing> {
-    e.chain().find_map(|c| c.downcast_ref::<Missing>())
-}
-
 /// Whether `oid` is absent from the object database. gitoxide reports a lookup
 /// that failed for another reason (a pack it couldn't read) as absent too, so
 /// this means "maybe fetchable", not "certainly not there".
@@ -110,26 +105,32 @@ pub struct Entry {
     pub oid: ObjectId,
 }
 
-/// Lists one tree level.
-pub fn tree_entries(tree: ObjectId) -> Result<Vec<Entry>> {
+/// Lists one tree level; `None` if the tree isn't in the object database.
+pub fn tree_entries(tree: ObjectId) -> Result<Option<Vec<Entry>>> {
     with_repo(|repo| {
-        let tree = repo.find_tree(tree)?;
+        let Some(object) = repo.try_find_object(tree)? else {
+            return Ok(None);
+        };
+        let tree = object.try_into_tree()?;
         let decoded = tree.decode()?;
-        Ok(decoded
-            .entries
-            .iter()
-            .map(|e| Entry {
-                name: e.filename.to_vec(),
-                kind: e.mode.kind(),
-                oid: e.oid.to_owned(),
-            })
-            .collect())
+        Ok(Some(
+            decoded
+                .entries
+                .iter()
+                .map(|e| Entry {
+                    name: e.filename.to_vec(),
+                    kind: e.mode.kind(),
+                    oid: e.oid.to_owned(),
+                })
+                .collect(),
+        ))
     })
 }
 
-/// Uncompressed size of an object, without decompressing it.
-pub fn object_size(oid: ObjectId) -> Result<u64> {
-    with_repo(|repo| Ok(repo.find_header(oid)?.size()))
+/// Uncompressed size of an object, without decompressing it; `None` if it
+/// isn't in the object database.
+pub fn object_size(oid: ObjectId) -> Result<Option<u64>> {
+    with_repo(|repo| Ok(repo.try_find_header(oid)?.map(|h| h.size())))
 }
 
 pub static BLOB_NS: AtomicU64 = AtomicU64::new(0);

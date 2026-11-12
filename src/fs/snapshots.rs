@@ -17,6 +17,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::prewarm::{self, Prewarm};
+use crate::promisor;
 use crate::refusal::Refusal;
 use crate::store::{DirRec, Store};
 use crate::worktree::{self, IndexWriter, StatInfo};
@@ -233,6 +234,16 @@ impl Snapshots {
             warn!("cannot resolve @{spec}: {e:#}");
             Errno::ENOENT
         })?;
+        // Before the creation lock: a partial clone fetches what is missing.
+        let (started, before) = (Instant::now(), store.stats());
+        let loaded = Loaded {
+            root: store
+                .load_tree(commit.tree)
+                .map_err(|e| load_failed(&format!("reading tree for {spec}"), e))?,
+            started,
+            before,
+            took: started.elapsed(),
+        };
 
         let _creating = self.creating.lock();
         if let Some(ino) = self.existing(name) {
@@ -250,7 +261,7 @@ impl Snapshots {
                 gitfile: s.gitfile.clone(),
                 dirs: s.dirs.clone(),
             },
-            None => self.create(store, spec, commit, &path)?,
+            None => self.create(store, spec, commit, loaded, &path)?,
         };
         let slot = {
             let mut list = self.list.write();
@@ -271,18 +282,16 @@ impl Snapshots {
         store: &Store,
         spec: &str,
         commit: Commit,
+        loaded: Loaded,
         path: &Path,
     ) -> Result<Snapshot, Errno> {
-        let fail = |what: &str, e: anyhow::Error| {
-            error!("{what} for {spec}: {e:#}");
-            Errno::EIO
-        };
-        let started = Instant::now();
-        let before = store.stats();
-        let root = store
-            .load_tree(commit.tree)
-            .map_err(|e| fail("reading tree", e))?;
-        let t_trees = started.elapsed();
+        let fail = |what: &str, e: anyhow::Error| load_failed(&format!("{what} for {spec}"), e);
+        let Loaded {
+            root,
+            started,
+            before,
+            took: t_trees,
+        } = loaded;
         let dirs = store.dir_table(root);
         let capacity = self.last_index_len.load(Ordering::Relaxed);
         let mut writer = IndexWriter::new(self.stat, capacity + capacity / 8);
@@ -319,4 +328,22 @@ impl Snapshots {
             dirs: dirs.into(),
         })
     }
+}
+
+/// A commit's tree, loaded before the creation lock, and what that took.
+struct Loaded {
+    root: u32,
+    started: Instant,
+    before: crate::store::Stats,
+    took: std::time::Duration,
+}
+
+/// Logs failure `e` of `what` (at debug level for a fetch's backoff refusal:
+/// its failure was logged once) and turns it into EIO.
+pub(super) fn load_failed(what: &str, e: anyhow::Error) -> Errno {
+    match promisor::is_backoff(&e) {
+        true => log::debug!("{what}: {e:#}"),
+        false => error!("{what}: {e:#}"),
+    }
+    Errno::EIO
 }
