@@ -473,6 +473,16 @@ started=$(grep -c ': started' "$T/pw2.log")
 eq "unmount with walks queued unmounts (doesn't detach)" "unmounted $MNT" "$("$BIN" unmount "$MNT" 2>&1 | tail -1)"
 eq "no walk started once it began" "$started" "$(grep -c ': started' "$T/pw2.log")"
 check "--prewarm-walks 0 refused" fails "$BIN" mount --foreground --prewarm-walks 0 "$PW" "$MNT"
+# A walker killed from outside (an older `gitfold unmount`, a user) drops the
+# queue, but later opens are still walked.
+"$BIN" mount --prewarm content --prewarm-threads 1 --log "$T/pw3.log" "$PW" "$MNT" >/dev/null 2>&1
+cat "$MNT/pw1/d/f1" >/dev/null
+WALKER=$(ps -eo pid=,args= | awk -v r="$MNT/pw1" '$2 == "gitfold" && $3 == "prewarm" && $4 == r { print $1 }')
+kill -TERM $WALKER 2>/dev/null
+cat "$MNT/pw2/d/f1" >/dev/null
+for _ in $(seq 200); do grep -q "prewarm done for $MNT/pw2" "$T/pw3.log" && break; sleep 0.05; done
+check "a walker killed from outside doesn't stop later walks" grep -q "prewarm done for $MNT/pw2" "$T/pw3.log"
+check "unmount" "$BIN" unmount "$MNT"
 for b in pw1 pw2 pw3 pw4; do "$BIN" remove "$PW" "$b" >/dev/null; done
 G "$PW" branch -q -D pw4
 check "the opt-out goes with the branch" fails G "$PW" config --get branch.pw4.gitfoldPrewarm

@@ -169,11 +169,17 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     let stop = control::Request::StopPrewarm;
     let _ = control::request(&common_dir, &stop, Some(WAIT));
     crate::prewarm::stop_below(&mountpoint);
-    let detached = !mountpoint::unmount(&mountpoint)?;
+    // If it doesn't go ahead, the mount stays: let the daemon walk again.
+    let resume = |e: anyhow::Error| {
+        let resume = control::Request::ResumePrewarm;
+        let _ = control::request(&common_dir, &resume, Some(WAIT));
+        e
+    };
+    let detached = !mountpoint::unmount(&mountpoint).map_err(resume)?;
     if detached {
         // Read while still mounted, so their paths still resolve.
         let users = mountpoint::users(&mountpoint, &mountpoint);
-        mountpoint::detach(&mountpoint)?;
+        mountpoint::detach(&mountpoint).map_err(resume)?;
         let ours = mountpoint::self_and_ancestors();
         if users.iter().any(|u| ours.contains(&u.pid)) {
             println!(

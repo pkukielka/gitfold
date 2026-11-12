@@ -165,10 +165,12 @@ fn start_queued(walks: &mut Walks) {
             // Killed while still listed: not by `stop_under` or `stop_all`
             // (they unlist first), so by `gitfold unmount` (`stop_below`).
             // Another walk would keep the mount busy, and the unmount would
-            // only detach it.
+            // only detach it: the queued ones are dropped (later opens are
+            // walked as usual, if the mount stays).
             if killed && ours {
-                warn!("a prewarm walker was stopped from outside (an unmount?): no more walks");
-                walks.stopped = true;
+                warn!(
+                    "a prewarm walker was stopped from outside (an unmount?): dropping queued walks"
+                );
                 walks.queued.clear();
             }
             if !walks.stopped {
@@ -193,6 +195,11 @@ pub fn stop_all() {
         std::mem::take(&mut walks.running)
     };
     terminate(pids.iter().map(|(p, _)| *p as libc::pid_t).collect());
+}
+
+/// Lets walks start again after `stop_all` (an unmount that failed).
+pub fn resume() {
+    WALKS.lock().stopped = false;
 }
 
 /// Stops this daemon's walks of `path` or below, running or queued (a

@@ -802,11 +802,13 @@ started ten walks of half the CPUs each. Each walk uses 4 threads by default
 queue (reported: 16 µs per request with up to 4 in flight, 87-214 µs with
 8-16). A walk already running or queued for the same path isn't added; a
 removal drops its queued walk (and restarts it if refused); stopping for an
-unmount drops the whole queue, and so does a walker killed from outside with
-SIGTERM (what `gitfold unmount` sends, for daemons without the request). A
-workspace's own mode, if set (`branch.<name>.gitfoldPrewarm`, git config, so it
-stays with the branch), overrides `--prewarm`. `meta` (default) lists every
-directory and stats it afterwards (see the read-write mount note under
+unmount drops the whole queue and starts no walk until the unmount, or, if it
+fails, `gitfold unmount` lets them start again; a walker killed from outside
+with SIGTERM (what `gitfold unmount` sends, for daemons without the request)
+only drops the queue. A workspace's own mode, if set
+(`branch.<name>.gitfoldPrewarm`, git config, so it stays with the branch),
+overrides `--prewarm`. `meta` (default) lists every directory and stats it
+afterwards (see the read-write mount note under
 [caching](#kernel-caching-does-the-heavy-lifting)); `content` also reads and
 stats every file.
 

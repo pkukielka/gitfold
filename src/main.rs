@@ -216,6 +216,11 @@ fn main() -> Result<()> {
                             .inspect(|done| log::info!("{done}")),
                     },
                     control::Request::Version => Ok(VERSION.to_string()),
+                    control::Request::ResumePrewarm => {
+                        prewarm::resume();
+                        log::info!("prewarm resumed: the unmount didn't go ahead");
+                        Ok("prewarm resumed".into())
+                    }
                     control::Request::StopPrewarm => {
                         prewarm::stop_all();
                         log::info!("prewarm stopped for the unmount");

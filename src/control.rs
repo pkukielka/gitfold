@@ -61,9 +61,11 @@ pub enum Request {
         /// Only check what would be refused.
         check: bool,
     },
-    /// Stop prewarm walks, running and queued, for the rest of the daemon's
-    /// life: an unmount follows.
+    /// Stop prewarm walks, running and queued, and start no more: an unmount
+    /// follows.
     StopPrewarm,
+    /// Start walks again: the unmount after `StopPrewarm` failed.
+    ResumePrewarm,
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
 }
@@ -77,6 +79,7 @@ impl Request {
                 format!("{verb}\n{}\n{name}\n", *force as u8)
             }
             Request::StopPrewarm => "stop-prewarm\n".to_string(),
+            Request::ResumePrewarm => "resume-prewarm\n".to_string(),
             Request::Version => "version\n".to_string(),
         }
         .into_bytes()
@@ -91,6 +94,7 @@ impl Request {
                 check: verb == "check-remove",
             }),
             ["stop-prewarm", ""] => Ok(Request::StopPrewarm),
+            ["resume-prewarm", ""] => Ok(Request::ResumePrewarm),
             ["version", ""] => Ok(Request::Version),
             _ => bail!(UNKNOWN),
         }
