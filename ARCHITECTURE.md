@@ -452,8 +452,8 @@ streamed.
 **Why:** `git status` first `lstat`s every index entry and compares mtime,
 ctime, inode, uid, gid and size with the index. When they match, the file is
 clean without being read. With matching data, `git status` on spark reads 6
-file contents out of 27.6k, and on Chromium it is about 30% slower than native
-(1.13 s vs 0.88 s on repeat runs).
+file contents out of 27.6k, and on Chromium it is as fast as native: 0.71 s vs
+0.86 s on repeat runs, with the cache tree below (1.13 s before it).
 
 Version 4 prefix-compresses paths: each entry stores how many bytes to drop from
 the previous path plus the new suffix. Chromium's index is 38 MB instead of

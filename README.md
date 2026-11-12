@@ -157,7 +157,7 @@ Options:
 
 | option | default | |
 |---|---|---|
-| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.10 s for a workspace). |
+| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.16 s for a workspace). |
 | `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--threads N` | number of CPUs | FUSE worker threads. |
@@ -448,12 +448,12 @@ Code issues itself. Details, methodology and more repositories:
 
 | | native checkout | snapshot | workspace |
 |---|---:|---:|---:|
-| open | `git worktree add`: 17.30 / 17.22 s, 5.5 GiB | 0.84 s (0.10-0.12 s near an open one) | 0.85 s |
-| prewarm (background, 4 threads) | | 0.70 s | 1.10 s |
-| `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.36 / 0.35 s | 0.35 / 0.35 s |
-| `git status` | 0.86 / 0.88 s | 1.15 / 1.13 s | 1.20 / 1.17 s |
-| `rg` | 0.37 / 0.37 s | 2.98 / 0.40 s | 3.36 / 0.41 s |
-| daemon memory | | 59 MB (4 snapshots: 77 MB, 82 MB after grepping) | 125 MB |
+| open | `git worktree add`: 17.30 / 17.22 s, 5.5 GiB | 0.86 s (0.10-0.12 s near an open one) | 0.87 s |
+| prewarm (background) | | 0.70 s | 1.16 s |
+| `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.35 / 0.35 s | 0.35 / 0.35 s |
+| `git status` | 0.87 / 0.86 s | 0.88 / 0.71 s | 0.94 / 0.72 s |
+| `rg` | 0.37 / 0.37 s | 2.87 / 0.41 s | 3.27 / 0.40 s |
+| daemon memory | | 63 MB | 124 MB |
 
 The slow first `rg` is the cost of decompressing and caching every file it
 reads; later reads come from the kernel page cache, which snapshots share for
