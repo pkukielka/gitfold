@@ -11,10 +11,13 @@ pub mod procs;
 
 use std::fs;
 use std::io::ErrorKind;
+use std::io::Read;
+use std::os::fd::FromRawFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::{Context, Result, bail};
 use log::{info, warn};
@@ -63,26 +66,47 @@ pub fn canonical(path: &Path) -> Result<PathBuf> {
 /// so `fuser::mount` returns and the daemon exits normally. A second SIGINT or
 /// SIGTERM exits immediately.
 ///
-/// Must be called before any other thread starts: the signals are blocked here
-/// and handled by `sigwait` on a dedicated thread, and threads inherit the mask.
+/// The handler catches the signals and passes them to a dedicated thread
+/// through a pipe. Blocking them for `sigwait` instead would block them in
+/// every process the daemon starts too (git, and what git starts: ssh,
+/// index-pack, hooks): a blocked mask survives exec, a handler doesn't.
 pub fn unmount_on_signal(mountpoint: PathBuf) {
-    let set = unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::sigaddset(&mut set, libc::SIGTERM);
-        // A terminal closing: in the foreground, stop cleanly rather than die.
-        libc::sigaddset(&mut set, libc::SIGHUP);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        set
-    };
+    let mut fds = [0; 2];
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        warn!(
+            "no clean unmount on signals: {}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+    // Signals faster than handled are dropped, not blocking the handler.
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) };
+    SIGNAL_PIPE.store(fds[1], Ordering::Relaxed);
+    // A terminal closing (SIGHUP): in the foreground, stop cleanly rather than die.
+    for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            // Ignored when started (`nohup`, a shell's background job): left so.
+            libc::sigaction(sig, std::ptr::null(), &mut action);
+            if action.sa_sigaction == libc::SIG_IGN {
+                continue;
+            }
+            action.sa_sigaction = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            // System calls the signal interrupts resume.
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(sig, &action, std::ptr::null_mut());
+        }
+    }
+    let mut signals = unsafe { fs::File::from_raw_fd(fds[0]) };
     std::thread::spawn(move || {
         let mut signalled = false;
         loop {
-            let mut sig = 0;
-            if unsafe { libc::sigwait(&set, &mut sig) } != 0 {
+            let mut byte = [0u8];
+            if signals.read_exact(&mut byte).is_err() {
                 continue;
             }
+            let sig = libc::c_int::from(byte[0]);
             if signalled {
                 // A closing terminal often sends SIGHUP twice; only an explicit
                 // second signal skips the clean exit.
@@ -106,6 +130,24 @@ pub fn unmount_on_signal(mountpoint: PathBuf) {
             }
         }
     });
+}
+
+/// Write end of the pipe `on_signal` reports to (see `unmount_on_signal`).
+static SIGNAL_PIPE: AtomicI32 = AtomicI32::new(-1);
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    let byte = sig as u8;
+    // Async-signal-safe. errno is kept: the interrupted thread may be about to
+    // read it (a full pipe sets it).
+    unsafe {
+        let errno = *libc::__errno_location();
+        libc::write(
+            SIGNAL_PIPE.load(Ordering::Relaxed),
+            (&raw const byte).cast(),
+            1,
+        );
+        *libc::__errno_location() = errno;
+    }
 }
 
 pub enum Unmounted {
