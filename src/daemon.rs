@@ -102,11 +102,12 @@ pub fn start(mountpoint: &Path, log: &Path) -> Result<()> {
 }
 
 /// `gitfold version`: this build's version and, for `mountpoint`, its
-/// daemon's. Fails if they differ or the daemon can't tell (an older one).
-pub fn version(mountpoint: Option<&Path>) -> Result<()> {
+/// daemon's. Returns the exit code: 0 the same build, 3 another build
+/// (remount to upgrade), 4 a daemon too old to tell, 5 no answer (busy).
+pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
     println!("gitfold {}", crate::VERSION);
     let Some(mountpoint) = mountpoint else {
-        return Ok(());
+        return Ok(0);
     };
     let mountpoint = mountpoint::canonical(mountpoint)?;
     let shown = mountpoint.display();
@@ -115,23 +116,45 @@ pub fn version(mountpoint: Option<&Path>) -> Result<()> {
     };
     let common_dir = admin::common_dir_of_source(&source);
     let answer = control::request(&common_dir, &control::Request::Version, Some(WAIT));
-    let daemon = match answer {
-        Ok(Some(daemon)) => daemon,
-        Ok(None) => bail!("the daemon of {shown} doesn't answer (starting, exiting, or older)"),
-        // Requests are answered one at a time: a removal may be running.
-        Err(e) if timed_out(&e) => bail!(
-            "the daemon of {shown} didn't answer within {} s (busy with a removal?)",
-            WAIT.as_secs()
+    let (code, message) = match answer {
+        Ok(Some(daemon)) => {
+            println!("daemon {daemon}");
+            if daemon == crate::VERSION {
+                return Ok(0);
+            }
+            (
+                3,
+                "runs another gitfold build: unmount and mount again to upgrade".to_string(),
+            )
+        }
+        // No socket answering: the daemon gone (killed, crashed) leaves its
+        // mount answering ENOTCONN; else it is starting, exiting or older
+        // than the control socket.
+        Ok(None)
+            if fs::metadata(&mountpoint)
+                .is_err_and(|e| e.raw_os_error() == Some(libc::ENOTCONN)) =>
+        {
+            bail!(
+                "the daemon of {shown} is gone (killed?): `gitfold unmount {shown}`, then mount again"
+            )
+        }
+        Ok(None) => (
+            5,
+            "doesn't answer (starting or exiting, or from before the control socket)".to_string(),
         ),
-        Err(e) => bail!("the daemon of {shown} can't tell its version: {e:#}"),
+        // Requests are answered one at a time: a removal may be running.
+        Err(e) if timed_out(&e) => {
+            let wait = WAIT.as_secs();
+            (
+                5,
+                format!("didn't answer within {wait} s (busy with a removal?)"),
+            )
+        }
+        Err(e) if control::is_older_daemon(&e) => (4, format!("can't tell its version: {e:#}")),
+        Err(e) => return Err(e.context(format!("asking the daemon of {shown}"))),
     };
-    println!("daemon {daemon}");
-    if daemon != crate::VERSION {
-        bail!(
-            "the daemon of {shown} runs another gitfold build: unmount and mount again to upgrade"
-        );
-    }
-    Ok(())
+    eprintln!("the daemon of {shown} {message}");
+    Ok(code)
 }
 
 /// How long `version` and `unmount` wait for the daemon to answer.
@@ -160,11 +183,17 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     let stop = control::Request::StopPrewarm;
     let _ = control::request(&common_dir, &stop, Some(WAIT));
     crate::prewarm::stop_below(&mountpoint);
-    let detached = !mountpoint::unmount(&mountpoint)?;
+    // If it doesn't go ahead, the mount stays: let the daemon walk again.
+    let resume = |e: anyhow::Error| {
+        let resume = control::Request::ResumePrewarm;
+        let _ = control::request(&common_dir, &resume, Some(WAIT));
+        e
+    };
+    let detached = !mountpoint::unmount(&mountpoint).map_err(resume)?;
     if detached {
         // Read while still mounted, so their paths still resolve.
         let users = mountpoint::users(&mountpoint, &mountpoint);
-        mountpoint::detach(&mountpoint)?;
+        mountpoint::detach(&mountpoint).map_err(resume)?;
         let ours = mountpoint::self_and_ancestors();
         if users.iter().any(|u| ours.contains(&u.pid)) {
             println!(

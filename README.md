@@ -157,18 +157,19 @@ Options:
 
 | option | default | |
 |---|---|---|
-| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.64 s for a snapshot, 1.37 s for a workspace). |
-| `--prewarm-threads N` | half the CPUs | Threads used by each prewarm walk. |
+| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.16 s for a workspace). |
+| `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--threads N` | number of CPUs | FUSE worker threads. |
 | `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |
 
-A workspace can have its own prewarm mode, kept across remounts in the
-branch's git config: `gitfold branch <REPO> <NAME> --prewarm none`, or
-`git config branch.<NAME>.gitfoldPrewarm none` for an existing branch (read
-when the workspace opens). `none` suits workspaces an agent only reads a few
-files in: a walk of a 1.4M-file tree costs about 1.26M FUSE requests and 100
-CPU-seconds of the daemon.
+A workspace can have its own prewarm mode, kept across remounts in the branch's
+git config: `gitfold branch <REPO> <NAME> --prewarm none`, or `git config
+branch.<NAME>.gitfoldPrewarm none` for an existing branch (read from the
+repository's own config file, where `git config` writes it, when the workspace
+opens; `--prewarm none` for the whole mount still wins). `none` suits
+workspaces an agent only reads a few files in: a walk of a 1.4M-file tree costs
+about 1.26M FUSE requests and 100 CPU-seconds of the daemon.
 
 ### Snapshots
 
@@ -299,11 +300,12 @@ Don't modify `.git/gitfold/` while mounted.
   Ctrl-C (in the foreground), SIGTERM, SIGHUP and `fusermount3 -u <MOUNTPOINT>`
   stop it as well; a second SIGINT or SIGTERM exits immediately.
 - **After upgrading gitfold,** a mount keeps running the build it was started
-  with. `gitfold version <MOUNTPOINT>` prints both builds and exits with 1 if
-  they differ (or the daemon is too old to say); unmount and mount again to
-  upgrade. `gitfold --version` names the build: the version and, built from a
-  git checkout, the commit (with `-dirty.<hash of the changes>` for uncommitted
-  ones).
+  with. `gitfold version <MOUNTPOINT>` prints both builds and exits with 3 if
+  they differ (unmount and mount again to upgrade), 4 if the daemon is too old
+  to say, and 5 if it doesn't answer within 3 s (busy, say with a removal). A
+  build is named by its version and a hash of its sources (`gitfold --version`
+  adds the git commit, for people): the same sources give the same name however
+  they were committed, so a commit that only changes docs asks for no remount.
 - Only `kill -9` (or a crash) leaves the mount behind: accesses then fail with
   `Transport endpoint is not connected`, and `gitfold unmount <MOUNTPOINT>`
   cleans it up. `gitfold mount` detects such stale mounts, and mount points
@@ -378,11 +380,11 @@ unmounted; later mounts reuse them.
   4 if it has uncommitted or staged changes, a git operation stopped in it, or
   changes that can't be told (its base couldn't catch up), 5 if it is in use (a
   process, a git command updating a ref, an unmount in progress), and 1 on any
-  other error. `--check` only checks: it exits as `remove` would and removes
-  nothing (it may bring the workspace's stored base up to its branch tip, as
-  mounting would). `--wait SECS` retries while it is in use, for up to SECS
-  seconds. While mounted, these need a daemon of this version (remount after
-  upgrading).
+  other error. `--check` only checks: it exits as `remove` would (reporting
+  uncommitted changes even while a process uses it) and removes nothing (it may
+  bring the workspace's stored base up to its branch tip, as mounting would).
+  `--wait SECS` retries while it is in use, for up to SECS seconds. While
+  mounted, these need a daemon of this version (remount after upgrading).
 
 The same by hand (bash), for example to remove everything at once: unmount,
 then use the repository's absolute git directory (a relative one would make
@@ -446,12 +448,12 @@ Code issues itself. Details, methodology and more repositories:
 
 | | native checkout | snapshot | workspace |
 |---|---:|---:|---:|
-| open | `git worktree add`: 17.30 / 17.22 s, 5.5 GiB | 0.84 s (0.10-0.12 s near an open one) | 0.85 s |
-| prewarm (background) | | 0.64 s | 1.37 s |
-| `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.36 / 0.35 s | 0.35 / 0.35 s |
-| `git status` | 0.86 / 0.88 s | 1.15 / 1.13 s | 1.20 / 1.17 s |
-| `rg` | 0.37 / 0.37 s | 2.98 / 0.40 s | 3.36 / 0.41 s |
-| daemon memory | | 59 MB (4 snapshots: 77 MB, 82 MB after grepping) | 125 MB |
+| open | `git worktree add`: 17.30 / 17.22 s, 5.5 GiB | 0.86 s (0.10-0.12 s near an open one) | 0.87 s |
+| prewarm (background) | | 0.70 s | 1.16 s |
+| `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.35 / 0.35 s | 0.35 / 0.35 s |
+| `git status` | 0.87 / 0.86 s | 0.88 / 0.71 s | 0.94 / 0.72 s |
+| `rg` | 0.37 / 0.37 s | 2.87 / 0.41 s | 3.27 / 0.40 s |
+| daemon memory | | 63 MB | 124 MB |
 
 The slow first `rg` is the cost of decompressing and caching every file it
 reads; later reads come from the kernel page cache, which snapshots share for

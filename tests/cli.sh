@@ -473,6 +473,29 @@ started=$(grep -c ': started' "$T/pw2.log")
 eq "unmount with walks queued unmounts (doesn't detach)" "unmounted $MNT" "$("$BIN" unmount "$MNT" 2>&1 | tail -1)"
 eq "no walk started once it began" "$started" "$(grep -c ': started' "$T/pw2.log")"
 check "--prewarm-walks 0 refused" fails "$BIN" mount --foreground --prewarm-walks 0 "$PW" "$MNT"
+# A walker killed from outside (an older `gitfold unmount`, a user) drops the
+# queue, but later opens are still walked.
+"$BIN" mount --prewarm content --prewarm-threads 1 --prewarm-walks 1 --log "$T/pw3.log" "$PW" "$MNT" >/dev/null 2>&1
+cat "$MNT/pw1/d/f1" "$MNT/pw2/d/f1" >/dev/null
+WALKER=
+for _ in $(seq 100); do
+    WALKER=$(ps -eo pid=,args= | awk -v r="$MNT/pw1" '$2 == "gitfold" && $3 == "prewarm" && $4 == r { print $1 }')
+    [ -n "$WALKER" ] && break; sleep 0.02
+done
+check "pw1's walker found" test -n "$WALKER"
+kill -TERM $WALKER 2>/dev/null
+for _ in $(seq 100); do grep -q "stopped from outside" "$T/pw3.log" && break; sleep 0.05; done
+check "its death taken for an outside stop" grep -q "stopped from outside" "$T/pw3.log"
+cat "$MNT/pw3/d/f1" >/dev/null
+for _ in $(seq 200); do grep -q "prewarm done for $MNT/pw3" "$T/pw3.log" && break; sleep 0.05; done
+check "the queued walk dropped" sh -c "! grep -q 'prewarm of $MNT/pw2: started' '$T/pw3.log'"
+check "later opens still walked" grep -q "prewarm done for $MNT/pw3" "$T/pw3.log"
+check "unmount" "$BIN" unmount "$MNT"
+G "$PW" config branch.pw1.gitfoldPrewarm content
+"$BIN" mount --prewarm none --log "$T/pw4.log" "$PW" "$MNT" >/dev/null 2>&1
+cat "$MNT/pw1/d/f1" >/dev/null; sleep 0.5
+check "--prewarm none for the mount wins over a branch's mode" sh -c "! grep -q 'prewarm of' '$T/pw4.log'"
+check "unmount" "$BIN" unmount "$MNT"
 for b in pw1 pw2 pw3 pw4; do "$BIN" remove "$PW" "$b" >/dev/null; done
 G "$PW" branch -q -D pw4
 check "the opt-out goes with the branch" fails G "$PW" config --get branch.pw4.gitfoldPrewarm
@@ -500,6 +523,12 @@ echo x >>"$MNT/ec2/a.txt"
 eq "mounted, not found: 3" 3 "$(code "$BIN" remove "$REPO" nope)"
 eq "uncommitted changes: 4" 4 "$(code "$BIN" remove "$REPO" ec2)"
 eq "--check of a workspace with changes: 4" 4 "$(code "$BIN" remove "$REPO" ec2 --check)"
+( cd "$MNT/ec2" && exec sleep 60 ) & HOLDER=$!
+for _ in $(seq 100); do [ "$(cat /proc/$HOLDER/comm 2>/dev/null)" = sleep ] && break; sleep 0.02; done
+out=$("$BIN" remove "$REPO" ec2 --check 2>&1); rc=$?
+eq "--check of changes in a workspace in use: 4" 4 "$rc"
+eq "and it reports both" yes "$(grep -q uncommitted <<<"$out" && grep -q "in use" <<<"$out" && echo yes)"
+kill $HOLDER; wait $HOLDER 2>/dev/null
 eq "--check of a removable workspace: 0" 0 "$(code "$BIN" remove "$REPO" ec1 --check)"
 check "--check removes nothing" sh -c "test -d '$COMMON/gitfold/ec1' && ls '$MNT' | grep -qx ec1"
 eq "--check of a snapshot: 0" 0 "$(code "$BIN" remove "$REPO" @main --check)"
@@ -525,10 +554,14 @@ echo "== version"
 eq "--version names the build" yes "$("$BIN" --version | grep -qE '^gitfold [0-9]+\.[0-9]+\.[0-9]+' && echo yes)"
 mount_fs
 out=$("$BIN" version "$MNT" 2>&1)
-eq "the daemon runs the same build" "$("$BIN" --version | sed 's/^gitfold //')" "$(sed -n 's/^daemon //p' <<<"$out")"
+eq "the daemon runs the same build" "$(sed -n "s/^gitfold //p" <<<"$out")" "$(sed -n "s/^daemon //p" <<<"$out")"
 check "version of a mount exits 0" "$BIN" version "$MNT"
 check "version of a non-mount fails" fails "$BIN" version "$T"
 check "the daemon logged its version" grep -q "gitfold .*: mounting" "$LOG"
+kill -STOP $PID
+rc=$("$BIN" version "$MNT" >/dev/null 2>&1; echo $?)
+kill -CONT $PID
+eq "a daemon that doesn't answer: exit code 5 (not a mismatch)" 5 "$rc"
 unmount_fs
 
 echo "== $FAILS failure(s)"

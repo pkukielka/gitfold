@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use fuser::{Config, MountOption};
 
 #[derive(Parser)]
-#[command(about = "Git revisions as a filesystem", version = VERSION)]
+#[command(about = "Git revisions as a filesystem", version = LONG_VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -48,7 +48,7 @@ enum Command {
         /// Populate kernel caches in the background after a snapshot or workspace is opened.
         #[arg(long, value_enum, default_value = "meta")]
         prewarm: prewarm::Prewarm,
-        /// Prewarm threads per walk (default: half the CPUs).
+        /// Prewarm threads per walk (default: 4, or half the CPUs if fewer).
         #[arg(long)]
         prewarm_threads: Option<usize>,
         /// Walks running at once; the others wait.
@@ -59,7 +59,8 @@ enum Command {
     /// exit.
     Unmount { mountpoint: PathBuf },
     /// Print this gitfold's version and, given a mount point, the version its
-    /// daemon runs; exits with 1 if they differ (remount to upgrade).
+    /// daemon runs. Exit codes: 0 the same build, 3 another build (remount to
+    /// upgrade), 4 a daemon too old to tell, 5 no answer (busy), 1 other errors.
     Version { mountpoint: Option<PathBuf> },
     /// Create a branch to open as a workspace (<mountpoint>/<name>).
     Branch {
@@ -69,7 +70,8 @@ enum Command {
         #[arg(long)]
         from: Option<String>,
         /// Prewarm mode for this workspace, kept across remounts (in git
-        /// config, branch.<name>.gitfoldPrewarm).
+        /// config, branch.<name>.gitfoldPrewarm); a mount's `--prewarm none`
+        /// still wins.
         #[arg(long, value_enum)]
         prewarm: Option<prewarm::Prewarm>,
     },
@@ -119,9 +121,11 @@ enum Command {
     },
 }
 
-/// This build: the crate version and, if built from a git checkout, the
-/// commit (see `build.rs`).
+/// This build: the crate version and a hash of its sources, as compared with
+/// a mount's daemon (see `build.rs`).
 pub const VERSION: &str = env!("GITFOLD_VERSION");
+/// `VERSION` and the git commit built from, if known, for `--version`.
+const LONG_VERSION: &str = env!("GITFOLD_LONG_VERSION");
 
 fn main() -> Result<()> {
     // Blob buffers are short-lived and often large. glibc raises its mmap threshold
@@ -192,7 +196,8 @@ fn main() -> Result<()> {
                 fs::Options {
                     no_open: !kernel_open,
                     prewarm,
-                    prewarm_threads: prewarm_threads.unwrap_or((cpus / 2).max(1)),
+                    prewarm_threads: prewarm_threads
+                        .unwrap_or(prewarm::THREADS.min(cpus / 2).max(1)),
                 },
                 names.clone(),
             );
@@ -214,6 +219,11 @@ fn main() -> Result<()> {
                             .inspect(|done| log::info!("{done}")),
                     },
                     control::Request::Version => Ok(VERSION.to_string()),
+                    control::Request::ResumePrewarm => {
+                        prewarm::resume();
+                        log::info!("prewarm resumed: the unmount didn't go ahead");
+                        Ok("prewarm resumed".into())
+                    }
                     control::Request::StopPrewarm => {
                         prewarm::stop_all();
                         log::info!("prewarm stopped for the unmount");
@@ -224,7 +234,10 @@ fn main() -> Result<()> {
             session.run()?;
         }
         Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
-        Command::Version { mountpoint } => daemon::version(mountpoint.as_deref())?,
+        Command::Version { mountpoint } => match daemon::version(mountpoint.as_deref())? {
+            0 => {}
+            code => std::process::exit(code),
+        },
         Command::Branch {
             repo,
             name,

@@ -159,9 +159,9 @@ impl Workspaces {
     }
 
     /// Walks the workspace of `branch` (see `prewarm`), in its own mode if set,
-    /// if it is open.
+    /// if it is open. `--prewarm none` for the mount wins over a branch's mode.
     pub fn prewarm(&self, branch: &str) {
-        if self.get_open(branch).is_none() {
+        if self.prewarm == Prewarm::None || self.get_open(branch).is_none() {
             return;
         }
         let mode = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm);

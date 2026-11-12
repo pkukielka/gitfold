@@ -113,8 +113,9 @@ impl Removal {
         let check =
             |ws: Option<&Workspace>| admin::check_workspace(store, common_dir, branch, force, ws);
         if let Some(open) = self.workspaces.get_open(branch) {
-            self.refuse_if_used(&self.mount_point.join(branch), branch)?;
+            // Changes first, as `check` reports them.
             check(Some(&open))?;
+            self.refuse_if_used(&self.mount_point.join(branch), branch)?;
             // `open` dropped here: the wait for requests in flight counts references.
         }
         self.workspaces.remove(branch, refuse_if_used, |ws| {
@@ -157,8 +158,18 @@ impl Removal {
                     Refusal::NotFound
                         .error(format!("{name} is a namespace directory, not a workspace"))
                 })?;
-                self.refuse_if_used(&path, name)?;
-                admin::check_workspace(store, common_dir, name, force, Some(&open))?
+                // Changes first, both reported: a shell sitting in it must not
+                // hide uncommitted work from the check.
+                let changes = admin::check_workspace(store, common_dir, name, force, Some(&open));
+                match (changes, self.refuse_if_used(&path, name)) {
+                    (Ok(ignored), Ok(())) => ignored,
+                    (Err(changes), Err(used))
+                        if Refusal::of(&changes) == Some(Refusal::Changes) =>
+                    {
+                        return Err(Refusal::Changes.error(format!("{changes:#}\n{used:#}")));
+                    }
+                    (Err(e), _) | (Ok(_), Err(e)) => return Err(e),
+                }
             }
         };
         Ok(admin::removable_workspace(name, ignored))

@@ -24,6 +24,26 @@ use crate::worktree;
 use anyhow::{Context, Result, bail};
 use log::{debug, warn};
 
+/// The daemon answered that it doesn't know the request.
+#[derive(Debug)]
+pub struct OlderDaemon;
+
+impl std::fmt::Display for OlderDaemon {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(
+            "the gitfold daemon doesn't know this request: it runs an older gitfold (remount \
+             to upgrade it)",
+        )
+    }
+}
+
+impl std::error::Error for OlderDaemon {}
+
+/// Whether `e` says the daemon runs an older gitfold (see `OlderDaemon`).
+pub fn is_older_daemon(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<OlderDaemon>().is_some())
+}
+
 /// The answer to a request the daemon doesn't know.
 const UNKNOWN: &str = "unknown request";
 
@@ -41,9 +61,11 @@ pub enum Request {
         /// Only check what would be refused.
         check: bool,
     },
-    /// Stop prewarm walks, running and queued, for the rest of the daemon's
-    /// life: an unmount follows.
+    /// Stop prewarm walks, running and queued, and start no more: an unmount
+    /// follows.
     StopPrewarm,
+    /// Start walks again: the unmount after `StopPrewarm` failed.
+    ResumePrewarm,
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
 }
@@ -57,6 +79,7 @@ impl Request {
                 format!("{verb}\n{}\n{name}\n", *force as u8)
             }
             Request::StopPrewarm => "stop-prewarm\n".to_string(),
+            Request::ResumePrewarm => "resume-prewarm\n".to_string(),
             Request::Version => "version\n".to_string(),
         }
         .into_bytes()
@@ -71,6 +94,7 @@ impl Request {
                 check: verb == "check-remove",
             }),
             ["stop-prewarm", ""] => Ok(Request::StopPrewarm),
+            ["resume-prewarm", ""] => Ok(Request::ResumePrewarm),
             ["version", ""] => Ok(Request::Version),
             _ => bail!(UNKNOWN),
         }
@@ -122,10 +146,7 @@ pub fn request(
             });
             match kind {
                 Some((text, refusal)) => Err(refusal.error(text)),
-                None if message == UNKNOWN => bail!(
-                    "the gitfold daemon doesn't know this request: it runs an older gitfold \
-                     (remount to upgrade it)"
-                ),
+                None if message == UNKNOWN => Err(anyhow::Error::new(OlderDaemon)),
                 None => bail!("{message}"),
             }
         }

@@ -519,3 +519,52 @@ prewarm, `git status --porcelain`, four runs per round:
 The index grows from 39,918 KiB to 41,535 KiB (46,362 cache tree nodes, all
 equal to those `git read-tree HEAD` writes); opening the snapshot took the same
 time (867 / 876 ms without, 860 / 840 ms with).
+
+## 2026-11-12, prewarm threads per walk: 4 instead of half the CPUs
+
+Reported from a 1.4M-file monorepo: a request cost 16 µs with up to 4 in
+flight and 87-214 µs with 8-16, so two walks of half the CPUs each (the old
+default) kept the daemon saturated. The default is now 4 threads per walk.
+
+Chromium bench clone, 24 CPUs, otherwise idle, metadata walk right after
+opening (one run each, ms):
+
+| walk      | 12 threads (old default) | 4 threads |
+|-----------|-------------------------:|----------:|
+| snapshot  | 481 479                  | 699 713   |
+| workspace | 1343                     | 1098      |
+
+Alone on an idle machine a snapshot walk takes longer with 4 threads; a
+workspace walk, whose requests cost more in the daemon, already got faster.
+With several walks (or agents) at once, fewer threads per walk leave the
+daemon room.
+
+## 2026-11-12, re-measurement of the README table
+
+After the cache tree, the prewarm queue (4 threads per walk) and the other
+changes since the last full run. Chromium bench clone (511,958 files), 24
+CPUs, `GF_WAIT_PREWARM=1 bench/bench.sh ~/work/bench/chromium
+PermissionRequestManager`, and the same with `GF_TARGET=<branch>` for a fresh
+workspace (a branch at HEAD; `bench.sh` gained `GF_TARGET` and prints the
+daemon's anonymous memory). ms, first run / repeat on a fresh mount after
+prewarm; native from the same runs:
+
+| cmd         | native          | snapshot     | workspace    |
+|-------------|-----------------|--------------|--------------|
+| open        |                 | 856          | 868          |
+| prewarm     |                 | 698          | 1159         |
+| find        | 467 / 478       | 349 / 352    | 351 / 351    |
+| Claude grep | 5236 / 4223     | 5950 / 4188  | 5695 / 4119  |
+| rg          | 376 / 365       | 2871 / 405   | 3266 / 395   |
+| git status  | 865 / 861       | 884 / 706    | 942 / 721    |
+
+Native from the workspace run: find 475 / 466, Claude grep 4172 / 4227, rg
+360 / 362, git status 869 / 849. Daemon anonymous memory after the warm runs:
+snapshot 63 MB after find, 64 MB after git status, 73 MB after Claude grep,
+216 MB right after rg (the content cache, trimmed once reads stop);
+workspace 124, 123, 134 and 298 MB.
+
+`git status` (Claude Code's invocation, `--ignored=matching`, so without
+git's untracked cache) is now as fast as native on the first run and faster
+on the repeat: 1145 / 1131 ms for a snapshot and 1200 / 1171 ms for a
+workspace before the cache tree.
