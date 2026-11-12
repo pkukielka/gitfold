@@ -157,8 +157,18 @@ impl Removal {
                     Refusal::NotFound
                         .error(format!("{name} is a namespace directory, not a workspace"))
                 })?;
-                self.refuse_if_used(&path, name)?;
-                admin::check_workspace(store, common_dir, name, force, Some(&open))?
+                // Changes first, both reported: a shell sitting in it must not
+                // hide uncommitted work from the check.
+                let changes = admin::check_workspace(store, common_dir, name, force, Some(&open));
+                match (changes, self.refuse_if_used(&path, name)) {
+                    (Ok(ignored), Ok(())) => ignored,
+                    (Err(changes), Err(used))
+                        if Refusal::of(&changes) == Some(Refusal::Changes) =>
+                    {
+                        return Err(Refusal::Changes.error(format!("{changes:#}\n{used:#}")));
+                    }
+                    (Err(e), _) | (Ok(_), Err(e)) => return Err(e),
+                }
             }
         };
         Ok(admin::removable_workspace(name, ignored))

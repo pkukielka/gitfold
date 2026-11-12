@@ -500,6 +500,12 @@ echo x >>"$MNT/ec2/a.txt"
 eq "mounted, not found: 3" 3 "$(code "$BIN" remove "$REPO" nope)"
 eq "uncommitted changes: 4" 4 "$(code "$BIN" remove "$REPO" ec2)"
 eq "--check of a workspace with changes: 4" 4 "$(code "$BIN" remove "$REPO" ec2 --check)"
+( cd "$MNT/ec2" && exec sleep 60 ) & HOLDER=$!
+for _ in $(seq 100); do [ "$(cat /proc/$HOLDER/comm 2>/dev/null)" = sleep ] && break; sleep 0.02; done
+out=$("$BIN" remove "$REPO" ec2 --check 2>&1); rc=$?
+eq "--check of changes in a workspace in use: 4" 4 "$rc"
+eq "and it reports both" yes "$(grep -q uncommitted <<<"$out" && grep -q "in use" <<<"$out" && echo yes)"
+kill $HOLDER; wait $HOLDER 2>/dev/null
 eq "--check of a removable workspace: 0" 0 "$(code "$BIN" remove "$REPO" ec1 --check)"
 check "--check removes nothing" sh -c "test -d '$COMMON/gitfold/ec1' && ls '$MNT' | grep -qx ec1"
 eq "--check of a snapshot: 0" 0 "$(code "$BIN" remove "$REPO" @main --check)"
