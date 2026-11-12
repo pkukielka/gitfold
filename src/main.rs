@@ -1,6 +1,5 @@
 mod admin;
-mod benchattrs;
-mod benchread;
+mod bench;
 mod control;
 mod daemon;
 mod fs;
@@ -267,11 +266,11 @@ fn main() -> Result<()> {
         } => prewarm::run(root, mode, threads)?,
         Command::BenchAttrs { repo, rev } => {
             git::init(&repo)?;
-            benchattrs::run(&rev)?;
+            bench::attrs::run(&rev)?;
         }
         Command::BenchRead { repo, rev, threads } => {
             git::init(&repo)?;
-            benchread::run(&rev, &threads)?;
+            bench::read::run(&rev, &threads)?;
         }
     }
     Ok(())
