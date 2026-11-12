@@ -48,10 +48,10 @@ use log::info;
 use super::markers::Kind;
 use super::times::{Stamp, shown_mtime};
 use super::{Layers, Lower, Workspace, ancestors, join, not_found};
+use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::store::{EMPTY_TREE, FileRec, Store, TEntry};
-use crate::worktree;
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
 /// build writing while a rebase waits for conflict resolution, say) they are

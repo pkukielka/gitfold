@@ -7,10 +7,8 @@ mod git;
 mod inode;
 mod mountpoint;
 mod prewarm;
-mod promisor;
 mod refusal;
 mod store;
-mod worktree;
 
 use std::path::PathBuf;
 
@@ -169,8 +167,8 @@ fn main() -> Result<()> {
             // Paths are resolved: don't keep the caller's directory busy (it may be
             // on another mount the user wants to unmount).
             std::env::set_current_dir("/")?;
-            // Held until the daemon exits (see `admin::mount_lock`).
-            let _lock = admin::mount_lock(&common_dir)?;
+            // Held until the daemon exits (see `git::lock::mount_lock`).
+            let _lock = git::lock::mount_lock(&common_dir)?;
             log::info!(
                 "gitfold {VERSION}: mounting {} at {}",
                 common_dir.display(),

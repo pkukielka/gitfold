@@ -2,6 +2,16 @@
 //!
 //! `gix::Repository` is not `Sync`, so each thread lazily gets its own handle
 //! derived from one shared `ThreadSafeRepository`.
+//!
+//! - `index`: the git index gitfold writes.
+//! - `worktree`: worktree registrations, base pins, git's busy state.
+//! - `lock`: the repository lock.
+//! - `promisor`: partial clones, fetching what loads miss.
+
+pub mod index;
+pub mod lock;
+pub mod promisor;
+pub mod worktree;
 
 use std::cell::RefCell;
 use std::os::unix::ffi::OsStrExt;

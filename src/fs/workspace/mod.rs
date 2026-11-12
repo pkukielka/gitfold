@@ -46,9 +46,9 @@ use gix::objs::tree::EntryKind;
 use parking_lot::{Mutex, RwLock};
 
 use crate::git;
+use crate::git::worktree;
 use crate::inode;
 use crate::store::{Store, TEntry};
-use crate::worktree;
 use markers::Markers;
 use nodes::Nodes;
 use times::{Stamp, Times};

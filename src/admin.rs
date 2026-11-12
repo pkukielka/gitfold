@@ -13,10 +13,10 @@ use clap::ValueEnum;
 use crate::control;
 use crate::fs::workspace::{Workspace, status};
 use crate::git;
+use crate::git::worktree::{self, workspace_branch, workspace_id};
 use crate::prewarm::Prewarm;
 use crate::refusal::Refusal;
 use crate::store::Store;
-use crate::worktree::{self, workspace_branch, workspace_id};
 
 /// How many paths an error message lists before "and N more".
 const SHOWN_PATHS: usize = 10;
@@ -60,19 +60,6 @@ pub fn common_dir_of_source(source: &str) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(bytes))
 }
 
-/// Holds the repository's daemon lock for the life of a mount: two daemons
-/// would share, and corrupt, the stored workspace state, and `remove` and
-/// `prune` must not run meanwhile.
-pub fn mount_lock(common_dir: &Path) -> Result<worktree::Lock> {
-    worktree::lock(common_dir)?.with_context(|| {
-        format!(
-            "{} is already mounted (or a `gitfold remove`/`prune` of it is running); \
-             a repository can be mounted only once at a time",
-            common_dir.display()
-        )
-    })
-}
-
 fn git(repo: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .arg("-C")
@@ -87,8 +74,8 @@ fn git(repo: &Path, args: &[&str]) -> Result<()> {
 /// holds it (mounted, or still exiting after an unmount): the daemon keeps
 /// workspace state in memory and owns the files below `.git/gitfold/`. Held
 /// until the returned file is dropped, so no mount starts meanwhile.
-fn exclusive(common_dir: &Path) -> Result<worktree::Lock> {
-    worktree::lock(common_dir)?.with_context(|| {
+fn exclusive(common_dir: &Path) -> Result<crate::git::lock::Lock> {
+    crate::git::lock::lock(common_dir)?.with_context(|| {
         format!(
             "{} is in use by a gitfold daemon; unmount it first",
             common_dir.display()
@@ -238,7 +225,7 @@ pub fn remove(repo: &Path, name: &str, force: bool, check: bool, wait: Duration)
 }
 
 fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Result<String> {
-    let lock = worktree::lock(common_dir)?;
+    let lock = crate::git::lock::lock(common_dir)?;
     Ok(match (lock, name.strip_prefix('@')) {
         (None, _) => {
             let request = control::Request::Remove {

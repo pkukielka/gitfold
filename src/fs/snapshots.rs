@@ -14,13 +14,14 @@ use gix::ObjectId;
 use log::{error, info, warn};
 use parking_lot::{Mutex, RwLock};
 
+use crate::git::index::{IndexWriter, StatInfo};
+use crate::git::promisor;
+use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::prewarm::{self, Prewarm};
-use crate::promisor;
 use crate::refusal::Refusal;
 use crate::store::{DirRec, Store};
-use crate::worktree::{self, IndexWriter, StatInfo};
 
 /// One root entry. Every name gets its own slot, and so its own directory
 /// inodes, since a directory can't have two parents in the kernel. Names that

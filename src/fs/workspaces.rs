@@ -26,12 +26,13 @@ use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
 use super::workspace::Workspace;
 use crate::git;
+use crate::git::index::{IndexWriter, StatInfo};
+use crate::git::promisor;
+use crate::git::worktree::{self, workspace_id};
 use crate::inode;
 use crate::prewarm::{self, Prewarm};
-use crate::promisor;
 use crate::refusal::Refusal;
 use crate::store::Store;
-use crate::worktree::{self, IndexWriter, StatInfo, workspace_id};
 
 pub enum Entry {
     Workspace(Arc<Workspace>),

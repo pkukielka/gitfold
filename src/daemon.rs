@@ -14,8 +14,8 @@ use anyhow::{Context, Result, bail};
 
 use crate::admin;
 use crate::control;
+use crate::git::worktree;
 use crate::mountpoint;
-use crate::worktree;
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
@@ -222,7 +222,7 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     let started = Instant::now();
     // After detaching, the wait is for the processes listed.
     let mut told = if detached { 2 } else { 0 };
-    while worktree::lock(&common_dir)?.is_none() {
+    while crate::git::lock::lock(&common_dir)?.is_none() {
         let waited = started.elapsed();
         if told == 0 && waited > Duration::from_secs(2) {
             println!("waiting for gitfold to exit (bringing workspace bases up to date)...");

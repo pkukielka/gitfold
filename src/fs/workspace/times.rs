@@ -14,7 +14,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::worktree;
+use crate::git::worktree;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stamp {

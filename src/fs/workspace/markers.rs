@@ -10,7 +10,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use crate::worktree;
+use crate::git::worktree;
 
 #[derive(Clone, Copy)]
 pub(super) enum Kind {

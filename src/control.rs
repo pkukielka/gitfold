@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use crate::git::worktree;
 use crate::refusal::Refusal;
-use crate::worktree;
 use anyhow::{Context, Result, bail};
 use log::{debug, warn};
 

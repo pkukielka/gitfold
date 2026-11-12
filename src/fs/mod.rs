@@ -45,10 +45,10 @@ use fuser::{
 };
 use log::info;
 
+use crate::git::index::StatInfo;
 use crate::inode;
 use crate::prewarm::Prewarm;
 use crate::store::Store;
-use crate::worktree::StatInfo;
 use content::ContentCache;
 pub use names::NameChanges;
 pub use removal::Removal;

@@ -17,9 +17,9 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 
 use crate::git;
+use crate::git::index::IndexWriter;
+use crate::git::promisor;
 use crate::inode;
-use crate::promisor;
-use crate::worktree::IndexWriter;
 
 /// Tree id of an empty table, used for submodules.
 pub const EMPTY_TREE: u32 = 0;
