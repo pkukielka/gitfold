@@ -48,7 +48,7 @@ enum Command {
         /// Populate kernel caches in the background after a snapshot or workspace is opened.
         #[arg(long, value_enum, default_value = "meta")]
         prewarm: prewarm::Prewarm,
-        /// Prewarm threads per walk (default: half the CPUs).
+        /// Prewarm threads per walk (default: 4, or half the CPUs if fewer).
         #[arg(long)]
         prewarm_threads: Option<usize>,
         /// Walks running at once; the others wait.
@@ -193,7 +193,8 @@ fn main() -> Result<()> {
                 fs::Options {
                     no_open: !kernel_open,
                     prewarm,
-                    prewarm_threads: prewarm_threads.unwrap_or((cpus / 2).max(1)),
+                    prewarm_threads: prewarm_threads
+                        .unwrap_or(prewarm::THREADS.min(cpus / 2).max(1)),
                 },
                 names.clone(),
             );

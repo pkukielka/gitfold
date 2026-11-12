@@ -157,8 +157,8 @@ Options:
 
 | option | default | |
 |---|---|---|
-| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.64 s for a snapshot, 1.37 s for a workspace). |
-| `--prewarm-threads N` | half the CPUs | Threads used by each prewarm walk. |
+| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.10 s for a workspace). |
+| `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--threads N` | number of CPUs | FUSE worker threads. |
 | `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |

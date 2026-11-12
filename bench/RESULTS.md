@@ -519,3 +519,22 @@ prewarm, `git status --porcelain`, four runs per round:
 The index grows from 39,918 KiB to 41,535 KiB (46,362 cache tree nodes, all
 equal to those `git read-tree HEAD` writes); opening the snapshot took the same
 time (867 / 876 ms without, 860 / 840 ms with).
+
+## 2026-11-12, prewarm threads per walk: 4 instead of half the CPUs
+
+Reported from a 1.4M-file monorepo: a request cost 16 µs with up to 4 in
+flight and 87-214 µs with 8-16, so two walks of half the CPUs each (the old
+default) kept the daemon saturated. The default is now 4 threads per walk.
+
+Chromium bench clone, 24 CPUs, otherwise idle, metadata walk right after
+opening (one run each, ms):
+
+| walk      | 12 threads (old default) | 4 threads |
+|-----------|-------------------------:|----------:|
+| snapshot  | 481 479                  | 699 713   |
+| workspace | 1343                     | 1098      |
+
+Alone on an idle machine a snapshot walk takes longer with 4 threads; a
+workspace walk, whose requests cost more in the daemon, already got faster.
+With several walks (or agents) at once, fewer threads per walk leave the
+daemon room.

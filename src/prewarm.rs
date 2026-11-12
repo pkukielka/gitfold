@@ -83,6 +83,11 @@ static WALKS: Mutex<Walks> = Mutex::new(Walks {
     stopped: false,
 });
 
+/// Threads per walk by default. A walk's requests are served by the daemon's
+/// FUSE threads, so more of them only queue there: reported from a monorepo,
+/// a request cost 16 µs with up to 4 in flight and 87-214 µs with 8-16.
+pub const THREADS: usize = 4;
+
 /// How many walks run at once (`gitfold mount --prewarm-walks`): each uses its
 /// own thread pool, and walks of everything agents open at once would compete
 /// for the CPUs.
