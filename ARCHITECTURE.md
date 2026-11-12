@@ -414,6 +414,11 @@ below is about snapshots.
 - *Reusing a slot for a second name of the same commit:* creates a directory
   hardlink (two dentries for one directory inode). An earlier version did this;
   the code review caught it.
+- *Workspace slots that stay the same across remounts:* would gain nothing for
+  git (reported from a monorepo). Git compares only the inode's low 32 bits
+  (with the default `core.checkStat`) and, unless built with `USE_STDEV`, not
+  `st_dev`, so the index stat data already survives a remount, and the
+  untracked cache too as long as the mount point stays the same.
 
 ### Snapshots are real linked worktrees
 
@@ -758,6 +763,15 @@ it likes, and gitfold avoids every request it can:
   skips. Chromium's first `find` after prewarm went from 351 to
   759 ms; prewarm now `stat`s what it read, moving that cost into the
   background (352 ms again). Warm runs are unaffected.
+  Why that `stat` stays: the kernel invalidates a directory's attributes after
+  every readdir (`fuse_invalidate_atime`, called from fs/fuse/readdir.c; it
+  skips only read-only mounts, so `noatime` doesn't help). A cold directory
+  therefore costs at least 2 READDIRPLUS requests (the second finds the end of
+  the listing) and 1 GETATTR, which, dropped from the walker, only moves to the
+  first `git status` (reported from a 1.4M-file monorepo). The kernel's faster
+  paths are out of reach: FUSE passthrough needs `CAP_SYS_ADMIN` (`EPERM`
+  otherwise) and FUSE-over-io_uring is off by default (`enable_uring=N`), so
+  cutting the number of requests is the lever.
 
 **Rejected:**
 
@@ -837,6 +851,13 @@ gets the speed with no correctness risk.
   (reported from a monorepo: 52 slots, 79 needed) until a remount. gitfold
   opens it with at least 16,384 slots (~110 bytes each, ~2 MB; slots of
   deleted packs are reused).
+  Two open gitoxide issues in the same area, reported from the monorepo and not
+  reproduced here:
+  [#3179](https://github.com/GitoxideLabs/gitoxide/issues/3179) (a long-lived
+  handle refreshing during a concurrent repack can panic or miss a pack) and
+  [#2878](https://github.com/GitoxideLabs/gitoxide/issues/2878) (every lookup
+  miss rescans the pack directory, even with `RefreshMode::Never`, which
+  gitfold doesn't set anyway).
 - *glibc.* After large frees, glibc raises its mmap threshold dynamically, after
   which large blob buffers come from heap arenas that are never returned to the
   OS (904 MB of heap after one pass over Chromium, vs 296-385 MB with a fixed
@@ -1000,7 +1021,8 @@ compact node table and write measurements. Next:
 
 - **Faster writes.** `FUSE_WRITEBACK_CACHE` (fewer requests per file, but the
   kernel then owns mtimes, which the index and rebases rely on), or passthrough
-  on a second mount point for build output. Builds measured cost little (a
+  on a second mount point for build output (passthrough needs
+  `CAP_SYS_ADMIN`). Builds measured cost little (a
   full `cargo build` +17%); installs of many small files (`node_modules`) are
   the slow case, where opt-in symlinks to real directories for named ignored
   directories would be the cheap fix. See the write numbers in

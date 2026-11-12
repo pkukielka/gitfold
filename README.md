@@ -114,9 +114,11 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <REPO> <NAME> [--from <REV>]   # create a branch for a workspace
+gitfold branch <REPO> <NAME> [--from <REV>] [--prewarm <MODE>]
+                                              # create a branch for a workspace
 gitfold list <REPO>                           # workspaces and their changes
-gitfold remove <REPO> <BRANCH> [--force]      # delete a workspace (or a snapshot: @<rev>)
+gitfold remove <REPO> <NAME> [--force] [--check] [--wait <SECS>]
+                                              # delete a workspace, or @<rev>
 gitfold prune <REPO>                          # delete snapshot registrations
 ```
 
@@ -280,11 +282,12 @@ Don't modify `.git/gitfold/` while mounted.
 
 - `gitfold mount` starts the daemon in the background, detached from the
   terminal (closing it doesn't stop the mount), and returns once the mount is
-  up, or with the daemon's error. It logs to a file named after the mount
-  point in `/gitfold/` (default `~/.local/state/gitfold/`),
-  printing its path (`--log` to choose): one line per new snapshot commit,
-  workspace, prewarm and workspace rebase, and operation counters on exit. `RUST_LOG=warn` for only problems. With `--foreground` it
-  stays in the foreground and logs to stderr, for service managers.
+  up, or with the daemon's error. It logs to a file named after the mount point
+  in `$XDG_STATE_HOME/gitfold/` (default `~/.local/state/gitfold/`), printing
+  its path (`--log` to choose): one line per new snapshot commit, workspace,
+  prewarm and workspace rebase, and operation counters on exit. `RUST_LOG=warn`
+  for only problems. With `--foreground` it stays in the foreground and logs to
+  stderr, for service managers.
 - **Stop it with `gitfold unmount <MOUNTPOINT>`.** It waits until the daemon
   has exited, so `gitfold remove` or `prune` can follow right away. If the
   mount is busy (say a `git maintenance run --auto` a commit started), it is
@@ -317,6 +320,28 @@ Don't modify `.git/gitfold/` while mounted.
     was compacted). Its unchanged files don't share page cache with snapshots
     or other workspaces.
   - Kernel caches are reclaimable; if evicted, the next access is just slower.
+  - On large trees, reclaim is what makes workspaces go cold. Reported from a
+    1.4M-file monorepo: each workspace held about 2 GB of kernel cache. Under
+    ten concurrent full-tree `git status` runs, free memory (`MemFree`) fell
+    below the kernel's low watermark while `MemAvailable` still showed about 89
+    GB, and reclaim dropped about 17 million cached directory entries, which
+    git then looked up again. That is the kernel's ordinary memory reclaim, not
+    gitfold; size RAM for the workspaces in use at once.
+
+### With coding agents
+
+- Workspaces an agent only reads a few files in are cheaper without the prewarm
+  walk: give their branch prewarm mode `none` (see [Usage](#usage)).
+- Claude Code (reported): it runs `git status` with `--ignored=matching`, which
+  git doesn't serve from its untracked cache, so each such run lists the whole
+  workspace. For read-only sessions, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1`
+  keeps git status out of its prompts, and
+  `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING=1` turns off the file snapshots its
+  rewind restores from, which a session that changes nothing doesn't need.
+- Orchestrators tearing down agent workspaces can use `gitfold remove`'s exit
+  codes, `--check` and `--wait SECS` (see [Cleaning up](#cleaning-up)), and
+  `gitfold version <MOUNTPOINT>` to find mounts still running an old build
+  after an upgrade.
 
 ### Cleaning up
 
