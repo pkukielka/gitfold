@@ -470,6 +470,8 @@ impl Workspaces {
         // files are the ones upper holds (the old base would show them as changed).
         worktree::register_branch(&admin, branch, &path.join(".git"), || {
             let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
+            // A load under `creating`, but rarely a fetch: `preload` loaded the tip
+            // (or it is in backoff, refused at once), unless the branch moved since.
             let tree = tip.and_then(|c| store.load_tree(c.tree).ok());
             let dirs = store.dir_table(tree.unwrap_or(base_tree));
             let mut writer = IndexWriter::new(self.stat, 1 << 20);

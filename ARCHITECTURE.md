@@ -132,7 +132,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check, workspace ids |
 | `src/git/lock.rs` | the repository lock, held by a mounted daemon and by `remove`/`prune` |
-| `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remote |
+| `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
 | `src/daemon/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
@@ -919,12 +919,22 @@ as did `remove` of it; 13% of the head tree's blobs were missing, and a plain
   system-wide trace logged every fetch).
 - **Backoff:** a tree whose fetch failed is refused for 30 s, checked before
   loading (the sync thread retries every second), lifted as soon as what it
-  missed is there. The refusal is logged at debug level, the failure once.
-- **The remote** is git's choice: the first remote in config file order with
-  `promisor` (alone, or `= true`) or a `partialclonefilter` (gitoxide's remote
-  list is sorted by name, so the config sections are walked), the one
-  `extensions.partialClone` names last (and only with `repositoryformatversion
-  = 1`), as git moves it to the end.
+  missed is there. The refusal is logged at debug level, the failure once. If
+  every remote refused the objects (`not our ref`, or `does not allow request
+  for unadvertised object`: the server doesn't serve objects by id, or they
+  are gone), it is 10 min: retrying every 30 s only repeats it. A refused
+  fetch's error names `uploadpack.allowAnySHA1InWant`.
+- **The remotes** are git's: those with `promisor` (alone, or `= true`) or a
+  `partialclonefilter`, in config file order (gitoxide's remote list is sorted
+  by name, so the config sections are walked), the one `extensions.partialClone`
+  names last (and only with `repositoryformatversion = 1`), as git moves it to
+  the end. As in git, each is asked for what the ones before didn't bring
+  (checked after one pack rescan, not one per object), so a wrong or
+  unreachable first remote doesn't fail the open. Read once per mount.
+- **Disk space:** no fetch starts with under 1 GiB free in the objects
+  directory. A fetch is bounded by the commit's missing objects, but on a large
+  repository that is tens of thousands; the fork's notes record a fetch without
+  a want list pulling a 47 GB pack.
 - **Finding what is missing doesn't rescan packs per miss.** gitoxide rescans
   the pack directory, under a store-wide lock, whenever an object isn't found,
   and a partial clone's walk misses once per absent blob: 60k missing blobs
@@ -993,10 +1003,9 @@ User-visible effects are listed in README ("Workspaces", "Differences from a
 checkout" and "Running it"); this is the why and what it would take.
 
 - **Partial clones** fetch a commit's every missing blob at open, as a checkout
-  would (sizes need the blobs): laziness ends at the commit. Only the first
-  promisor remote is tried (git tries them all), every failure gets the same 30
-  s backoff (a permanently refused object too), the remote is read once per
-  mount, and nothing guards the disk against a huge fetch. Fetch locks are per
+  would (sizes need the blobs): laziness ends at the commit. The remotes are
+  read once per mount; the free-space floor is fixed, not an estimate of the
+  fetch's size (the server doesn't say before sending). Fetch locks are per
   root tree: two commits opened at once download what they share twice.
   `@<sha>` of a commit the clone lacks isn't fetched (`ENOENT`). A `gitfold
   remove` while mounted fetches on the daemon's single control thread, so

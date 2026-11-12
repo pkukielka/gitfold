@@ -299,19 +299,27 @@ So do a workspace's base following a branch that moved, and the checks of
   `uploadpack.allowFilter`. Otherwise the fetch fails with `not our ref`.
 - The whole commit is fetched, as a checkout would: gitfold needs every file's
   size to show it.
-- The remote is the one git would pick: the first in config file order with
-  `promisor = true` or a `partialclonefilter`, the one
-  `extensions.partialClone` names last.
+- The remotes are the ones git would use, in its order: those with
+  `promisor = true` or a `partialclonefilter`, in config file order, the one
+  `extensions.partialClone` names last. Each is asked for what the ones before
+  it didn't bring. They are read once per mount: a remote added or flagged
+  later is used after a remount (a changed URL at once).
 - The daemon has no terminal to ask for credentials: use an ssh agent or a
   credential helper (`gitfold list` and `remove` run from a terminal let ssh
   ask). A fetch that fails (unreachable remote, refused) fails the open with
   `EIO` and is logged once; the same commit is refused for 30 s, unless its
-  objects arrive meanwhile (`git fetch` by hand). A resumed workspace whose
+  objects arrive meanwhile (`git fetch` by hand). A remote that refuses objects
+  asked for by id (`not our ref`: the server needs
+  `uploadpack.allowAnySHA1InWant`, or they are gone from it) is retried after
+  10 min instead. A resumed workspace whose
   branch moved needs only its stored base: if the tip can't be fetched, it
   opens and follows the tip later.
 - A fetch that prints nothing (no progress) for 120 s is stopped, with its ssh
   and index-pack; one making progress may take as long as it needs.
   `GITFOLD_FETCH_STALL_SECS` changes the limit.
+- No fetch starts with less than 1 GiB free in `.git/objects`
+  (`GITFOLD_FETCH_MIN_FREE_MB` changes it): a large commit can be tens of
+  thousands of objects.
 
 ## Running it
 

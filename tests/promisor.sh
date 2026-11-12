@@ -213,6 +213,39 @@ C config core.repositoryformatversion 1; C config extensions.partialClone origin
 remount
 eq "the extensions.partialClone remote is tried last" "c five" "$(cat "$MNT/@HEAD/c/five" 2>&1)"
 check "other, not origin" grep -q "missing objects from other" "$LOG"
+echo "== refusals, the next remote, free space"
+# A remote without the objects: protocol v2 says "not our ref".
+git init -q --bare "$T/empty.git"
+git -C "$T/empty.git" config uploadpack.allowFilter true
+git -C "$T/empty.git" config uploadpack.allowAnySHA1InWant true
+REPO=$T/next; clone "$REPO"
+C remote set-url origin "file://$T/empty.git"
+C remote add good "file://$T/remote.git"; C config remote.good.promisor true
+remount
+eq "a first remote without the objects: the next one has them" "c five" "$(cat "$MNT/@HEAD/c/five" 2>&1)"
+check "fetched from it" grep -q "missing objects from good" "$LOG"
+check "the first one's failure logged as a warning" grep -q "WARN.*not our ref.*another promisor remote had them" "$LOG"
+REPO=$T/refused; clone "$REPO"
+C remote set-url origin "file://$T/empty.git"
+C remote add also "file://$T/empty.git"; C config remote.also.promisor true
+RUST_LOG=info,gitfold=debug remount
+check "refused by every remote: the open fails" fails cat "$MNT/@HEAD/c/five"
+check "the error says what the server needs" grep -q "ERROR.*still missing after every promisor remote.*uploadpack.allowAnySHA1InWant" "$LOG"
+check "refused again at once" fails cat "$MNT/@HEAD/c/five"
+check "for 10 min" grep -q "retried within 600 s" "$LOG"
+REPO=$T/mixed; clone "$REPO"
+C remote set-url origin "file://$T/empty.git"
+C remote add gone "file://$T/nonexistent.git"; C config remote.gone.promisor true
+RUST_LOG=info,gitfold=debug remount
+check "refused by one remote, unreachable on the other: the open fails" fails cat "$MNT/@HEAD/c/five"
+check "refused again at once" fails cat "$MNT/@HEAD/c/five"
+check "for the usual 30 s (the other may come back)" grep -q "retried within 30 s" "$LOG"
+REPO=$T/full; clone "$REPO"
+GITFOLD_FETCH_MIN_FREE_MB=999999999 remount
+check "too little free space: the open fails" fails cat "$MNT/@HEAD/c/five"
+check "without fetching, saying why" grep -q "not fetching: .* MB free in .*, a fetch needs at least 999999999 MB" "$LOG"
+check "no fetch started" sh -c "! grep -q 'fetching .* missing objects from' '$LOG'"
+
 REPO=$T/nopromisor; clone "$REPO"
 C config --unset remote.origin.promisor; C config --unset remote.origin.partialclonefilter
 remount
