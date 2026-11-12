@@ -1,7 +1,7 @@
 //! Background walk of a freshly opened snapshot or workspace through the mount,
 //! so the kernel's dentry/inode cache (and optionally page cache) is populated
 //! before the first agent command arrives. The walk runs in its own process
-//! (`gitfold prewarm`, see `spawn`).
+//! (`gitfold prewarm-walk`, see `spawn`).
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
@@ -59,6 +59,7 @@ pub fn for_branch(common_dir: &Path, branch: &str) -> Option<Prewarm> {
 }
 
 /// A walk to run.
+#[derive(Clone)]
 struct Walk {
     root: PathBuf,
     mode: Prewarm,
@@ -67,22 +68,26 @@ struct Walk {
 
 /// A walk whose process is being started.
 struct Starting {
-    root: PathBuf,
+    walk: Walk,
     /// Stopped meanwhile (`stop_under`, `stop_all`): `launch` stops the process
     /// once it exists, and drops this, which they wait for.
     cancelled: bool,
 }
 
 struct Walks {
-    /// Walker processes running (pid, root), so they can be stopped before
+    /// Walker processes running (pid, walk), so they can be stopped before
     /// unmounting or removing what they walk.
-    running: Vec<(u32, PathBuf)>,
+    running: Vec<(u32, Walk)>,
     /// Walks whose process is being started (see `launch`).
     starting: Vec<Starting>,
     /// Walks waiting for one of `MAX_WALKS` to finish.
     queued: VecDeque<Walk>,
     /// Stopping began (unmounting): no new walk starts.
     stopped: bool,
+    /// The walks `stop_all` stopped or dropped, started again by `resume`.
+    paused: Vec<Walk>,
+    /// Calls of `stop_all`, so a resume meant for one doesn't end a later one.
+    stops: u64,
 }
 
 static WALKS: Mutex<Walks> = Mutex::new(Walks {
@@ -90,6 +95,8 @@ static WALKS: Mutex<Walks> = Mutex::new(Walks {
     starting: Vec::new(),
     queued: VecDeque::new(),
     stopped: false,
+    paused: Vec::new(),
+    stops: 0,
 });
 
 /// Threads per walk by default. A walk's requests are served by the daemon's
@@ -106,39 +113,69 @@ pub fn set_max_walks(n: usize) {
     MAX_WALKS.store(n, Ordering::Relaxed);
 }
 
-/// Walks `root` (see `run`) in a separate `gitfold prewarm` process, now or
-/// once fewer than `MAX_WALKS` run; not if a walk of `root` is running or
-/// queued already. Not in the daemon itself: a daemon killed with SIGKILL while
+/// Walks `root` (see `run`) in a separate `gitfold prewarm-walk` process, now
+/// or once fewer than `MAX_WALKS` run, or once walks resume if stopped for an
+/// unmount; not if a walk of `root` is known already. Not in the daemon itself: a daemon killed with SIGKILL while
 /// its own threads wait on requests to its mount never finishes dying, and the
 /// mount hangs; a separate walker's requests just fail once the daemon is gone,
 /// and it exits.
-pub fn spawn(root: PathBuf, mode: Prewarm, threads: usize) {
+pub fn spawn(root: PathBuf, mode: Prewarm, threads: usize) -> Spawned {
     if mode == Prewarm::None {
-        return;
+        return Spawned::Known;
     }
-    let next = {
+    let walk = Walk {
+        root,
+        mode,
+        threads,
+    };
+    let (next, spawned) = {
         let mut walks = WALKS.lock();
-        let known = walks.running.iter().any(|(_, r)| *r == root)
-            || walks.starting.iter().any(|s| s.root == root)
-            || walks.queued.iter().any(|w| w.root == root);
-        if walks.stopped || known {
-            return;
+        if walks.known(&walk.root) {
+            return Spawned::Known;
+        }
+        if walks.stopped {
+            walks.paused.push(walk);
+            return Spawned::Paused;
         }
         let busy = walks.running.len() + walks.starting.len();
-        if busy >= MAX_WALKS.load(Ordering::Relaxed) {
-            info!(
-                "prewarm of {}: queued behind {busy} running",
-                root.display()
-            );
-        }
-        walks.queued.push_back(Walk {
-            root,
-            mode,
-            threads,
-        });
-        next_walks(&mut walks)
+        let spawned = match busy >= MAX_WALKS.load(Ordering::Relaxed) {
+            true => {
+                info!(
+                    "prewarm of {}: queued behind {busy} running",
+                    walk.root.display()
+                );
+                Spawned::Queued
+            }
+            false => Spawned::Now,
+        };
+        walks.queued.push_back(walk);
+        (next_walks(&mut walks), spawned)
     };
     launch(next);
+    spawned
+}
+
+/// What `spawn` did with a walk.
+pub enum Spawned {
+    /// Started it.
+    Now,
+    /// Queued it behind `MAX_WALKS` running.
+    Queued,
+    /// Kept it for when walks resume (stopped for an unmount).
+    Paused,
+    /// Nothing: one of that root is running, queued or kept already (or the
+    /// mode is `none`).
+    Known,
+}
+
+impl Walks {
+    /// Whether a walk of `root` is running, starting, queued or kept.
+    fn known(&self, root: &Path) -> bool {
+        self.running.iter().any(|(_, w)| w.root == root)
+            || self.starting.iter().any(|s| s.walk.root == root)
+            || self.queued.iter().any(|w| w.root == root)
+            || self.paused.iter().any(|w| w.root == root)
+    }
 }
 
 /// Takes the queued walks that may start (fewer than `MAX_WALKS` running or
@@ -149,7 +186,7 @@ fn next_walks(walks: &mut Walks) -> Vec<Walk> {
         && let Some(walk) = walks.queued.pop_front()
     {
         walks.starting.push(Starting {
-            root: walk.root.clone(),
+            walk: walk.clone(),
             cancelled: false,
         });
         next.push(walk);
@@ -168,19 +205,19 @@ fn launch(walks: Vec<Walk>) {
         command.arg0("gitfold");
         let mode_name = ValueEnum::to_possible_value(&walk.mode).expect("not skipped");
         command
-            .arg("prewarm")
+            .arg("prewarm-walk")
             .arg(&walk.root)
             .args(["--mode", mode_name.get_name()])
             .args(["--threads", &walk.threads.to_string()])
             .stdin(Stdio::null());
         let spawned = command.spawn();
         let mut state = WALKS.lock();
-        let at = state.starting.iter().position(|s| s.root == walk.root);
+        let at = state.starting.iter().position(|s| s.walk.root == walk.root);
         let wanted = at.is_some_and(|at| !state.starting[at].cancelled) && !state.stopped;
         // Dropped from `starting` once it can no longer use the mount: the
         // stoppers wait for that.
         let forget = |state: &mut Walks| {
-            if let Some(at) = state.starting.iter().position(|s| s.root == walk.root) {
+            if let Some(at) = state.starting.iter().position(|s| s.walk.root == walk.root) {
                 state.starting.remove(at);
             }
         };
@@ -213,7 +250,7 @@ fn launch(walks: Vec<Walk>) {
         };
         let pid = child.id();
         info!("prewarm of {}: started", walk.root.display());
-        state.running.push((pid, walk.root));
+        state.running.push((pid, walk));
         drop(state);
         // Reaped on a thread of its own, so it doesn't stay a zombie; then the
         // next one starts. Without a thread (the system refuses one: process
@@ -266,33 +303,101 @@ fn reap(mut child: std::process::Child, pid: u32) {
 }
 
 /// Stops the running walkers, and any later one from starting: they keep the
-/// mount busy, which would make an unmount only detach it.
-pub fn stop_all() {
-    let pids = {
+/// mount busy, which would make an unmount only detach it. What it stops is
+/// kept for `resume`. Returns this stop's number (see `stop_for_unmount`).
+pub fn stop_all() -> u64 {
+    let (pids, stop) = {
         let mut walks = WALKS.lock();
         walks.stopped = true;
-        walks.queued.clear();
-        walks.starting.iter_mut().for_each(|s| s.cancelled = true);
-        std::mem::take(&mut walks.running)
+        walks.stops += 1;
+        let Walks {
+            running,
+            starting,
+            queued,
+            paused,
+            ..
+        } = &mut *walks;
+        for s in starting.iter_mut() {
+            s.cancelled = true;
+            paused.push(s.walk.clone());
+        }
+        let running = std::mem::take(running);
+        paused.extend(running.iter().map(|(_, w)| w.clone()));
+        paused.extend(queued.drain(..));
+        (running, walks.stops)
     };
     terminate(pids.iter().map(|(p, _)| *p as libc::pid_t).collect());
     wait_for_starting(|_| true);
+    stop
+}
+
+/// How long after `stop_for_unmount` the walks resume if the mount is still
+/// there (`GITFOLD_PREWARM_RESUME_SECS` overrides it, for tests).
+const RESUME_AFTER: Duration = Duration::from_secs(60);
+
+/// `stop_all` for `gitfold unmount`, which unmounts next. If it never does (it
+/// was interrupted), the walks resume once `mountpoint` is still mounted after
+/// `RESUME_AFTER`, unless stopped again meanwhile.
+pub fn stop_for_unmount(mountpoint: PathBuf) {
+    // This mount, by device: one mounted at the same path later (after a lazy
+    // unmount detached this one) has another, as does the bare directory.
+    let device = |path: &Path| fs::metadata(path).map(|m| m.dev()).ok();
+    let ours = device(&mountpoint);
+    let stop = stop_all();
+    let after = std::env::var("GITFOLD_PREWARM_RESUME_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(RESUME_AFTER, Duration::from_secs);
+    let lease = std::thread::Builder::new()
+        .name("prewarm lease".into())
+        .spawn(move || {
+            std::thread::sleep(after);
+            if ours.is_none() || device(&mountpoint) != ours {
+                return;
+            }
+            let mut walks = WALKS.lock();
+            if walks.stopped && walks.stops == stop {
+                let next = restart(&mut walks);
+                drop(walks);
+                info!(
+                    "prewarm resumed: still mounted {} s after an unmount stopped it",
+                    after.as_secs()
+                );
+                launch(next);
+            }
+        });
+    if let Err(e) = lease {
+        warn!("prewarm stays stopped until an unmount fails: no thread to resume it ({e})");
+    }
 }
 
 /// Waits (up to 2 s) until no walk whose root `matches` is being started:
 /// `launch` stops cancelled ones once their process exists.
 fn wait_for_starting(matches: impl Fn(&Path) -> bool) {
     let started = Instant::now();
-    while WALKS.lock().starting.iter().any(|s| matches(&s.root))
+    while WALKS.lock().starting.iter().any(|s| matches(&s.walk.root))
         && started.elapsed() < Duration::from_secs(2)
     {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
 
-/// Lets walks start again after `stop_all` (an unmount that failed).
+/// Lets walks start again after `stop_all` (an unmount that failed), the ones
+/// it stopped first.
 pub fn resume() {
-    WALKS.lock().stopped = false;
+    let next = restart(&mut WALKS.lock());
+    launch(next);
+}
+
+/// Ends a stop: queues the walks it stopped, and returns those that may start.
+fn restart(walks: &mut Walks) -> Vec<Walk> {
+    walks.stopped = false;
+    for walk in std::mem::take(&mut walks.paused) {
+        if !walks.known(&walk.root) {
+            walks.queued.push_back(walk);
+        }
+    }
+    next_walks(walks)
 }
 
 /// Stops this daemon's walks of `path` or below, running or queued (a
@@ -301,13 +406,15 @@ pub fn stop_under(path: &Path) -> bool {
     let (pids, dropped) = {
         let mut walks = WALKS.lock();
         let queued = walks.queued.len();
+        let paused = walks.paused.len();
         walks.queued.retain(|w| !w.root.starts_with(path));
-        let mut dropped = walks.queued.len() != queued;
+        walks.paused.retain(|w| !w.root.starts_with(path));
+        let mut dropped = walks.queued.len() != queued || walks.paused.len() != paused;
         // Stopped by `launch` once started; waited for below.
         for s in walks
             .starting
             .iter_mut()
-            .filter(|s| s.root.starts_with(path))
+            .filter(|s| s.walk.root.starts_with(path))
         {
             s.cancelled = true;
             dropped = true;
@@ -316,10 +423,10 @@ pub fn stop_under(path: &Path) -> bool {
         // meanwhile, while they die, another walk may start).
         let (under, others) = std::mem::take(&mut walks.running)
             .into_iter()
-            .partition(|(_, root)| root.starts_with(path));
+            .partition(|(_, w)| w.root.starts_with(path));
         walks.running = others;
         let pids: Vec<_> = (under.into_iter())
-            .map(|(p, _): (u32, PathBuf)| p as libc::pid_t)
+            .map(|(p, _): (u32, Walk)| p as libc::pid_t)
             .collect();
         (pids, dropped)
     };
@@ -330,7 +437,8 @@ pub fn stop_under(path: &Path) -> bool {
 }
 
 /// Stops the walkers of this user working below `mountpoint` (`gitfold
-/// prewarm <root>` processes of the same binary name), for `gitfold unmount`.
+/// prewarm-walk <root>` processes of the same binary name, or `prewarm <root>`
+/// from older daemons), for `gitfold unmount`.
 pub fn stop_below(mountpoint: &Path) {
     let Ok(procs) = fs::read_dir("/proc") else {
         return;
@@ -354,7 +462,8 @@ pub fn stop_below(mountpoint: &Path) {
         let below = args
             .get(2)
             .is_some_and(|root| Path::new(OsStr::from_bytes(root)).starts_with(mountpoint));
-        if is_gitfold && args.get(1) == Some(&&b"prewarm"[..]) && below {
+        let walker = matches!(args.get(1), Some(&b"prewarm-walk" | &b"prewarm"));
+        if is_gitfold && walker && below {
             pids.push(pid);
         }
     }
@@ -373,7 +482,7 @@ fn terminate(pids: Vec<libc::pid_t>) {
     }
 }
 
-/// `gitfold prewarm`: walks `root` (see `visit`) and logs what it saw.
+/// `gitfold prewarm-walk`: walks `root` (see `visit`) and logs what it saw.
 pub fn run(root: PathBuf, mode: Prewarm, threads: usize) -> anyhow::Result<()> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)

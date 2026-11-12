@@ -96,9 +96,19 @@ enum Command {
     /// Delete the snapshot registrations (recreated when opened again). The
     /// repository must not be mounted.
     Prune { repo: PathBuf },
+    /// Set a workspace's prewarm mode (as `branch --prewarm`), and while
+    /// mounted apply it at once: walk the workspace if it is open, or stop
+    /// walking it (none).
+    Prewarm {
+        repo: PathBuf,
+        /// The workspace's branch.
+        name: String,
+        #[arg(value_enum)]
+        mode: prewarm::Prewarm,
+    },
     /// Walk a freshly opened snapshot or workspace (started by the daemon).
     #[command(hide = true)]
-    Prewarm {
+    PrewarmWalk {
         root: PathBuf,
         #[arg(long, value_enum)]
         mode: prewarm::Prewarm,
@@ -204,6 +214,8 @@ fn main() -> Result<()> {
                 .inspect_err(|e| log::warn!("{e:#}; `gitfold remove` will need an unmount"))
                 .ok();
             let removal = fs.removal();
+            let workspaces = fs.workspaces();
+            let mounted = mountpoint.clone();
             let session = fuser::Session::new(fs, &mountpoint, &config)?;
             names.set_notifier(session.notifier());
             // After the notifier is set: a removal tells the kernel.
@@ -221,8 +233,9 @@ fn main() -> Result<()> {
                         log::info!("prewarm resumed: the unmount didn't go ahead");
                         Ok("prewarm resumed".into())
                     }
+                    control::Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
                     control::Request::StopPrewarm => {
-                        prewarm::stop_all();
+                        prewarm::stop_for_unmount(mounted.clone());
                         log::info!("prewarm stopped for the unmount");
                         Ok("prewarm stopped for the unmount".into())
                     }
@@ -256,7 +269,8 @@ fn main() -> Result<()> {
             }
         }
         Command::Prune { repo } => cli::manage::prune(&repo)?,
-        Command::Prewarm {
+        Command::Prewarm { repo, name, mode } => cli::manage::prewarm(&repo, &name, mode)?,
+        Command::PrewarmWalk {
             root,
             mode,
             threads,

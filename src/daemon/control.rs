@@ -1,6 +1,7 @@
 //! The daemon's control socket: how `gitfold remove` asks a running daemon to
-//! remove a workspace or snapshot, instead of requiring an unmount, and
-//! `gitfold unmount` asks it to stop prewarm walks first.
+//! remove a workspace or snapshot, instead of requiring an unmount,
+//! `gitfold unmount` asks it to stop prewarm walks first, and `gitfold
+//! prewarm` to walk an open workspace.
 //!
 //! A Unix socket at `.git/gitfold/.control`, so the repository's permissions
 //! guard it (an abstract socket name could be taken by any local user), and
@@ -66,6 +67,9 @@ pub enum Request {
     StopPrewarm,
     /// Start walks again: the unmount after `StopPrewarm` failed.
     ResumePrewarm,
+    /// Walk the workspace of `branch` now in its mode (just set), if it is
+    /// open; stop walking it if that is `none`.
+    Prewarm { branch: String },
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
 }
@@ -80,6 +84,7 @@ impl Request {
             }
             Request::StopPrewarm => "stop-prewarm\n".to_string(),
             Request::ResumePrewarm => "resume-prewarm\n".to_string(),
+            Request::Prewarm { branch } => format!("prewarm\n{branch}\n"),
             Request::Version => "version\n".to_string(),
         }
         .into_bytes()
@@ -95,6 +100,9 @@ impl Request {
             }),
             ["stop-prewarm", ""] => Ok(Request::StopPrewarm),
             ["resume-prewarm", ""] => Ok(Request::ResumePrewarm),
+            ["prewarm", branch, ""] => Ok(Request::Prewarm {
+                branch: branch.to_string(),
+            }),
             ["version", ""] => Ok(Request::Version),
             _ => bail!(UNKNOWN),
         }

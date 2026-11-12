@@ -800,7 +800,7 @@ of decoding trees on demand. The remaining cold cost is per-entry kernel work
 ### Prewarm instead of tricks
 
 **What:** right after opening a snapshot or workspace, the daemon starts a
-walker process (`gitfold prewarm`) that walks it through the mount on a thread
+walker process (`gitfold prewarm-walk`) that walks it through the mount on a thread
 pool. A separate process, because a daemon killed with SIGKILL while its own
 threads wait on requests to its mount never finishes dying, and every access to
 the mount hangs; a separate walker's requests just fail once the daemon is
@@ -813,14 +813,19 @@ started ten walks of half the CPUs each. Each walk uses 4 threads by default
 queue (reported: 16 µs per request with up to 4 in flight, 87-214 µs with
 8-16). A walk already running or queued for the same path isn't added; a
 removal drops its queued walk (and restarts it if refused); stopping for an
-unmount drops the whole queue and starts no walk until the unmount, or, if it
-fails, `gitfold unmount` lets them start again (what opened meanwhile isn't
-walked; interrupted in between, prewarm stays off until the next mount); a
+unmount stops every walk and starts none until the unmount, keeping them and
+those of what opens meanwhile; if it fails, `gitfold unmount` lets them start
+again. If `gitfold unmount` is interrupted in between, the daemon resumes by
+itself once still mounted 60 s later (a lease, ended by a newer stop; the mount
+point must still have the device it had, so neither a detached mount nor a
+new one at the same path counts); a
 walker killed from outside with SIGTERM (what `gitfold unmount` sends, for
 daemons without the request) only drops the queue. A workspace's own mode, if
 set (`branch.<name>.gitfoldPrewarm`, git config, so it stays with the branch),
 overrides `--prewarm`, except `--prewarm none`, which turns prewarm off for the
-whole mount. `meta` (default) lists every directory and stats it afterwards
+whole mount. `gitfold prewarm <repo> <name> <mode>` sets it and asks the daemon
+(control socket) to apply it to the workspace if open: walk it now, or stop its
+walk. `meta` (default) lists every directory and stats it afterwards
 (see the read-write mount note under
 [caching](#kernel-caching-does-the-heavy-lifting)); `content` also reads and
 stats every file.

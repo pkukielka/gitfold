@@ -124,6 +124,7 @@ gitfold list <REPO>                           # workspaces and their changes
 gitfold remove <REPO> <NAME> [--force] [--check] [--wait <SECS>]
                                               # delete a workspace, or @<rev>
 gitfold prune <REPO>                          # delete snapshot registrations
+gitfold prewarm <REPO> <NAME> <MODE>          # a workspace's prewarm mode
 ```
 
 `<REPO>` is the repository's top-level work tree or its git directory (not a
@@ -171,9 +172,12 @@ A workspace can have its own prewarm mode, kept across remounts in the branch's
 git config: `gitfold branch <REPO> <NAME> --prewarm none`, or `git config
 branch.<NAME>.gitfoldPrewarm none` for an existing branch (read from the
 repository's own config file, where `git config` writes it, when the workspace
-opens; `--prewarm none` for the whole mount still wins). `none` suits
-workspaces an agent only reads a few files in: a walk of a 1.4M-file tree costs
-about 1.26M FUSE requests and 100 CPU-seconds of the daemon.
+opens; `--prewarm none` for the whole mount still wins). `gitfold prewarm
+<REPO> <NAME> none|meta|content` sets it and, while mounted, applies it at
+once: an open workspace is walked now (a read-only session turning into a
+coding one), or its walk stopped (`none`). `none` suits workspaces an agent
+only reads a few files in: a walk of a 1.4M-file tree costs about 1.26M FUSE
+requests and 100 CPU-seconds of the daemon.
 
 ### Snapshots
 

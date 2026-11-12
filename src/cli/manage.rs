@@ -63,12 +63,37 @@ pub fn branch(repo: &Path, name: &str, from: Option<&str>, prewarm: Option<Prewa
     args.extend(from);
     git(repo, &args)?;
     if let Some(mode) = prewarm {
-        let key = format!("branch.{name}.{}", crate::daemon::prewarm::BRANCH_KEY);
-        let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
-        git(repo, &["config", &key, value.get_name()])?;
+        set_prewarm(repo, name, mode)?;
     }
     println!("created branch {name}; open it as <mountpoint>/{name}");
     Ok(())
+}
+
+/// `gitfold prewarm`: sets the prewarm mode of workspace `name` (as `branch
+/// --prewarm`) and, while mounted, has the daemon apply it at once.
+pub fn prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
+    let common_dir = git::init(repo)?;
+    ensure!(git::branch_exists(name), "no branch {name}");
+    set_prewarm(repo, name, mode)?;
+    let request = control::Request::Prewarm {
+        branch: name.to_string(),
+    };
+    match control::request(&common_dir, &request, None) {
+        Ok(Some(done)) => println!("{done}"),
+        Ok(None) => println!("set; {name} is walked when opened"),
+        Err(e) if control::is_older_daemon(&e) => {
+            println!("set; the mounted gitfold is older: {name} is walked when it opens next")
+        }
+        Err(e) => return Err(e.context("set, but not applied to the mount")),
+    }
+    Ok(())
+}
+
+/// Stores `mode` as branch `name`'s prewarm mode, in git config.
+fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
+    let key = format!("branch.{name}.{}", crate::daemon::prewarm::BRANCH_KEY);
+    let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
+    git(repo, &["config", &key, value.get_name()])
 }
 
 struct Listed {
