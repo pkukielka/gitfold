@@ -176,21 +176,31 @@ fn launch(walks: Vec<Walk>) {
         let spawned = command.spawn();
         let mut state = WALKS.lock();
         let at = state.starting.iter().position(|s| s.root == walk.root);
-        let cancelled = at.map(|at| state.starting.remove(at).cancelled);
-        let wanted = cancelled == Some(false) && !state.stopped;
+        let wanted = at.is_some_and(|at| !state.starting[at].cancelled) && !state.stopped;
+        // Dropped from `starting` once it can no longer use the mount: the
+        // stoppers wait for that.
+        let forget = |state: &mut Walks| {
+            if let Some(at) = state.starting.iter().position(|s| s.root == walk.root) {
+                state.starting.remove(at);
+            }
+        };
         let child = match spawned {
-            Ok(child) if wanted => Some(child),
+            Ok(child) if wanted => {
+                forget(&mut state);
+                Some(child)
+            }
             Ok(mut child) => {
-                // Stopped meanwhile: stop it now (waited for unlocked; the
-                // stopper waits for `starting` to drop it, done above).
+                // Stopped meanwhile: stop it now, unlocked.
                 drop(state);
                 unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
                 let _ = child.wait();
                 state = WALKS.lock();
+                forget(&mut state);
                 None
             }
             Err(e) => {
                 warn!("prewarm of {}: {e}", walk.root.display());
+                forget(&mut state);
                 None
             }
         };

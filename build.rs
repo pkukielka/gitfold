@@ -1,14 +1,15 @@
 //! Records which build this is.
 //!
 //! - `GITFOLD_VERSION`: the crate version and a hash of the build's inputs
-//!   (everything under `src/`, `Cargo.toml`, `Cargo.lock`, `build.rs`), read
+//!   (the `.rs` files under `src/`, `Cargo.toml`, `Cargo.lock`, `build.rs`), read
 //!   from disk. It is what `gitfold version` compares with a mount's daemon:
 //!   the same sources give the same value however they were committed (so a
 //!   docs-only commit asks for no remount), and any change to them, committed
 //!   or not, tracked or not, a different one.
 //! - `GITFOLD_LONG_VERSION`: that and, for people (`--version`), the git
 //!   commit built from, when built from a checkout of gitfold itself (`-dirty`
-//!   with uncommitted changes to tracked files).
+//!   with uncommitted changes to the inputs: a change elsewhere, to docs say,
+//!   doesn't rerun this script, so it couldn't be told).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -108,7 +109,7 @@ impl Fnv {
 
 /// The commit `dir` is checked out at, if it is the top of a git checkout
 /// (not, say, a copy inside another repository), `-dirty` with uncommitted
-/// changes to tracked files.
+/// changes to the build's inputs.
 fn commit(dir: &Path) -> Option<String> {
     let top = git(dir, &["rev-parse", "--show-toplevel"])?;
     if Path::new(&top).canonicalize().ok()? != dir.canonicalize().ok()? {
@@ -117,15 +118,15 @@ fn commit(dir: &Path) -> Option<String> {
     let commit = git(dir, &["rev-parse", "--short=12", "HEAD"])?;
     // No optional locks: `status` would otherwise refresh (rewrite) the index
     // and contend with the user's git commands.
-    let status = git(
-        dir,
-        &[
-            "--no-optional-locks",
-            "status",
-            "--porcelain",
-            "--untracked-files=no",
-        ],
-    )?;
+    let mut args = vec![
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "--untracked-files=no",
+        "--",
+    ];
+    args.extend(INPUTS);
+    let status = git(dir, &args)?;
     Some(match status.is_empty() {
         true => commit,
         false => format!("{commit}-dirty"),
