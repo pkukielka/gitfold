@@ -264,25 +264,24 @@ impl Workspace {
         new_base: Option<git::Commit>,
         gitfile: Vec<u8>,
     ) -> Result<Workspace> {
-        let upper = state_dir.join("upper");
-        fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
-        let base_file = state_dir.join("base");
+        let created = new_base.is_some();
         let base = match new_base {
-            Some(base) => {
-                // For people looking at the state directory; the id is escaped.
-                worktree::write_atomic(
-                    &state_dir.join("branch"),
-                    format!("{branch}\n").as_bytes(),
-                )?;
-                // Written last and atomically: its presence means "workspace exists".
-                worktree::write_atomic(&base_file, format!("{}\n", base.id).as_bytes())?;
-                base
-            }
+            Some(base) => base,
             None => read_base(&state_dir)?,
         };
+        // Loaded first (a partial clone fetches): a failed open leaves no state.
+        let base_tree = store.load_tree(base.tree)?;
+        let upper = state_dir.join("upper");
+        fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
+        if created {
+            // For people looking at the state directory; the id is escaped.
+            worktree::write_atomic(&state_dir.join("branch"), format!("{branch}\n").as_bytes())?;
+            // Written last and atomically: its presence means "workspace exists".
+            worktree::write_atomic(&state_dir.join("base"), format!("{}\n", base.id).as_bytes())?;
+        }
         let layers = Layers {
             base: base.id,
-            base_tree: store.load_tree(base.tree)?,
+            base_tree,
             markers: Markers::open(&state_dir.join("markers"))?,
             times: Times::open(&state_dir.join("times"))?,
         };

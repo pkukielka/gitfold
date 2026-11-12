@@ -52,11 +52,13 @@ pub fn load_tree(store: &Store, tree: ObjectId) -> Result<u32> {
     let generation = GENERATION.load(Ordering::Acquire);
     let mut missing = match local(store, tree)? {
         Ok(id) => return Ok(id),
-        Err(_) if remote().is_none() => return store.load_tree_local(tree),
+        Err(missing) if remote().is_none() => return Err(git::Missing(missing).into()),
         Err(missing) => missing,
     };
     let lock = tree_lock(tree);
     let _fetching = lock.lock();
+    // A fetch of this tree that failed while we waited: no other one.
+    refuse_in_backoff(tree)?;
     // Another fetch (of this tree, say) may have brought them meanwhile.
     if GENERATION.load(Ordering::Acquire) != generation {
         missing = match local(store, tree)? {
@@ -66,7 +68,9 @@ pub fn load_tree(store: &Store, tree: ObjectId) -> Result<u32> {
     }
     let result = fetch_rounds(store, tree, &mut missing);
     if result.is_err() {
-        FAILURES.lock().insert(
+        let mut failures = FAILURES.lock();
+        failures.retain(|_, f| f.at.elapsed() < BACKOFF);
+        failures.insert(
             tree,
             Failure {
                 at: Instant::now(),
@@ -169,9 +173,9 @@ fn tree_lock(tree: ObjectId) -> Arc<Mutex<()>> {
 }
 
 /// The promisor remote, as git picks it: the first remote, in config file
-/// order, with `promisor = true` or a `partialclonefilter`, else the one
-/// `extensions.partialClone` names (set by clones before the remote keys).
-/// Read once.
+/// order, with `promisor = true` or a `partialclonefilter`, the one
+/// `extensions.partialClone` names (repositoryformatversion 1; clones set it
+/// before the remote keys) last. Read once.
 pub fn remote() -> Option<String> {
     static REMOTE: OnceLock<Option<String>> = OnceLock::new();
     REMOTE
@@ -179,22 +183,29 @@ pub fn remote() -> Option<String> {
             git::with_repo(|repo| {
                 let config = repo.config_snapshot();
                 let config = config.plumbing();
-                let promisor = config
+                // Only with repositoryformatversion 1, and tried last.
+                let extension =
+                    matches!(config.integer("core.repositoryformatversion"), Ok(Some(1)))
+                        .then(|| config.string("extensions.partialClone"))
+                        .flatten()
+                        .map(|v| v.to_string());
+                let mut flagged = config
                     .sections_by_name("remote")
                     .into_iter()
                     .flatten()
-                    .find_map(|s| {
+                    .filter_map(|s| {
                         let name = s.header().subsection_name()?.to_string();
-                        let flagged = s
-                            .value("promisor")
-                            .is_some_and(|v| gix::config::Boolean::try_from(v).is_ok_and(|b| b.0));
-                        (flagged || s.value("partialclonefilter").is_some()).then_some(name)
+                        // `promisor` alone (no `= value`) is true too.
+                        let promisor = match s.value_implicit("promisor") {
+                            Some(None) => true,
+                            Some(Some(v)) => gix::config::Boolean::try_from(v).is_ok_and(|b| b.0),
+                            None => false,
+                        };
+                        (promisor || s.value("partialclonefilter").is_some()).then_some(name)
                     });
-                promisor.or_else(|| {
-                    config
-                        .string("extensions.partialClone")
-                        .map(|v| v.to_string())
-                })
+                flagged
+                    .find(|name| Some(name) != extension.as_ref())
+                    .or(extension)
             })
         })
         .clone()
@@ -216,6 +227,8 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
         "--no-tags",
         "--no-write-fetch-head",
         "--recurse-submodules=no",
+        // A repack (gc --auto) would run inside the stall window, silently.
+        "--no-auto-maintenance",
         "--filter=blob:none",
         "--stdin",
         "--progress",
@@ -227,7 +240,8 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
             args[2..].join(" ")
         )
     };
-    let mut child = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .arg("--git-dir")
         .arg(&git_dir)
         .args(args)
@@ -240,65 +254,88 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
         .env_remove("GIT_TRACE2")
         .env_remove("GIT_TRACE2_PERF")
         .env_remove("GIT_TRACE")
-        // Its own group, so a stall stops ssh, index-pack and the rest too.
-        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    // The daemon (no terminal) runs it in its own group, so a stall stops ssh,
+    // index-pack and the rest too. From a terminal (`gitfold list`), it stays in
+    // the foreground group, where ssh can ask for a passphrase.
+    let group = std::fs::File::open("/dev/tty").is_err();
+    if group {
+        command.process_group(0);
+    }
+    let mut child = command.spawn()?;
     let pid = child.id() as libc::pid_t;
-    // From a thread: a git that never reads must not block us.
-    let mut stdin = child.stdin.take().expect("piped");
+    let stop = |signal| unsafe { libc::kill(if group { -pid } else { pid }, signal) };
     let mut wanted = String::with_capacity(41 * ids.len());
     for id in ids {
         let _ = writeln!(wanted, "{id}");
     }
-    thread::spawn(move || stdin.write_all(wanted.as_bytes()));
     // Any stderr output is progress; its tail is kept for the error.
     let (progress, made) = mpsc::channel();
-    let mut stderr = child.stderr.take().expect("piped");
-    let reader = thread::spawn(move || {
-        let (mut buf, mut tail) = ([0u8; 4096], Vec::new());
-        while let Ok(n @ 1..) = stderr.read(&mut buf) {
-            tail.extend_from_slice(&buf[..n]);
-            tail.drain(..tail.len().saturating_sub(STDERR_TAIL));
-            let _ = progress.send(());
-        }
-        tail
-    });
+    let tail = Arc::new(Mutex::new(Vec::new()));
+    let (mut stdin, mut stderr) = (
+        child.stdin.take().expect("piped"),
+        child.stderr.take().expect("piped"),
+    );
+    let threads = (|| -> std::io::Result<()> {
+        // A git that never reads must not block us.
+        thread::Builder::new().spawn(move || stdin.write_all(wanted.as_bytes()))?;
+        let tail = tail.clone();
+        thread::Builder::new().spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n @ 1..) = stderr.read(&mut buf) {
+                let mut tail = tail.lock();
+                tail.extend_from_slice(&buf[..n]);
+                let excess = tail.len().saturating_sub(STDERR_TAIL);
+                tail.drain(..excess);
+                let _ = progress.send(());
+            }
+        })?;
+        Ok(())
+    })();
+    if let Err(e) = threads {
+        stop(libc::SIGKILL);
+        child.wait()?;
+        return Err(failed(format!("couldn't be watched: {e}")));
+    }
     let stall = std::env::var("GITFOLD_FETCH_STALL_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
         .map_or(STALL, Duration::from_secs);
-    loop {
-        match made.recv_timeout(stall) {
-            Ok(()) => continue,
-            // stderr closed: git is exiting.
-            Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => {
-                // SIGTERM first: git removes the lock and .keep files it holds;
-                // not reaped yet, so the group id can't have been reused.
-                unsafe { libc::kill(-pid, libc::SIGTERM) };
-                let deadline = Instant::now() + Duration::from_secs(2);
-                while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-                    if let Err(RecvTimeoutError::Disconnected) = made.recv_timeout(left) {
-                        break;
-                    }
-                }
-                unsafe { libc::kill(-pid, libc::SIGKILL) };
-                child.wait()?;
-                return Err(failed(format!(
-                    "made no progress for {} s",
-                    stall.as_secs()
-                )));
-            }
+    let (mut last, mut stderr_open) = (Instant::now(), true);
+    let status = loop {
+        // Exited, even if something it started still holds stderr open.
+        if let Some(status) = child.try_wait()? {
+            break status;
         }
-    }
-    let status = child.wait()?;
-    let tail = reader.join().unwrap_or_default();
+        if last.elapsed() > stall {
+            // SIGTERM first: git removes the lock and .keep files it holds;
+            // not reaped yet, so the (group) id can't have been reused.
+            stop(libc::SIGTERM);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while child.try_wait()?.is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(20));
+            }
+            stop(libc::SIGKILL);
+            child.wait()?;
+            return Err(failed(format!(
+                "made no progress for {} s",
+                stall.as_secs()
+            )));
+        }
+        match stderr_open {
+            true => match made.recv_timeout(Duration::from_millis(200)) {
+                Ok(()) => last = Instant::now(),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => stderr_open = false,
+            },
+            false => thread::sleep(Duration::from_millis(20)),
+        }
+    };
     if !status.success() {
         // git's last `fatal:` (or `error:`) line says why; else its last line.
-        let tail = String::from_utf8_lossy(&tail);
+        let tail = String::from_utf8_lossy(&tail.lock()).into_owned();
         let lines = || tail.lines().rev().map(str::trim).filter(|l| !l.is_empty());
         let why = |l: &&str| l.starts_with("fatal:") || l.starts_with("error:");
         let last = lines().find(why).or_else(|| lines().next()).unwrap_or("");

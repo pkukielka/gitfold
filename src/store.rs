@@ -238,6 +238,8 @@ impl Store {
     /// `git::Missing` listing all of them, so one fetch can bring them; a tree
     /// that isn't complete is never stored.
     pub fn load_tree_local(&self, oid: ObjectId) -> Result<u32> {
+        // Once per load, not once per missing object (see `with_repo_no_refresh`).
+        git::refresh_packs();
         let gaps = Gaps::default();
         match self.walk_tree(oid, &gaps)? {
             Some(id) => Ok(id),

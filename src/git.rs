@@ -27,6 +27,8 @@ static REPO: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
 
 thread_local! {
     static LOCAL: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
+    /// The same, without rescanning packs on a miss (see `with_repo_no_refresh`).
+    static LOCAL_NO_REFRESH: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
 }
 
 /// Opens the repository at `path` and returns its common git dir (`.git`).
@@ -59,6 +61,31 @@ pub fn with_repo<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
         });
         f(repo)
     })
+}
+
+/// `with_repo`, with a handle that doesn't look for new packs when an object
+/// isn't found: gitoxide otherwise rescans the pack directory (under a global
+/// lock) on every miss, and a tree walk in a partial clone misses once per
+/// absent blob. Call `refresh_packs` first to see packs added since.
+pub fn with_repo_no_refresh<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
+    LOCAL_NO_REFRESH.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let repo = slot.get_or_insert_with(|| {
+            let mut repo = REPO.get().expect("git::init not called").to_thread_local();
+            repo.object_cache_size(0);
+            repo.objects.refresh_never();
+            repo
+        });
+        f(repo)
+    })
+}
+
+/// Makes packs added since (a fetch, a repack) visible to all handles: a
+/// lookup that misses rescans the pack directory once.
+pub fn refresh_packs() {
+    // No object has this id.
+    let none = ObjectId::from_hex(b"0000000000000000000000000000000000000001").expect("hex");
+    with_repo(|repo| repo.has_object(none));
 }
 
 pub struct Commit {
@@ -105,9 +132,10 @@ pub struct Entry {
     pub oid: ObjectId,
 }
 
-/// Lists one tree level; `None` if the tree isn't in the object database.
+/// Lists one tree level; `None` if the tree isn't in the object database
+/// (as of the last `refresh_packs`).
 pub fn tree_entries(tree: ObjectId) -> Result<Option<Vec<Entry>>> {
-    with_repo(|repo| {
+    with_repo_no_refresh(|repo| {
         let Some(object) = repo.try_find_object(tree)? else {
             return Ok(None);
         };
@@ -128,9 +156,9 @@ pub fn tree_entries(tree: ObjectId) -> Result<Option<Vec<Entry>>> {
 }
 
 /// Uncompressed size of an object, without decompressing it; `None` if it
-/// isn't in the object database.
+/// isn't in the object database (as of the last `refresh_packs`).
 pub fn object_size(oid: ObjectId) -> Result<Option<u64>> {
-    with_repo(|repo| Ok(repo.try_find_header(oid)?.map(|h| h.size())))
+    with_repo_no_refresh(|repo| Ok(repo.try_find_header(oid)?.map(|h| h.size())))
 }
 
 pub static BLOB_NS: AtomicU64 = AtomicU64::new(0);

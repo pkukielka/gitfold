@@ -142,6 +142,12 @@ impl Workspace {
         } else {
             Ok(())
         };
+        // The rebase may have fetched (a partial clone) for long: git may have
+        // started meanwhile.
+        if !self.git_idle() {
+            self.limit_touched();
+            return rebased;
+        }
         let dropped = if rebased.is_ok() {
             self.drop_unchanged(store)
         } else {
@@ -249,6 +255,12 @@ impl Workspace {
     fn rebase(&self, store: &Store, new: &Commit) -> Result<()> {
         let started = Instant::now();
         let new_tree = store.load_tree(new.tree)?;
+        // The load may have fetched (a partial clone) for long: if git started
+        // or the branch moved meanwhile, the next sync sees to it.
+        let tip = git::resolve(&format!("refs/heads/{}", self.branch))?;
+        if !self.git_idle() || tip.id != new.id {
+            return Ok(());
+        }
         let mut layers = self.layers.write();
         let locked = Instant::now();
         let old = layers.base;

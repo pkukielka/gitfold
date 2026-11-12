@@ -379,12 +379,26 @@ impl Workspaces {
     /// Failing here leaves no state behind.
     fn preload(&self, store: &Store, branch: &str) -> Result<(), Errno> {
         let state_dir = worktree::state_root(&self.common_dir).join(workspace_id(branch));
-        let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
-        let base = super::workspace::read_base(&state_dir).ok();
-        for commit in tip.iter().chain(&base) {
+        let load = |commit: &git::Commit| {
             store
                 .load_tree(commit.tree)
-                .map_err(|e| load_failed(&format!("loading workspace {branch}"), e))?;
+                .map_err(|e| load_failed(&format!("loading workspace {branch}"), e))
+        };
+        let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
+        match super::workspace::read_base(&state_dir).ok() {
+            // Resuming needs only the base: the sync thread moves it to the tip,
+            // fetching then if it can't now.
+            Some(base) => {
+                load(&base)?;
+                if let Some(tip) = tip {
+                    let _ = load(&tip);
+                }
+            }
+            None => {
+                if let Some(tip) = tip {
+                    load(&tip)?;
+                }
+            }
         }
         Ok(())
     }

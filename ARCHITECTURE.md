@@ -916,12 +916,24 @@ as did `remove` of it; 13% of the head tree's blobs were missing, and a plain
   loading (the sync thread retries every second), lifted as soon as what it
   missed is there. The refusal is logged at debug level, the failure once.
 - **The remote** is git's choice: the first remote in config file order with
-  `promisor = true` or a `partialclonefilter` (gitoxide's remote list is sorted
-  by name, so the config sections are walked), else `extensions.partialClone`.
-- **A missing object is one lookup** (`try_find_header`, `try_find_object`):
-  gitoxide reports an object it couldn't read (a refresh that failed) as
-  missing too, so "missing" means maybe fetchable. Its slot table is sized for
-  many packs ([memory hygiene](#memory-hygiene)): every fetch adds one.
+  `promisor` (alone, or `= true`) or a `partialclonefilter` (gitoxide's remote
+  list is sorted by name, so the config sections are walked), the one
+  `extensions.partialClone` names last (and only with `repositoryformatversion
+  = 1`), as git moves it to the end.
+- **Finding what is missing doesn't rescan packs per miss.** gitoxide rescans
+  the pack directory, under a store-wide lock, whenever an object isn't found,
+  and a partial clone's walk misses once per absent blob: 60k missing blobs
+  with 41 packs took 19.3 s to find. The walk uses handles with refresh off
+  (`git::with_repo_no_refresh`), after one explicit refresh (`refresh_packs`,
+  so a fetch's new pack is seen): 1.3 s. A missing object is one lookup
+  (`try_find_header`, `try_find_object`). Every fetch adds a pack; the object
+  database's slot table is sized for many ([memory hygiene](#memory-hygiene)).
+- **The fetch's process group:** the daemon (no terminal) runs it in its own
+  group, so a stall stops ssh and index-pack with it; from a terminal (`gitfold
+  list`, `remove`) it stays in the foreground group, so ssh can ask for a
+  passphrase. `--no-auto-maintenance`: a `gc --auto` repack would otherwise run
+  inside the stall window, silently, and be killed. A fetch whose stderr a
+  helper keeps open is still seen to end.
 
 **Rejected:** fetching per object as reads need it (one fetch per file; the
 fork's notes: the store needs every blob's size anyway); a global fetch lock (a
@@ -965,9 +977,13 @@ checkout" and "Running it"); this is the why and what it would take.
   would (sizes need the blobs): laziness ends at the commit. Only the first
   promisor remote is tried (git tries them all), every failure gets the same 30
   s backoff (a permanently refused object too), the remote is read once per
-  mount, and nothing guards the disk against a huge fetch. If a branch moves
-  between an open's preload and its creation lock, that open fetches under the
-  lock. A daemon killed mid-fetch can leave git's `.keep` file pinning a pack.
+  mount, and nothing guards the disk against a huge fetch. Fetch locks are per
+  root tree: two commits opened at once download what they share twice.
+  `@<sha>` of a commit the clone lacks isn't fetched (`ENOENT`). A `gitfold
+  remove` while mounted fetches on the daemon's single control thread, so
+  `version` or another `remove` waits meanwhile. If a branch moves between an
+  open's preload and its creation lock, that open fetches under the lock. A
+  daemon killed mid-fetch can leave git's `.keep` file pinning a pack.
 - **Checkout filters are not applied** (`eol=crlf`, LFS, `ident`,
   `working-tree-encoding`, custom filters). Investigated: gitoxide provides the
   whole pipeline; evaluating attributes for all of Chromium takes 94 ms in

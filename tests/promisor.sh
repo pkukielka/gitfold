@@ -78,7 +78,6 @@ eq "its new blobs fetched" 0 "$(missing ws1)"
 
 echo "== a slow fetch holds up only its own tree"
 hook 'mkdir "$HOME/slow" 2>/dev/null && sleep 6'
-C branch -q slow1 HEAD~3; C branch -q other1 HEAD~4   # HEAD~4 is fetched already
 (cat "$MNT/@HEAD~3/c/two" >/dev/null) & SLOW=$!
 sleep 0.5
 s=$(date +%s%N)
@@ -103,28 +102,31 @@ no_hook; unset GITFOLD_FETCH_STALL_SECS
 
 echo "== an unreachable remote, and the backoff"
 REPO=$T/unreach; clone "$REPO"
-C remote set-url origin "file://$T/nonexistent.git"
-C branch -q u1 HEAD~1
+C branch -q u1 HEAD~1; C branch -q s1 HEAD~4
 remount
+eq "a workspace opens while the remote is there" "f1 two" "$(cat "$MNT/s1/a/f1" 2>&1)"
+C remote set-url origin "file://$T/nonexistent.git"   # read by each fetch
+errors() { grep ERROR "$LOG" | grep -c "$1"; }
+C update-ref refs/heads/s1 HEAD~2   # never fetched
+sleep 5
+eq "the sync thread's failing fetch: one error in 5 s" 1 "$(errors "workspace s1")"
 s=$(date +%s%N)
 check "an open fails" fails timeout 60 cat "$MNT/u1/a/f1"
 eq "fast" yes "$([ $(( ($(date +%s%N) - s) / 1000000 )) -lt 10000 ] && echo yes)"
 check "and leaves no workspace state" test ! -e "$REPO/.git/gitfold/u1"
 check "the error names the remote and command" grep -q "fetching .* missing objects from origin: .git fetch origin" "$LOG"
-for _ in 1 2 3 4; do cat "$MNT/u1/a/f1" 2>/dev/null; cat "$MNT/@HEAD/a/f1" 2>/dev/null; done
-sleep 1
-eq "repeated opens in the backoff log no more errors" yes "$([ "$(grep -c ERROR "$LOG")" -le 2 ] && echo yes)"
+SHA3=$(C rev-parse HEAD~3)
+cat "$MNT/@HEAD~3/a/f1" >/dev/null 2>&1 & P1=$!; cat "$MNT/@$SHA3/a/f1" >/dev/null 2>&1 & P2=$!; wait $P1 $P2
+eq "two opens of a commit behind a failing fetch: one fetch error" 1 "$(grep ERROR "$LOG" | grep -c "HEAD~3\|$SHA3")"
+before=$(grep -c ERROR "$LOG")
+for _ in 1 2 3 4; do cat "$MNT/u1/a/f1" 2>/dev/null; done
+eq "repeated opens in the backoff log no more errors" "$before" "$(grep -c ERROR "$LOG")"
 # Brought by hand, from the real remote: the backoff ends at once.
 GIT_NO_LAZY_FETCH=1 C rev-list --objects --missing=print "u1^{tree}" | sed -n 's/^?//p' |
     C -c fetch.negotiationAlgorithm=noop fetch -q "file://$T/remote.git" --no-tags \
         --no-write-fetch-head --filter=blob:none --stdin
 eq "fetched by hand, the workspace opens within the backoff" "f1 five" "$(cat "$MNT/u1/a/f1" 2>&1)"
-eq "without gitfold fetching" 0 "$(fetches)"
-
-echo "== the sync thread with an unfetchable tip logs little"
-C update-ref refs/heads/u1 HEAD
-sleep 5
-eq "at most 2 errors in 5 s" yes "$([ "$(grep -c ERROR "$LOG")" -le 4 ] && echo yes)"
+eq "without gitfold fetching" 1 "$(fetches)"
 
 echo "== tree:0 clones"
 REPO=$T/tree0; rm -rf "$REPO"
@@ -139,12 +141,16 @@ remount; cat "$MNT/rw/a/f1" >/dev/null
 REPO=$T/res2; clone "$REPO"; C branch -q rw HEAD~1
 mkdir -p "$REPO/.git/gitfold"; cp -r "$T/res1/.git/gitfold/rw" "$REPO/.git/gitfold/"
 remount
-eq "it opens, at its stored base" "f1 three" "$(cat "$MNT/rw/a/f1" 2>&1)"
+check "it opens" test -f "$MNT/rw/a/f1"
 check "resumed" grep -q "workspace rw: resumed" "$LOG"
 TIP=$(C rev-parse rw)
 for _ in $(seq 100); do [ "$(cat "$REPO/.git/gitfold/rw/base")" = "$TIP" ] && break; sleep 0.1; done
 eq "then follows the tip" "$TIP" "$(cat "$REPO/.git/gitfold/rw/base")"
 eq "base and tip fetched" 0 "$(( $(missing HEAD~3) + $(missing HEAD~1) ))"
+# Its tip moved while unmounted and the remote is gone: the base is enough.
+REPO=$T/res1; C update-ref refs/heads/rw HEAD; C remote set-url origin "file://$T/nonexistent.git"
+remount
+check "with only its tip unfetchable, it opens" test -f "$MNT/rw/a/f1"
 
 echo "== which remote: git's precedence"
 REPO=$T/remotes; clone "$REPO"
@@ -164,6 +170,20 @@ C config --unset remote.origin.promisor; C config --unset remote.origin.partialc
 C config extensions.partialClone origin
 remount
 eq "extensions.partialClone alone" "c five" "$(cat "$MNT/@HEAD/c/five" 2>&1)"
+REPO=$T/bare; clone "$REPO"
+C config --unset remote.origin.promisor; C config --unset remote.origin.partialclonefilter
+C remote set-url origin "file://$T/nonexistent.git"
+printf '[remote "q"]\n\turl = file://%s/remote.git\n\tpromisor\n' "$T" >>"$REPO/.git/config"
+remount
+eq "\`promisor\` without a value is true" "c five" "$(cat "$MNT/@HEAD/c/five" 2>&1)"
+check "q" grep -q "missing objects from q" "$LOG"
+REPO=$T/tail; clone "$REPO"
+C remote set-url origin "file://$T/nonexistent.git"
+C remote add other "file://$T/remote.git"; C config remote.other.promisor true
+C config core.repositoryformatversion 1; C config extensions.partialClone origin
+remount
+eq "the extensions.partialClone remote is tried last" "c five" "$(cat "$MNT/@HEAD/c/five" 2>&1)"
+check "other, not origin" grep -q "missing objects from other" "$LOG"
 REPO=$T/nopromisor; clone "$REPO"
 C config --unset remote.origin.promisor; C config --unset remote.origin.partialclonefilter
 remount

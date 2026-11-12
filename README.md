@@ -104,8 +104,9 @@ gitfold writes into the repository: worktree registrations under
 - git with linked worktree and index v4 support (any git from the last decade;
   tested with 2.49).
 - A full clone, or a partial clone (`git clone --filter=blob:none`, or
-  `tree:0`) whose promisor remote gitfold can fetch from without a prompt (an
-  ssh agent, a credential helper); see [Partial clones](#partial-clones).
+  `tree:0`; git 2.29 or newer) whose promisor remote gitfold can fetch from
+  without a prompt (an ssh agent, a credential helper); see [Partial
+  clones](#partial-clones).
 - To build: Rust 1.88 or newer (edition 2024; developed with 1.99), or Nix on
   x86_64-linux (`flake.nix` provides a dev shell with the toolchain). Without
   installing, the binary is `target/release/gitfold` after
@@ -297,10 +298,13 @@ So do a workspace's base following a branch that moved, and the checks of
 - The remote is the one git would pick: the first in config file order with
   `promisor = true` or a `partialclonefilter`, else
   `extensions.partialClone`'s.
-- No terminal is asked for credentials: use an ssh agent or a credential
-  helper. A fetch that fails (unreachable remote, refused) fails the open with
+- The daemon has no terminal to ask for credentials: use an ssh agent or a
+  credential helper (`gitfold list` and `remove` run from a terminal let ssh
+  ask). A fetch that fails (unreachable remote, refused) fails the open with
   `EIO` and is logged once; the same commit is refused for 30 s, unless its
-  objects arrive meanwhile (`git fetch` by hand).
+  objects arrive meanwhile (`git fetch` by hand). A resumed workspace whose
+  branch moved needs only its stored base: if the tip can't be fetched, it
+  opens and follows the tip later.
 - A fetch that prints nothing (no progress) for 120 s is stopped, with its ssh
   and index-pack; one making progress may take as long as it needs.
   `GITFOLD_FETCH_STALL_SECS` changes the limit.
