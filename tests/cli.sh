@@ -564,6 +564,23 @@ kill -CONT $PID
 eq "a daemon that doesn't answer: exit code 5 (not a mismatch)" 5 "$rc"
 unmount_fs
 
+echo "== an unmount that fails lets prewarm resume"
+R branch rs1; R branch rs2
+mkdir -p "$T/fakebin"
+printf '#!/bin/sh\necho "fusermount3: simulated failure" >&2\nexit 1\n' >"$T/fakebin/fusermount3"
+chmod +x "$T/fakebin/fusermount3"
+"$BIN" mount --log "$T/resume.log" "$REPO" "$MNT" >/dev/null 2>&1
+cat "$MNT/rs1/a.txt" >/dev/null
+check "the unmount fails" fails env PATH="$T/fakebin:$PATH" "$BIN" unmount "$MNT"
+check "and the mount stays" mountpoint -q "$MNT"
+cat "$MNT/rs2/a.txt" >/dev/null
+for _ in $(seq 100); do grep -q "prewarm done for $MNT/rs2" "$T/resume.log" && break; sleep 0.05; done
+check "prewarm resumed" grep -q "prewarm resumed" "$T/resume.log"
+check "a workspace opened afterwards is walked" grep -q "prewarm done for $MNT/rs2" "$T/resume.log"
+check "unmount" "$BIN" unmount "$MNT"
+for b in rs1 rs2; do "$BIN" remove "$REPO" "$b" >/dev/null; done
+R branch -q -D rs1 rs2
+
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"
 exit $((FAILS > 0))

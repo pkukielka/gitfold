@@ -204,7 +204,7 @@ fn launch(walks: Vec<Walk>) {
                 None
             }
         };
-        let Some(mut child) = child else {
+        let Some(child) = child else {
             // Its slot is free: the next queued walk may start.
             let next = next_walks(&mut state);
             drop(state);
@@ -215,39 +215,54 @@ fn launch(walks: Vec<Walk>) {
         info!("prewarm of {}: started", walk.root.display());
         state.running.push((pid, walk.root));
         drop(state);
-        // Reaped here, so it doesn't stay a zombie; then the next one starts.
-        std::thread::spawn(move || {
-            let killed = child
-                .wait()
-                .is_ok_and(|s| s.signal() == Some(libc::SIGTERM));
-            let next = {
-                let mut walks = WALKS.lock();
-                let ours = walks.running.iter().any(|(p, _)| *p == pid);
-                walks.running.retain(|(p, _)| *p != pid);
-                // Killed while still listed: not by `stop_under` or `stop_all`
-                // (they unlist first), so by `gitfold unmount` (`stop_below`).
-                // Another walk would keep the mount busy, and the unmount would
-                // only detach it: the queued ones are dropped (later opens are
-                // walked as usual, if the mount stays).
-                if killed && ours {
-                    warn!(
-                        "a prewarm walker was stopped from outside (an unmount?): dropping queued walks"
-                    );
-                    walks.queued.clear();
-                }
-                match walks.stopped {
-                    true => Vec::new(),
-                    false => next_walks(&mut walks),
-                }
-            };
-            launch(next);
-        });
+        // Reaped on a thread of its own, so it doesn't stay a zombie; then the
+        // next one starts. Without a thread (the system refuses one: process
+        // limits, memory), it is stopped now, rather than panicking in a FUSE
+        // request or the control thread and leaving its slot taken.
+        let reaper = std::thread::Builder::new()
+            .name("prewarm reaper".into())
+            .spawn(move || reap(child, pid));
+        if let Err(e) = reaper {
+            warn!("prewarm walker {pid}: no thread to reap it ({e}); stopping it");
+            let pid = pid as libc::pid_t;
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+            while unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) } < 0
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+            {
+            }
+            // The next ones would most likely fail the same way.
+            let mut walks = WALKS.lock();
+            walks.running.retain(|(p, _)| *p != pid as u32);
+            walks.queued.clear();
+        }
     }
 }
 
-/// The pids of this daemon's running walkers.
-pub fn walker_pids() -> Vec<u32> {
-    WALKS.lock().running.iter().map(|(p, _)| *p).collect()
+/// Waits for walker `child` (`pid`) to exit, unlists it, and starts the next
+/// queued walks.
+fn reap(mut child: std::process::Child, pid: u32) {
+    let killed = child
+        .wait()
+        .is_ok_and(|s| s.signal() == Some(libc::SIGTERM));
+    let next = {
+        let mut walks = WALKS.lock();
+        let ours = walks.running.iter().any(|(p, _)| *p == pid);
+        walks.running.retain(|(p, _)| *p != pid);
+        // Killed while still listed: not by `stop_under` or `stop_all` (they
+        // unlist first), so by `gitfold unmount` (`stop_below`). Another walk
+        // would keep the mount busy, and the unmount would only detach it: the
+        // queued ones are dropped (later opens are walked as usual, if the
+        // mount stays).
+        if killed && ours {
+            warn!("a prewarm walker was stopped from outside (an unmount?): dropping queued walks");
+            walks.queued.clear();
+        }
+        match walks.stopped {
+            true => Vec::new(),
+            false => next_walks(&mut walks),
+        }
+    };
+    launch(next);
 }
 
 /// Stops the running walkers, and any later one from starting: they keep the

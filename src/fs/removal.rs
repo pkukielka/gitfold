@@ -186,12 +186,13 @@ impl Removal {
     }
 
     /// Fails, naming them, if processes use something at or below `path`
-    /// (workspace or snapshot `name`). This daemon's prewarm walkers don't
-    /// count: a removal stops them.
+    /// (workspace or snapshot `name`). This daemon's own children don't
+    /// count: its prewarm walkers (stopped by a removal), also one just started
+    /// and not listed yet; nothing else it starts uses the mount.
     fn refuse_if_used(&self, path: &Path, name: &str) -> Result<()> {
-        let walkers = prewarm::walker_pids();
+        let daemon = std::process::id();
         let mut users = mountpoint::users(&self.mount_point, path);
-        users.retain(|u| !walkers.contains(&u.pid));
+        users.retain(|u| mountpoint::parent(u.pid) != Some(daemon));
         if users.is_empty() {
             return Ok(());
         }
