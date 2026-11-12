@@ -56,13 +56,20 @@ fn main() {
     println!("cargo:rustc-env=GITFOLD_LONG_VERSION={long}");
 }
 
-/// Hashes the path and content of `path` (below `dir`), of every file below
-/// it if it is a directory, in a fixed order.
+/// Hashes the path and content of `path` (below `dir`), or of the `.rs` files
+/// below it if it is a directory, in a fixed order. Symlinks and other files
+/// (an editor's swap files) don't count.
 fn hash_path(dir: &Path, path: &Path, hash: &mut Fnv) {
     let full = dir.join(path);
-    let Ok(meta) = fs::metadata(&full) else {
+    let Ok(meta) = fs::symlink_metadata(&full) else {
         return;
     };
+    let is_source = meta.is_dir()
+        || INPUTS.iter().any(|i| Path::new(i) == path)
+        || path.extension().is_some_and(|e| e == "rs");
+    if meta.is_symlink() || !is_source {
+        return;
+    }
     hash.write(path.to_string_lossy().as_bytes());
     hash.write(&[0]);
     if meta.is_dir() {

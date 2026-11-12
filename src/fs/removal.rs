@@ -113,8 +113,9 @@ impl Removal {
         let check =
             |ws: Option<&Workspace>| admin::check_workspace(store, common_dir, branch, force, ws);
         if let Some(open) = self.workspaces.get_open(branch) {
-            self.refuse_if_used(&self.mount_point.join(branch), branch)?;
+            // Changes first, as `check` reports them.
             check(Some(&open))?;
+            self.refuse_if_used(&self.mount_point.join(branch), branch)?;
             // `open` dropped here: the wait for requests in flight counts references.
         }
         self.workspaces.remove(branch, refuse_if_used, |ws| {

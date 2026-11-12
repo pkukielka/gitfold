@@ -133,7 +133,7 @@ Then, per request (`fs/workspace/`):
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
 | `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
 | `src/daemon.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
-| `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping prewarm for `unmount`; its version) |
+| `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
 | `build.rs` | the build's version (crate version and a hash of its sources; the git commit for `--version`), for `gitfold version` |
@@ -803,10 +803,11 @@ queue (reported: 16 µs per request with up to 4 in flight, 87-214 µs with
 8-16). A walk already running or queued for the same path isn't added; a
 removal drops its queued walk (and restarts it if refused); stopping for an
 unmount drops the whole queue and starts no walk until the unmount, or, if it
-fails, `gitfold unmount` lets them start again; a walker killed from outside
-with SIGTERM (what `gitfold unmount` sends, for daemons without the request)
-only drops the queue. A workspace's own mode, if set
-(`branch.<name>.gitfoldPrewarm`, git config, so it stays with the branch),
+fails, `gitfold unmount` lets them start again (what opened meanwhile isn't
+walked; interrupted in between, prewarm stays off until the next mount); a
+walker killed from outside with SIGTERM (what `gitfold unmount` sends, for
+daemons without the request) only drops the queue. A workspace's own mode, if
+set (`branch.<name>.gitfoldPrewarm`, git config, so it stays with the branch),
 overrides `--prewarm`, except `--prewarm none`, which turns prewarm off for the
 whole mount. `meta` (default) lists every directory and stats it afterwards
 (see the read-write mount note under
@@ -968,27 +969,28 @@ checkout" and "Running it"); this is the why and what it would take.
   kind (not found, changes, in use: `remove`'s exit codes 3, 4, 5) travels on
   the answer's last line, where clients that don't know it just show it;
   `remove --check` is a verb of its own, which daemons that don't know it
-  refuse. Without an answer (an older daemon, one starting), `remove` asks for
-  an unmount; a daemon being unmounted (detached while busy, or exiting)
-  refuses, and exits only after a removal in progress. For an open workspace,
-  the daemon first runs the checks while it is live (its own prewarm walkers
-  don't count as users): whether a process of this user uses it (from `/proc`),
-  then those of the offline `remove`; refusals almost always happen here,
-  before anything else changes. One that isn't open is only checked once, while
-  lookups of its name answer `EBUSY` (it can't be opened alongside). Then it
-  takes the workspace out of its registry, so no request reaches it (waiting up
-  to 5 s for requests in flight), runs all the checks again (what changed
-  meanwhile counts), puts it back if any fails, else deletes its state and has
-  the kernel drop the entry. While taken out, requests into it answer `EBUSY`,
-  which the kernel doesn't cache (an `ENOENT` would leave negative entries for
-  files that exist, if the removal is refused), and so do lookups of its name;
-  other workspaces open as usual. A snapshot only leaves the root meanwhile
-  (its inodes keep working), and holds off opening snapshots for the `/proc`
-  scan and stopping its prewarm walker. Removed slots aren't reused: inodes the
-  kernel still holds answer `ENOENT`, and a reopened branch gets new ones. Its
-  prewarm walk is stopped only once it is taken out, and restarted if the
-  removal is then refused. `remove --check` runs the same first checks; for a
-  workspace that isn't open, lookups of its name answer `EBUSY` meanwhile.
+  refuse. Without an answer (a daemon from before the control socket, one
+  starting), `remove` asks for an unmount; a daemon being unmounted (detached
+  while busy, or exiting) refuses, and exits only after a removal in progress.
+  For an open workspace, the daemon first runs the checks while it is live (its
+  own prewarm walkers don't count as users): whether a process of this user
+  uses it (from `/proc`), then those of the offline `remove`; refusals almost
+  always happen here, before anything else changes. One that isn't open is only
+  checked once, while lookups of its name answer `EBUSY` (it can't be opened
+  alongside). Then it takes the workspace out of its registry, so no request
+  reaches it (waiting up to 5 s for requests in flight), runs all the checks
+  again (what changed meanwhile counts), puts it back if any fails, else
+  deletes its state and has the kernel drop the entry. While taken out,
+  requests into it answer `EBUSY`, which the kernel doesn't cache (an `ENOENT`
+  would leave negative entries for files that exist, if the removal is
+  refused), and so do lookups of its name; other workspaces open as usual. A
+  snapshot only leaves the root meanwhile (its inodes keep working), and holds
+  off opening snapshots for the `/proc` scan and stopping its prewarm walker.
+  Removed slots aren't reused: inodes the kernel still holds answer `ENOENT`,
+  and a reopened branch gets new ones. Its prewarm walk is stopped only once it
+  is taken out, and restarted if the removal is then refused. `remove --check`
+  runs the same first checks; for a workspace that isn't open, lookups of its
+  name answer `EBUSY` meanwhile.
   A daemon holds an exclusive `flock` on the git common
   directory itself (nothing is created for it) for its whole life, also while
   exiting after an unmount, and through bind mounts or other mount namespaces,

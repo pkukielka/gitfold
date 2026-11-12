@@ -65,12 +65,20 @@ struct Walk {
     threads: usize,
 }
 
+/// A walk whose process is being started.
+struct Starting {
+    root: PathBuf,
+    /// Stopped meanwhile (`stop_under`, `stop_all`): `launch` stops the process
+    /// once it exists, and drops this, which they wait for.
+    cancelled: bool,
+}
+
 struct Walks {
     /// Walker processes running (pid, root), so they can be stopped before
     /// unmounting or removing what they walk.
     running: Vec<(u32, PathBuf)>,
-    /// Roots of walks whose process is being started.
-    starting: Vec<PathBuf>,
+    /// Walks whose process is being started (see `launch`).
+    starting: Vec<Starting>,
     /// Walks waiting for one of `MAX_WALKS` to finish.
     queued: VecDeque<Walk>,
     /// Stopping began (unmounting): no new walk starts.
@@ -111,7 +119,7 @@ pub fn spawn(root: PathBuf, mode: Prewarm, threads: usize) {
     let next = {
         let mut walks = WALKS.lock();
         let known = walks.running.iter().any(|(_, r)| *r == root)
-            || walks.starting.contains(&root)
+            || walks.starting.iter().any(|s| s.root == root)
             || walks.queued.iter().any(|w| w.root == root);
         if walks.stopped || known {
             return;
@@ -140,7 +148,10 @@ fn next_walks(walks: &mut Walks) -> Vec<Walk> {
     while walks.running.len() + walks.starting.len() < MAX_WALKS.load(Ordering::Relaxed)
         && let Some(walk) = walks.queued.pop_front()
     {
-        walks.starting.push(walk.root.clone());
+        walks.starting.push(Starting {
+            root: walk.root.clone(),
+            cancelled: false,
+        });
         next.push(walk);
     }
     next
@@ -164,25 +175,33 @@ fn launch(walks: Vec<Walk>) {
             .stdin(Stdio::null());
         let spawned = command.spawn();
         let mut state = WALKS.lock();
-        let wanted = state.starting.iter().position(|r| *r == walk.root);
-        let wanted = wanted.map(|at| state.starting.remove(at)).is_some() && !state.stopped;
-        let mut child = match spawned {
-            Ok(child) => child,
+        let at = state.starting.iter().position(|s| s.root == walk.root);
+        let cancelled = at.map(|at| state.starting.remove(at).cancelled);
+        let wanted = cancelled == Some(false) && !state.stopped;
+        let child = match spawned {
+            Ok(child) if wanted => Some(child),
+            Ok(mut child) => {
+                // Stopped meanwhile: stop it now (waited for unlocked; the
+                // stopper waits for `starting` to drop it, done above).
+                drop(state);
+                unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+                let _ = child.wait();
+                state = WALKS.lock();
+                None
+            }
             Err(e) => {
                 warn!("prewarm of {}: {e}", walk.root.display());
-                let next = next_walks(&mut state);
-                drop(state);
-                launch(next);
-                continue;
+                None
             }
         };
-        let pid = child.id();
-        if !wanted {
+        let Some(mut child) = child else {
+            // Its slot is free: the next queued walk may start.
+            let next = next_walks(&mut state);
             drop(state);
-            terminate(vec![pid as libc::pid_t]);
-            let _ = child.wait();
+            launch(next);
             continue;
-        }
+        };
+        let pid = child.id();
         info!("prewarm of {}: started", walk.root.display());
         state.running.push((pid, walk.root));
         drop(state);
@@ -228,10 +247,22 @@ pub fn stop_all() {
         let mut walks = WALKS.lock();
         walks.stopped = true;
         walks.queued.clear();
-        walks.starting.clear();
+        walks.starting.iter_mut().for_each(|s| s.cancelled = true);
         std::mem::take(&mut walks.running)
     };
     terminate(pids.iter().map(|(p, _)| *p as libc::pid_t).collect());
+    wait_for_starting(|_| true);
+}
+
+/// Waits (up to 2 s) until no walk whose root `matches` is being started:
+/// `launch` stops cancelled ones once their process exists.
+fn wait_for_starting(matches: impl Fn(&Path) -> bool) {
+    let started = Instant::now();
+    while WALKS.lock().starting.iter().any(|s| matches(&s.root))
+        && started.elapsed() < Duration::from_secs(2)
+    {
+        std::thread::sleep(Duration::from_millis(5));
+    }
 }
 
 /// Lets walks start again after `stop_all` (an unmount that failed).
@@ -244,11 +275,18 @@ pub fn resume() {
 pub fn stop_under(path: &Path) -> bool {
     let (pids, dropped) = {
         let mut walks = WALKS.lock();
-        let (queued, starting) = (walks.queued.len(), walks.starting.len());
+        let queued = walks.queued.len();
         walks.queued.retain(|w| !w.root.starts_with(path));
-        // Stopped by `launch` once started.
-        walks.starting.retain(|root| !root.starts_with(path));
-        let dropped = walks.queued.len() != queued || walks.starting.len() != starting;
+        let mut dropped = walks.queued.len() != queued;
+        // Stopped by `launch` once started; waited for below.
+        for s in walks
+            .starting
+            .iter_mut()
+            .filter(|s| s.root.starts_with(path))
+        {
+            s.cancelled = true;
+            dropped = true;
+        }
         // Unlisted first, so their reaper doesn't take it for an unmount (and
         // meanwhile, while they die, another walk may start).
         let (under, others) = std::mem::take(&mut walks.running)
@@ -262,6 +300,7 @@ pub fn stop_under(path: &Path) -> bool {
     };
     let stopped = dropped || !pids.is_empty();
     terminate(pids);
+    wait_for_starting(|root| root.starts_with(path));
     stopped
 }
 

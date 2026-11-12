@@ -165,8 +165,9 @@ Options:
 
 A workspace can have its own prewarm mode, kept across remounts in the branch's
 git config: `gitfold branch <REPO> <NAME> --prewarm none`, or `git config
-branch.<NAME>.gitfoldPrewarm none` for an existing branch (read when the
-workspace opens; `--prewarm none` for the whole mount still wins). `none` suits
+branch.<NAME>.gitfoldPrewarm none` for an existing branch (read from the
+repository's own config file, where `git config` writes it, when the workspace
+opens; `--prewarm none` for the whole mount still wins). `none` suits
 workspaces an agent only reads a few files in: a walk of a 1.4M-file tree costs
 about 1.26M FUSE requests and 100 CPU-seconds of the daemon.
 
@@ -448,7 +449,7 @@ Code issues itself. Details, methodology and more repositories:
 | | native checkout | snapshot | workspace |
 |---|---:|---:|---:|
 | open | `git worktree add`: 17.30 / 17.22 s, 5.5 GiB | 0.84 s (0.10-0.12 s near an open one) | 0.85 s |
-| prewarm (background) | | 0.64 s | 1.37 s |
+| prewarm (background, 4 threads) | | 0.70 s | 1.10 s |
 | `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.36 / 0.35 s | 0.35 / 0.35 s |
 | `git status` | 0.86 / 0.88 s | 1.15 / 1.13 s | 1.20 / 1.17 s |
 | `rg` | 0.37 / 0.37 s | 2.98 / 0.40 s | 3.36 / 0.41 s |

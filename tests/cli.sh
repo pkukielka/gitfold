@@ -475,13 +475,21 @@ eq "no walk started once it began" "$started" "$(grep -c ': started' "$T/pw2.log
 check "--prewarm-walks 0 refused" fails "$BIN" mount --foreground --prewarm-walks 0 "$PW" "$MNT"
 # A walker killed from outside (an older `gitfold unmount`, a user) drops the
 # queue, but later opens are still walked.
-"$BIN" mount --prewarm content --prewarm-threads 1 --log "$T/pw3.log" "$PW" "$MNT" >/dev/null 2>&1
-cat "$MNT/pw1/d/f1" >/dev/null
-WALKER=$(ps -eo pid=,args= | awk -v r="$MNT/pw1" '$2 == "gitfold" && $3 == "prewarm" && $4 == r { print $1 }')
+"$BIN" mount --prewarm content --prewarm-threads 1 --prewarm-walks 1 --log "$T/pw3.log" "$PW" "$MNT" >/dev/null 2>&1
+cat "$MNT/pw1/d/f1" "$MNT/pw2/d/f1" >/dev/null
+WALKER=
+for _ in $(seq 100); do
+    WALKER=$(ps -eo pid=,args= | awk -v r="$MNT/pw1" '$2 == "gitfold" && $3 == "prewarm" && $4 == r { print $1 }')
+    [ -n "$WALKER" ] && break; sleep 0.02
+done
+check "pw1's walker found" test -n "$WALKER"
 kill -TERM $WALKER 2>/dev/null
-cat "$MNT/pw2/d/f1" >/dev/null
-for _ in $(seq 200); do grep -q "prewarm done for $MNT/pw2" "$T/pw3.log" && break; sleep 0.05; done
-check "a walker killed from outside doesn't stop later walks" grep -q "prewarm done for $MNT/pw2" "$T/pw3.log"
+for _ in $(seq 100); do grep -q "stopped from outside" "$T/pw3.log" && break; sleep 0.05; done
+check "its death taken for an outside stop" grep -q "stopped from outside" "$T/pw3.log"
+cat "$MNT/pw3/d/f1" >/dev/null
+for _ in $(seq 200); do grep -q "prewarm done for $MNT/pw3" "$T/pw3.log" && break; sleep 0.05; done
+check "the queued walk dropped" sh -c "! grep -q 'prewarm of $MNT/pw2: started' '$T/pw3.log'"
+check "later opens still walked" grep -q "prewarm done for $MNT/pw3" "$T/pw3.log"
 check "unmount" "$BIN" unmount "$MNT"
 G "$PW" config branch.pw1.gitfoldPrewarm content
 "$BIN" mount --prewarm none --log "$T/pw4.log" "$PW" "$MNT" >/dev/null 2>&1

@@ -127,7 +127,21 @@ pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
                 "runs another gitfold build: unmount and mount again to upgrade".to_string(),
             )
         }
-        Ok(None) => (5, "doesn't answer (starting or exiting)".to_string()),
+        // No socket answering: the daemon gone (killed, crashed) leaves its
+        // mount answering ENOTCONN; else it is starting, exiting or older
+        // than the control socket.
+        Ok(None)
+            if fs::metadata(&mountpoint)
+                .is_err_and(|e| e.raw_os_error() == Some(libc::ENOTCONN)) =>
+        {
+            bail!(
+                "the daemon of {shown} is gone (killed?): `gitfold unmount {shown}`, then mount again"
+            )
+        }
+        Ok(None) => (
+            5,
+            "doesn't answer (starting or exiting, or from before the control socket)".to_string(),
+        ),
         // Requests are answered one at a time: a removal may be running.
         Err(e) if timed_out(&e) => {
             let wait = WAIT.as_secs();
