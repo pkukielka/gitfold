@@ -821,6 +821,13 @@ gets the speed with no correctness risk.
   raw decompression even got faster (5.5 to 6.6 GB/s). gitfold opens the
   repository with `core.deltaBaseCacheLimit=0` and sets the object cache to 0
   (which is gitoxide's default anyway).
+- *Room for new packs.* gitoxide sizes the object database's pack index table
+  once, at open (by default the packs on disk then, plus 10%, at least 32), and
+  never grows it. On a mount that lived through days of fetches and repacks,
+  lookups of objects in new packs then failed with "too few index slots"
+  (reported from a monorepo: 52 slots, 79 needed) until a remount. gitfold
+  opens it with at least 16,384 slots (~110 bytes each, ~2 MB; slots of
+  deleted packs are reused).
 - *glibc.* After large frees, glibc raises its mmap threshold dynamically, after
   which large blob buffers come from heap arenas that are never returned to the
   OS (904 MB of heap after one pass over Chromium, vs 296-385 MB with a fixed

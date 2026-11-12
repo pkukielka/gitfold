@@ -14,6 +14,13 @@ use anyhow::{Context, Result, anyhow};
 use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 
+/// The least number of pack indexes the object database can hold. Its slot table
+/// is sized once, at open (by default to the packs on disk then, plus 10%), and
+/// never grows: after enough fetches or repacks while mounted, lookups of
+/// objects in new packs failed ("too few index slots") until a remount. Slots
+/// of deleted packs are reused; each costs ~110 bytes (~2 MB in all).
+const MIN_INDEX_SLOTS: usize = 16384;
+
 static REPO: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
 
 thread_local! {
@@ -25,7 +32,13 @@ pub fn init(path: &Path) -> Result<PathBuf> {
     // Trees are decoded once per snapshot and file content is cached by the kernel,
     // so gitoxide's per-thread delta-base cache (96 MB by default) only costs memory
     // (~2 GB on chromium with 24 threads) without making reads faster.
-    let opts = gix::open::Options::default().config_overrides(["core.deltaBaseCacheLimit=0"]);
+    let slots = gix::odb::store::init::Slots::AsNeededByDiskState {
+        multiplier: 1.1,
+        minimum: MIN_INDEX_SLOTS,
+    };
+    let opts = gix::open::Options::default()
+        .config_overrides(["core.deltaBaseCacheLimit=0"])
+        .object_store_slots(slots);
     let repo = gix::open_opts(path, opts)
         .with_context(|| format!("opening repository {}", path.display()))?;
     let common = repo.common_dir().canonicalize()?;

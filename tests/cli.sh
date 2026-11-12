@@ -431,6 +431,24 @@ check "'..' refused unmounted" fails "$BIN" remove "$REPO" ..
 check "remove live1" "$BIN" remove "$REPO" live1
 R branch -q -D live1 live2 nsx/live3 live4 live5 many
 
+echo "== many packs added while mounted"
+# The object database's pack index table was sized at open and never grew.
+mount_fs
+test -f "$MNT/@main/a.txt"
+prev=$(R rev-parse main)
+for i in $(seq 100); do
+    blob=$(echo "$i" | R hash-object -w --stdin)
+    tree=$(printf '100644 blob %s\tn.txt\n' "$blob" | R mktree)
+    prev=$(R commit-tree "$tree" -p "$prev" -m "pack $i")
+    printf '%s\n' "$prev" "$tree" "$blob" | R pack-objects -q "$COMMON/objects/pack/pack" >/dev/null
+    R prune-packed
+done
+R branch packs "$prev"
+eq "a commit in the 100th new pack opens" 100 "$(cat "$MNT/@packs/n.txt" 2>&1)"
+unmount_fs
+R branch -q -D packs
+R repack -qad
+
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"
 exit $((FAILS > 0))
