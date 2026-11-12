@@ -157,6 +157,16 @@ impl Workspaces {
         slot
     }
 
+    /// Walks the workspace of `branch` (see `prewarm`), in its own mode if set,
+    /// if it is open.
+    pub fn prewarm(&self, branch: &str) {
+        if self.get_open(branch).is_none() {
+            return;
+        }
+        let mode = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm);
+        prewarm::spawn(self.mount_point.join(branch), mode, self.prewarm_threads);
+    }
+
     /// The open workspace of `branch`.
     pub fn get_open(&self, branch: &str) -> Option<Arc<Workspace>> {
         let slot = *self.by_path.lock().get(branch)?;
@@ -401,7 +411,7 @@ impl Workspaces {
         let ws = Arc::new(ws);
         let slot = self.add(branch, Entry::Workspace(ws.clone()));
         watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
-        prewarm::spawn(path, self.prewarm, self.prewarm_threads);
+        self.prewarm(branch);
         Ok(inode::ws(slot, 0))
     }
 }

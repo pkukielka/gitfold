@@ -1,5 +1,6 @@
 //! The daemon's control socket: how `gitfold remove` asks a running daemon to
-//! remove a workspace or snapshot, instead of requiring an unmount.
+//! remove a workspace or snapshot, instead of requiring an unmount, and
+//! `gitfold unmount` asks it to stop prewarm walks first.
 //!
 //! A Unix socket at `.git/gitfold/.control`, so the repository's permissions
 //! guard it (an abstract socket name could be taken by any local user), and
@@ -27,12 +28,16 @@ const READ_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum Request {
     /// Remove workspace `name`, or snapshot `@<rev>`.
     Remove { name: String, force: bool },
+    /// Stop prewarm walks, running and queued, for the rest of the daemon's
+    /// life: an unmount follows.
+    StopPrewarm,
 }
 
 impl Request {
     fn encode(&self) -> Vec<u8> {
         match self {
             Request::Remove { name, force } => format!("remove\n{}\n{name}\n", *force as u8),
+            Request::StopPrewarm => "stop-prewarm\n".to_string(),
         }
         .into_bytes()
     }
@@ -44,6 +49,7 @@ impl Request {
                 name: name.to_string(),
                 force: force == "1",
             }),
+            ["stop-prewarm", ""] => Ok(Request::StopPrewarm),
             _ => bail!("unknown request"),
         }
     }
@@ -63,8 +69,13 @@ fn with_path<T>(
 }
 
 /// Sends `request` to the daemon of `common_dir`: `Ok(None)` if no daemon
-/// listens, else its answer, or its refusal as the error.
-pub fn request(common_dir: &Path, request: &Request) -> Result<Option<String>> {
+/// listens, else its answer, or its refusal as the error. Waits at most
+/// `timeout` for the answer, if given (requests are answered one at a time).
+pub fn request(
+    common_dir: &Path,
+    request: &Request,
+    timeout: Option<Duration>,
+) -> Result<Option<String>> {
     let mut stream = match with_path(common_dir, |path| UnixStream::connect(path)) {
         Ok(stream) => stream,
         Err(e) if matches!(e.kind(), ErrorKind::ConnectionRefused | ErrorKind::NotFound) => {
@@ -72,6 +83,7 @@ pub fn request(common_dir: &Path, request: &Request) -> Result<Option<String>> {
         }
         Err(e) => return Err(e).context("connecting to the gitfold daemon"),
     };
+    stream.set_read_timeout(timeout)?;
     stream.write_all(&request.encode())?;
     stream.shutdown(std::net::Shutdown::Write)?;
     let mut answer = String::new();

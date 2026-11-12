@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::admin;
+use crate::control;
 use crate::mountpoint;
 use crate::worktree;
 
@@ -115,6 +116,13 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     // Not one of the processes using it.
     std::env::set_current_dir("/")?;
     // Prewarm walkers keep the mount busy, which would make this only detach it.
+    // The daemon stops them, and starts no more; killing them from here is for
+    // daemons without the request (it would start queued ones meanwhile).
+    let common_dir = admin::common_dir_of_source(&source);
+    // Briefly: a daemon that is stopped, hung or busy with a removal must not
+    // keep it from unmounting.
+    let stop = control::Request::StopPrewarm;
+    let _ = control::request(&common_dir, &stop, Some(Duration::from_secs(3)));
     crate::prewarm::stop_below(&mountpoint);
     let detached = !mountpoint::unmount(&mountpoint)?;
     if detached {
@@ -142,7 +150,6 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
         println!("Close them or `cd` out; Ctrl-C is safe: gitfold still exits once they leave.");
     }
     // The daemon holds the lock of its repository until it has exited.
-    let common_dir = admin::common_dir_of_source(&source);
     if !common_dir.is_dir() {
         println!("unmounted {shown} (can't tell when gitfold exits: {source} not found)");
         return Ok(());

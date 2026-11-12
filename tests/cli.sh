@@ -449,6 +449,41 @@ unmount_fs
 R branch -q -D packs
 R repack -qad
 
+echo "== prewarm: walks at once, per-workspace opt-out"
+PW=$T/pwrepo
+git init -q "$PW"; mkdir "$PW/d"
+for i in $(seq 5000); do echo $i >"$PW/d/f$i"; done
+G "$PW" add -A; G "$PW" commit -qm many
+for b in pw1 pw2 pw3; do G "$PW" branch $b; done
+check "branch --prewarm none" "$BIN" branch "$PW" pw4 --prewarm none
+eq "kept in the branch's git config" none "$(G "$PW" config --get branch.pw4.gitfoldPrewarm)"
+"$BIN" mount --prewarm-walks 1 --log "$T/pw.log" "$PW" "$MNT" >/dev/null 2>&1
+for b in pw1 pw2 pw3 pw4; do cat "$MNT/$b/d/f1" >/dev/null & done; wait
+for _ in $(seq 200); do [ "$(grep -c 'prewarm done' "$T/pw.log")" -ge 3 ] && break; sleep 0.05; done
+sleep 0.3
+# Starts and ends alternate: never two walks at once.
+eq "one walk at a time" "SDSDSD" "$(grep -oE 'prewarm (of [^:]*: started|done for)' "$T/pw.log" | sed 's/.*started/S/; s/.*done for/D/' | tr -d '\n')"
+eq "each workspace walked once" "pw1 pw2 pw3" "$(grep -o 'prewarm done for [^:]*' "$T/pw.log" | sed 's|.*/||' | sort | xargs)"
+check "a workspace that opted out isn't walked" sh -c "! grep -q 'mnt/pw4' '$T/pw.log'"
+check "unmount" "$BIN" unmount "$MNT"
+# Slow walks, one at a time: an unmount must not start the queued ones.
+"$BIN" mount --prewarm-walks 1 --prewarm content --prewarm-threads 1 --log "$T/pw2.log" "$PW" "$MNT" >/dev/null 2>&1
+for b in pw1 pw2 pw3; do cat "$MNT/$b/d/f1" >/dev/null & done; wait
+started=$(grep -c ': started' "$T/pw2.log")
+eq "unmount with walks queued unmounts (doesn't detach)" "unmounted $MNT" "$("$BIN" unmount "$MNT" 2>&1 | tail -1)"
+eq "no walk started once it began" "$started" "$(grep -c ': started' "$T/pw2.log")"
+check "--prewarm-walks 0 refused" fails "$BIN" mount --foreground --prewarm-walks 0 "$PW" "$MNT"
+for b in pw1 pw2 pw3 pw4; do "$BIN" remove "$PW" "$b" >/dev/null; done
+G "$PW" branch -q -D pw4
+check "the opt-out goes with the branch" fails G "$PW" config --get branch.pw4.gitfoldPrewarm
+
+echo "== unmount of a stopped daemon"
+mount_fs
+kill -STOP $PID
+timeout 10 "$BIN" unmount "$MNT" >/dev/null 2>&1
+check "unmounts without the daemon's answer" sh -c "! mountpoint -q '$MNT'"
+kill -CONT $PID; wait $PID 2>/dev/null
+
 echo "== $FAILS failure(s)"
 [ -n "${KEEP:-}" ] || rm -rf "$T"
 exit $((FAILS > 0))
