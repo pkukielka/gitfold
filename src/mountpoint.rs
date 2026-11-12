@@ -278,7 +278,7 @@ pub fn self_and_ancestors() -> Vec<u32> {
 }
 
 /// The parent of process `pid`, if it has one (and is visible here).
-fn parent(pid: u32) -> Option<u32> {
+pub fn parent(pid: u32) -> Option<u32> {
     // pid (comm) state ppid ...; comm may contain spaces and parentheses.
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let at = stat.rfind(')')?;
