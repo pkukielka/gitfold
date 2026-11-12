@@ -9,7 +9,7 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::Result;
 use parking_lot::Mutex;
 
 use super::NameChanges;
@@ -17,6 +17,7 @@ use super::snapshots::Snapshots;
 use super::workspace::Workspace;
 use super::workspaces::Workspaces;
 use crate::admin;
+use crate::refusal::Refusal;
 use crate::store::Store;
 use crate::{git, mountpoint, prewarm};
 
@@ -37,24 +38,22 @@ impl Removal {
     /// does unmounted; returns what was done.
     pub fn remove(&self, name: &str, force: bool) -> Result<String> {
         let closed = self.closed.lock();
-        // Detached (unmounted while busy): who uses it can't be told any more.
-        ensure!(
-            !*closed && mountpoint::gitfold_source(&self.mount_point)?.is_some(),
-            "{} is being unmounted",
-            self.mount_point.display()
-        );
+        self.refuse_if_unmounting(*closed)?;
         let path = self.mount_point.join(name);
-        // Whether a prewarm walk of it was stopped (walkers would count as
-        // users), to restart it if the removal is refused.
+        // Taken out, it must not be in use: its prewarm walk is stopped then
+        // (the checks before ignore it), and restarted if it is refused.
         let walk_stopped = Cell::new(false);
-        let stop_walk = || walk_stopped.set(prewarm::stop_under(&path) || walk_stopped.get());
         let refuse_if_used = || {
-            stop_walk();
+            walk_stopped.set(prewarm::stop_under(&path));
             self.refuse_if_used(&path, name)
         };
         let (parent, leaf) = self.workspaces.parent_and_leaf(name);
         let removed = match name.strip_prefix('@') {
             Some(rev) => {
+                // While it is open, refusals come before it leaves the root.
+                if self.snapshots.commit_of(name.as_bytes()).is_some() {
+                    self.refuse_if_used(&path, name)?;
+                }
                 let resolve = || git::resolve(rev).ok().map(|c| c.id);
                 self.snapshots
                     .remove(
@@ -67,6 +66,7 @@ impl Removal {
                                 rev,
                                 commit,
                                 shared,
+                                false,
                             )
                         },
                     )
@@ -75,7 +75,7 @@ impl Removal {
                         false => (done, false),
                     })
             }
-            None => self.remove_workspace(name, force, stop_walk, refuse_if_used),
+            None => self.remove_workspace(name, force, refuse_if_used),
         };
         // Refused while open (not taken out by another removal meanwhile).
         if removed.is_err() && walk_stopped.get() {
@@ -107,14 +107,12 @@ impl Removal {
         &self,
         branch: &str,
         force: bool,
-        stop_walk: impl FnOnce(),
         refuse_if_used: impl FnOnce() -> Result<()>,
     ) -> Result<(String, bool)> {
         let (store, common_dir) = (&*self.store, &self.common_dir);
         let check =
             |ws: Option<&Workspace>| admin::check_workspace(store, common_dir, branch, force, ws);
         if let Some(open) = self.workspaces.get_open(branch) {
-            stop_walk();
             self.refuse_if_used(&self.mount_point.join(branch), branch)?;
             check(Some(&open))?;
             // `open` dropped here: the wait for requests in flight counts references.
@@ -125,17 +123,71 @@ impl Removal {
         })
     }
 
+    /// What `remove` would refuse, without changing anything (`remove --check`).
+    pub fn check(&self, name: &str, force: bool) -> Result<String> {
+        let closed = self.closed.lock();
+        self.refuse_if_unmounting(*closed)?;
+        let path = self.mount_point.join(name);
+        if let Some(rev) = name.strip_prefix('@') {
+            let open = self.snapshots.commit_of(name.as_bytes());
+            if open.is_some() {
+                self.refuse_if_used(&path, name)?;
+            }
+            let commit = open.or_else(|| git::resolve(rev).ok().map(|c| c.id));
+            let commit =
+                commit.ok_or_else(|| Refusal::NotFound.error(format!("no snapshot {name}")))?;
+            let shared = self.snapshots.open_names_of(&commit) > usize::from(open.is_some());
+            return admin::remove_snapshot_registration(
+                &self.common_dir,
+                rev,
+                &commit,
+                shared,
+                true,
+            );
+        }
+        let (store, common_dir) = (&*self.store, &self.common_dir);
+        // Not open: checked while it can't be opened (catching up may write).
+        let closed = self.workspaces.check_closed(name, || {
+            admin::check_workspace(store, common_dir, name, force, None)
+        })?;
+        let ignored = match closed {
+            Some(ignored) => ignored,
+            None => {
+                let open = (self.workspaces.get_open(name)).ok_or_else(|| {
+                    Refusal::NotFound
+                        .error(format!("{name} is a namespace directory, not a workspace"))
+                })?;
+                self.refuse_if_used(&path, name)?;
+                admin::check_workspace(store, common_dir, name, force, Some(&open))?
+            }
+        };
+        Ok(admin::removable_workspace(name, ignored))
+    }
+
+    /// Refuses once the mount is being unmounted (`closed`), or detached
+    /// (unmounted while busy): who uses what can't be told any more.
+    fn refuse_if_unmounting(&self, closed: bool) -> Result<()> {
+        if closed || mountpoint::gitfold_source(&self.mount_point)?.is_none() {
+            let shown = self.mount_point.display();
+            return Err(Refusal::InUse.error(format!("{shown} is being unmounted")));
+        }
+        Ok(())
+    }
+
     /// Fails, naming them, if processes use something at or below `path`
-    /// (workspace or snapshot `name`).
+    /// (workspace or snapshot `name`). This daemon's prewarm walkers don't
+    /// count: a removal stops them.
     fn refuse_if_used(&self, path: &Path, name: &str) -> Result<()> {
-        let users = mountpoint::users(&self.mount_point, path);
+        let walkers = prewarm::walker_pids();
+        let mut users = mountpoint::users(&self.mount_point, path);
+        users.retain(|u| !walkers.contains(&u.pid));
         if users.is_empty() {
             return Ok(());
         }
         let list: Vec<String> = users.iter().map(|u| format!("\n  {u}")).collect();
-        bail!(
+        Err(Refusal::InUse.error(format!(
             "{name} is in use; close or `cd` out of it first:{}",
             list.concat()
-        )
+        )))
     }
 }

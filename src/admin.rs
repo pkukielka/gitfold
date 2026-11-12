@@ -5,6 +5,7 @@ use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::ValueEnum;
@@ -13,6 +14,7 @@ use crate::control;
 use crate::fs::workspace::{Workspace, status};
 use crate::git;
 use crate::prewarm::Prewarm;
+use crate::refusal::Refusal;
 use crate::store::Store;
 use crate::worktree::{self, workspace_branch, workspace_id};
 
@@ -207,18 +209,44 @@ pub fn list(repo: &Path) -> Result<()> {
 
 /// `gitfold remove`: deletes a workspace (its registration, state and base
 /// pin; its commits stay on the branch), or a snapshot registration
-/// (`@<rev>`). While mounted, the daemon does it (see `control`).
-pub fn remove(repo: &Path, name: &str, force: bool) -> Result<()> {
+/// (`@<rev>`). While mounted, the daemon does it (see `control`). With
+/// `check`, only checks what would be refused. Retries for up to `wait` while
+/// it is in use.
+pub fn remove(repo: &Path, name: &str, force: bool, check: bool, wait: Duration) -> Result<()> {
     check_name(name)?;
     let common_dir = git::init(repo)?;
-    let lock = worktree::lock(&common_dir)?;
-    let done = match (lock, name.strip_prefix('@')) {
+    let started = Instant::now();
+    let mut told = false;
+    let done = loop {
+        match remove_once(&common_dir, name, force, check) {
+            Err(e) if Refusal::of(&e) == Some(Refusal::InUse) && started.elapsed() < wait => {
+                if !told {
+                    eprintln!("{e:#}\nwaiting (up to {} s)...", wait.as_secs());
+                    told = true;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) if told && Refusal::of(&e) == Some(Refusal::InUse) => {
+                let waited = started.elapsed().as_secs();
+                return Err(e.context(format!("still in use after {waited} s")));
+            }
+            done => break done?,
+        }
+    };
+    println!("{done}");
+    Ok(())
+}
+
+fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Result<String> {
+    let lock = worktree::lock(common_dir)?;
+    Ok(match (lock, name.strip_prefix('@')) {
         (None, _) => {
             let request = control::Request::Remove {
                 name: name.to_string(),
                 force,
+                check,
             };
-            control::request(&common_dir, &request, None)?.with_context(|| {
+            control::request(common_dir, &request, None)?.with_context(|| {
                 format!(
                     "{} is locked by a gitfold daemon that doesn't take removal requests (one \
                      starting or exiting, or an older gitfold), or by a `gitfold remove` or \
@@ -228,13 +256,29 @@ pub fn remove(repo: &Path, name: &str, force: bool) -> Result<()> {
             })?
         }
         (Some(_), Some(rev)) => {
-            let commit = git::resolve(rev).with_context(|| format!("no snapshot @{rev}"))?;
-            remove_snapshot_registration(&common_dir, rev, &commit.id, false)?
+            let commit = git::resolve(rev)
+                .map_err(|e| Refusal::NotFound.error(format!("no snapshot @{rev}: {e:#}")))?;
+            remove_snapshot_registration(common_dir, rev, &commit.id, false, check)?
         }
-        (Some(_), None) => remove_workspace(&Store::default(), &common_dir, name, force)?,
-    };
-    println!("{done}");
-    Ok(())
+        (Some(_), None) => {
+            let store = Store::default();
+            match check {
+                true => {
+                    let ignored = check_workspace(&store, common_dir, name, force, None)?;
+                    removable_workspace(name, ignored)
+                }
+                false => remove_workspace(&store, common_dir, name, force)?,
+            }
+        }
+    })
+}
+
+/// What `remove --check` says of a workspace that can be removed.
+pub fn removable_workspace(branch: &str, ignored: usize) -> String {
+    match ignored {
+        0 => format!("workspace {branch} can be removed"),
+        n => format!("workspace {branch} can be removed (with {n} ignored files in it)"),
+    }
 }
 
 /// Refuses what can name neither a workspace (a valid branch name) nor a
@@ -246,26 +290,37 @@ pub fn check_name(name: &str) -> Result<()> {
             gix::validate::reference::name(format!("refs/heads/{name}").as_str().into()).is_ok()
         }
     };
-    ensure!(valid, "{name:?} is neither a branch name nor @<rev>");
+    if !valid {
+        let message = format!("{name:?} is neither a branch name nor @<rev>");
+        return Err(Refusal::NotFound.error(message));
+    }
     Ok(())
 }
 
 /// Deletes the registration of the snapshot of `commit` (named `@<rev>`)
-/// unless `in_use`; returns what was done.
+/// unless `in_use` (another open name shows it); returns what was done. With
+/// `dry_run`, only says what it would do.
 pub fn remove_snapshot_registration(
     common_dir: &Path,
     rev: &str,
     commit: &gix::ObjectId,
     in_use: bool,
+    dry_run: bool,
 ) -> Result<String> {
     let admin = worktree::snapshot_admin_dir(common_dir, commit);
-    Ok(if in_use {
-        format!("the registration of @{rev} stays: another open snapshot shows {commit}")
-    } else if admin.exists() {
-        remove_dir(&admin)?;
-        format!("removed the registration of snapshot @{rev}")
-    } else {
-        format!("no registration of snapshot @{rev} ({commit}) to remove")
+    Ok(match (dry_run, in_use, admin.exists()) {
+        (true, true, _) => format!(
+            "@{rev} can be removed; its registration would stay: another open snapshot shows {commit}"
+        ),
+        (false, true, _) => {
+            format!("the registration of @{rev} stays: another open snapshot shows {commit}")
+        }
+        (true, false, true) => format!("@{rev} can be removed, with its registration"),
+        (false, false, true) => {
+            remove_dir(&admin)?;
+            format!("removed the registration of snapshot @{rev}")
+        }
+        (_, false, false) => format!("no registration of snapshot @{rev} ({commit}) to remove"),
     })
 }
 
@@ -298,22 +353,32 @@ pub fn check_workspace(
     let id = workspace_id(branch);
     let state_dir = worktree::state_root(common_dir).join(&id);
     let admin = worktree::ws_admin_dir(common_dir, &id);
-    ensure!(
-        state_dir.exists() || admin.exists(),
-        "no workspace for branch {branch}"
-    );
+    if !state_dir.exists() && !admin.exists() {
+        return Err(Refusal::NotFound.error(format!("no workspace for branch {branch}")));
+    }
+    let changes = |message: String| Refusal::Changes.error(message);
     // Commits reachable only from the worktree (a rebase stopped half-way, a
     // detached HEAD) would be lost with its admin directory.
     if !force
         && admin.exists()
         && let Some(why) = worktree::git_busy(common_dir, &admin, branch)
     {
-        bail!("workspace {branch}: {why}; finish it, or use --force to discard it");
+        // A locked ref is git at work right now: retried by `--wait`.
+        return Err(match why == worktree::REF_LOCKED {
+            true => Refusal::InUse.error(format!(
+                "workspace {branch}: {why} (git is updating it); try again, or use --wait"
+            )),
+            false => Refusal::Changes.error(format!(
+                "workspace {branch}: {why}; finish it, or use --force to discard it"
+            )),
+        });
     }
     // Staged changes live in the worktree's index, which upper may not show (a
     // file staged, then edited back).
     if !force && admin.join("index").exists() && !index_matches_head(&admin)? {
-        bail!("workspace {branch} has staged changes; commit them, or use --force to discard them");
+        return Err(changes(format!(
+            "workspace {branch} has staged changes; commit them, or use --force to discard them"
+        )));
     }
     let mut ignored = 0;
     if !force && state_dir.join("base").exists() {
@@ -339,20 +404,21 @@ pub fn check_workspace(
                 ws.sync(store)
             };
             catch_up().map_err(|e| {
-                anyhow::anyhow!(
+                changes(format!(
                     "workspace {branch}: its base is behind the branch tip and catching up \
                      failed ({e:#}); mount it, open it once, or use --force"
-                )
+                ))
             })?;
             s = status::status(store, common_dir, &state_dir)?;
         }
         ignored = s.ignored;
         let note = base_note(branch, &s.base);
-        ensure!(
-            note.is_empty() || note == "branch deleted",
-            "workspace {branch}: {note}, so its changes can't be told; mount it, open \
-             it once, or use --force"
-        );
+        if !note.is_empty() && note != "branch deleted" {
+            return Err(changes(format!(
+                "workspace {branch}: {note}, so its changes can't be told; mount it, open \
+                 it once, or use --force"
+            )));
+        }
         if !s.changed.is_empty() || !s.deleted.is_empty() {
             let mut msg = format!(
                 "workspace {branch} has uncommitted changes ({} changed, {} deleted):",
@@ -364,7 +430,9 @@ pub fn check_workspace(
                     msg += &format!("\n{what}:\n{}", shown(paths));
                 }
             }
-            bail!("{msg}\ncommit them, or use --force to discard them");
+            return Err(changes(format!(
+                "{msg}\ncommit them, or use --force to discard them"
+            )));
         }
     }
     Ok(ignored)

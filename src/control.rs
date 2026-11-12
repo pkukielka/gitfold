@@ -8,7 +8,8 @@
 //! a crash). It is reached as `/proc/self/fd/<dir>/.control`: socket paths are
 //! limited to 107 bytes. The daemon only answers processes of its own user.
 //! One request per connection: the client writes it and shuts its side down;
-//! the daemon answers `ok` or `error`, a newline, then the message.
+//! the daemon answers `ok` or `error`, a newline, then the message (for a
+//! refusal, then `refusal: <kind>` on a last line).
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};
@@ -18,16 +19,28 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+use crate::refusal::Refusal;
 use crate::worktree;
 use anyhow::{Context, Result, bail};
 use log::{info, warn};
+
+/// The answer to a request the daemon doesn't know.
+const UNKNOWN: &str = "unknown request";
+
+/// Precedes the kind of a refusal at the end of an `error` answer.
+const REFUSAL: &str = "\nrefusal: ";
 
 /// How long the daemon waits for a client to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub enum Request {
     /// Remove workspace `name`, or snapshot `@<rev>`.
-    Remove { name: String, force: bool },
+    Remove {
+        name: String,
+        force: bool,
+        /// Only check what would be refused.
+        check: bool,
+    },
     /// Stop prewarm walks, running and queued, for the rest of the daemon's
     /// life: an unmount follows.
     StopPrewarm,
@@ -36,7 +49,11 @@ pub enum Request {
 impl Request {
     fn encode(&self) -> Vec<u8> {
         match self {
-            Request::Remove { name, force } => format!("remove\n{}\n{name}\n", *force as u8),
+            // `check` as another verb: daemons that don't know it refuse it.
+            Request::Remove { name, force, check } => {
+                let verb = if *check { "check-remove" } else { "remove" };
+                format!("{verb}\n{}\n{name}\n", *force as u8)
+            }
             Request::StopPrewarm => "stop-prewarm\n".to_string(),
         }
         .into_bytes()
@@ -45,12 +62,13 @@ impl Request {
     fn decode(bytes: &[u8]) -> Result<Request> {
         let text = std::str::from_utf8(bytes).context("request not UTF-8")?;
         match text.split('\n').collect::<Vec<_>>()[..] {
-            ["remove", force, name, ""] => Ok(Request::Remove {
+            [verb @ ("remove" | "check-remove"), force, name, ""] => Ok(Request::Remove {
                 name: name.to_string(),
                 force: force == "1",
+                check: verb == "check-remove",
             }),
             ["stop-prewarm", ""] => Ok(Request::StopPrewarm),
-            _ => bail!("unknown request"),
+            _ => bail!(UNKNOWN),
         }
     }
 }
@@ -92,7 +110,21 @@ pub fn request(
         .context("reading the gitfold daemon's answer")?;
     match answer.split_once('\n') {
         Some(("ok", message)) => Ok(Some(message.to_string())),
-        Some(("error", message)) => bail!("{message}"),
+        Some(("error", message)) => {
+            // A refusal's kind is on the last line (see `serve`).
+            let kind = message.rsplit_once(REFUSAL).and_then(|(text, name)| {
+                let refusal = Refusal::ALL.into_iter().find(|r| r.name() == name)?;
+                Some((text, refusal))
+            });
+            match kind {
+                Some((text, refusal)) => Err(refusal.error(text)),
+                None if message == UNKNOWN => bail!(
+                    "the gitfold daemon doesn't know this request: it runs an older gitfold \
+                     (remount to upgrade it)"
+                ),
+                None => bail!("{message}"),
+            }
+        }
         _ => bail!("the gitfold daemon gave no answer (see its log)"),
     }
 }
@@ -143,7 +175,12 @@ pub fn serve(
                         info!("{message}");
                         format!("ok\n{message}")
                     }
-                    Err(e) => format!("error\n{e:#}"),
+                    // The kind of a refusal on a line of its own, last, so the
+                    // message stays readable for clients that don't know it.
+                    Err(e) => match Refusal::of(&e) {
+                        Some(refusal) => format!("error\n{e:#}{REFUSAL}{}", refusal.name()),
+                        None => format!("error\n{e:#}"),
+                    },
                 };
                 // The client may have gone (Ctrl-C); nothing to do then.
                 let _ = stream.write_all(reply.as_bytes());

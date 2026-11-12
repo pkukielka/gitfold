@@ -8,6 +8,7 @@ mod git;
 mod inode;
 mod mountpoint;
 mod prewarm;
+mod refusal;
 mod store;
 mod worktree;
 
@@ -73,7 +74,9 @@ enum Command {
     List { repo: PathBuf },
     /// Delete a workspace (its registration, stored changes and base ref; its
     /// commits stay on the branch), or a snapshot's registration (@<rev>).
-    /// Works mounted too, unless the workspace or snapshot is in use.
+    /// Works mounted too, unless the workspace or snapshot is in use. Exit
+    /// codes: 3 not found, 4 uncommitted changes (or a git operation in
+    /// progress), 5 in use, 1 other errors, 2 usage errors.
     Remove {
         repo: PathBuf,
         /// A branch, or @<rev> for a snapshot.
@@ -81,6 +84,12 @@ enum Command {
         /// Discard uncommitted changes.
         #[arg(long)]
         force: bool,
+        /// Only check whether it would be removed; remove nothing.
+        #[arg(long)]
+        check: bool,
+        /// While in use, retry for up to this many seconds.
+        #[arg(long, value_name = "SECS", default_value_t = 0)]
+        wait: u64,
     },
     /// Delete the snapshot registrations (recreated when opened again). The
     /// repository must not be mounted.
@@ -186,7 +195,10 @@ fn main() -> Result<()> {
             // After the notifier is set: a removal tells the kernel.
             if let Some(listener) = listener {
                 control::serve(listener, move |request| match request {
-                    control::Request::Remove { name, force } => removal.remove(&name, force),
+                    control::Request::Remove { name, force, check } => match check {
+                        true => removal.check(&name, force),
+                        false => removal.remove(&name, force),
+                    },
                     control::Request::StopPrewarm => {
                         prewarm::stop_all();
                         Ok("prewarm stopped for the unmount".into())
@@ -203,7 +215,19 @@ fn main() -> Result<()> {
             prewarm,
         } => admin::branch(&repo, &name, from.as_deref(), prewarm)?,
         Command::List { repo } => admin::list(&repo)?,
-        Command::Remove { repo, name, force } => admin::remove(&repo, &name, force)?,
+        Command::Remove {
+            repo,
+            name,
+            force,
+            check,
+            wait,
+        } => {
+            let wait = std::time::Duration::from_secs(wait);
+            if let Err(e) = admin::remove(&repo, &name, force, check, wait) {
+                eprintln!("Error: {e:?}");
+                std::process::exit(refusal::Refusal::of(&e).map_or(1, |r| r.exit_code()));
+            }
+        }
         Command::Prune { repo } => admin::prune(&repo)?,
         Command::Prewarm {
             root,

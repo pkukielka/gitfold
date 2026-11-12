@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Instant, SystemTime};
 
-use anyhow::Context;
 use fuser::Errno;
 use gix::ObjectId;
 use log::{error, info, warn};
@@ -18,6 +17,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::prewarm::{self, Prewarm};
+use crate::refusal::Refusal;
 use crate::store::{DirRec, Store};
 use crate::worktree::{self, IndexWriter, StatInfo};
 
@@ -94,6 +94,34 @@ impl Snapshots {
             .ok_or(Errno::ENOENT)
     }
 
+    /// The commit of open snapshot `name`.
+    pub fn commit_of(&self, name: &[u8]) -> Option<ObjectId> {
+        let ino = self.existing(name)?;
+        let Some(inode::Ino::Dir { slot, .. }) = inode::decode(ino) else {
+            return None;
+        };
+        self.get(slot).ok().map(|s| s.commit)
+    }
+
+    /// How many open names show `commit`.
+    pub fn open_names_of(&self, commit: &ObjectId) -> usize {
+        let open: Vec<u32> = self
+            .root
+            .lock()
+            .names
+            .iter()
+            .map(|(_, slot)| *slot)
+            .collect();
+        let list = self.list.read();
+        (open.iter())
+            .filter(|&&slot| {
+                list[slot as usize]
+                    .as_ref()
+                    .is_some_and(|s| s.commit == *commit)
+            })
+            .count()
+    }
+
     /// Walks open snapshot `name` (see `prewarm`) again.
     pub fn prewarm(&self, name: &[u8]) {
         if self.existing(name).is_some() {
@@ -142,9 +170,9 @@ impl Snapshots {
                 }
                 None => None,
             };
-            let commit = open
-                .or_else(resolve)
-                .with_context(|| format!("no snapshot {}", String::from_utf8_lossy(name)))?;
+            let commit = open.or_else(resolve).ok_or_else(|| {
+                Refusal::NotFound.error(format!("no snapshot {}", String::from_utf8_lossy(name)))
+            })?;
             let shared = (self.list.read().iter().enumerate()).any(|(i, s)| {
                 Some(i as u32) != slot && s.as_ref().is_some_and(|s| s.commit == commit)
             });
