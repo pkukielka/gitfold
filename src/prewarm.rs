@@ -3,15 +3,16 @@
 //! before the first agent command arrives. The walk runs in its own process
 //! (`gitfold prewarm`, see `spawn`).
 
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
@@ -34,64 +35,178 @@ struct Stats {
     bytes: AtomicU64,
 }
 
-/// Walker processes running (pid, root), so they can be stopped before
-/// unmounting; `None` once stopping began, so no new one starts.
-static WALKERS: Mutex<Option<Vec<(u32, PathBuf)>>> = Mutex::new(Some(Vec::new()));
+/// The git config key holding a branch's prewarm mode, as in
+/// `branch.<name>.gitfoldPrewarm`: git keeps it with the branch (and deletes
+/// it with it).
+pub const BRANCH_KEY: &str = "gitfoldPrewarm";
 
-/// Starts the walk of `root` as a separate `gitfold prewarm` process. Not in
-/// the daemon itself: a daemon killed with SIGKILL while its own threads wait
-/// on requests to its mount never finishes dying, and the mount hangs; a
-/// separate walker's requests just fail once the daemon is gone, and it exits.
+/// The prewarm mode set for the workspace of `branch` (`git config
+/// branch.<branch>.gitfoldPrewarm none|meta|content`), if any. Read when it
+/// opens, so a change counts from the next open.
+pub fn for_branch(common_dir: &Path, branch: &str) -> Option<Prewarm> {
+    let key = format!("branch.{branch}.{BRANCH_KEY}");
+    let out = Command::new("git")
+        .arg("--git-dir")
+        .arg(common_dir)
+        .args(["config", "--get", &key])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&out.stdout);
+    Prewarm::from_str(value.trim(), true)
+        .inspect_err(|_| warn!("{key}: {:?} is not none, meta or content", value.trim()))
+        .ok()
+}
+
+/// A walk to run.
+struct Walk {
+    root: PathBuf,
+    mode: Prewarm,
+    threads: usize,
+}
+
+struct Walks {
+    /// Walker processes running (pid, root), so they can be stopped before
+    /// unmounting or removing what they walk.
+    running: Vec<(u32, PathBuf)>,
+    /// Walks waiting for one of `MAX_WALKS` to finish.
+    queued: VecDeque<Walk>,
+    /// Stopping began (unmounting): no new walk starts.
+    stopped: bool,
+}
+
+static WALKS: Mutex<Walks> = Mutex::new(Walks {
+    running: Vec::new(),
+    queued: VecDeque::new(),
+    stopped: false,
+});
+
+/// How many walks run at once (`gitfold mount --prewarm-walks`): each uses its
+/// own thread pool, and walks of everything agents open at once would compete
+/// for the CPUs.
+static MAX_WALKS: AtomicUsize = AtomicUsize::new(2);
+
+pub fn set_max_walks(n: usize) {
+    MAX_WALKS.store(n, Ordering::Relaxed);
+}
+
+/// Walks `root` (see `run`) in a separate `gitfold prewarm` process, now or
+/// once fewer than `MAX_WALKS` run; not if a walk of `root` is running or
+/// queued already. Not in the daemon itself: a daemon killed with SIGKILL while
+/// its own threads wait on requests to its mount never finishes dying, and the
+/// mount hangs; a separate walker's requests just fail once the daemon is gone,
+/// and it exits.
 pub fn spawn(root: PathBuf, mode: Prewarm, threads: usize) {
     if mode == Prewarm::None {
         return;
     }
-    // This very binary, even if the file was replaced since (a rebuild while
-    // mounted), under the name `stop_below` looks for.
-    let mut command = Command::new("/proc/self/exe");
-    command.arg0("gitfold");
-    let mode_name = ValueEnum::to_possible_value(&mode).expect("not skipped");
-    command
-        .arg("prewarm")
-        .arg(&root)
-        .args(["--mode", mode_name.get_name()])
-        .args(["--threads", &threads.to_string()])
-        .stdin(Stdio::null());
-    let mut walkers = WALKERS.lock();
-    let Some(running) = walkers.as_mut() else {
-        return; // unmounting
-    };
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(e) => return warn!("prewarm of {}: {e}", root.display()),
-    };
-    let pid = child.id();
-    running.push((pid, root));
-    drop(walkers);
-    // Reaped here, so it doesn't stay a zombie.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-        if let Some(running) = WALKERS.lock().as_mut() {
-            running.retain(|(p, _)| *p != pid);
-        }
+    let mut walks = WALKS.lock();
+    let known = walks.running.iter().any(|(_, r)| *r == root)
+        || walks.queued.iter().any(|w| w.root == root);
+    if walks.stopped || known {
+        return;
+    }
+    let running = walks.running.len();
+    if running >= MAX_WALKS.load(Ordering::Relaxed) {
+        info!(
+            "prewarm of {}: queued behind {running} running",
+            root.display()
+        );
+    }
+    walks.queued.push_back(Walk {
+        root,
+        mode,
+        threads,
     });
+    start_queued(&mut walks);
+}
+
+/// Starts queued walks while fewer than `MAX_WALKS` run.
+fn start_queued(walks: &mut Walks) {
+    while walks.running.len() < MAX_WALKS.load(Ordering::Relaxed)
+        && let Some(walk) = walks.queued.pop_front()
+    {
+        // This very binary, even if the file was replaced since (a rebuild
+        // while mounted), under the name `stop_below` looks for.
+        let mut command = Command::new("/proc/self/exe");
+        command.arg0("gitfold");
+        let mode_name = ValueEnum::to_possible_value(&walk.mode).expect("not skipped");
+        command
+            .arg("prewarm")
+            .arg(&walk.root)
+            .args(["--mode", mode_name.get_name()])
+            .args(["--threads", &walk.threads.to_string()])
+            .stdin(Stdio::null());
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                warn!("prewarm of {}: {e}", walk.root.display());
+                continue;
+            }
+        };
+        info!("prewarm of {}: started", walk.root.display());
+        let pid = child.id();
+        walks.running.push((pid, walk.root));
+        // Reaped here, so it doesn't stay a zombie; then the next one starts.
+        std::thread::spawn(move || {
+            let killed = child
+                .wait()
+                .is_ok_and(|s| s.signal() == Some(libc::SIGTERM));
+            let mut walks = WALKS.lock();
+            let ours = walks.running.iter().any(|(p, _)| *p == pid);
+            walks.running.retain(|(p, _)| *p != pid);
+            // Killed while still listed: not by `stop_under` or `stop_all`
+            // (they unlist first), so by `gitfold unmount` (`stop_below`).
+            // Another walk would keep the mount busy, and the unmount would
+            // only detach it.
+            if killed && ours {
+                warn!("a prewarm walker was stopped from outside (an unmount?): no more walks");
+                walks.stopped = true;
+                walks.queued.clear();
+            }
+            if !walks.stopped {
+                start_queued(&mut walks);
+            }
+        });
+    }
 }
 
 /// Stops the running walkers, and any later one from starting: they keep the
 /// mount busy, which would make an unmount only detach it.
 pub fn stop_all() {
-    let walkers = WALKERS.lock().take().unwrap_or_default();
-    terminate(walkers.iter().map(|(p, _)| *p as libc::pid_t).collect());
+    let pids = {
+        let mut walks = WALKS.lock();
+        walks.stopped = true;
+        walks.queued.clear();
+        std::mem::take(&mut walks.running)
+    };
+    terminate(pids.iter().map(|(p, _)| *p as libc::pid_t).collect());
 }
 
-/// Stops this daemon's walkers of `path` or below (a workspace or snapshot
-/// being removed).
-pub fn stop_under(path: &Path) {
-    let pids = (WALKERS.lock().iter().flatten())
-        .filter(|(_, root)| root.starts_with(path))
-        .map(|(p, _)| *p as libc::pid_t)
-        .collect();
+/// Stops this daemon's walks of `path` or below, running or queued (a
+/// workspace or snapshot being removed); returns whether there were any.
+pub fn stop_under(path: &Path) -> bool {
+    let (pids, dropped) = {
+        let mut walks = WALKS.lock();
+        let queued = walks.queued.len();
+        walks.queued.retain(|w| !w.root.starts_with(path));
+        let dropped = walks.queued.len() != queued;
+        // Unlisted first, so their reaper doesn't take it for an unmount (and
+        // meanwhile, while they die, another walk may start).
+        let (under, others) = std::mem::take(&mut walks.running)
+            .into_iter()
+            .partition(|(_, root)| root.starts_with(path));
+        walks.running = others;
+        let pids: Vec<_> = (under.into_iter())
+            .map(|(p, _): (u32, PathBuf)| p as libc::pid_t)
+            .collect();
+        (pids, dropped)
+    };
+    let stopped = dropped || !pids.is_empty();
     terminate(pids);
+    stopped
 }
 
 /// Stops the walkers of this user working below `mountpoint` (`gitfold

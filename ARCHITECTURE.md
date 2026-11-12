@@ -133,7 +133,7 @@ Then, per request (`fs/workspace/`):
 | `src/admin.rs` | `branch`, `list`, `remove` and `prune` commands |
 | `src/mountpoint.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table |
 | `src/daemon.rs` | `mount` in the background (detached, log file), `unmount` |
-| `src/control.rs` | the daemon's control socket (`remove` while mounted) |
+| `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping prewarm for `unmount`) |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
@@ -778,10 +778,18 @@ walker process (`gitfold prewarm`) that walks it through the mount on a
 thread pool. A separate process, because a daemon killed with SIGKILL while
 its own threads wait on requests to its mount never finishes dying, and every
 access to the mount hangs; a separate walker's requests just fail once the
-daemon is gone. Walkers keep the mount busy, so the daemon stops its own
-before unmounting on a signal, and `gitfold unmount` stops those below the
-mount point. `meta` (default) lists every directory
-and stats it afterwards (see the read-write mount note under
+daemon is gone. Walkers keep the mount busy, so the daemon stops its own before
+unmounting on a signal, and `gitfold unmount` asks it to (over the control
+socket), then stops any left below the mount point. At most `--prewarm-walks`
+(2) walks run at once, the others queue: ten agents opening workspaces at once
+started ten walks of half the CPUs each. A walk already running or queued for
+the same path isn't added; a removal drops its queued walk (and restarts it if
+refused); stopping for an unmount drops the whole queue, and so does a walker
+killed from outside with SIGTERM (what `gitfold unmount` sends, for daemons
+without the request). A workspace's own mode, if set
+(`branch.<name>.gitfoldPrewarm`, git config, so it stays with the branch),
+overrides `--prewarm`. `meta` (default) lists every directory and stats it
+afterwards (see the read-write mount note under
 [caching](#kernel-caching-does-the-heavy-lifting)); `content` also reads and
 stats every file.
 

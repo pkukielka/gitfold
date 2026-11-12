@@ -155,9 +155,17 @@ Options:
 | option | default | |
 |---|---|---|
 | `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.64 s for a snapshot, 1.37 s for a workspace). |
-| `--prewarm-threads N` | half the CPUs | Threads used by the prewarm walk. |
+| `--prewarm-threads N` | half the CPUs | Threads used by each prewarm walk. |
+| `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--threads N` | number of CPUs | FUSE worker threads. |
 | `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |
+
+A workspace can have its own prewarm mode, kept across remounts in the
+branch's git config: `gitfold branch <REPO> <NAME> --prewarm none`, or
+`git config branch.<NAME>.gitfoldPrewarm none` for an existing branch (read
+when the workspace opens). `none` suits workspaces an agent only reads a few
+files in: a walk of a 1.4M-file tree costs about 1.26M FUSE requests and 100
+CPU-seconds of the daemon.
 
 ### Snapshots
 

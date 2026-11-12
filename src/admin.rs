@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
+use clap::ValueEnum;
 
 use crate::control;
 use crate::fs::workspace::{Workspace, status};
 use crate::git;
+use crate::prewarm::Prewarm;
 use crate::store::Store;
 use crate::worktree::{self, workspace_branch, workspace_id};
 
@@ -103,7 +105,7 @@ fn shown(paths: &[Vec<u8>]) -> String {
 }
 
 /// `gitfold branch`: creates a branch to open as a workspace.
-pub fn branch(repo: &Path, name: &str, from: Option<&str>) -> Result<()> {
+pub fn branch(repo: &Path, name: &str, from: Option<&str>, prewarm: Option<Prewarm>) -> Result<()> {
     // Mount names starting with `@` are snapshots; such a branch would be
     // unreachable as a workspace.
     ensure!(
@@ -120,6 +122,11 @@ pub fn branch(repo: &Path, name: &str, from: Option<&str>) -> Result<()> {
     let mut args = vec!["branch", "--", name];
     args.extend(from);
     git(repo, &args)?;
+    if let Some(mode) = prewarm {
+        let key = format!("branch.{name}.{}", crate::prewarm::BRANCH_KEY);
+        let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
+        git(repo, &["config", &key, value.get_name()])?;
+    }
     println!("created branch {name}; open it as <mountpoint>/{name}");
     Ok(())
 }
@@ -211,7 +218,7 @@ pub fn remove(repo: &Path, name: &str, force: bool) -> Result<()> {
                 name: name.to_string(),
                 force,
             };
-            control::request(&common_dir, &request)?.with_context(|| {
+            control::request(&common_dir, &request, None)?.with_context(|| {
                 format!(
                     "{} is locked by a gitfold daemon that doesn't take removal requests (one \
                      starting or exiting, or an older gitfold), or by a `gitfold remove` or \

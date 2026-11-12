@@ -94,6 +94,14 @@ impl Snapshots {
             .ok_or(Errno::ENOENT)
     }
 
+    /// Walks open snapshot `name` (see `prewarm`) again.
+    pub fn prewarm(&self, name: &[u8]) {
+        if self.existing(name).is_some() {
+            let path = self.mount_point.join(OsStr::from_bytes(name));
+            prewarm::spawn(path, self.prewarm, self.prewarm_threads);
+        }
+    }
+
     /// How many names were added to the root; only grows.
     pub fn name_count(&self) -> usize {
         self.list.read().len()

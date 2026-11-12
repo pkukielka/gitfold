@@ -5,6 +5,7 @@
 //! a year), so a removal tells the kernel to drop the entry, and refuses while
 //! a process uses the name: its working directory, an open or mapped file.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,9 +44,12 @@ impl Removal {
             self.mount_point.display()
         );
         let path = self.mount_point.join(name);
+        // Whether a prewarm walk of it was stopped (walkers would count as
+        // users), to restart it if the removal is refused.
+        let walk_stopped = Cell::new(false);
+        let stop_walk = || walk_stopped.set(prewarm::stop_under(&path) || walk_stopped.get());
         let refuse_if_used = || {
-            // Prewarm walkers would count.
-            prewarm::stop_under(&path);
+            stop_walk();
             self.refuse_if_used(&path, name)
         };
         let (parent, leaf) = self.workspaces.parent_and_leaf(name);
@@ -71,8 +75,15 @@ impl Removal {
                         false => (done, false),
                     })
             }
-            None => self.remove_workspace(name, force, refuse_if_used),
+            None => self.remove_workspace(name, force, stop_walk, refuse_if_used),
         };
+        // Refused while open (not taken out by another removal meanwhile).
+        if removed.is_err() && walk_stopped.get() {
+            match name.starts_with('@') {
+                true => self.snapshots.prewarm(name.as_bytes()),
+                false => self.workspaces.prewarm(name),
+            }
+        }
         match removed {
             Ok((done, open)) => {
                 if open {
@@ -96,15 +107,15 @@ impl Removal {
         &self,
         branch: &str,
         force: bool,
+        stop_walk: impl FnOnce(),
         refuse_if_used: impl FnOnce() -> Result<()>,
     ) -> Result<(String, bool)> {
         let (store, common_dir) = (&*self.store, &self.common_dir);
         let check =
             |ws: Option<&Workspace>| admin::check_workspace(store, common_dir, branch, force, ws);
         if let Some(open) = self.workspaces.get_open(branch) {
-            let path = self.mount_point.join(branch);
-            prewarm::stop_under(&path);
-            self.refuse_if_used(&path, branch)?;
+            stop_walk();
+            self.refuse_if_used(&self.mount_point.join(branch), branch)?;
             check(Some(&open))?;
             // `open` dropped here: the wait for requests in flight counts references.
         }

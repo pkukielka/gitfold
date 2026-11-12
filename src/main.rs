@@ -47,9 +47,12 @@ enum Command {
         /// Populate kernel caches in the background after a snapshot or workspace is opened.
         #[arg(long, value_enum, default_value = "meta")]
         prewarm: prewarm::Prewarm,
-        /// Prewarm threads (default: half the CPUs).
+        /// Prewarm threads per walk (default: half the CPUs).
         #[arg(long)]
         prewarm_threads: Option<usize>,
+        /// Walks running at once; the others wait.
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+        prewarm_walks: u64,
     },
     /// Unmount, even while a shell is inside the mount, and wait for gitfold to
     /// exit.
@@ -61,6 +64,10 @@ enum Command {
         /// Start point (default: the current HEAD).
         #[arg(long)]
         from: Option<String>,
+        /// Prewarm mode for this workspace, kept across remounts (in git
+        /// config, branch.<name>.gitfoldPrewarm).
+        #[arg(long, value_enum)]
+        prewarm: Option<prewarm::Prewarm>,
     },
     /// List the repository's workspaces, their uncommitted changes and ignored files.
     List { repo: PathBuf },
@@ -118,6 +125,7 @@ fn main() -> Result<()> {
             kernel_open,
             prewarm,
             prewarm_threads,
+            prewarm_walks,
         } => {
             let mountpoint = mountpoint::check(&mountpoint)?;
             if !foreground {
@@ -135,6 +143,7 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             mountpoint::unmount_on_signal(mountpoint.clone());
+            prewarm::set_max_walks(prewarm_walks as usize);
             // Absolute: the repository handle keeps the path it was opened with.
             let common_dir = git::init(&std::path::absolute(&repo)?)?;
             // Paths are resolved: don't keep the caller's directory busy (it may be
@@ -178,12 +187,21 @@ fn main() -> Result<()> {
             if let Some(listener) = listener {
                 control::serve(listener, move |request| match request {
                     control::Request::Remove { name, force } => removal.remove(&name, force),
+                    control::Request::StopPrewarm => {
+                        prewarm::stop_all();
+                        Ok("prewarm stopped for the unmount".into())
+                    }
                 })?;
             }
             session.run()?;
         }
         Command::Unmount { mountpoint } => daemon::unmount(&mountpoint)?,
-        Command::Branch { repo, name, from } => admin::branch(&repo, &name, from.as_deref())?,
+        Command::Branch {
+            repo,
+            name,
+            from,
+            prewarm,
+        } => admin::branch(&repo, &name, from.as_deref(), prewarm)?,
         Command::List { repo } => admin::list(&repo)?,
         Command::Remove { repo, name, force } => admin::remove(&repo, &name, force)?,
         Command::Prune { repo } => admin::prune(&repo)?,
