@@ -375,13 +375,6 @@ fn terminate(pids: Vec<libc::pid_t>) {
 
 /// `gitfold prewarm`: walks `root` (see `visit`) and logs what it saw.
 pub fn run(root: PathBuf, mode: Prewarm, threads: usize) -> anyhow::Result<()> {
-    // The daemon blocks SIGINT/SIGTERM/SIGHUP for its signal thread, and the
-    // mask is inherited: unblock them, so the walker can be stopped.
-    unsafe {
-        let mut empty: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut empty);
-        libc::pthread_sigmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
-    }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|i| format!("prewarm-{i}"))

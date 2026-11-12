@@ -102,6 +102,19 @@ remount
 eq "a fetch that shows progress outlives the limit" "c five" "$(cat "$MNT/@HEAD/c/five" 2>&1)"
 no_hook; unset GITFOLD_FETCH_STALL_SECS
 
+echo "== a fetch leaves nothing behind"
+REPO=$T/leftover; clone "$REPO"; remount
+# Started by the server, in the fetch's process group, holding its stderr.
+hook 'sleep 7.29 >/dev/null 2>"/proc/$PPID/fd/2" </dev/null &'
+eq "a snapshot opens" "c five" "$(cat "$MNT/@HEAD/c/five" 2>&1)"
+check "what the fetch started is stopped once it ends" sh -c "! ps -eo args= | awk '\$1 == \"sleep\" && \$2 == \"7.29\"' | grep -q ."
+hook 'sleep 7.31 >/dev/null 2>&1 </dev/null &'
+eq "a second commit opens" "c four" "$(cat "$MNT/@HEAD~1/c/four" 2>&1)"
+left=$(ps -eo pid=,args= | awk '$2 == "sleep" && $3 == "7.31" {print $1}')
+check "one not holding stderr is left to run (a credential cache daemon)" test -n "$left"
+[ -n "$left" ] && kill $left
+no_hook
+
 echo "== an unreachable remote, and the backoff"
 REPO=$T/unreach; clone "$REPO"
 C branch -q u1 HEAD~1; C branch -q s1 HEAD~4

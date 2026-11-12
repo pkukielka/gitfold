@@ -314,17 +314,18 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
         .and_then(|s| s.parse().ok())
         .map_or(STALL, Duration::from_secs);
     let (mut last, mut stderr_open) = (Instant::now(), true);
-    let status = loop {
+    // Git is reaped only at the end (`child.wait()`), after any signal to its
+    // group: until then its id, which names the group, can't be reused.
+    loop {
         // Exited, even if something it started still holds stderr open.
-        if let Some(status) = child.try_wait()? {
-            break status;
+        if exited(pid)? {
+            break;
         }
         if last.elapsed() > stall {
-            // SIGTERM first: git removes the lock and .keep files it holds;
-            // not reaped yet, so the (group) id can't have been reused.
+            // SIGTERM first: git removes the lock and .keep files it holds.
             stop(libc::SIGTERM);
             let deadline = Instant::now() + Duration::from_secs(2);
-            while child.try_wait()?.is_none() && Instant::now() < deadline {
+            while !exited(pid)? && Instant::now() < deadline {
                 thread::sleep(Duration::from_millis(20));
             }
             stop(libc::SIGKILL);
@@ -342,7 +343,21 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
             },
             false => thread::sleep(Duration::from_millis(20)),
         }
-    };
+    }
+    // A helper still holding stderr (it would keep the reader thread blocked)
+    // goes with git, once the reader had a moment to see stderr close. One that
+    // let go of it is meant to outlive git (a credential cache daemon) and is
+    // left alone.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    while stderr_open && Instant::now() < deadline {
+        if let Err(RecvTimeoutError::Disconnected) = made.recv_timeout(Duration::from_millis(20)) {
+            stderr_open = false;
+        }
+    }
+    if group && stderr_open {
+        stop(libc::SIGTERM);
+    }
+    let status = child.wait()?;
     if !status.success() {
         // git's last `fatal:` (or `error:`) line says why; else its last line.
         let tail = String::from_utf8_lossy(&tail.lock()).into_owned();
@@ -358,4 +373,16 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
         started.elapsed()
     );
     Ok(())
+}
+
+/// Whether child `pid` has exited, leaving it unreaped (`WNOWAIT`): its id
+/// still names its process group, which can then still be signalled safely.
+fn exited(pid: libc::pid_t) -> std::io::Result<bool> {
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let flags = libc::WEXITED | libc::WNOHANG | libc::WNOWAIT;
+    if unsafe { libc::waitid(libc::P_PID, pid as libc::id_t, &mut info, flags) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // WNOHANG leaves si_pid 0 while it runs.
+    Ok(unsafe { info.si_pid() } != 0)
 }

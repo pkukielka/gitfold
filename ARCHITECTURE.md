@@ -940,11 +940,20 @@ as did `remove` of it; 13% of the head tree's blobs were missing, and a plain
   `SSH_ASKPASS_REQUIRE=never`: a desktop's ssh-askpass would block it until the
   stall limit). `--no-auto-maintenance`: a `gc --auto` repack would otherwise
   run inside the stall window, silently, and be killed. A fetch whose stderr a
-  helper keeps open is still seen to end. At unmount bases move to their tip
-  only if it is here: a hanging remote must not hold up the unmount (the next
-  mount, or `remove`, catches up). An empty list is never fetched: `git fetch`
-  would fall back to the remote's refspecs, everything (the fork's notes: 27M
-  objects, 47 GB).
+  helper keeps open is still seen to end, and once git exits (normally or
+  stopped), what it left in its group still holding stderr gets SIGTERM, so no
+  reader thread is stranded (a helper that let go of stderr, like a credential
+  cache daemon, is meant to outlive git). Git is reaped only after that (its exit is seen with `waitid`
+  and `WNOWAIT`): until then its id, which names the group, can't be reused.
+  At unmount bases move to their tip only if it is here: a hanging remote must
+  not hold up the unmount (the next mount, or `remove`, catches up). An empty
+  list is never fetched: `git fetch` would fall back to the remote's refspecs,
+  everything (the fork's notes: 27M objects, 47 GB).
+- **Signals reach what the daemon starts.** The daemon used to block
+  SIGINT/SIGTERM/SIGHUP for a `sigwait` thread; the mask survives exec (Rust's
+  `Command` doesn't reset it), so git and everything under it never received
+  SIGTERM (blocked, pending) and only the SIGKILL 2 s later worked. A handler that writes to a pipe
+  replaces it: handlers reset at exec.
 **Rejected:** fetching per object as reads need it (one fetch per file; the
 fork's notes: the store needs every blob's size anyway); a global fetch lock (a
 slow fetch stalled every open, reads included); a total time limit (above).
