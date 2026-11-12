@@ -233,6 +233,8 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
         .args(args)
         // No terminal to ask on: fail rather than wait for a password.
         .env("GIT_TERMINAL_PROMPT", "0")
+        // Messages as written, for the error (its `fatal:` line).
+        .env("LC_ALL", "C")
         // A system-wide trace would log every fetch, and its index-pack.
         .env_remove("GIT_TRACE2_EVENT")
         .env_remove("GIT_TRACE2")
@@ -295,13 +297,11 @@ fn fetch(ids: &[ObjectId]) -> Result<()> {
     let status = child.wait()?;
     let tail = reader.join().unwrap_or_default();
     if !status.success() {
-        // git's last line says why (`fatal: ...`).
+        // git's last `fatal:` (or `error:`) line says why; else its last line.
         let tail = String::from_utf8_lossy(&tail);
-        let last = tail
-            .lines()
-            .rev()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("");
+        let lines = || tail.lines().rev().map(str::trim).filter(|l| !l.is_empty());
+        let why = |l: &&str| l.starts_with("fatal:") || l.starts_with("error:");
+        let last = lines().find(why).or_else(|| lines().next()).unwrap_or("");
         return Err(failed(format!("ended with {status}: {}", last.trim())));
     }
     GENERATION.fetch_add(1, Ordering::AcqRel);
