@@ -18,7 +18,9 @@ use gix::objs::tree::EntryKind;
 /// is sized once, at open (by default to the packs on disk then, plus 10%), and
 /// never grows: after enough fetches or repacks while mounted, lookups of
 /// objects in new packs failed ("too few index slots") until a remount. Slots
-/// of deleted packs are reused; each costs ~110 bytes (~2 MB in all).
+/// of deleted packs are reused; each costs ~110 bytes (~2 MB in all). gitoxide
+/// caps the table at 2^15 - 1 slots, so with its 10% margin, more than ~29,800
+/// packs on disk at mount time fail the open (git's auto gc repacks at 50).
 const MIN_INDEX_SLOTS: usize = 16384;
 
 static REPO: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
