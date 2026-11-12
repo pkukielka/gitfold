@@ -19,7 +19,7 @@ use clap::{Parser, Subcommand};
 use fuser::{Config, MountOption};
 
 #[derive(Parser)]
-#[command(about = "Git revisions as a filesystem", version = VERSION)]
+#[command(about = "Git revisions as a filesystem", version = LONG_VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -121,9 +121,11 @@ enum Command {
     },
 }
 
-/// This build: the crate version and, if built from a git checkout, the
-/// commit (see `build.rs`).
+/// This build: the crate version and a hash of its sources, as compared with
+/// a mount's daemon (see `build.rs`).
 pub const VERSION: &str = env!("GITFOLD_VERSION");
+/// `VERSION` and the git commit built from, if known, for `--version`.
+const LONG_VERSION: &str = env!("GITFOLD_LONG_VERSION");
 
 fn main() -> Result<()> {
     // Blob buffers are short-lived and often large. glibc raises its mmap threshold

@@ -546,7 +546,7 @@ echo "== version"
 eq "--version names the build" yes "$("$BIN" --version | grep -qE '^gitfold [0-9]+\.[0-9]+\.[0-9]+' && echo yes)"
 mount_fs
 out=$("$BIN" version "$MNT" 2>&1)
-eq "the daemon runs the same build" "$("$BIN" --version | sed 's/^gitfold //')" "$(sed -n 's/^daemon //p' <<<"$out")"
+eq "the daemon runs the same build" "$(sed -n "s/^gitfold //p" <<<"$out")" "$(sed -n "s/^daemon //p" <<<"$out")"
 check "version of a mount exits 0" "$BIN" version "$MNT"
 check "version of a non-mount fails" fails "$BIN" version "$T"
 check "the daemon logged its version" grep -q "gitfold .*: mounting" "$LOG"

@@ -136,7 +136,7 @@ Then, per request (`fs/workspace/`):
 | `src/control.rs` | the daemon's control socket (`remove` while mounted; stopping prewarm for `unmount`; its version) |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/benchread.rs`, `src/benchattrs.rs` | hidden `bench-read` and `bench-attrs` commands |
-| `build.rs` | the build's version (crate version, git commit, a hash of uncommitted changes), for `--version` and `gitfold version` |
+| `build.rs` | the build's version (crate version and a hash of its sources; the git commit for `--version`), for `gitfold version` |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
 | `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |
