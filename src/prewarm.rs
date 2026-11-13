@@ -15,11 +15,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::settings;
 use clap::ValueEnum;
 use log::{info, warn};
 use parking_lot::Mutex;
 
+/// How a freshly opened snapshot or workspace is walked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum Prewarm {
     None,
@@ -41,20 +41,6 @@ struct Stats {
     dirs: AtomicU64,
     files: AtomicU64,
     bytes: AtomicU64,
-}
-
-/// The prewarm mode set for the workspace of `branch` (`git config
-/// branch.<branch>.gitfoldPrewarm none|meta|content`), if any, in the
-/// repository's config file (not included ones). Read when it opens, so a
-/// change counts from the next open.
-pub fn for_branch(common_dir: &Path, branch: &str) -> Option<Prewarm> {
-    let value = settings::branch(common_dir, branch, settings::PREWARM)?;
-    Prewarm::from_str(&value, true)
-        .inspect_err(|_| {
-            let key = settings::branch_key(branch, settings::PREWARM);
-            warn!("{key}: {value:?} is not none, meta or content")
-        })
-        .ok()
 }
 
 /// A walk to run.

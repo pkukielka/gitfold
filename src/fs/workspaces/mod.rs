@@ -33,12 +33,12 @@ use parking_lot::{Mutex, RwLock};
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
 use super::workspace::{Purpose, Workspace};
-use crate::daemon::prewarm::{self, Prewarm};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
 use crate::git::worktree;
 use crate::inode;
+use crate::prewarm::{self, Prewarm};
 use crate::refusal::Refusal;
 use crate::settings;
 use crate::state::StateDir;
@@ -226,8 +226,9 @@ impl Workspaces {
     /// every file first would leave the agent's reads to the kernel's cache,
     /// unseen.
     fn branch_mode(&self, branch: &str) -> Prewarm {
-        match prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm) {
-            Prewarm::Content if self.tracks_reads(branch) => {
+        let local = settings::Local::read(&self.common_dir);
+        match local.prewarm(branch).unwrap_or(self.prewarm) {
+            Prewarm::Content if local.track_reads(branch).unwrap_or(self.track_reads) => {
                 warn!("workspace {branch}: prewarm content walks as meta while reads are tracked");
                 Prewarm::Meta
             }
@@ -235,9 +236,13 @@ impl Workspaces {
         }
     }
 
+    /// The prewarm mode set for the workspace of `branch`, else the mount's.
+    fn configured_prewarm(&self, branch: &str) -> Prewarm {
+        settings::prewarm(&self.common_dir, branch).unwrap_or(self.prewarm)
+    }
+
     fn tracks_reads(&self, branch: &str) -> bool {
-        settings::branch_bool(&self.common_dir, branch, settings::TRACK_READS)
-            .unwrap_or(self.track_reads)
+        settings::track_reads(&self.common_dir, branch).unwrap_or(self.track_reads)
     }
 
     /// The open workspace of `branch`.

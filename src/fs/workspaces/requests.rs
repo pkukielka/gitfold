@@ -10,7 +10,7 @@ use log::warn;
 
 use super::Workspaces;
 use super::busy::Mark;
-use crate::daemon::prewarm::{self, Prewarm, Spawned};
+use crate::prewarm::{self, Prewarm, Spawned};
 use crate::state::fork;
 
 /// How long unmounting waits for long requests in progress.
@@ -68,8 +68,7 @@ impl Workspaces {
         // A content walk running would be recorded as the agent's reads: walked
         // again as meta (see `branch_mode`).
         let path = self.mount_point.join(branch);
-        let content = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm)
-            == Prewarm::Content;
+        let content = self.configured_prewarm(branch) == Prewarm::Content;
         if on && content && self.prewarm != Prewarm::None && prewarm::stop_under(&path) {
             prewarm::spawn(path, Prewarm::Meta, self.prewarm_threads);
         }

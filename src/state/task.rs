@@ -16,7 +16,6 @@
 //! its changes, has no task folder.
 
 use std::fs;
-use std::io::{ErrorKind, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -24,6 +23,7 @@ use anyhow::{Context, Result};
 use log::warn;
 
 use crate::fsutil;
+use crate::git;
 use crate::settings;
 use crate::state::{state_root, workspace_id};
 
@@ -111,7 +111,9 @@ impl TaskDir {
     pub fn prepare(&self, common_dir: &Path) -> Result<()> {
         fs::create_dir_all(&self.dir)
             .with_context(|| format!("creating {}", self.dir.display()))?;
-        exclude(common_dir, &self.name)
+        let pattern = [b"/", self.name.as_slice()].concat();
+        let why = "gitfold's task folder link (see `gitfold.taskDir`)";
+        git::exclude(common_dir, &pattern, why)
     }
 
     /// Copies the folder of another branch into this one's (`branch -w`), unless
@@ -171,35 +173,6 @@ fn expand_home(dir: &str) -> PathBuf {
         Some(rest) if rest.starts_with('/') => home().join(&rest[1..]),
         _ => PathBuf::from(dir),
     }
-}
-
-/// Adds `/<name>` to `info/exclude` (shared by every worktree) if missing, in
-/// one append: no temporary file for two processes to share.
-fn exclude(common_dir: &Path, name: &[u8]) -> Result<()> {
-    let path = common_dir.join("info").join("exclude");
-    let line = [b"/", name].concat();
-    let text = match fs::read(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e.into()),
-    };
-    if text.split(|b| *b == b'\n').any(|l| l == line.as_slice()) {
-        return Ok(());
-    }
-    fs::create_dir_all(path.parent().context("info")?)?;
-    let mut add = Vec::new();
-    if !text.is_empty() && !text.ends_with(b"\n") {
-        add.push(b'\n');
-    }
-    add.extend_from_slice(b"# gitfold's task folder link (see `gitfold.taskDir`)\n");
-    add.extend_from_slice(&line);
-    add.push(b'\n');
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    file.write_all(&add)?;
-    Ok(())
 }
 
 #[cfg(test)]

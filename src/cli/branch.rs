@@ -7,8 +7,8 @@ use anyhow::{Result, ensure};
 use clap::builder::BoolishValueParser;
 
 use crate::daemon::control;
-use crate::daemon::prewarm::Prewarm;
 use crate::git;
+use crate::prewarm::Prewarm;
 use crate::refusal::Refusal;
 use crate::settings;
 use crate::state::StateDir;
@@ -78,7 +78,7 @@ pub fn prewarm(repo: &Path, args: PrewarmArgs) -> Result<()> {
     let PrewarmArgs { branch: name, mode } = args;
     let common_dir = git::init(repo)?;
     git::require_branch(&name)?;
-    set_prewarm(repo, &name, mode)?;
+    settings::set_prewarm(repo, &name, mode)?;
     let unmounted = match mode {
         Prewarm::None => format!("set; {name} isn't walked"),
         _ => format!("set; {name} is walked when opened"),
@@ -113,10 +113,10 @@ fn set_branch_settings(
     track_reads: Option<bool>,
 ) -> Result<()> {
     if let Some(mode) = prewarm {
-        set_prewarm(repo, name, mode)?;
+        settings::set_prewarm(repo, name, mode)?;
     }
     if let Some(on) = track_reads {
-        set_track_reads(repo, name, on)?;
+        settings::set_track_reads(repo, name, on)?;
     }
     Ok(())
 }
@@ -127,7 +127,7 @@ pub fn track_reads(repo: &Path, args: TrackReadsArgs) -> Result<()> {
     let TrackReadsArgs { branch: name, on } = args;
     let common_dir = git::init(repo)?;
     git::require_branch(&name)?;
-    set_track_reads(repo, &name, on)?;
+    settings::set_track_reads(repo, &name, on)?;
     let unmounted = format!("set; applied when {name} opens");
     let older = format!("set; the mounted gitfold is older: applied when {name} opens next");
     apply(
@@ -136,17 +136,6 @@ pub fn track_reads(repo: &Path, args: TrackReadsArgs) -> Result<()> {
         &unmounted,
         &older,
     )
-}
-
-/// Stores whether branch `name`'s workspace records reads, in git config.
-fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
-    let value = &on.to_string();
-    settings::set_branch(repo, name, settings::TRACK_READS, value)
-}
-
-/// Stores `mode` as branch `name`'s prewarm mode, in git config.
-fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
-    settings::set_branch(repo, name, settings::PREWARM, &mode.to_string())
 }
 
 /// The arguments of `gitfold branch`.
