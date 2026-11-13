@@ -36,6 +36,46 @@ pub struct Status {
     /// How many untracked upper files git ignores (build output): not
     /// changes, as for `git worktree remove`.
     pub ignored: usize,
+    /// The base's root tree in the store.
+    tree: u32,
+}
+
+/// What happened to a path, as `git diff --name-status` says it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Change {
+    Added,
+    Modified,
+    Deleted,
+}
+
+impl Change {
+    pub fn letter(self) -> char {
+        match self {
+            Change::Added => 'A',
+            Change::Modified => 'M',
+            Change::Deleted => 'D',
+        }
+    }
+}
+
+impl Status {
+    /// Every changed and deleted path, sorted, with what happened to it:
+    /// modified if the base has a file (or submodule) there, else added (a file
+    /// where the base has a directory is added; the directory's files are
+    /// deleted).
+    pub fn changes(&self, store: &Store) -> Vec<(Change, &[u8])> {
+        let mut all: Vec<(Change, &[u8])> = self
+            .changed
+            .iter()
+            .map(|p| match Workspace::lower_in(store, self.tree, p) {
+                Some(Lower::File(_) | Lower::Gitlink) => (Change::Modified, p.as_slice()),
+                _ => (Change::Added, p.as_slice()),
+            })
+            .chain(self.deleted.iter().map(|p| (Change::Deleted, p.as_slice())))
+            .collect();
+        all.sort_by(|a, b| a.1.cmp(b.1));
+        all
+    }
 }
 
 /// The changes of the workspace stored in `state_dir`, in repository `common_dir`.
@@ -94,6 +134,7 @@ pub fn status(store: &Store, common_dir: &Path, state_dir: &Path) -> Result<Stat
         changed,
         deleted: deleted.into_iter().collect(),
         ignored,
+        tree,
     })
 }
 

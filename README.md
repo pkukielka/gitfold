@@ -121,6 +121,7 @@ gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
 gitfold branch <BRANCH> [--from <REV>] [--prewarm <MODE>]
                                               # create a branch for a workspace
 gitfold list                                  # workspaces and their changes
+gitfold changes [<BRANCH>] [-z]               # a workspace's changed paths
 gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
                                               # delete a workspace, or a snapshot's
 gitfold prune                                 # delete snapshot registrations
@@ -253,7 +254,14 @@ with `gitfold remove <BRANCH>`, mounted or not (see
 [Cleaning up](#cleaning-up) for when it refuses). `gitfold list` shows
 how many files each workspace has changed and deleted, and how many ignored
 files (build output) it holds, with a note if its branch was deleted or its
-base is behind the branch tip (mount once to update it). Until it is removed,
+base is behind the branch tip (mount once to update it). `gitfold changes
+[<BRANCH>]` lists one workspace's uncommitted changes against its base,
+untracked files included and whatever is staged, as `git add -A` and `git diff
+--cached --name-status` would (`A`, `M`, `D` and the path, quoted as git quotes
+it; `-z` for NUL-terminated, unquoted lines); run inside a workspace, it is
+that workspace's. It reads the workspace's stored state, not every directory
+of the tree as `git status` does, so a supervisor can poll many agents'
+workspaces cheaply. Until it is removed,
 git treats the branch as checked out, even while unmounted: you can't check it
 out elsewhere or delete it.
 

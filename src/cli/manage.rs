@@ -2,6 +2,7 @@
 //! mounting it: `branch`, `list`, `remove`, `prune`.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -95,6 +96,72 @@ fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
     let key = format!("branch.{name}.{}", crate::daemon::prewarm::BRANCH_KEY);
     let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
     git(repo, &["config", &key, value.get_name()])
+}
+
+/// `gitfold changes`: the uncommitted changes of workspace `name` relative to
+/// its base (normally its branch's tip), untracked files included and ignored
+/// ones not, whatever is staged: what `git add -A` and `git diff --cached
+/// --name-status <base>` would print, paths quoted as git quotes them, or
+/// NUL-terminated and unquoted (`nul`). Read from its stored state, without
+/// listing the tree; mounted or not. A branch never opened has none.
+pub fn changes(repo: &Path, name: &str, nul: bool) -> Result<()> {
+    check_name(name)?;
+    let common_dir = git::init(repo)?;
+    let state_dir = worktree::state_root(&common_dir).join(workspace_id(name));
+    if !state_dir.join("base").exists() {
+        ensure!(git::branch_exists(name), "no workspace or branch {name}");
+        return Ok(());
+    }
+    let store = Store::default();
+    let s = status::status(&store, &common_dir, &state_dir)?;
+    let note = base_note(name, &s.base);
+    if !note.is_empty() {
+        eprintln!("note: {name}: {note}; changes are against the stored base");
+    }
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (change, path) in s.changes(&store) {
+        write!(out, "{}\t", change.letter())?;
+        match nul {
+            true => {
+                out.write_all(path)?;
+                out.write_all(b"\0")?;
+            }
+            false => {
+                out.write_all(&quote(path))?;
+                out.write_all(b"\n")?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// `path` as git prints it with `core.quotePath` on (the default): as is,
+/// unless it has a control character, a double quote, a backslash or a byte
+/// above 0x7f; then in double quotes, with C escapes and octal for the rest.
+fn quote(path: &[u8]) -> Vec<u8> {
+    let plain = |b: u8| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\';
+    if path.iter().all(|&b| plain(b)) {
+        return path.to_vec();
+    }
+    let mut out = vec![b'"'];
+    for &b in path {
+        match b {
+            b'\x07' => out.extend(b"\\a"),
+            b'\x08' => out.extend(b"\\b"),
+            b'\t' => out.extend(b"\\t"),
+            b'\n' => out.extend(b"\\n"),
+            b'\x0b' => out.extend(b"\\v"),
+            b'\x0c' => out.extend(b"\\f"),
+            b'\r' => out.extend(b"\\r"),
+            b'"' => out.extend(b"\\\""),
+            b'\\' => out.extend(b"\\\\"),
+            b if plain(b) => out.push(b),
+            b => out.extend(format!("\\{b:03o}").bytes()),
+        }
+    }
+    out.push(b'"');
+    out
 }
 
 struct Listed {
