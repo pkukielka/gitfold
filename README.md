@@ -699,8 +699,8 @@ the commands an agent issues, `probe.sh` isolates content reads, `writes.sh`
 measures write workloads. `bench.sh` must run inside Claude Code (it uses Claude Code's grep and needs
 `CLAUDE_CODE_EXECPATH`).
 
-Tests: `cargo test` runs the unit tests (logic with no file system: parsing,
-formats, settings); the end-to-end suites drive the release binary, a real
+Tests: `cargo test` runs the unit tests (logic without a mount or git:
+parsing, formats, settings, a few scratch files); the end-to-end suites drive the release binary, a real
 mount and real git (build with `--release` first):
 
 - `tests/cli.sh`: the commands, one section at a time, each on a fresh

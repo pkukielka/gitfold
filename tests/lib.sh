@@ -20,7 +20,10 @@ T=$ROOT
 REPO=$T/repo MNT=$T/mnt LOG=$T/gitfold.log
 REAL_BIN=$BIN
 BIN=$ROOT/gitfold
-printf '#!/bin/sh\nexec timeout %s "%s" "$@"\n' "${GF_TIMEOUT:-120}" "$REAL_BIN" >"$BIN"
+# --kill-after: gitfold handles SIGTERM (it unmounts), which can hang too;
+# --foreground: Ctrl-C reaches the command, not just the script.
+printf '#!/bin/sh\nexec timeout --foreground --kill-after 10 %s "%s" "$@"\n' \
+    "${GF_TIMEOUT:-120}" "$REAL_BIN" >"$BIN"
 chmod +x "$BIN"
 
 pass() { echo "ok   $*"; }
@@ -47,6 +50,14 @@ unmount_fs() { # retries: a background prewarm walk keeps the mount busy briefly
     wait "$PID" 2>/dev/null
 }
 
+# Stops this shell's background jobs (daemons from mount_fs, sections run
+# with PARALLEL=1) and waits for them.
+stop_jobs() {
+    local jobs
+    jobs=$(jobs -p)
+    [ -z "$jobs" ] || { kill $jobs 2>/dev/null; wait $jobs 2>/dev/null; }
+}
+
 # Unmounts (lazily) every FUSE mount below directory $1.
 unmount_below() {
     cd /
@@ -61,11 +72,13 @@ unmount_below() {
 # section that ends early (`set -u`, a failed mount) counts as one. With
 # PARALLEL=1, sections run at once; `finish` prints their output in order.
 SECTION_N=0
+SECTIONS_RUN=0
 section() {
     SECTION_N=$((SECTION_N + 1))
     if [ -n "${SECTION:-}" ] && [[ "$1" != *"$SECTION"* ]]; then
         return
     fi
+    SECTIONS_RUN=$((SECTIONS_RUN + 1))
     if [ -n "${PARALLEL:-}" ]; then
         run_section "$@" >"$ROOT/$SECTION_N.out" 2>&1 &
     else
@@ -77,9 +90,12 @@ run_section() {
         T=$ROOT/$SECTION_N
         REPO=$T/repo MNT=$T/mnt LOG=$T/gitfold.log
         mkdir -p "$MNT" "$REPO"
-        trap 'unmount_below "$T"' EXIT
+        trap 'unmount_below "$T"; stop_jobs' EXIT
         echo "== $1"
-        ( fixture; "$2" ) || fail "$1: the section ended early (exit $?)"
+        # Passing means reaching the end: a section's last command may well
+        # be a `wait` for a daemon that exits non-zero.
+        ( fixture || { echo "the fixture failed"; exit 1; }; "$2"; exit 0 ) ||
+            fail "$1: the section ended early (exit $?)"
     )
 }
 
@@ -89,10 +105,15 @@ finish() {
         wait
         for i in $(seq "$SECTION_N"); do [ ! -f "$ROOT/$i.out" ] || cat "$ROOT/$i.out"; done
     fi
+    if [ -n "${SECTION:-}" ] && [ "$SECTION_N" -gt 0 ] && [ "$SECTIONS_RUN" = 0 ]; then
+        fail "SECTION=$SECTION matches no section"
+    fi
     local n=0
     [ -f "$ROOT/.fails" ] && n=$(wc -l <"$ROOT/.fails")
     echo "== $n failure(s)"
     [ -n "${KEEP:-}" ] && echo "kept $ROOT"
     exit $((n > 0))
 }
-trap 'unmount_below "$ROOT"; [ -n "${KEEP:-}" ] || rm -rf "$ROOT"' EXIT
+# Sections still running (PARALLEL=1, an interrupted run) and daemons are
+# stopped before anything is removed.
+trap 'stop_jobs; unmount_below "$ROOT"; [ -n "${KEEP:-}" ] || rm -rf "$ROOT"' EXIT

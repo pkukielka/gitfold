@@ -236,29 +236,41 @@ fn copy_tree(src: &Path, dst: &Path, skip: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// An empty scratch directory for test `name`.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("gitfold-task-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// An empty scratch directory for test `name`, removed when dropped
+    /// (also when an assertion fails).
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("gitfold-task-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     /// A scratch git directory holding `config` (a git config file's text).
-    fn git_dir(name: &str, config: &str) -> PathBuf {
-        let dir = scratch(name);
-        fs::write(dir.join("config"), config).unwrap();
+    fn git_dir(name: &str, config: &str) -> Scratch {
+        let dir = Scratch::new(name);
+        fs::write(dir.0.join("config"), config).unwrap();
         dir
     }
 
     #[test]
     fn defaults() {
-        let dir = git_dir("defaults", "");
-        let t = TaskDir::of(&dir, "agent/x");
+        let scratch = git_dir("defaults", "");
+        let dir = &scratch.0;
+        let t = TaskDir::of(dir, "agent/x");
         assert_eq!(t.name, b".task");
         assert_eq!(t.dir, dir.join("gitfold/.tasks/agent%2Fx"));
-        assert_eq!(inbox_name(&dir), "inbox");
-        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(inbox_name(dir), "inbox");
     }
 
     #[test]
@@ -267,40 +279,41 @@ mod tests {
             "settings",
             "[gitfold]\n\ttaskDir = .notes\n\ttasksDir = /srv/tasks\n\tinbox = mail\n",
         );
-        let t = TaskDir::of(&dir, "b");
+        let t = TaskDir::of(&dir.0, "b");
         assert_eq!(
             (t.name.as_slice(), t.dir.as_path()),
             (&b".notes"[..], Path::new("/srv/tasks/b"))
         );
-        assert_eq!(inbox_name(&dir), "mail");
-        fs::remove_dir_all(dir).unwrap();
+        assert_eq!(inbox_name(&dir.0), "mail");
     }
 
     #[test]
     fn bad_settings_fall_back() {
-        for (name, value) in [
-            ("slash", "a/b"),
-            ("dot", "."),
-            ("dotdot", ".."),
-            ("git", ".git"),
+        // A task folder name, a tasks directory and an inbox name, each unusable.
+        for (name, task_dir, tasks_dir, inbox) in [
+            ("slash", "a/b", "rel/dir", "a/b"),
+            ("dot", ".", "dir", ".hidden"),
+            ("dotdot", "..", "./dir", "."),
+            ("git", ".git", "../up", "inbox/x"),
         ] {
-            let dir = git_dir(
+            let scratch = git_dir(
                 name,
                 &format!(
-                    "[gitfold]\n\ttaskDir = {value}\n\ttasksDir = rel/dir\n\tinbox = .hidden\n"
+                    "[gitfold]\n\ttaskDir = {task_dir}\n\ttasksDir = {tasks_dir}\n\tinbox = {inbox}\n"
                 ),
             );
-            let t = TaskDir::of(&dir, "b");
-            assert_eq!(t.name, b".task", "{value}");
-            assert_eq!(t.dir, dir.join("gitfold/.tasks/b"), "a relative tasksDir");
-            assert_eq!(inbox_name(&dir), "inbox", "a dot name");
-            fs::remove_dir_all(dir).unwrap();
+            let dir = &scratch.0;
+            let t = TaskDir::of(dir, "b");
+            assert_eq!(t.name, b".task", "taskDir {task_dir}");
+            assert_eq!(t.dir, dir.join("gitfold/.tasks/b"), "tasksDir {tasks_dir}");
+            assert_eq!(inbox_name(dir), "inbox", "inbox {inbox}");
         }
     }
 
     #[test]
     fn copy_leaves_inbox_and_dot_files() {
-        let root = scratch("copy");
+        let scratch = Scratch::new("copy");
+        let root = &scratch.0;
         let (from, to) = (root.join("from"), root.join("to"));
         for p in ["notes", "inbox"] {
             fs::create_dir_all(from.join(p)).unwrap();
@@ -330,7 +343,6 @@ mod tests {
             !dst.copy_from(&src, "inbox").unwrap(),
             "an existing folder is kept"
         );
-        fs::remove_dir_all(root).unwrap();
 
         fn walk(dir: &Path) -> Vec<String> {
             let mut out = Vec::new();
