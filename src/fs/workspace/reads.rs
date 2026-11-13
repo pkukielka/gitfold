@@ -16,51 +16,17 @@
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Write};
-use std::path::Path;
 
 use anyhow::Result;
 use log::warn;
 
 use super::Workspace;
-use crate::settings;
-
-pub const READS: &str = "reads";
+use crate::state::reads::{READS, paths, whole};
 
 /// The paths recorded, and the log they are appended to.
 pub(super) struct Reads {
     seen: HashSet<Vec<u8>>,
     log: File,
-}
-
-/// The paths recorded in the workspace stored in `state_dir`, or `None` if
-/// reads were never tracked there.
-pub fn recorded(state_dir: &Path) -> Result<Option<HashSet<Vec<u8>>>> {
-    match fs::read(state_dir.join(READS)) {
-        Ok(data) => Ok(Some(paths(whole(&data)))),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
-    }
-}
-
-/// `data` up to its last whole path: a path being appended, or cut short by a
-/// crash, is left out.
-fn whole(data: &[u8]) -> &[u8] {
-    let end = data.iter().rposition(|b| *b == 0).map_or(0, |i| i + 1);
-    &data[..end]
-}
-
-fn paths(data: &[u8]) -> HashSet<Vec<u8>> {
-    data.split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect()
-}
-
-/// Whether the workspace of `branch` records reads: its own setting if any,
-/// else `default` (the mount's). Read when it opens, and by `gitfold
-/// track-reads` while open.
-pub fn tracked(common_dir: &Path, branch: &str, default: bool) -> bool {
-    settings::branch_bool(common_dir, branch, settings::TRACK_READS).unwrap_or(default)
 }
 
 impl Workspace {

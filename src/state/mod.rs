@@ -7,6 +7,10 @@
 //! `times`, `reads`, `tmp/`. Its worktree registration (the admin directory,
 //! with its index and HEAD) is `.git/worktrees/gitfold-ws-<id>/`.
 
+pub mod markers;
+pub mod reads;
+pub mod times;
+
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -102,6 +106,25 @@ pub fn workspace_id(branch: &str) -> String {
 /// The branch of workspace id `id` (inverse of `workspace_id`).
 pub fn workspace_branch(id: &str) -> String {
     id.replace("%2F", "/").replace("%25", "%")
+}
+
+/// `dir/name`, for paths below a workspace's root (`dir` empty: the root).
+pub fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
+    let mut path = dir.to_vec();
+    if !path.is_empty() {
+        path.push(b'/');
+    }
+    path.extend_from_slice(name);
+    path
+}
+
+/// The path prefixes of `path` at `/` boundaries, shortest first, excluding
+/// `path`.
+pub fn ancestors(path: &[u8]) -> impl Iterator<Item = &[u8]> {
+    path.iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'/')
+        .map(|(i, _)| &path[..i])
 }
 
 /// The base commit of the workspace stored in `dir`.

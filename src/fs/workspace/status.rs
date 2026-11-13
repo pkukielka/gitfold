@@ -25,10 +25,10 @@ use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 
 use super::markers::{Markers, PathSet};
-use super::rebase::{ModeCheck, matches_stored};
-use super::{Lower, Workspace, ancestors, hidden, join, not_found};
+use super::{Lower, ancestors, hidden, join, not_found};
 use crate::git;
 use crate::state::StateDir;
+use crate::store::{ModeCheck, matches_stored};
 use crate::store::{Store, TreeTable};
 
 pub struct Status {
@@ -78,7 +78,7 @@ impl Status {
         change: Change,
         path: &[u8],
     ) -> Result<LineCounts> {
-        let before = match Workspace::lower_in(store, self.tree, path) {
+        let before = match store.entry_at(self.tree, path) {
             Some(Lower::File(id)) if change != Change::Added => {
                 let rec = store.file(id).context("stored file")?;
                 git::read_blob(rec.oid)?
@@ -122,7 +122,7 @@ impl Status {
         let mut all: Vec<(Change, &[u8])> = self
             .changed
             .iter()
-            .map(|p| match Workspace::lower_in(store, self.tree, p) {
+            .map(|p| match store.entry_at(self.tree, p) {
                 Some(Lower::File(_) | Lower::Gitlink) => (Change::Modified, p.as_slice()),
                 _ => (Change::Added, p.as_slice()),
             })
@@ -175,7 +175,7 @@ pub fn status(store: &Store, common_dir: &Path, state: &StateDir) -> Result<Stat
     let marked = |p: &[u8]| whiteouts.contains(p) || opaque.contains(p);
     for path in whiteouts.iter().chain(&opaque) {
         if !ancestors(path).any(marked)
-            && let Some(lower) = Workspace::lower_in(store, tree, path)
+            && let Some(lower) = store.entry_at(tree, path)
         {
             deleted_below(store, &upper, path, lower, &mut deleted)?;
         }

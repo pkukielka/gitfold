@@ -33,7 +33,7 @@ const COPIED: [&str; 4] = [
     state::BASE,
     state::MARKERS,
     state::TIMES,
-    super::reads::READS,
+    state::reads::READS,
 ];
 
 /// The source's git index, copied into the new state directory with the rest

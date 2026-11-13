@@ -6,6 +6,11 @@
 //! per-directory array (`DirRec`).
 
 use std::cmp::Ordering;
+use std::fs;
+use std::io;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
@@ -466,4 +471,76 @@ impl<F: Fn(&[u8], &DirRec, &TEntry) -> u32> IndexWalk<'_, F> {
             path.truncate(len);
         }
     }
+}
+
+/// What is at a path of a stored tree.
+#[derive(Clone, Copy)]
+pub enum Lower {
+    Tree(u32),
+    /// Submodule: an empty directory.
+    Gitlink,
+    File(u32),
+}
+
+impl Lower {
+    pub fn of(e: &TEntry) -> Lower {
+        match e.kind {
+            EntryKind::Tree => Lower::Tree(e.id),
+            EntryKind::Commit => Lower::Gitlink,
+            _ => Lower::File(e.id),
+        }
+    }
+}
+
+impl Store {
+    /// The entry at `path` (`/`-separated) below tree `tree`, if any.
+    pub fn entry_at(&self, tree: u32, path: &[u8]) -> Option<Lower> {
+        let mut cur = Lower::Tree(tree);
+        if path.is_empty() {
+            return Some(cur);
+        }
+        for comp in path.split(|b| *b == b'/') {
+            let Lower::Tree(tree) = cur else { return None };
+            let table = self.tree(tree);
+            cur = Lower::of(table.find(comp)?);
+        }
+        Some(cur)
+    }
+}
+
+/// How `matches_stored` compares modes.
+#[derive(Clone, Copy)]
+pub enum ModeCheck {
+    /// All permission bits, as shown in the mount (an invisible rebase needs it).
+    Exact,
+    /// Only the executable bit, as git records it.
+    Git,
+}
+
+/// Whether the file at `path` (with metadata `meta`) has the content and mode
+/// of stored file `rec`.
+pub fn matches_stored(
+    path: &Path,
+    meta: &fs::Metadata,
+    rec: &FileRec,
+    modes: ModeCheck,
+) -> io::Result<bool> {
+    let data = if rec.kind == EntryKind::Link {
+        if !meta.file_type().is_symlink() {
+            return Ok(false);
+        }
+        fs::read_link(path)?.as_os_str().as_bytes().to_vec()
+    } else {
+        let same_mode = match modes {
+            ModeCheck::Exact => meta.mode() & 0o7777 == rec.perm().into(),
+            ModeCheck::Git => (meta.mode() & 0o100 != 0) == (rec.kind == EntryKind::BlobExecutable),
+        };
+        if !meta.is_file() || meta.len() != rec.size || !same_mode {
+            return Ok(false);
+        }
+        fs::read(path)?
+    };
+    let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &data)
+        .map_err(io::Error::other)?;
+    Ok(oid == rec.oid)
 }

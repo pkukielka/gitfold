@@ -12,17 +12,24 @@ use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy)]
-pub(super) enum Kind {
+pub enum Kind {
     Whiteout,
     Opaque,
 }
 
 /// A set of paths below the workspace root.
-pub(super) type PathSet = BTreeSet<Vec<u8>>;
+pub type PathSet = BTreeSet<Vec<u8>>;
 
-pub(super) struct Markers {
-    pub(super) whiteouts: BTreeSet<Vec<u8>>,
-    pub(super) opaque: BTreeSet<Vec<u8>>,
+/// Whether the lower entry at `path` is hidden by a whiteout on it or an
+/// ancestor, or by an opaque ancestor.
+pub fn hidden(whiteouts: &PathSet, opaque: &PathSet, path: &[u8]) -> bool {
+    whiteouts.contains(path)
+        || super::ancestors(path).any(|p| whiteouts.contains(p) || opaque.contains(p))
+}
+
+pub struct Markers {
+    pub whiteouts: BTreeSet<Vec<u8>>,
+    pub opaque: BTreeSet<Vec<u8>>,
     path: PathBuf,
     log: File,
     /// Records appended since the last compaction.
@@ -40,7 +47,7 @@ const fn op(kind: Kind, present: bool) -> u8 {
 }
 
 impl Markers {
-    pub(super) fn open(path: &Path) -> io::Result<Markers> {
+    pub fn open(path: &Path) -> io::Result<Markers> {
         let (whiteouts, opaque) = Self::read(path)?;
         let log = OpenOptions::new().create(true).append(true).open(path)?;
         let mut markers = Markers {
@@ -56,7 +63,7 @@ impl Markers {
 
     /// The (whiteouts, opaque markers) recorded in the log at `path`, without
     /// opening it for changes.
-    pub(super) fn read(path: &Path) -> io::Result<(PathSet, PathSet)> {
+    pub fn read(path: &Path) -> io::Result<(PathSet, PathSet)> {
         let (mut whiteouts, mut opaque) = (BTreeSet::new(), BTreeSet::new());
         let data = match fs::read(path) {
             Ok(data) => data,
@@ -108,7 +115,7 @@ impl Markers {
 
     /// Adds (`present`) or removes a marker; only actual changes are logged.
     /// Returns whether it changed.
-    pub(super) fn set(&mut self, kind: Kind, path: &[u8], present: bool) -> io::Result<bool> {
+    pub fn set(&mut self, kind: Kind, path: &[u8], present: bool) -> io::Result<bool> {
         let set = self.set_of(kind);
         let changed = if present {
             set.insert(path.to_vec())
@@ -132,12 +139,12 @@ impl Markers {
     }
 
     /// Flushes appended records to stable storage.
-    pub(super) fn sync(&self) -> io::Result<()> {
+    pub fn sync(&self) -> io::Result<()> {
         self.log.sync_data()
     }
 
     /// Markers strictly below directory `dir`.
-    pub(super) fn below(&self, kind: Kind, dir: &[u8]) -> Vec<Vec<u8>> {
+    pub fn below(&self, kind: Kind, dir: &[u8]) -> Vec<Vec<u8>> {
         let set = match kind {
             Kind::Whiteout => &self.whiteouts,
             Kind::Opaque => &self.opaque,

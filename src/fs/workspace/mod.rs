@@ -29,14 +29,12 @@
 //! - `write`: mutations and copy-up.
 
 pub mod fork;
-mod markers;
 mod nodes;
 pub mod reads;
 mod rebase;
 pub mod retire;
 pub mod status;
 pub mod task;
-mod times;
 mod write;
 
 use std::collections::{HashMap, HashSet};
@@ -51,17 +49,18 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use fuser::Errno;
 use gix::ObjectId;
-use gix::objs::tree::EntryKind;
 use parking_lot::{Mutex, RwLock};
 
+use crate::fsutil::not_found;
 use crate::git;
 use crate::git::worktree;
 use crate::inode;
-use crate::state::{self, StateDir};
-use crate::store::{Store, TEntry};
-use markers::Markers;
+use crate::state::markers::{self, Markers, hidden};
+use crate::state::times::{self, Stamp, Times};
+use crate::state::{self, StateDir, ancestors, join};
+use crate::store::Lower;
+use crate::store::Store;
 use nodes::Nodes;
-use times::{Stamp, Times};
 
 /// `local` of the virtual `.git` file in the workspace root.
 pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
@@ -90,23 +89,6 @@ impl Obj {
             Obj::Upper(m) => m.is_dir(),
             Obj::LowerDir => true,
             Obj::LowerFile { .. } => false,
-        }
-    }
-}
-
-enum Lower {
-    Tree(u32),
-    /// Submodule: an empty directory.
-    Gitlink,
-    File(u32),
-}
-
-impl Lower {
-    fn of(e: &TEntry) -> Lower {
-        match e.kind {
-            EntryKind::Tree => Lower::Tree(e.id),
-            EntryKind::Commit => Lower::Gitlink,
-            _ => Lower::File(e.id),
         }
     }
 }
@@ -238,33 +220,6 @@ pub enum Read {
     Lower(u32),
 }
 
-fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
-    let mut path = dir.to_vec();
-    if !path.is_empty() {
-        path.push(b'/');
-    }
-    path.extend_from_slice(name);
-    path
-}
-
-/// The path prefixes of `path` at `/` boundaries, shortest first, excluding `path`.
-fn ancestors(path: &[u8]) -> impl Iterator<Item = &[u8]> {
-    path.iter()
-        .enumerate()
-        .filter(|(_, b)| **b == b'/')
-        .map(|(i, _)| &path[..i])
-}
-
-/// Whether the lower entry at `path` is hidden by a whiteout on it or an
-/// ancestor, or by an opaque ancestor.
-fn hidden(whiteouts: &markers::PathSet, opaque: &markers::PathSet, path: &[u8]) -> bool {
-    whiteouts.contains(path) || ancestors(path).any(|p| whiteouts.contains(p) || opaque.contains(p))
-}
-
-fn not_found(e: &io::Error) -> bool {
-    e.kind() == ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
-}
-
 impl Workspace {
     /// Opens the workspace of `branch` stored in `state`, creating it at
     /// `new_base` if new.
@@ -386,21 +341,7 @@ impl Workspace {
     }
 
     fn lower(store: &Store, layers: &Layers, path: &[u8]) -> Option<Lower> {
-        Self::lower_in(store, layers.base_tree, path)
-    }
-
-    /// The entry at `path` below tree `tree`.
-    fn lower_in(store: &Store, tree: u32, path: &[u8]) -> Option<Lower> {
-        let mut cur = Lower::Tree(tree);
-        if path.is_empty() {
-            return Some(cur);
-        }
-        for comp in path.split(|b| *b == b'/') {
-            let Lower::Tree(tree) = cur else { return None };
-            let table = store.tree(tree);
-            cur = Lower::of(table.find(comp)?);
-        }
-        Some(cur)
+        store.entry_at(layers.base_tree, path)
     }
 
     /// Whether the lower entry at `path` is hidden by a whiteout or an opaque

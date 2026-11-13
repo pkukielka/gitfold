@@ -29,7 +29,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::workspace::{Workspace, reads};
+use super::workspace::Workspace;
 use crate::daemon::prewarm::{self, Prewarm, Spawned};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
@@ -38,6 +38,7 @@ use crate::git::worktree;
 use crate::inode;
 use crate::refusal::Refusal;
 use crate::state::StateDir;
+use crate::state::reads;
 use crate::store::Store;
 
 /// What a slot holds, for the inodes in it (`Workspaces::get`).

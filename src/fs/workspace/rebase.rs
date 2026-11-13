@@ -35,9 +35,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -52,7 +50,8 @@ use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::state;
-use crate::store::{EMPTY_TREE, FileRec, Store, TEntry};
+use crate::store::{EMPTY_TREE, Store, TEntry};
+use crate::store::{ModeCheck, matches_stored};
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
 /// build writing while a rebase waits for conflict resolution, say) they are
@@ -482,7 +481,7 @@ impl Workspace {
                 plan.stale_opaque.push(path);
                 continue;
             }
-            let n = Self::lower_in(store, new_tree, &path);
+            let n = store.entry_at(new_tree, &path);
             let children = match n {
                 Some(Lower::Tree(tree)) => Some(tree),
                 Some(Lower::Gitlink) => Some(EMPTY_TREE),
@@ -551,43 +550,6 @@ impl Workspace {
         };
         Ok(matches_stored(&upper, &meta, &rec, ModeCheck::Exact)?.then(|| Seen::of(&meta)))
     }
-}
-
-/// How `matches_stored` compares modes.
-#[derive(Clone, Copy)]
-pub(super) enum ModeCheck {
-    /// All permission bits, as shown in the mount (an invisible rebase needs it).
-    Exact,
-    /// Only the executable bit, as git records it.
-    Git,
-}
-
-/// Whether the file at `path` (with metadata `meta`) has the content and mode
-/// of stored file `rec`.
-pub(super) fn matches_stored(
-    path: &Path,
-    meta: &fs::Metadata,
-    rec: &FileRec,
-    modes: ModeCheck,
-) -> io::Result<bool> {
-    let data = if rec.kind == EntryKind::Link {
-        if !meta.file_type().is_symlink() {
-            return Ok(false);
-        }
-        fs::read_link(path)?.as_os_str().as_bytes().to_vec()
-    } else {
-        let same_mode = match modes {
-            ModeCheck::Exact => meta.mode() & 0o7777 == rec.perm().into(),
-            ModeCheck::Git => (meta.mode() & 0o100 != 0) == (rec.kind == EntryKind::BlobExecutable),
-        };
-        if !meta.is_file() || meta.len() != rec.size || !same_mode {
-            return Ok(false);
-        }
-        fs::read(path)?
-    };
-    let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &data)
-        .map_err(io::Error::other)?;
-    Ok(oid == rec.oid)
 }
 
 fn show(path: &[u8]) -> String {
