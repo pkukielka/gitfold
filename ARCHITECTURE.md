@@ -122,7 +122,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/reads.rs` | read tracking: the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/workspace/status.rs` | a workspace's uncommitted changes and ignored files, read from its state directory (for `list` and `remove`) |
+| `src/fs/workspace/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes` and `remove`) |
 | `src/fs/workspace/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |

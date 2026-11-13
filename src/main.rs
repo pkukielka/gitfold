@@ -110,9 +110,16 @@ enum Command {
     },
     /// List the workspaces and their changes.
     ///
-    /// For each: how many files it changed and deleted, how many ignored files
-    /// it holds, its base commit, and notes (branch deleted, base behind).
-    List,
+    /// For each: how many files it changed and deleted (uncommitted), how many
+    /// ignored files it holds, its base commit, how long ago it last changed
+    /// (a file written, created or deleted, or a commit), and notes (branch
+    /// deleted, base behind).
+    List {
+        /// Also the lines added and removed, in total (reads every changed
+        /// file and its base version).
+        #[arg(long)]
+        stat: bool,
+    },
     /// List a workspace's uncommitted changes (A/M/D per path), without git status.
     ///
     /// Against its base, untracked files included and ignored ones not, whatever
@@ -125,6 +132,10 @@ enum Command {
         /// End each line with NUL instead of a newline, paths unquoted.
         #[arg(short = 'z')]
         nul: bool,
+        /// Also the lines added and removed per path (`-` for binary files),
+        /// as `git diff --numstat`, and a summary line (not with -z).
+        #[arg(long)]
+        stat: bool,
     },
     /// List what a workspace read or changed that changed elsewhere since.
     ///
@@ -378,11 +389,11 @@ fn main() -> Result<()> {
                 with_changes,
             ));
         }
-        Command::List => cli::manage::list(&repo()?)?,
-        Command::Changes { branch, nul } => {
+        Command::List { stat } => cli::manage::list(&repo()?, stat)?,
+        Command::Changes { branch, nul, stat } => {
             let repo = repo()?;
             let branch = cli::branch_or_current(branch, &repo)?;
-            cli::manage::changes(&repo, &branch, nul)?
+            cli::manage::changes(&repo, &branch, nul, stat)?
         }
         Command::Overlaps {
             branch,

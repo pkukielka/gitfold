@@ -16,8 +16,9 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use gix::ObjectId;
@@ -36,6 +37,9 @@ pub struct Status {
     /// How many untracked upper files git ignores (build output): not
     /// changes, as for `git worktree remove`.
     pub ignored: usize,
+    /// The newest modification time in upper (files, directories), if any:
+    /// when something was last written, created or removed there.
+    pub newest: Option<SystemTime>,
     /// The base's root tree in the store.
     tree: u32,
 }
@@ -58,7 +62,57 @@ impl Change {
     }
 }
 
+/// Lines added and removed at a path, as `git diff --numstat` counts them, or
+/// `None` for a binary file (a NUL in its first 8000 bytes, as git decides).
+pub type LineCounts = Option<(u32, u32)>;
+
 impl Status {
+    /// The lines `change` at `path` added and removed relative to the base,
+    /// with upper in `state_dir`: the base's blob against upper's file (a
+    /// symlink's target, as git diffs it).
+    pub fn line_counts(
+        &self,
+        store: &Store,
+        state_dir: &Path,
+        change: Change,
+        path: &[u8],
+    ) -> Result<LineCounts> {
+        let before = match Workspace::lower_in(store, self.tree, path) {
+            Some(Lower::File(id)) if change != Change::Added => {
+                let rec = store.file(id).context("stored file")?;
+                git::read_blob(rec.oid)?
+            }
+            // A submodule: one line, its commit, as git shows it.
+            Some(Lower::Gitlink) => b"Subproject commit\n".to_vec(),
+            _ => Vec::new(),
+        };
+        let upper = upper_path(&state_dir.join("upper"), path);
+        let after = match change {
+            Change::Deleted => Vec::new(),
+            _ => {
+                let meta = fs::symlink_metadata(&upper)?;
+                if meta.is_symlink() {
+                    fs::read_link(&upper)?.into_os_string().into_vec()
+                } else if meta.is_dir() {
+                    // An untracked repository: git shows it as one entry.
+                    return Ok(None);
+                } else {
+                    fs::read(&upper)?
+                }
+            }
+        };
+        let binary = |d: &[u8]| d[..d.len().min(8000)].contains(&0);
+        if binary(&before) || binary(&after) {
+            return Ok(None);
+        }
+        let input = imara_diff::InternedInput::new(
+            imara_diff::sources::byte_lines(&before),
+            imara_diff::sources::byte_lines(&after),
+        );
+        let diff = imara_diff::Diff::compute(imara_diff::Algorithm::Myers, &input);
+        Ok(Some((diff.count_additions(), diff.count_removals())))
+    }
+
     /// Every changed and deleted path, sorted, with what happened to it:
     /// modified if the base has a file (or submodule) there, else added (a file
     /// where the base has a directory is added; the directory's files are
@@ -111,12 +165,14 @@ pub fn status(store: &Store, common_dir: &Path, state_dir: &Path) -> Result<Stat
         changed: Vec::new(),
         deleted: BTreeSet::new(),
         ignored: 0,
+        newest: None,
     };
     walk.changed_below(b"", Some(tree), Ignoring::Match)?;
     let Walk {
         changed,
         mut deleted,
         ignored,
+        newest,
         ..
     } = walk;
     // Base entries hidden by a marker (one below another marked path is
@@ -134,6 +190,7 @@ pub fn status(store: &Store, common_dir: &Path, state_dir: &Path) -> Result<Stat
         changed,
         deleted: deleted.into_iter().collect(),
         ignored,
+        newest,
         tree,
     })
 }
@@ -154,6 +211,7 @@ struct Walk<'a> {
     changed: Vec<Vec<u8>>,
     deleted: BTreeSet<Vec<u8>>,
     ignored: usize,
+    newest: Option<SystemTime>,
 }
 
 /// Which untracked files below a directory count as ignored.
@@ -179,6 +237,7 @@ impl Walk<'_> {
             Err(e) if not_found(&e) => return Ok(()),
             Err(e) => return Err(e).with_context(|| format!("listing {}", dir_path.display())),
         };
+        self.saw(&fs::metadata(&dir_path)?);
         let table = tree.map(|t| self.store.tree(t));
         let lists = self.ignore.patterns.len();
         if ignoring == Ignoring::Match {
@@ -193,6 +252,7 @@ impl Walk<'_> {
                 .and_then(|t| t.find(name.as_bytes()))
                 .map(Lower::of);
             let meta = entry.metadata()?;
+            self.saw(&meta);
             if meta.is_dir() {
                 let below = match lower {
                     Some(Lower::Tree(t)) => Some(t),
@@ -281,6 +341,13 @@ impl Walk<'_> {
             )?;
         }
         Ok(())
+    }
+
+    /// Keeps the newest modification time seen.
+    fn saw(&mut self, meta: &fs::Metadata) {
+        if let Ok(t) = meta.modified() {
+            self.newest = self.newest.max(Some(t));
+        }
     }
 
     /// Whether git ignores untracked `path`.

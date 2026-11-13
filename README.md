@@ -121,8 +121,8 @@ gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
 gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>] [--track-reads on|off]
                                               # create a branch for a workspace
                                               # (-w: with a workspace's changes)
-gitfold list                                  # workspaces and their changes
-gitfold changes [<BRANCH>] [-z]               # a workspace's changed paths
+gitfold list [--stat]                         # workspaces and their changes
+gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold overlaps [<BRANCH>] [--against <REV>]... [--against-workspaces] [--reads|--writes] [-z]
                                               # what it read or changed that
                                               # changed elsewhere since
@@ -307,13 +307,18 @@ read, and its setting; turning tracking off keeps what was recorded.
 with `gitfold remove <BRANCH>`, mounted or not (see
 [Cleaning up](#cleaning-up) for when it refuses). `gitfold list` shows
 how many files each workspace has changed and deleted, and how many ignored
-files (build output) it holds, with a note if its branch was deleted or its
-base is behind the branch tip (mount once to update it). `gitfold changes
+files (build output) it holds, how long ago it last changed (`last`: a file
+written, created or deleted, or a commit; a stalled agent stands out), with a
+note if its branch was deleted or its base is behind the branch tip (mount once
+to update it); `--stat` adds the lines added and removed in total, reading
+every changed file. `gitfold changes
 [<BRANCH>]` lists one workspace's uncommitted changes against its base,
 untracked files included and whatever is staged, as `git add -A` and `git diff
 --cached --name-status` would (`A`, `M`, `D` and the path, quoted as git quotes
 it; `-z` for NUL-terminated, unquoted lines); run inside a workspace, it is
-that workspace's. It reads the workspace's stored state, not every directory
+that workspace's. `--stat` adds the lines added and removed per path (`-` for
+binary files), as `git diff --numstat` against the base would, and git's
+`--shortstat` summary line. It reads the workspace's stored state, not every directory
 of the tree as `git status` does, so a supervisor can poll many agents'
 workspaces cheaply. Until it is removed,
 git treats the branch as checked out, even while unmounted: you can't check it
