@@ -16,10 +16,12 @@ pub mod worktree;
 use std::cell::RefCell;
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::ops::Range;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::LocalKey;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow};
@@ -64,15 +66,7 @@ pub fn init(path: &Path) -> Result<PathBuf> {
 }
 
 pub fn with_repo<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
-    LOCAL.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        let repo = slot.get_or_insert_with(|| {
-            let mut repo = REPO.get().expect("git::init not called").to_thread_local();
-            repo.object_cache_size(0);
-            repo
-        });
-        f(repo)
-    })
+    with_local(&LOCAL, false, f)
 }
 
 /// `with_repo`, with a handle that doesn't look for new packs when an object
@@ -80,12 +74,22 @@ pub fn with_repo<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
 /// lock) on every miss, and a tree walk in a partial clone misses once per
 /// absent blob. Call `refresh_packs` first to see packs added since.
 pub fn with_repo_no_refresh<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
-    LOCAL_NO_REFRESH.with(|cell| {
+    with_local(&LOCAL_NO_REFRESH, true, f)
+}
+
+fn with_local<R>(
+    key: &'static LocalKey<RefCell<Option<gix::Repository>>>,
+    no_refresh: bool,
+    f: impl FnOnce(&gix::Repository) -> R,
+) -> R {
+    key.with(|cell| {
         let mut slot = cell.borrow_mut();
         let repo = slot.get_or_insert_with(|| {
             let mut repo = REPO.get().expect("git::init not called").to_thread_local();
             repo.object_cache_size(0);
-            repo.objects.refresh_never();
+            if no_refresh {
+                repo.objects.refresh_never();
+            }
             repo
         });
         f(repo)
@@ -138,32 +142,44 @@ pub fn is_missing(oid: ObjectId) -> bool {
     with_repo(|repo| !repo.has_object(oid))
 }
 
+/// One tree level, in stored order, its names in one buffer.
+pub struct Tree {
+    pub entries: Vec<Entry>,
+    pub names: Vec<u8>,
+}
+
 pub struct Entry {
-    pub name: Vec<u8>,
+    /// Where the name is in `Tree::names`.
+    pub name: Range<usize>,
     pub kind: EntryKind,
     pub oid: ObjectId,
 }
 
 /// Lists one tree level; `None` if the tree isn't in the object database
 /// (as of the last `refresh_packs`).
-pub fn tree_entries(tree: ObjectId) -> Result<Option<Vec<Entry>>> {
+pub fn tree_entries(tree: ObjectId) -> Result<Option<Tree>> {
     with_repo_no_refresh(|repo| {
         let Some(object) = repo.try_find_object(tree)? else {
             return Ok(None);
         };
         let tree = object.try_into_tree()?;
         let decoded = tree.decode()?;
-        Ok(Some(
-            decoded
-                .entries
-                .iter()
-                .map(|e| Entry {
-                    name: e.filename.to_vec(),
+        let len = decoded.entries.iter().map(|e| e.filename.len()).sum();
+        let mut names = Vec::with_capacity(len);
+        let entries = decoded
+            .entries
+            .iter()
+            .map(|e| {
+                let start = names.len();
+                names.extend_from_slice(e.filename);
+                Entry {
+                    name: start..names.len(),
                     kind: e.mode.kind(),
                     oid: e.oid.to_owned(),
-                })
-                .collect(),
-        ))
+                }
+            })
+            .collect();
+        Ok(Some(Tree { entries, names }))
     })
 }
 
@@ -186,7 +202,6 @@ pub fn read_blob(oid: ObjectId) -> Result<Vec<u8>> {
     data
 }
 
-/// Whether `refs/heads/<name>` exists.
 /// Refuses (not found: exit 3) unless `name` is a local branch.
 pub fn require_branch(name: &str) -> Result<()> {
     match branch_exists(name) {
@@ -200,6 +215,7 @@ pub fn branch_tip(name: &str) -> Result<Commit> {
     resolve(&format!("refs/heads/{name}"))
 }
 
+/// Whether `refs/heads/<name>` exists.
 pub fn branch_exists(name: &str) -> bool {
     with_repo(|repo| {
         repo.try_find_reference(format!("refs/heads/{name}").as_str())

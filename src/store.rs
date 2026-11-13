@@ -64,6 +64,8 @@ pub struct TreeTable {
     /// Sorted in git tree order (directories compare as `name/`), which makes a
     /// depth-first walk produce paths in index order.
     entries: Box<[TEntry]>,
+    /// The entries' names, in the tree object's order (not `entries`'): only
+    /// reached through each entry's offset and length.
     names: Box<[u8]>,
     /// Index entries below this tree (files, symlinks and submodules).
     index_entries: u32,
@@ -75,7 +77,7 @@ pub struct TreeTable {
 
 /// Git's tree entry order: names compare bytewise, with a directory's name
 /// followed by an implicit `/`.
-pub fn tree_order(a: &[u8], a_dir: bool, b: &[u8], b_dir: bool) -> Ordering {
+fn tree_order(a: &[u8], a_dir: bool, b: &[u8], b_dir: bool) -> Ordering {
     let common = a.len().min(b.len());
     a[..common].cmp(&b[..common]).then_with(|| {
         let next = |name: &[u8], dir: bool| name.get(common).copied().or(dir.then_some(b'/'));
@@ -263,16 +265,20 @@ impl Store {
         if gaps.any.load(AtomicOrdering::Relaxed) && gaps.trees.lock().contains(&oid) {
             return Ok(None);
         }
-        let Some(mut raw) = git::tree_entries(oid)? else {
+        let Some(git::Tree {
+            entries: mut raw,
+            names,
+        }) = git::tree_entries(oid)?
+        else {
             gaps.add(oid);
             gaps.trees.lock().insert(oid);
             return Ok(None);
         };
         let order = |a: &git::Entry, b: &git::Entry| {
             tree_order(
-                &a.name,
+                &names[a.name.clone()],
                 a.kind == EntryKind::Tree,
-                &b.name,
+                &names[b.name.clone()],
                 b.kind == EntryKind::Tree,
             )
         };
@@ -300,12 +306,12 @@ impl Store {
             return Ok(None);
         };
 
-        let mut names = Vec::with_capacity(raw.iter().map(|e| e.name.len()).sum());
+        // Names stay where the tree object had them; entries point into them.
         let mut entries = Vec::with_capacity(raw.len());
         let mut ord = 0;
         for (e, id) in raw.iter().zip(ids) {
             let entry = TEntry {
-                name_off: names.len() as u32,
+                name_off: e.name.start as u32,
                 name_len: e.name.len() as u16,
                 kind: e.kind,
                 id,
@@ -314,7 +320,6 @@ impl Store {
             if entry.is_dir() {
                 ord += 1;
             }
-            names.extend_from_slice(&e.name);
             entries.push(entry);
         }
         let index_entries = {

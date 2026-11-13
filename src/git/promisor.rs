@@ -281,10 +281,7 @@ fn still_missing(ids: &[ObjectId]) -> Vec<ObjectId> {
 /// can bring tens of thousands of objects, and one that fills the disk takes
 /// the repository's other writers down with it.
 fn check_free_space() -> Result<()> {
-    let min_mb = std::env::var("GITFOLD_FETCH_MIN_FREE_MB")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(MIN_FREE_MB);
+    let min_mb = env_override("GITFOLD_FETCH_MIN_FREE_MB").unwrap_or(MIN_FREE_MB);
     let objects = git::with_repo(|repo| repo.objects.store_ref().path().to_path_buf());
     let path = std::ffi::CString::new(objects.as_os_str().as_bytes())?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -423,10 +420,7 @@ fn fetch(remote: &str, ids: &[ObjectId]) -> Result<()> {
         child.wait()?;
         return Err(failed(format!("couldn't be watched: {e}"), false).into());
     }
-    let stall = std::env::var("GITFOLD_FETCH_STALL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .map_or(STALL, Duration::from_secs);
+    let stall = env_override("GITFOLD_FETCH_STALL_SECS").map_or(STALL, Duration::from_secs);
     let (mut last, mut stderr_open) = (Instant::now(), true);
     // Git is reaped only at the end (`child.wait()`), after any signal to its
     // group: until then its id, which names the group, can't be reused.
@@ -493,6 +487,11 @@ fn fetch(remote: &str, ids: &[ObjectId]) -> Result<()> {
         started.elapsed()
     );
     Ok(())
+}
+
+/// A limit set by environment variable `name`, if it is set to a number.
+fn env_override(name: &str) -> Option<u64> {
+    std::env::var(name).ok()?.parse().ok()
 }
 
 /// Whether child `pid` has exited, leaving it unreaped (`WNOWAIT`): its id
