@@ -139,7 +139,7 @@ pub fn check_workspace(
     // detached HEAD) would be lost with its admin directory.
     if !force
         && state.admin.exists()
-        && let Some(why) = worktree::git_busy(common_dir, &state.admin, branch)
+        && let Some(why) = state.git_busy()
     {
         // A locked ref is git at work right now: retried by `--wait`.
         return Err(match why == worktree::GitBusy::RefLocked {

@@ -46,11 +46,10 @@ use log::info;
 use super::times::{Stamp, shown_mtime};
 use super::{Layers, Workspace};
 use crate::fsutil::not_found;
-use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::state::markers::Kind;
-use crate::state::{self, ModeCheck, ancestors, join, matches_stored};
+use crate::state::{ModeCheck, ancestors, join, matches_stored};
 use crate::store::{EMPTY_TREE, Lower, Store, TEntry};
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
@@ -144,7 +143,7 @@ impl Workspace {
             self.limit_touched();
             return Ok(());
         }
-        let tip = git::branch_tip(&self.branch)?;
+        let tip = git::branch_tip(&self.state.branch)?;
         let rebased = if tip.id != self.layers.read().base {
             let rebased = self.rebase(store, &tip, fetch);
             self.rebase_failed
@@ -182,8 +181,8 @@ impl Workspace {
         let base = self.layers.read().base;
         let mut pinned = self.pinned.lock();
         if *pinned != Some(base) {
-            if git::resolve(&self.pin_ref).map_or(true, |c| c.id != base) {
-                worktree::pin(&self.common_dir, &self.pin_ref, &base)?;
+            if git::resolve(&self.state.pin_ref()).map_or(true, |c| c.id != base) {
+                self.state.pin(&base)?;
             }
             *pinned = Some(base);
         }
@@ -241,7 +240,7 @@ impl Workspace {
         removed?;
         info!(
             "workspace {}: {} unchanged files dropped",
-            self.branch,
+            self.state.branch,
             dropped.len()
         );
         Ok(())
@@ -260,7 +259,7 @@ impl Workspace {
     /// Whether the workspace's HEAD is on its branch and no git operation is
     /// running or stopped half-way in it.
     fn git_idle(&self) -> bool {
-        worktree::git_busy(&self.common_dir, &self.state.admin, &self.branch).is_none()
+        self.state.git_busy().is_none()
     }
 
     fn rebase(&self, store: &Store, new: &Commit, fetch: bool) -> Result<()> {
@@ -271,7 +270,7 @@ impl Workspace {
         };
         // The load may have fetched (a partial clone) for long: if git started
         // or the branch moved meanwhile, the next sync sees to it.
-        let tip = git::branch_tip(&self.branch)?;
+        let tip = git::branch_tip(&self.state.branch)?;
         if !self.git_idle() || tip.id != new.id {
             return Ok(());
         }
@@ -321,7 +320,7 @@ impl Workspace {
             }
         }
         layers.times.save()?;
-        state::write_base(&self.state.dir, &new.id)?;
+        self.state.write_base(&new.id)?;
         layers.base = new.id;
         layers.base_tree = new_tree;
         // Before anything below can fail: cached listings hold the old base's files.
@@ -342,7 +341,7 @@ impl Workspace {
         self.changed();
         info!(
             "workspace {}: base {old} -> {}: {} copied up, {} whited out, {} dropped, {} whiteouts dropped; {:?} ({:?} locked)",
-            self.branch,
+            self.state.branch,
             new.id,
             plan.copied,
             plan.whited_out,
@@ -420,7 +419,9 @@ impl Workspace {
                     Some(o) if !o.is_dir() => {
                         let shown = shown_mtime(stamp);
                         self.copy_file(store, &path, o.id, false, Some(shown))
-                            .map_err(|e| anyhow!("copying up {}: {e:?}", show(&path)))?;
+                            .map_err(|e| {
+                                anyhow!("copying up {}: {e:?}", String::from_utf8_lossy(&path))
+                            })?;
                         plan.created.push(path.clone());
                         plan.copied += 1;
                     }
@@ -428,8 +429,9 @@ impl Workspace {
                     Some(o) => {
                         if children(n).is_none() {
                             // N has no directory here: an upper one.
-                            self.ensure_upper_dir(&path)
-                                .map_err(|e| anyhow!("creating {}: {e:?}", show(&path)))?;
+                            self.ensure_upper_dir(&path).map_err(|e| {
+                                anyhow!("creating {}: {e:?}", String::from_utf8_lossy(&path))
+                            })?;
                             plan.created.push(path.clone());
                         }
                         self.prepare(store, layers, &path, children(Some(o)), children(n), plan)?;
@@ -550,10 +552,6 @@ impl Workspace {
         };
         Ok(matches_stored(&upper, &meta, &rec, ModeCheck::Exact)?.then(|| Seen::of(&meta)))
     }
-}
-
-fn show(path: &[u8]) -> String {
-    String::from_utf8_lossy(path).into_owned()
 }
 
 /// Flushes the file system holding `dir`.

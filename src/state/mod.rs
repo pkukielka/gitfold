@@ -117,9 +117,25 @@ impl StateDir {
         self.dir.join(READS)
     }
 
+    /// Records `base` as its base, atomically.
+    pub fn write_base(&self, base: &ObjectId) -> io::Result<()> {
+        write_base(&self.dir, base)
+    }
+
     /// The ref keeping its base from `git gc`.
     pub fn pin_ref(&self) -> String {
         worktree::pin_ref(&self.id)
+    }
+
+    /// Points its pin ref at `base`.
+    pub fn pin(&self, base: &ObjectId) -> Result<()> {
+        worktree::pin(&self.common_dir, &self.pin_ref(), base)
+    }
+
+    /// The git operation under way (or stopped half-way) in its worktree, if
+    /// any (see `worktree::git_busy`).
+    pub fn git_busy(&self) -> Option<worktree::GitBusy> {
+        worktree::git_busy(&self.common_dir, &self.admin, &self.branch)
     }
 
     /// Its registration's git index.
@@ -152,6 +168,12 @@ pub fn workspace_branch(id: &str) -> String {
         None => id.to_string(),
     };
     id.replace("%2F", "/").replace("%25", "%")
+}
+
+/// The directory holding `path` (the root: empty), for paths below a
+/// workspace's root.
+pub fn parent(path: &[u8]) -> &[u8] {
+    &path[..path.iter().rposition(|b| *b == b'/').unwrap_or(0)]
 }
 
 /// `dir/name`, for paths below a workspace's root (`dir` empty: the root).

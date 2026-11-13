@@ -86,18 +86,14 @@ impl Obj {
 }
 
 pub struct Workspace {
+    /// `state.upper()`, kept: every path resolution starts from it.
     upper: PathBuf,
-    /// The task folder, if it has one: not when opened only to catch up, nor
-    /// when its base tracks a path of the folder's name or upper has one, nor
-    /// if the folder couldn't be made (`state::task`).
+    /// The task folder, if it has one (see `with_task_folder`).
     task: Option<TaskDir>,
-    common_dir: PathBuf,
-    /// Where its state and its worktree registration are.
+    /// Where its state and its worktree registration are, its repository and
+    /// branch.
     state: StateDir,
-    branch: String,
-    /// `refs/gitfold/<id>`, which keeps the base from `git gc`, and the commit it
-    /// was last set to.
-    pin_ref: String,
+    /// The commit its pin ref (`StateDir::pin_ref`) was last set to.
     pinned: Mutex<Option<ObjectId>>,
     /// The last rebase failed, maybe after copying files up, or none ran yet in
     /// this process (a killed one may have left unsynced copies; see `rebase`).
@@ -113,8 +109,9 @@ pub struct Workspace {
     /// Held exclusively to change an upper file's mode, shared to `stat` one,
     /// so the mode `open_upper` lifts briefly is never seen (see there).
     modes: RwLock<()>,
-    /// Copy-ups are written here and renamed into place, so a half-written copy
-    /// is never visible in upper (or left there by a crash).
+    /// `state.tmp()`, kept like `upper`: copy-ups are written here and renamed
+    /// into place, so a half-written copy is never visible in upper (or left
+    /// there by a crash).
     tmp: PathBuf,
     /// Bumped by every change; cached listings of older generations are stale.
     generation: AtomicU64,
@@ -214,15 +211,13 @@ pub enum Read {
 }
 
 impl Workspace {
-    /// Opens the workspace of `branch` stored in `state`, creating it at
-    /// `new_base` if new.
+    /// Opens the workspace stored in `state`, creating it at `new_base` if new.
+    /// Without its task folder: only one served under the mount gets it
+    /// (`with_task_folder`).
     pub fn open(
         store: &Store,
-        common_dir: PathBuf,
         state: StateDir,
-        branch: &str,
         new_base: Option<git::Commit>,
-        purpose: Purpose,
     ) -> Result<Workspace> {
         let created = new_base.is_some();
         let base = match new_base {
@@ -233,14 +228,10 @@ impl Workspace {
         let base_tree = store.load_tree(base.tree)?;
         let upper = state.upper();
         fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
-        let task = match purpose {
-            Purpose::Serve => task_folder(store, base_tree, &upper, &common_dir, branch),
-            Purpose::CatchUp => None,
-        };
         if created {
-            state::write_branch(&state.dir, branch)?;
+            state::write_branch(&state.dir, &state.branch)?;
             // Written last: its presence means "workspace exists".
-            state::write_base(&state.dir, &base.id)?;
+            state.write_base(&base.id)?;
         }
         let layers = Layers {
             base: base.id,
@@ -252,17 +243,13 @@ impl Workspace {
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
-        let pin_ref = state.pin_ref();
         // The registration's directory name is deterministic, so the `.git`
         // file can be written before the workspace exists.
         let gitfile = format!("gitdir: {}\n", state.admin.display()).into_bytes();
         Ok(Workspace {
             upper,
-            task,
-            common_dir,
+            task: None,
             state,
-            branch: branch.to_string(),
-            pin_ref,
             pinned: Mutex::new(None),
             rebase_failed: AtomicBool::new(true),
             gitfile: Arc::new(gitfile),
@@ -277,6 +264,14 @@ impl Workspace {
             touched: Mutex::new(HashSet::new()),
             reads: Mutex::new(None),
         })
+    }
+
+    /// Gives it its task folder, as one served under the mount: none, with a
+    /// warning, where it can't have one (see `task_folder`).
+    pub fn with_task_folder(mut self, store: &Store) -> Workspace {
+        let base_tree = self.layers.get_mut().base_tree;
+        self.task = task_folder(store, base_tree, &self.state);
+        self
     }
 
     /// Whether `name` in directory `parent` is virtual (`.git`, the task folder's
@@ -466,7 +461,7 @@ impl Workspace {
         self.listings.lock().clear();
     }
 
-    fn touched(&self, path: &[u8]) {
+    fn touch(&self, path: &[u8]) {
         let mut touched = self.touched.lock();
         if !touched.contains(path) {
             touched.insert(path.to_vec());
@@ -532,13 +527,10 @@ impl Workspace {
 
 /// The task folder a workspace served under the mount links to (see
 /// `state::task`), set up; none, with a warning, where it can't have one.
-fn task_folder(
-    store: &Store,
-    base_tree: u32,
-    upper: &Path,
-    common_dir: &Path,
-    branch: &str,
-) -> Option<TaskDir> {
+/// None if its base tracks a path of the folder's name or upper has one, or if
+/// the folder couldn't be made.
+fn task_folder(store: &Store, base_tree: u32, state: &StateDir) -> Option<TaskDir> {
+    let (common_dir, branch) = (&state.common_dir, &state.branch);
     let task = TaskDir::of(common_dir, branch);
     let shown = String::from_utf8_lossy(&task.name).into_owned();
     if store.tree(base_tree).find(&task.name).is_some() {
@@ -547,7 +539,7 @@ fn task_folder(
         );
         return None;
     }
-    if fs::symlink_metadata(upper.join(std::ffi::OsStr::from_bytes(&task.name))).is_ok() {
+    if fs::symlink_metadata(state::upper_path(&state.upper(), &task.name)).is_ok() {
         log::warn!(
             "workspace {branch}: no task folder: it has a file {shown} (set gitfold.taskDir)"
         );
@@ -565,24 +557,5 @@ fn task_folder(
 /// Brings the stored base of the closed workspace of `branch` up to its branch
 /// tip, as opening it does (`state::retire` checks it then).
 pub fn catch_up(store: &Store, common_dir: &Path, branch: &str) -> Result<()> {
-    let state = StateDir::of(common_dir, branch);
-    let ws = Workspace::open(
-        store,
-        common_dir.to_path_buf(),
-        state,
-        branch,
-        None,
-        Purpose::CatchUp,
-    )?;
-    ws.sync(store)
-}
-
-/// What a workspace is opened for.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Purpose {
-    /// Shown under the mount: with its task folder.
-    Serve,
-    /// Only to bring its stored base up to the branch tip, closed (`catch_up`,
-    /// for `remove` and its `--check`): nothing set up that it doesn't need.
-    CatchUp,
+    Workspace::open(store, StateDir::of(common_dir, branch), None)?.sync(store)
 }

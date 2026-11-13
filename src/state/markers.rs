@@ -172,6 +172,21 @@ impl Markers {
         self.log.sync_data()
     }
 
+    /// Removes the markers of `kind` strictly below directory `dir`.
+    pub fn clear_below(&mut self, kind: Kind, dir: &[u8]) -> io::Result<()> {
+        for p in self.below(kind, dir) {
+            self.set(kind, &p, false)?;
+        }
+        Ok(())
+    }
+
+    /// Marks directory `dir` opaque, then drops the whiteouts below it, which
+    /// that makes moot (in that order: a crash between leaves them hidden).
+    pub fn make_opaque(&mut self, dir: &[u8]) -> io::Result<()> {
+        self.set(Kind::Opaque, dir, true)?;
+        self.clear_below(Kind::Whiteout, dir)
+    }
+
     /// Markers strictly below directory `dir`.
     pub fn below(&self, kind: Kind, dir: &[u8]) -> Vec<Vec<u8>> {
         let set = self.of(kind);
