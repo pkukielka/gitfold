@@ -27,7 +27,7 @@ pub fn branch_or_current(branch: Option<String>, repo: &Path) -> Result<String> 
         .file_name()
         .and_then(|n| n.to_str()?.strip_prefix("gitfold-ws-"));
     match id {
-        Some(id) if in_worktrees => Ok(crate::git::worktree::workspace_branch(id)),
+        Some(id) if in_worktrees => Ok(crate::state::workspace_branch(id)),
         _ => bail!("not in a gitfold workspace: name the branch"),
     }
 }

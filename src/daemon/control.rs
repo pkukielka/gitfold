@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use crate::git::worktree;
 use crate::refusal::Refusal;
 use anyhow::{Context, Result, bail};
 use log::{debug, warn};
@@ -137,7 +136,7 @@ fn with_path<T>(
     common_dir: &Path,
     f: impl FnOnce(&Path) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    let dir = File::open(worktree::state_root(common_dir))?;
+    let dir = File::open(crate::state::state_root(common_dir))?;
     f(&PathBuf::from(format!(
         "/proc/self/fd/{}/.control",
         dir.as_raw_fd()
@@ -188,7 +187,7 @@ pub fn request(
 /// Creates the control socket of `common_dir`. The caller holds the
 /// repository lock: a socket left there is stale.
 pub fn bind(common_dir: &Path) -> Result<UnixListener> {
-    fs::create_dir_all(worktree::state_root(common_dir))?;
+    fs::create_dir_all(crate::state::state_root(common_dir))?;
     let listener = with_path(common_dir, |path| {
         if let Err(e) = fs::remove_file(path)
             && e.kind() != ErrorKind::NotFound

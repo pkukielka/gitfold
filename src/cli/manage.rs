@@ -18,7 +18,7 @@ use crate::fs::workspace::retire::{
 use crate::fs::workspace::task::TaskDir;
 use crate::fs::workspace::{fork, status};
 use crate::git;
-use crate::git::worktree::{self, workspace_branch};
+use crate::git::worktree;
 use crate::refusal::Refusal;
 use crate::settings;
 use crate::state::{self, StateDir};
@@ -294,7 +294,7 @@ pub(super) struct Listed {
 }
 
 pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
-    let dir = worktree::state_root(common_dir);
+    let dir = state::state_root(common_dir);
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -309,7 +309,8 @@ pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
         if id.starts_with('.') {
             continue;
         }
-        let branch = state::read_branch(&entry.path()).unwrap_or_else(|| workspace_branch(&id));
+        let branch =
+            state::read_branch(&entry.path()).unwrap_or_else(|| state::workspace_branch(&id));
         list.push(Listed {
             branch,
             state: StateDir::of_id(common_dir, &id),

@@ -1,7 +1,7 @@
 //! A workspace's stored state, mounted or not: where it is, and its base.
 //!
 //! The state of the workspace of branch `b` is `.git/gitfold/<id>/`, `<id>`
-//! being `b` with `%` and `/` escaped (`worktree::workspace_id`): `base` (the
+//! being `b` with `%` and `/` escaped (`workspace_id`): `base` (the
 //! commit its changes are against, written last when it is made, so its
 //! presence means the workspace was opened), `branch`, `upper/`, `markers`,
 //! `times`, `reads`, `tmp/`. Its worktree registration (the admin directory,
@@ -33,7 +33,7 @@ pub const TMP: &str = "tmp";
 /// Where the stored state of one workspace is.
 #[derive(Clone)]
 pub struct StateDir {
-    /// The branch, escaped (`worktree::workspace_id`).
+    /// The branch, escaped (`workspace_id`).
     pub id: String,
     /// `.git/gitfold/<id>`.
     pub dir: PathBuf,
@@ -44,14 +44,14 @@ pub struct StateDir {
 impl StateDir {
     /// The state of the workspace of `branch` in repository `common_dir`.
     pub fn of(common_dir: &Path, branch: &str) -> StateDir {
-        StateDir::of_id(common_dir, &worktree::workspace_id(branch))
+        StateDir::of_id(common_dir, &workspace_id(branch))
     }
 
     /// The state of the workspace with id `id`.
     pub fn of_id(common_dir: &Path, id: &str) -> StateDir {
         StateDir {
             id: id.to_string(),
-            dir: worktree::state_root(common_dir).join(id),
+            dir: state_root(common_dir).join(id),
             admin: worktree::ws_admin_dir(common_dir, id),
         }
     }
@@ -88,6 +88,22 @@ impl StateDir {
     }
 }
 
+/// `<common>/gitfold`: the workspaces' state directories, by id.
+pub fn state_root(common_dir: &Path) -> PathBuf {
+    common_dir.join("gitfold")
+}
+
+/// A workspace's id, naming its state and registration directories: the branch
+/// with `%` and `/` escaped.
+pub fn workspace_id(branch: &str) -> String {
+    branch.replace('%', "%25").replace('/', "%2F")
+}
+
+/// The branch of workspace id `id` (inverse of `workspace_id`).
+pub fn workspace_branch(id: &str) -> String {
+    id.replace("%2F", "/").replace("%25", "%")
+}
+
 /// The base commit of the workspace stored in `dir`.
 pub fn read_base(dir: &Path) -> Result<git::Commit> {
     let base_file = dir.join(BASE);
@@ -115,6 +131,17 @@ pub fn read_branch(dir: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ids name directories: no `/`, and the branch reads back from its id.
+    #[test]
+    fn workspace_ids_round_trip() {
+        for branch in ["main", "agent/task-17", "a%2Fb", "100%", "x/%25/y"] {
+            let id = workspace_id(branch);
+            assert!(!id.contains('/'), "{id}");
+            assert_eq!(workspace_branch(&id), branch);
+        }
+        assert_eq!(workspace_id("agent/task-17"), "agent%2Ftask-17");
+    }
 
     /// The base and branch files read back as written.
     #[test]

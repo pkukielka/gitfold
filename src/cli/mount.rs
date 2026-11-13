@@ -14,7 +14,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::daemon::control;
 use crate::daemon::{self, procs};
-use crate::git::worktree;
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
@@ -31,7 +30,7 @@ pub fn default_log(mountpoint: &Path) -> Result<PathBuf> {
             Some(PathBuf::from(home).join(".local/state"))
         })
         .context("neither XDG_STATE_HOME nor HOME is set; pass --log")?;
-    let name = worktree::workspace_id(&mountpoint.display().to_string());
+    let name = crate::state::workspace_id(&mountpoint.display().to_string());
     Ok(state.join("gitfold").join(format!("{name}.log")))
 }
 

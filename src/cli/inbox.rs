@@ -24,7 +24,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::fs::workspace::task::{TaskDir, inbox_name};
 use crate::git;
-use crate::git::worktree::workspace_id;
+use crate::state::workspace_id;
 
 /// How long a watch keeps collecting events after the first, so one burst
 /// (a file written then renamed, several messages) comes out together.

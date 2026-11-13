@@ -73,12 +73,17 @@ pub fn fork(
         "the base pin {to_pin} of an earlier branch {to} is left; delete it with `git \
          update-ref -d {to_pin}`"
     );
-    worktree::refuse_if_busy(common_dir, from, "branch from it once that is done")?;
+    worktree::refuse_if_busy(
+        common_dir,
+        &source.admin,
+        from,
+        "branch from it once that is done",
+    )?;
     let tip_ref = format!("refs/heads/{from}");
     let before = git::resolve(&tip_ref)?.id;
     let copied = source.opened();
     if copied {
-        let tmp = worktree::state_root(common_dir).join(format!(".fork-{}", target.id));
+        let tmp = state::state_root(common_dir).join(format!(".fork-{}", target.id));
         // Left by an interrupted fork.
         if tmp.exists() {
             fs::remove_dir_all(&tmp)?;
@@ -168,7 +173,13 @@ pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &Path, dst: &Path) -
     // Checked again here, where nothing writes through the mount: a git command
     // started since (a stash, a commit) holds `index.lock` while it rewrites
     // files, and would be copied half-done.
-    worktree::refuse_if_busy(common_dir, branch, "branch from it once that is done")?;
+    let admin = &StateDir::of(common_dir, branch).admin;
+    worktree::refuse_if_busy(
+        common_dir,
+        admin,
+        branch,
+        "branch from it once that is done",
+    )?;
     let index = StateDir::of(common_dir, branch).index();
     fs::create_dir_all(dst)?;
     for name in COPIED {
