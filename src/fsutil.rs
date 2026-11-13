@@ -23,6 +23,13 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// Moves file `src` to `dst` (same filesystem), its data on disk first: as
+/// `write_atomic`, for a file already written.
+pub fn rename_synced(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::File::open(src)?.sync_all()?;
+    fs::rename(src, dst)
+}
+
 /// Whether `e` means there is nothing at a path: not found, or a component of
 /// it isn't a directory.
 pub fn not_found(e: &io::Error) -> bool {

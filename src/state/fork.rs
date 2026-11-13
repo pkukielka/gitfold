@@ -209,9 +209,9 @@ fn register(
     mount: Option<&Path>,
 ) -> Result<()> {
     let copied = dst.join(INDEX);
-    let Ok(index) = fs::read(&copied) else {
+    if !copied.exists() {
         return Ok(());
-    };
+    }
     // Where the fork's `.git` file is; every open rewrites it, so unmounted a
     // guess from the source's (`<mount>/<from>/.git`) is enough.
     let mount = match mount {
@@ -224,8 +224,14 @@ fn register(
         Some(mount) => mount.join(to).join(".git"),
         None => dst.join(".git"),
     };
-    worktree::register_branch(to_admin, to, &gitfile, || index)?;
-    fs::remove_file(&copied)?;
+    // Moved into place, not read and written again: at 1M files it is 100 MB+.
+    let index = |path: &Path| fsutil::rename_synced(&copied, path);
+    worktree::register_branch(to_admin, to, &gitfile, index)?;
+    // Still there if the registration existed already (and kept its index).
+    match fs::remove_file(&copied) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        _ => {}
+    }
     // With `core.splitIndex`, the index refers to a shared index file next to
     // it. git never changes one, and keeps old ones for weeks, so linking them
     // after the copy is enough.
