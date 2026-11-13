@@ -5,6 +5,7 @@ mod fs;
 mod fsutil;
 mod git;
 mod inode;
+mod inotify;
 mod lock;
 mod refusal;
 mod settings;
