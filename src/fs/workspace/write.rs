@@ -20,7 +20,7 @@ use gix::objs::tree::EntryKind;
 
 use super::markers::Kind;
 use super::times::shown_mtime;
-use super::{Entry, Layers, Lower, Obj, Workspace, join, not_found};
+use super::{Layers, ListEntry, Lower, Obj, Workspace, join, not_found};
 use crate::git;
 use crate::store::Store;
 
@@ -471,7 +471,7 @@ impl Workspace {
         for (name, entry) in self.entries(store, layers, path)? {
             let child = join(path, &name);
             match entry {
-                Entry::LowerFile(id) => {
+                ListEntry::LowerFile(id) => {
                     plan.bytes += store.file(id).map_or(0, |f| f.size);
                     plan.files.push((child, id));
                     if plan.files.len() > COPY_ON_RENAME_FILES || plan.bytes > COPY_ON_RENAME_BYTES
@@ -480,11 +480,11 @@ impl Workspace {
                     }
                 }
                 // Also a submodule: an empty directory.
-                Entry::LowerDir => {
+                ListEntry::LowerDir => {
                     plan.dirs.push(child.clone());
                     self.plan_copy(store, layers, &child, plan)?;
                 }
-                Entry::Upper
+                ListEntry::Upper
                     if matches!(
                         self.visible_lower(store, layers, &child),
                         Some(Lower::Tree(_))
@@ -492,7 +492,7 @@ impl Workspace {
                 {
                     self.plan_copy(store, layers, &child, plan)?
                 }
-                Entry::Upper => {}
+                ListEntry::Upper => {}
             }
         }
         Ok(())

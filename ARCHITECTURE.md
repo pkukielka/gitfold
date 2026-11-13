@@ -134,10 +134,14 @@ Then, per request (`fs/workspace/`):
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
+| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory and registration), its base |
+| `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): reading, writing, copying for a fork |
+| `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
 | `src/refusal.rs` | why a command refused (typed, with its own exit code), carried over the control socket; every command's exit codes |
 | `src/main.rs` | CLI (clap) and dispatch, the foreground mount and its control handler, `M_MMAP_THRESHOLD` |
 | `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access |
+| `src/git/cmd.rs` | running git itself (`command`, `run`, `output`) |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check, workspace ids |
 | `src/git/lock.rs` | the repository lock, held by a mounted daemon and by `remove`/`prune` |

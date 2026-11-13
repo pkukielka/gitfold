@@ -169,12 +169,12 @@ struct Layers {
 /// kernel actually receives (see `nodes`).
 pub struct Listing {
     dir: Vec<u8>,
-    pub entries: Vec<(Vec<u8>, Entry)>,
+    pub entries: Vec<(Vec<u8>, ListEntry)>,
 }
 
 /// A listing entry. Upper entries are stat-ed when served, not when listed, so
 /// writes into a file don't invalidate its directory's cached listing.
-pub enum Entry {
+pub enum ListEntry {
     Upper,
     LowerDir,
     LowerFile(u32),
@@ -210,14 +210,14 @@ impl Page<'_> {
             .peek(self.parent, name, &self.listing.dir)
     }
 
-    pub fn obj(&self, name: &[u8], entry: &Entry) -> Result<Obj, Errno> {
+    pub fn obj(&self, name: &[u8], entry: &ListEntry) -> Result<Obj, Errno> {
         Ok(match entry {
-            Entry::Upper => {
+            ListEntry::Upper => {
                 let path = self.ws.upper_path(&join(&self.listing.dir, name));
                 Obj::Upper(self.ws.upper_meta(&path)?)
             }
-            Entry::LowerDir => Obj::LowerDir,
-            Entry::LowerFile(file_id) => Obj::LowerFile {
+            ListEntry::LowerDir => Obj::LowerDir,
+            ListEntry::LowerFile(file_id) => Obj::LowerFile {
                 file_id: *file_id,
                 stamp: (!self.layers.times.is_empty())
                     .then(|| self.layers.times.get(&join(&self.listing.dir, name)))
@@ -512,17 +512,17 @@ impl Workspace {
         store: &Store,
         layers: &Layers,
         path: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Entry)>, Errno> {
+    ) -> Result<Vec<(Vec<u8>, ListEntry)>, Errno> {
         if !self.resolve_in(store, layers, path)?.is_dir() {
             return Err(Errno::ENOTDIR);
         }
         // Upper entries win; lower ones come straight from the tree table, without
         // a stat or a path walk each.
-        let mut entries: Vec<(Vec<u8>, Entry)> = Vec::new();
+        let mut entries: Vec<(Vec<u8>, ListEntry)> = Vec::new();
         match fs::read_dir(self.upper_path(path)) {
             Ok(dir) => entries.extend(
                 dir.flatten()
-                    .map(|e| (e.file_name().as_bytes().to_vec(), Entry::Upper)),
+                    .map(|e| (e.file_name().as_bytes().to_vec(), ListEntry::Upper)),
             ),
             Err(e) if not_found(&e) => {}
             Err(e) => return Err(e.into()),
@@ -541,9 +541,9 @@ impl Workspace {
                     continue;
                 }
                 let entry = if e.is_dir() {
-                    Entry::LowerDir
+                    ListEntry::LowerDir
                 } else {
-                    Entry::LowerFile(e.id)
+                    ListEntry::LowerFile(e.id)
                 };
                 entries.push((name.to_vec(), entry));
             }

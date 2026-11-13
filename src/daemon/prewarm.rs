@@ -29,6 +29,14 @@ pub enum Prewarm {
     Content,
 }
 
+impl std::fmt::Display for Prewarm {
+    /// Its name on the command line and in git config: `none`, `meta`, `content`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = self.to_possible_value().expect("not skipped");
+        f.write_str(value.get_name())
+    }
+}
+
 #[derive(Default)]
 struct Stats {
     dirs: AtomicU64,
@@ -196,11 +204,10 @@ fn launch(walks: Vec<Walk>) {
         // while mounted), under the name `stop_below` looks for.
         let mut command = Command::new("/proc/self/exe");
         command.arg0("gitfold");
-        let mode_name = ValueEnum::to_possible_value(&walk.mode).expect("not skipped");
         command
             .arg("prewarm-walk")
             .arg(&walk.root)
-            .args(["--mode", mode_name.get_name()])
+            .args(["--mode", &walk.mode.to_string()])
             .args(["--threads", &walk.threads.to_string()])
             .stdin(Stdio::null());
         let spawned = command.spawn();

@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, ensure};
-use clap::ValueEnum;
 
 use crate::daemon::control;
 use crate::daemon::prewarm::Prewarm;
@@ -159,8 +158,7 @@ fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
 
 /// Stores `mode` as branch `name`'s prewarm mode, in git config.
 fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
-    let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
-    settings::set_branch(repo, name, settings::PREWARM, value.get_name())
+    settings::set_branch(repo, name, settings::PREWARM, &mode.to_string())
 }
 
 /// `gitfold changes`: the uncommitted changes of workspace `name` relative to

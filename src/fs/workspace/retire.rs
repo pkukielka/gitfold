@@ -128,7 +128,7 @@ pub fn check_workspace(
         && let Some(why) = worktree::git_busy(common_dir, admin, branch)
     {
         // A locked ref is git at work right now: retried by `--wait`.
-        return Err(match why == worktree::REF_LOCKED {
+        return Err(match why == worktree::GitBusy::RefLocked {
             true => Refusal::InUse.error(format!(
                 "workspace {branch}: {why} (git is updating it); try again, or use --wait"
             )),

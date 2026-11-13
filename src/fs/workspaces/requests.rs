@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use log::warn;
 
-use super::{Busy, Workspaces, busy_error};
+use super::{Busy, Mark, Workspaces, busy_error};
 use crate::fs::workspace::{Workspace, fork};
 
 /// How long unmounting waits for long requests in progress.
@@ -21,32 +21,32 @@ impl Workspaces {
     fn mark_busy(
         &self,
         branch: &str,
-        shared: bool,
+        mark: Mark,
     ) -> anyhow::Result<(Option<Arc<Workspace>>, Busy<'_>)> {
         let _creating = self.creating.lock();
-        if !self.try_mark(branch, shared) {
+        if !self.try_mark(branch, mark) {
             return Err(busy_error(branch));
         }
         let busy = Busy {
             set: &self.busy,
             branch: branch.to_string(),
-            shared,
+            mark,
         };
         Ok((self.get_open(branch), busy))
     }
 
-    /// Marks `branch` busy, shared (reading it) or exclusively, if that agrees
-    /// with its marks: any number of readers, or one exclusive mark.
-    pub(super) fn try_mark(&self, branch: &str, shared: bool) -> bool {
+    /// Marks `branch` busy as `mark` says, if that agrees with its marks: any
+    /// number of readers, or one exclusive mark.
+    pub(super) fn try_mark(&self, branch: &str, mark: Mark) -> bool {
         let mut busy = self.busy.lock();
-        let mark = busy.entry(branch.to_string()).or_default();
-        let free = match shared {
-            true => !mark.exclusive,
-            false => !mark.exclusive && mark.readers == 0,
+        let marks = busy.entry(branch.to_string()).or_default();
+        let free = match mark {
+            Mark::Reader => !marks.exclusive,
+            Mark::Exclusive => !marks.exclusive && marks.readers == 0,
         };
-        match (free, shared) {
-            (true, true) => mark.readers += 1,
-            (true, false) => mark.exclusive = true,
+        match (free, mark) {
+            (true, Mark::Reader) => marks.readers += 1,
+            (true, Mark::Exclusive) => marks.exclusive = true,
             (false, _) => {}
         }
         free
@@ -80,8 +80,8 @@ impl Workspaces {
         let _request = self.request()?;
         // The target first: once a reader of `from`, it takes `creating` no more
         // (an open of `from` waiting for it may hold that).
-        let (_, _to) = self.mark_busy(to, false)?;
-        let (ws, _from) = self.mark_busy(from, true)?;
+        let (_, _to) = self.mark_busy(to, Mark::Exclusive)?;
+        let (ws, _from) = self.mark_busy(from, Mark::Reader)?;
         let (common, mount) = (&self.common_dir, Some(self.mount_point.as_path()));
         match ws {
             Some(ws) => fork::fork(common, from, to, mount, |dst| ws.copy_state(dst)),

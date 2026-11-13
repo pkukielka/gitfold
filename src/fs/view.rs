@@ -11,6 +11,7 @@ use log::error;
 
 use super::GitFold;
 use super::workspace::{GITFILE_LOCAL, Obj, Read, TASKLINK_LOCAL, Workspace};
+use super::workspaces::Slot;
 use crate::git;
 use crate::inode::{self, Ino};
 
@@ -124,11 +125,13 @@ impl GitFold {
 
     pub(super) fn ws_node(&self, slot: u32, local: u64) -> Result<WsNode, Errno> {
         Ok(match (self.workspaces.get(slot)?, local) {
-            (Err(path), 0) => WsNode::Namespace(path),
-            (Err(_), _) => return Err(Errno::ENOENT),
-            (Ok(ws), GITFILE_LOCAL) => WsNode::GitFile(ws),
-            (Ok(ws), TASKLINK_LOCAL) if ws.task_name().is_some() => WsNode::TaskLink(ws),
-            (Ok(ws), local) => WsNode::Entry(ws, local),
+            (Slot::Namespace(path), 0) => WsNode::Namespace(path),
+            (Slot::Namespace(_), _) => return Err(Errno::ENOENT),
+            (Slot::Workspace(ws), GITFILE_LOCAL) => WsNode::GitFile(ws),
+            (Slot::Workspace(ws), TASKLINK_LOCAL) if ws.task_name().is_some() => {
+                WsNode::TaskLink(ws)
+            }
+            (Slot::Workspace(ws), local) => WsNode::Entry(ws, local),
         })
     }
 

@@ -40,7 +40,15 @@ use crate::refusal::Refusal;
 use crate::state::StateDir;
 use crate::store::Store;
 
-pub enum Entry {
+/// What a slot holds, for the inodes in it (`Workspaces::get`).
+pub enum Slot {
+    Workspace(Arc<Workspace>),
+    /// A namespace directory, with its full path (e.g. `feature`).
+    Namespace(String),
+}
+
+/// What is registered in a slot.
+pub enum Registered {
     Workspace(Arc<Workspace>),
     /// A directory holding the next component of longer names, e.g. `feature`
     /// or `@origin`.
@@ -64,14 +72,14 @@ pub struct Workspaces {
     /// Whether workspaces record reads unless their branch says (`reads`).
     track_reads: bool,
     /// Indexed by slot; (full path below the mount root, entry).
-    list: RwLock<Vec<(String, Entry)>>,
+    list: RwLock<Vec<(String, Registered)>>,
     by_path: Mutex<HashMap<String, u32>>,
     /// Serializes workspace creation.
     creating: Mutex<()>,
     /// Branches whose workspace is being removed, checked while closed, or
     /// worked on by a request (`mark_busy`): not opened, removed or worked on
     /// again meanwhile.
-    busy: Mutex<HashMap<String, Mark>>,
+    busy: Mutex<HashMap<String, Marks>>,
     /// Taken shared by requests that may take long (copying a workspace)
     /// while they work, exclusively by `close_requests` at unmount, which waits
     /// for them: a fork cut off half-way would leave a workspace without its
@@ -116,15 +124,15 @@ impl Workspaces {
         *self.mtime.lock()
     }
 
-    /// The workspace in `slot`, or the full path of the namespace there.
-    pub fn get(&self, slot: u32) -> Result<Result<Arc<Workspace>, String>, Errno> {
+    /// What `slot` holds: a workspace, or a namespace directory.
+    pub fn get(&self, slot: u32) -> Result<Slot, Errno> {
         let list = self.list.read();
         let (path, entry) = list.get(slot as usize).ok_or(Errno::ENOENT)?;
         Ok(match entry {
-            Entry::Workspace(ws) => Ok(ws.clone()),
-            Entry::Namespace => Err(path.clone()),
-            Entry::Removing(_) => return Err(Errno::EBUSY),
-            Entry::Removed => return Err(Errno::ENOENT),
+            Registered::Workspace(ws) => Slot::Workspace(ws.clone()),
+            Registered::Namespace => Slot::Namespace(path.clone()),
+            Registered::Removing(_) => return Err(Errno::EBUSY),
+            Registered::Removed => return Err(Errno::ENOENT),
         })
     }
 
@@ -133,7 +141,7 @@ impl Workspaces {
     pub fn sync_all(&self, store: &Store) {
         let list = self.list.read();
         for (path, entry) in list.iter() {
-            if let Entry::Workspace(ws) = entry
+            if let Registered::Workspace(ws) = entry
                 && let Err(e) = ws.sync_at_unmount(store)
             {
                 match e.chain().any(|c| c.is::<git::Missing>()) {
@@ -152,7 +160,7 @@ impl Workspaces {
     pub fn namespace_inodes(&self) -> Vec<u64> {
         let list = self.list.read();
         (list.iter().enumerate())
-            .filter(|(_, (_, entry))| matches!(entry, Entry::Namespace))
+            .filter(|(_, (_, entry))| matches!(entry, Registered::Namespace))
             .map(|(slot, _)| inode::ws(slot as u32, 0))
             .collect()
     }
@@ -160,7 +168,7 @@ impl Workspaces {
     pub fn is_namespace(&self, slot: u32) -> bool {
         matches!(
             self.list.read().get(slot as usize),
-            Some((_, Entry::Namespace))
+            Some((_, Registered::Namespace))
         )
     }
 
@@ -169,7 +177,9 @@ impl Workspaces {
     pub fn children(&self, prefix: &str) -> Vec<(u64, Vec<u8>)> {
         let list = self.list.read();
         (list.iter().enumerate())
-            .filter(|(_, (_, entry))| !matches!(entry, Entry::Removing(_) | Entry::Removed))
+            .filter(|(_, (_, entry))| {
+                !matches!(entry, Registered::Removing(_) | Registered::Removed)
+            })
             .filter_map(|(slot, (path, _))| {
                 let rest = super::child_name(prefix, path.as_bytes())?;
                 Some((inode::ws(slot as u32, 0), rest.to_vec()))
@@ -177,7 +187,7 @@ impl Workspaces {
             .collect()
     }
 
-    fn add(&self, path: &str, entry: Entry) -> u32 {
+    fn add(&self, path: &str, entry: Registered) -> u32 {
         let mut list = self.list.write();
         list.push((path.to_string(), entry));
         let slot = (list.len() - 1) as u32;
@@ -258,8 +268,7 @@ impl Workspaces {
             mode => {
                 prewarm::stop_under(&path);
                 let spawned = prewarm::spawn(path.clone(), mode, self.prewarm_threads);
-                let mode = clap::ValueEnum::to_possible_value(&mode).expect("not skipped");
-                let (path, mode) = (path.display(), mode.get_name());
+                let path = path.display();
                 match spawned {
                     Spawned::Now => format!("walking {path} ({mode})"),
                     Spawned::Queued => format!("{path} queued for a walk ({mode})"),
@@ -288,7 +297,7 @@ impl Workspaces {
             if self.by_path.lock().contains_key(branch) {
                 return Ok(None);
             }
-            if !self.try_mark(branch, false) {
+            if !self.try_mark(branch, Mark::Exclusive) {
                 return Err(busy_error(branch));
             }
         }
@@ -296,7 +305,7 @@ impl Workspaces {
         let _busy = Busy {
             set: &self.busy,
             branch: branch.to_string(),
-            shared: false,
+            mark: Mark::Exclusive,
         };
         check().map(Some)
     }
@@ -305,7 +314,7 @@ impl Workspaces {
     pub fn get_open(&self, branch: &str) -> Option<Arc<Workspace>> {
         let slot = *self.by_path.lock().get(branch)?;
         match &self.list.read()[slot as usize].1 {
-            Entry::Workspace(ws) => Some(ws.clone()),
+            Registered::Workspace(ws) => Some(ws.clone()),
             _ => None,
         }
     }
@@ -314,7 +323,7 @@ impl Workspaces {
     /// must not be lost if the removal is refused.
     pub fn get_for_forget(&self, slot: u32) -> Option<Arc<Workspace>> {
         match &self.list.read().get(slot as usize)?.1 {
-            Entry::Workspace(ws) | Entry::Removing(ws) => Some(ws.clone()),
+            Registered::Workspace(ws) | Registered::Removing(ws) => Some(ws.clone()),
             _ => None,
         }
     }
@@ -358,15 +367,15 @@ impl Workspaces {
         }
         .and_then(|()| remove(ws.map(|ws| &**ws)));
         let _creating = self.creating.lock();
-        unmark(&self.busy, branch, false);
+        unmark(&self.busy, branch, Mark::Exclusive);
         let open = taken.is_some();
         if let Some((slot, ws)) = taken {
             let entry = &mut self.list.write()[slot as usize].1;
             if result.is_ok() {
-                *entry = Entry::Removed;
+                *entry = Registered::Removed;
             } else {
                 ws.removing.store(false, Ordering::Release);
-                *entry = Entry::Workspace(ws);
+                *entry = Registered::Workspace(ws);
                 self.by_path.lock().insert(branch.to_string(), slot);
             }
             // Listings without it (taken out) or with it (removed) are stale.
@@ -379,21 +388,21 @@ impl Workspaces {
     /// registry if open.
     fn take(&self, branch: &str) -> anyhow::Result<Option<(u32, Arc<Workspace>)>> {
         let _creating = self.creating.lock();
-        if !self.try_mark(branch, false) {
+        if !self.try_mark(branch, Mark::Exclusive) {
             return Err(busy_error(branch));
         }
         let Some(slot) = self.by_path.lock().get(branch).copied() else {
             return Ok(None);
         };
         let entry = &mut self.list.write()[slot as usize].1;
-        let ws = match std::mem::replace(entry, Entry::Removed) {
-            Entry::Workspace(ws) => {
-                *entry = Entry::Removing(ws.clone());
+        let ws = match std::mem::replace(entry, Registered::Removed) {
+            Registered::Workspace(ws) => {
+                *entry = Registered::Removing(ws.clone());
                 ws
             }
             other => {
                 *entry = other;
-                unmark(&self.busy, branch, false);
+                unmark(&self.busy, branch, Mark::Exclusive);
                 return Err(Refusal::NotFound.error(format!(
                     "{branch} is a namespace directory, not a workspace"
                 )));
@@ -448,7 +457,7 @@ impl Workspaces {
         if let Some(&slot) = self.by_path.lock().get(path) {
             return inode::ws(slot, 0);
         }
-        inode::ws(self.add(path, Entry::Namespace), 0)
+        inode::ws(self.add(path, Registered::Namespace), 0)
     }
 
     /// The branch's checkout elsewhere, if any: git allows one checkout per branch.
@@ -616,7 +625,7 @@ impl Workspaces {
             base
         );
         let ws = Arc::new(ws);
-        let slot = self.add(branch, Entry::Workspace(ws.clone()));
+        let slot = self.add(branch, Registered::Workspace(ws.clone()));
         watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
         self.prewarm(branch);
         Ok(inode::ws(slot, 0))
@@ -684,9 +693,18 @@ fn settle(
 /// How long opening a workspace waits for requests reading it.
 const OPEN_WAIT: Duration = Duration::from_secs(30);
 
+/// How a request marks a branch busy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// Reading it (the source of a copy): any number at once.
+    Reader,
+    /// Removing, checking or writing it: alone.
+    Exclusive,
+}
+
 /// A branch's marks in `Workspaces::busy`.
 #[derive(Default, PartialEq)]
-struct Mark {
+struct Marks {
     /// Requests reading it (the source of a copy).
     readers: usize,
     /// Being removed, checked while closed, or copied into.
@@ -695,26 +713,26 @@ struct Mark {
 
 /// A branch marked busy by `Workspaces::mark_busy`, until dropped.
 struct Busy<'a> {
-    set: &'a Mutex<HashMap<String, Mark>>,
+    set: &'a Mutex<HashMap<String, Marks>>,
     branch: String,
-    shared: bool,
+    mark: Mark,
 }
 
 impl Drop for Busy<'_> {
     fn drop(&mut self) {
-        unmark(self.set, &self.branch, self.shared);
+        unmark(self.set, &self.branch, self.mark);
     }
 }
 
-/// Undoes a shared or exclusive mark of `branch` (see `Workspaces::try_mark`).
-fn unmark(set: &Mutex<HashMap<String, Mark>>, branch: &str, shared: bool) {
+/// Undoes a mark of `branch` (see `Workspaces::try_mark`).
+fn unmark(set: &Mutex<HashMap<String, Marks>>, branch: &str, mark: Mark) {
     let mut busy = set.lock();
-    if let Some(mark) = busy.get_mut(branch) {
-        match shared {
-            true => mark.readers = mark.readers.saturating_sub(1),
-            false => mark.exclusive = false,
+    if let Some(marks) = busy.get_mut(branch) {
+        match mark {
+            Mark::Reader => marks.readers = marks.readers.saturating_sub(1),
+            Mark::Exclusive => marks.exclusive = false,
         }
-        if *mark == Mark::default() {
+        if *marks == Marks::default() {
             busy.remove(branch);
         }
     }
