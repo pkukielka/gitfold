@@ -31,7 +31,7 @@ fn shown(paths: &[Vec<u8>]) -> String {
 
 /// Where a workspace's stored base is, relative to its branch.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Tip {
+enum Tip {
     /// The base is the branch tip.
     At,
     /// The branch moved after the daemon last saw it.
@@ -42,7 +42,7 @@ pub enum Tip {
 
 impl Tip {
     /// Where `base`, the base of the workspace of `branch`, is.
-    pub fn of(branch: &str, base: &gix::ObjectId) -> Tip {
+    fn of(branch: &str, base: &gix::ObjectId) -> Tip {
         match git::branch_tip(branch) {
             Err(_) => Tip::Deleted,
             Ok(tip) if tip.id != *base => Tip::Behind,
@@ -51,7 +51,7 @@ impl Tip {
     }
 
     /// What to tell the user about it: nothing at the tip.
-    pub fn note(self) -> &'static str {
+    fn note(self) -> &'static str {
         match self {
             Tip::At => "",
             Tip::Behind => "base behind the branch tip (mount to update)",
@@ -160,18 +160,19 @@ pub fn check_workspace(
     }
     let mut ignored = 0;
     if !force && state.opened() {
+        let mut s = status::status(store, common_dir, &state)?;
         // Changes are measured against the base; behind the tip (the branch moved
         // after the daemon last saw it), a file edited back to the base's content
         // would look unchanged. Catch up as the daemon would have.
-        if Tip::of(branch, &state.read_base()?.id) == Tip::Behind {
+        if Tip::of(branch, &s.base) == Tip::Behind {
             catch_up().map_err(|e| {
                 changes(format!(
                     "workspace {branch}: its base is behind the branch tip and catching up \
                      failed ({e:#}); mount it, open it once, or use --force"
                 ))
             })?;
+            s = status::status(store, common_dir, &state)?;
         }
-        let s = status::status(store, common_dir, &state)?;
         ignored = s.ignored;
         let tip = Tip::of(branch, &s.base);
         if tip == Tip::Behind {

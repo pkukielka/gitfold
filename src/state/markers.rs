@@ -1,9 +1,9 @@
 //! Whiteouts (deleted lower paths) and opaque markers (directories recreated
 //! over a whiteout), persisted as an append-only log in `markers`: a change
 //! costs one small append. Rewriting the whole set on every change made `rm -r`
-//! of a large lower directory quadratic. The log is compacted when opened, and
-//! in process once it is mostly history; a record cut short by a crash is
-//! ignored.
+//! of a large lower directory quadratic. The log is compacted when opened if
+//! it holds more than the live markers, and in process once it is mostly
+//! history; a record cut short by a crash is ignored.
 
 use crate::fsutil;
 use std::collections::BTreeSet;
@@ -60,7 +60,13 @@ impl Markers {
         let (whiteouts, opaque, compact) = Self::parse(path)?;
         let log = match compact {
             true => Self::rewrite(path, &whiteouts, &opaque)?,
-            false => OpenOptions::new().create(true).append(true).open(path)?,
+            false => {
+                let log = OpenOptions::new().create(true).append(true).open(path)?;
+                // Records a daemon appended before it died unsynced (see `sync`)
+                // are made durable now, as a compaction would.
+                log.sync_data()?;
+                log
+            }
         };
         Ok(Markers {
             whiteouts,
@@ -173,5 +179,54 @@ impl Markers {
         let start = [dir, b"/"].concat();
         let end = [dir, b"0"].concat();
         set.range(start..end).cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch markers log for test `name`, removed when dropped.
+    struct Log(PathBuf);
+
+    impl Log {
+        fn new(name: &str, data: &[u8]) -> Log {
+            let dir =
+                std::env::temp_dir().join(format!("gitfold-markers-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("markers"), data).unwrap();
+            Log(dir)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("markers")
+        }
+    }
+
+    impl Drop for Log {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Opening rewrites the log only if it holds more than the live markers.
+    #[test]
+    fn compacted_only_with_history() {
+        let live = b"Wa\0Od\0".as_slice();
+        let ino = |p: &Path| std::os::unix::fs::MetadataExt::ino(&fs::metadata(p).unwrap());
+        for (name, data, rewritten) in [
+            ("live", live, false),
+            ("history", b"Wa\0Wb\0wb\0Od\0".as_slice(), true),
+            ("torn", b"Wa\0Od\0Wc".as_slice(), true),
+        ] {
+            let log = Log::new(name, data);
+            let before = ino(&log.path());
+            let markers = Markers::open(&log.path()).unwrap();
+            assert_eq!(ino(&log.path()) != before, rewritten, "{name}");
+            assert_eq!(markers.whiteouts, PathSet::from([b"a".to_vec()]), "{name}");
+            assert_eq!(markers.opaque, PathSet::from([b"d".to_vec()]), "{name}");
+            assert_eq!(fs::read(log.path()).unwrap(), live, "{name}");
+        }
     }
 }

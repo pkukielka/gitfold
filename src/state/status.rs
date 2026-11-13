@@ -224,7 +224,7 @@ impl Walk<'_> {
     fn changed_below(&mut self, dir: &[u8], tree: Option<u32>, ignoring: Ignoring) -> Result<()> {
         let dir_path = upper_path(self.upper, dir);
         let entries = match fs::read_dir(&dir_path) {
-            Ok(entries) => entries.collect::<std::io::Result<Vec<_>>>()?,
+            Ok(entries) => entries,
             Err(e) if not_found(&e) => return Ok(()),
             Err(e) => return Err(e).with_context(|| format!("listing {}", dir_path.display())),
         };
@@ -235,10 +235,10 @@ impl Walk<'_> {
         let table = tree.map(|t| self.store.tree(t));
         let lists = self.ignore.patterns.len();
         if ignoring == Ignoring::Match {
-            let in_upper = entries.iter().any(|e| e.file_name() == ".gitignore");
-            self.add_gitignore(dir, table.as_deref(), in_upper)?;
+            self.add_gitignore(dir, table.as_deref())?;
         }
         for entry in entries {
+            let entry = entry?;
             let name = entry.file_name();
             let path = join(dir, name.as_bytes());
             let lower = table
@@ -301,24 +301,15 @@ impl Walk<'_> {
 
     /// Adds the patterns of `dir/.gitignore` as the workspace shows it: the
     /// upper entry if there is one, else the base's unless deleted (`table`: the
-    /// base tree of `dir`; `in_upper`: whether upper's listing of `dir` has
-    /// one). As for git, only a regular file counts: a symlink (git doesn't
-    /// follow it), a directory or anything else gives no patterns.
-    fn add_gitignore(
-        &mut self,
-        dir: &[u8],
-        table: Option<&TreeTable>,
-        in_upper: bool,
-    ) -> Result<()> {
+    /// base tree of `dir`). As for git, only a regular file counts: a symlink
+    /// (git doesn't follow it), a directory or anything else gives no patterns.
+    fn add_gitignore(&mut self, dir: &[u8], table: Option<&TreeTable>) -> Result<()> {
         let path = join(dir, b".gitignore");
         let upper = upper_path(self.upper, &path);
-        let meta = match in_upper {
-            true => match fs::symlink_metadata(&upper) {
-                Ok(meta) => Some(meta),
-                Err(e) if not_found(&e) => None,
-                Err(e) => return Err(e.into()),
-            },
-            false => None,
+        let meta = match fs::symlink_metadata(&upper) {
+            Ok(meta) => Some(meta),
+            Err(e) if not_found(&e) => None,
+            Err(e) => return Err(e.into()),
         };
         let bytes = match meta {
             Some(meta) if meta.is_file() => Some(fs::read(&upper)?),
