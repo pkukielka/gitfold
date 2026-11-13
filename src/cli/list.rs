@@ -92,34 +92,34 @@ fn age(time: SystemTime) -> String {
     }
 }
 
-/// When workspace `branch` (stored in `state`, with status `s`) last
-/// changed: its newest upper entry, its deletion log, or its branch's reflog
-/// (commits: committed files leave upper).
-fn last_change(
-    common_dir: &Path,
-    branch: &str,
-    state: &StateDir,
-    s: &status::Status,
-) -> Option<SystemTime> {
+/// When the workspace stored in `state` (with status `s`, task folder `task`)
+/// last changed: its newest upper entry, its deletion log, its branch's reflog
+/// (commits: committed files leave upper), or its task folder.
+fn last_change(state: &StateDir, s: &status::Status, task: &TaskDir) -> Option<SystemTime> {
     let mtime = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
-    let reflog = common_dir.join("logs/refs/heads").join(branch);
-    [s.newest, mtime(state.markers()), mtime(reflog)]
-        .into_iter()
-        .flatten()
-        .max()
+    let reflog = state.common_dir.join("logs/refs/heads").join(&state.branch);
+    [
+        s.newest,
+        mtime(state.markers()),
+        mtime(reflog),
+        task.newest(),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
 }
 
 /// `gitfold list`: the repository's workspaces and their uncommitted changes.
 pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     let ListArgs { stat } = args;
     let common_dir = git::init(repo)?;
-    let store = Store::default();
     let list = state::list(&common_dir)?;
-    let local = settings::Local::read(&common_dir);
     if list.is_empty() {
         println!("no workspaces");
         return Ok(());
     }
+    let store = Store::default();
+    let local = settings::Local::read(&common_dir);
     let lines = match stat {
         true => format!(" {:>8} {:>8}", "+lines", "-lines"),
         false => String::new(),
@@ -149,19 +149,13 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             false => String::new(),
         };
         let task = TaskDir::with(&local, &common_dir, &w.branch);
-        let last = [
-            last_change(&common_dir, &w.branch, &w.state, &s),
-            task.newest(),
-        ]
-        .into_iter()
-        .flatten()
-        .max()
-        .map_or("-".into(), age);
+        let last = last_change(&w.state, &s, &task).map_or("-".into(), age);
         // What the agent says it is doing, then what gitfold notes.
         let status = match (task.status(), base_note(&w.branch, &s.base)) {
             (Some(status), "") => status,
             (Some(status), note) => format!("{status} ({note})"),
-            (None, note) => format!("({note})").replace("()", ""),
+            (None, "") => String::new(),
+            (None, note) => format!("({note})"),
         };
         println!(
             "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {}",

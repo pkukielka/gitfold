@@ -35,12 +35,6 @@ use message::{Message, json_str, messages, rfc3339, take};
 /// still there.
 const PARENT_CHECK: Duration = Duration::from_secs(5);
 
-/// The task folder directory of `branch`, which must exist as a branch.
-pub(super) fn task_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
-    git::require_branch(branch)?;
-    Ok(TaskDir::of(common_dir, branch).dir)
-}
-
 /// The inbox of `branch`, which must exist as a branch.
 fn inbox_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
     git::require_branch(branch)?;
@@ -51,11 +45,12 @@ fn inbox_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
 }
 
 /// `now + secs`, or `None` (no deadline) if that overflows or no time is given.
-pub(super) fn deadline(secs: Option<u64>) -> Option<Instant> {
+fn deadline(secs: Option<u64>) -> Option<Instant> {
     secs.and_then(|s| Instant::now().checked_add(Duration::from_secs(s)))
 }
 
-pub(super) fn remaining(deadline: Option<Instant>) -> Option<Duration> {
+/// The time left until `deadline`, if there is one.
+fn remaining(deadline: Option<Instant>) -> Option<Duration> {
     deadline.map(|d| d.saturating_duration_since(Instant::now()))
 }
 

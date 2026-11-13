@@ -88,12 +88,11 @@ pub fn mount(args: MountArgs) -> Result<()> {
             track_reads: args.track_reads,
         });
     }
-    let mountpoint = &mountpoint;
     let log = match args.log {
         Some(log) => std::path::absolute(log)?,
-        None => default_log(mountpoint)?,
+        None => default_log(&mountpoint)?,
     };
-    start(mountpoint, &log)?;
+    start(&mountpoint, &log)?;
     println!(
         "mounted at {} (log: {})",
         mountpoint.display(),
@@ -171,12 +170,8 @@ pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
     let Some(mountpoint) = mountpoint else {
         return Ok(0);
     };
-    let mountpoint = daemon::canonical(mountpoint)?;
+    let (mountpoint, _, common_dir) = gitfold_mount(mountpoint)?;
     let shown = mountpoint.display();
-    let Some(source) = mount_table::gitfold_source(&mountpoint)? else {
-        bail!("{shown} is not a gitfold mount");
-    };
-    let common_dir = mount_table::common_dir_of_source(&source);
     let answer = control::request(&common_dir, &control::Request::Version, Some(WAIT));
     let (code, message) = match answer {
         Ok(Some(daemon)) => {
@@ -219,6 +214,17 @@ pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
     Ok(code)
 }
 
+/// The gitfold mount at `mountpoint`: its canonical path, its source and its
+/// repository's git common directory.
+fn gitfold_mount(mountpoint: &Path) -> Result<(PathBuf, String, PathBuf)> {
+    let mountpoint = daemon::canonical(mountpoint)?;
+    let Some(source) = mount_table::gitfold_source(&mountpoint)? else {
+        bail!("{} is not a gitfold mount", mountpoint.display());
+    };
+    let common_dir = mount_table::common_dir_of_source(&source);
+    Ok((mountpoint, source, common_dir))
+}
+
 /// How long `version` and `unmount` wait for the daemon to answer.
 const WAIT: Duration = Duration::from_secs(3);
 
@@ -229,17 +235,13 @@ const WAIT: Duration = Duration::from_secs(3);
 /// process or one it runs under (its shell, `make`, ...) is inside it: that
 /// would wait forever.
 pub fn unmount(mountpoint: &Path) -> Result<()> {
-    let mountpoint = daemon::canonical(mountpoint)?;
+    let (mountpoint, source, common_dir) = gitfold_mount(mountpoint)?;
     let shown = mountpoint.display();
-    let Some(source) = mount_table::gitfold_source(&mountpoint)? else {
-        bail!("{shown} is not a gitfold mount");
-    };
     // Not one of the processes using it.
     std::env::set_current_dir("/")?;
     // Prewarm walkers keep the mount busy, which would make this only detach it.
     // The daemon stops them, and starts no more; killing them from here is for
     // daemons without the request (it would start queued ones meanwhile).
-    let common_dir = mount_table::common_dir_of_source(&source);
     // Briefly: a daemon that is stopped, hung or busy with a removal must not
     // keep it from unmounting.
     let stop = control::Request::StopPrewarm;

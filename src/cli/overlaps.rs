@@ -29,7 +29,7 @@ use crate::store::Store;
 
 /// Which lines to print.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Kinds {
+enum Kinds {
     /// Reads if recorded, and writes.
     Both,
     Reads,
@@ -37,7 +37,7 @@ pub enum Kinds {
 }
 
 /// The exit code when there are overlaps.
-pub const FOUND: i32 = 6;
+const FOUND: i32 = 6;
 
 /// One target and the paths it changed.
 struct Target {
@@ -98,26 +98,20 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     let common_dir = git::init(repo)?;
     git::require_branch(branch)?;
     let state = StateDir::of(&common_dir, branch);
-    let opened = state.opened();
-    let base = match opened {
-        true => state.read_base()?.id,
-        false => git::branch_tip(branch)?.id,
-    };
-    let note = base_note(branch, &base);
-    if opened && !note.is_empty() {
-        eprintln!("note: {branch}: {note}; its changes are against the stored base");
-    }
     let store = Store::default();
-    let uncommitted = match opened {
+    // A branch never opened has only its commits.
+    let (base, uncommitted, read) = match state.opened() {
         true => {
+            let base = state.read_base()?.id;
+            let note = base_note(branch, &base);
+            if !note.is_empty() {
+                eprintln!("note: {branch}: {note}; its changes are against the stored base");
+            }
             let s = status::status(&store, &state)?;
-            s.changed.into_iter().chain(s.deleted).collect()
+            let uncommitted: Vec<_> = s.changed.into_iter().chain(s.deleted).collect();
+            (base, uncommitted, reads::recorded(&state)?)
         }
-        false => Vec::new(),
-    };
-    let read = match opened {
-        true => reads::recorded(&state)?,
-        false => None,
+        false => (git::branch_tip(branch)?.id, Vec::new(), None),
     };
     match (&read, kinds) {
         (None, Kinds::Reads) => {
@@ -160,12 +154,17 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
 
     let mut lines = BTreeSet::new();
     for t in &targets {
-        if kinds != Kinds::Reads {
+        let committed = match kinds {
+            Kinds::Reads => Vec::new(),
             // The branch's own commits since it diverged from this target.
-            let committed = diff(&common_dir, &t.name, &base.to_string())?;
-            for path in committed.into_iter().chain(uncommitted.iter().cloned()) {
-                if t.touches(&path) {
-                    lines.insert((path, 'W', t.name.clone()));
+            _ => diff(&common_dir, &t.name, &base.to_string())?,
+        };
+        // The paths written that this target changed too.
+        let mut written = HashSet::new();
+        if kinds != Kinds::Reads {
+            for path in committed.iter().chain(&uncommitted) {
+                if t.touches(path) && written.insert(path.as_slice()) {
+                    lines.insert((path.clone(), 'W', t.name.clone()));
                 }
             }
         }
@@ -173,8 +172,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
             for path in read.iter().flatten() {
                 // A path also written says more (git's own reads of a file the
                 // agent wrote, for one).
-                let written = || lines.contains(&(path.clone(), 'W', t.name.clone()));
-                if t.touches(path) && !git_reads(path) && !(kinds == Kinds::Both && written()) {
+                if t.touches(path) && !git_reads(path) && !written.contains(path.as_slice()) {
                     lines.insert((path.clone(), 'R', t.name.clone()));
                 }
             }
