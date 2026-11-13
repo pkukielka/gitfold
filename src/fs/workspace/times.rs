@@ -8,13 +8,12 @@
 //! record per path, `path NUL` followed by mtime and ctime as big-endian
 //! (i64 seconds, u32 nanoseconds).
 
+use crate::fsutil;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use crate::git::worktree;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stamp {
@@ -98,7 +97,7 @@ impl Times {
             encode(stamp.mtime, &mut data);
             encode(stamp.ctime, &mut data);
         }
-        worktree::write_atomic(&self.path, &data)?;
+        fsutil::write_atomic(&self.path, &data)?;
         self.dirty = false;
         Ok(())
     }

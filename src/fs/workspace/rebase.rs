@@ -51,6 +51,7 @@ use super::{Layers, Lower, Workspace, ancestors, join, not_found};
 use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
+use crate::state;
 use crate::store::{EMPTY_TREE, FileRec, Store, TEntry};
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
@@ -321,10 +322,7 @@ impl Workspace {
             }
         }
         layers.times.save()?;
-        worktree::write_atomic(
-            &self.state_dir.join("base"),
-            format!("{}\n", new.id).as_bytes(),
-        )?;
+        state::write_base(&self.state_dir, &new.id)?;
         layers.base = new.id;
         layers.base_tree = new_tree;
         // Before anything below can fail: cached listings hold the old base's files.

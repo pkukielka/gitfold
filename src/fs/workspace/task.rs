@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use log::warn;
 
+use crate::fsutil;
 use crate::git::worktree::{self, workspace_id};
+use crate::settings;
 
 /// The folder's name unless `gitfold.taskDir` says otherwise.
 pub const DEFAULT_NAME: &str = ".task";
@@ -43,16 +45,10 @@ impl TaskDir {
     /// The task folder of `branch` in repository `common_dir`, as configured;
     /// a setting that can't be used is warned about and the default used.
     pub fn of(common_dir: &Path, branch: &str) -> TaskDir {
-        let config = config(common_dir);
-        let get = |key: &str| {
-            config
-                .as_ref()
-                .and_then(|c| c.string_by("gitfold", None, key))
-                .map(|v| v.to_string().trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
+        let local = settings::Local::read(common_dir);
+        let get = |key: &str| local.repository(key);
         // One name in the workspace root, not one of its special names.
-        let name = match get("taskDir") {
+        let name = match get(settings::TASK_DIR) {
             Some(name) if !name.contains('/') && ![".", "..", ".git"].contains(&name.as_str()) => {
                 name
             }
@@ -64,7 +60,7 @@ impl TaskDir {
         };
         let default = || worktree::state_root(common_dir).join(".tasks");
         // Relative paths would depend on each process's current directory.
-        let root = match get("tasksDir").map(|d| expand_home(&d)) {
+        let root = match get(settings::TASKS_DIR).map(|d| expand_home(&d)) {
             Some(dir) if dir.is_absolute() => dir,
             Some(dir) => {
                 warn!(
@@ -135,8 +131,16 @@ impl TaskDir {
             self.dir.file_name().unwrap_or_default().to_string_lossy()
         ));
         let _ = fs::remove_dir_all(&tmp);
-        let copied =
-            copy_tree(&from.dir, &tmp, Some(inbox)).and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
+        // Dot names: files being written or taken; the inbox stays with `from`.
+        let skip = |rel: &Path| {
+            rel.file_name()
+                .is_some_and(|n| n.as_bytes().starts_with(b"."))
+                || rel == Path::new(inbox)
+        };
+        // The source's agent may be using it: files it can't read are left out
+        // rather than have their modes lifted under it.
+        let copied = fsutil::copy_tree(&from.dir, &tmp, &skip, fsutil::Unreadable::Skip)
+            .and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
         if copied.is_err() {
             let _ = fs::remove_dir_all(&tmp);
         }
@@ -147,11 +151,8 @@ impl TaskDir {
 /// The name of a task folder's inbox: `gitfold.inbox` if it is one plain name
 /// (not starting with a dot), else `inbox`.
 pub fn inbox_name(common_dir: &Path) -> String {
-    let name = config(common_dir)
-        .and_then(|c| c.string_by("gitfold", None, "inbox").map(|v| v.to_string()))
-        .map(|v| v.trim().to_string());
-    match name {
-        Some(name) if !name.is_empty() && !name.contains('/') && !name.starts_with('.') => name,
+    match settings::repository(common_dir, settings::INBOX) {
+        Some(name) if !name.contains('/') && !name.starts_with('.') => name,
         Some(name) => {
             warn!("gitfold.inbox {name:?} isn't a plain name: using {DEFAULT_INBOX}");
             DEFAULT_INBOX.to_string()
@@ -162,12 +163,6 @@ pub fn inbox_name(common_dir: &Path) -> String {
 
 /// The inbox's name unless `gitfold.inbox` says otherwise.
 const DEFAULT_INBOX: &str = "inbox";
-
-/// The repository's own config file (where `git config` writes), read now.
-fn config(common_dir: &Path) -> Option<gix::config::File> {
-    let path = common_dir.join("config");
-    gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok()
-}
 
 fn expand_home(dir: &str) -> PathBuf {
     let home = || std::env::home_dir().unwrap_or_default();
@@ -204,31 +199,6 @@ fn exclude(common_dir: &Path, name: &[u8]) -> Result<()> {
         .append(true)
         .open(&path)?;
     file.write_all(&add)?;
-    Ok(())
-}
-
-/// Copies directory `src` to new directory `dst`, files, symlinks and
-/// directories, with their modes.
-/// Leaves out names starting with a dot, and `skip` in `src` itself.
-fn copy_tree(src: &Path, dst: &Path, skip: Option<&str>) -> Result<()> {
-    fs::create_dir(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name.as_bytes().starts_with(b".") || skip.is_some_and(|s| name == s) {
-            continue;
-        }
-        let (from, to) = (entry.path(), dst.join(&name));
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&from, &to, None)?;
-        } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
-        } else {
-            fs::copy(&from, &to).with_context(|| format!("copying {}", from.display()))?;
-        }
-    }
-    fs::set_permissions(dst, fs::metadata(src)?.permissions())?;
     Ok(())
 }
 

@@ -5,11 +5,9 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, ensure};
-use clap::ValueEnum;
 
 use crate::daemon::control;
 use crate::daemon::prewarm::Prewarm;
@@ -18,21 +16,13 @@ use crate::fs::workspace::retire::{
     remove_snapshot_registration, remove_workspace,
 };
 use crate::fs::workspace::task::TaskDir;
-use crate::fs::workspace::{fork, reads, status};
+use crate::fs::workspace::{fork, status};
 use crate::git;
-use crate::git::worktree::{self, workspace_branch, workspace_id};
+use crate::git::worktree::{self, workspace_branch};
 use crate::refusal::Refusal;
+use crate::settings;
+use crate::state::{self, StateDir};
 use crate::store::Store;
-
-fn git(repo: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .status()?;
-    ensure!(status.success(), "git {} failed ({status})", args.join(" "));
-    Ok(())
-}
 
 /// Takes the repository's daemon lock exclusively, failing if a gitfold daemon
 /// holds it (mounted, or still exiting after an unmount): the daemon keeps
@@ -64,15 +54,14 @@ pub fn branch(
     );
     // A workspace left from a deleted branch of that name would be resumed.
     let common_dir = git::init(repo)?;
-    let state_dir = worktree::state_root(&common_dir).join(workspace_id(name));
     ensure!(
-        git::branch_exists(name) || !state_dir.exists(),
+        git::branch_exists(name) || !StateDir::of(&common_dir, name).dir.exists(),
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
     if with_changes {
         // `git branch` checks names itself; `update-ref` would take `HEAD`, and
         // refuse other bad names only after the copy.
-        let valid = worktree::git_output(&common_dir, &["check-ref-format", "--branch", name]);
+        let valid = git::cmd::output(&common_dir, &["check-ref-format", "--branch", name]);
         ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
         // A workspace to copy: `from`, or the one we are in.
         let source = super::branch_or_current(from.map(str::to_string), repo).map_err(|_| {
@@ -98,7 +87,7 @@ pub fn branch(
     }
     let mut args = vec!["branch", "--", name];
     args.extend(from);
-    git(repo, &args)?;
+    git::cmd::run(repo, &args)?;
     set_branch_settings(repo, name, prewarm, track_reads)?;
     println!("created branch {name}; open it as <mountpoint>/{name}");
     Ok(())
@@ -163,15 +152,13 @@ pub fn track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
 
 /// Stores whether branch `name`'s workspace records reads, in git config.
 fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
-    let key = format!("branch.{name}.{}", reads::BRANCH_KEY);
-    git(repo, &["config", &key, if on { "true" } else { "false" }])
+    let value = &on.to_string();
+    settings::set_branch(repo, name, settings::TRACK_READS, value)
 }
 
 /// Stores `mode` as branch `name`'s prewarm mode, in git config.
 fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
-    let key = format!("branch.{name}.{}", crate::daemon::prewarm::BRANCH_KEY);
-    let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
-    git(repo, &["config", &key, value.get_name()])
+    settings::set_branch(repo, name, settings::PREWARM, &mode.to_string())
 }
 
 /// `gitfold changes`: the uncommitted changes of workspace `name` relative to
@@ -186,13 +173,13 @@ fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
 pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
     check_name(name)?;
     let common_dir = git::init(repo)?;
-    let state_dir = worktree::state_root(&common_dir).join(workspace_id(name));
-    if !state_dir.join("base").exists() {
+    let state = StateDir::of(&common_dir, name);
+    if !state.opened() {
         git::require_branch(name)?;
         return Ok(());
     }
     let store = Store::default();
-    let s = status::status(&store, &common_dir, &state_dir)?;
+    let s = status::status(&store, &common_dir, &state)?;
     let note = base_note(name, &s.base);
     if !note.is_empty() {
         eprintln!("note: {name}: {note}; changes are against the stored base");
@@ -203,7 +190,7 @@ pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
     for &(change, path) in &changes {
         write!(out, "{}\t", change.letter())?;
         if stat {
-            match s.line_counts(&store, &state_dir, change, path)? {
+            match s.line_counts(&store, &state, change, path)? {
                 Some((added, removed)) => {
                     write!(out, "{added}\t{removed}\t")?;
                     total = (total.0 + added, total.1 + removed);
@@ -256,18 +243,18 @@ fn age(time: SystemTime) -> String {
     }
 }
 
-/// When workspace `branch` (stored in `state_dir`, with status `s`) last
+/// When workspace `branch` (stored in `state`, with status `s`) last
 /// changed: its newest upper entry, its deletion log, or its branch's reflog
 /// (commits: committed files leave upper).
 fn last_change(
     common_dir: &Path,
     branch: &str,
-    state_dir: &Path,
+    state: &StateDir,
     s: &status::Status,
 ) -> Option<SystemTime> {
     let mtime = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
     let reflog = common_dir.join("logs/refs/heads").join(branch);
-    [s.newest, mtime(state_dir.join("markers")), mtime(reflog)]
+    [s.newest, mtime(state.markers()), mtime(reflog)]
         .into_iter()
         .flatten()
         .max()
@@ -302,9 +289,8 @@ pub(super) fn quote(path: &[u8]) -> Vec<u8> {
 }
 
 pub(super) struct Listed {
-    id: String,
     pub(super) branch: String,
-    state_dir: PathBuf,
+    state: StateDir,
 }
 
 pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
@@ -323,13 +309,10 @@ pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
         if id.starts_with('.') {
             continue;
         }
-        let branch = fs::read_to_string(entry.path().join("branch"))
-            .map(|b| b.trim_end_matches('\n').to_string())
-            .unwrap_or_else(|_| workspace_branch(&id));
+        let branch = state::read_branch(&entry.path()).unwrap_or_else(|| workspace_branch(&id));
         list.push(Listed {
-            id,
             branch,
-            state_dir: entry.path(),
+            state: StateDir::of_id(common_dir, &id),
         });
     }
     list.sort_by(|a, b| a.branch.cmp(&b.branch));
@@ -354,10 +337,10 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
         "branch", "changed", "deleted", "ignored", "base", "last"
     );
     for w in list {
-        let s = match status::status(&store, &common_dir, &w.state_dir) {
+        let s = match status::status(&store, &common_dir, &w.state) {
             Ok(s) => s,
             Err(e) => {
-                println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.id);
+                println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.state.id);
                 continue;
             }
         };
@@ -365,7 +348,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
             true => {
                 let (mut added, mut removed) = (0, 0);
                 for (change, path) in s.changes(&store) {
-                    if let Some((a, r)) = s.line_counts(&store, &w.state_dir, change, path)? {
+                    if let Some((a, r)) = s.line_counts(&store, &w.state, change, path)? {
                         (added, removed) = (added + a, removed + r);
                     }
                 }
@@ -375,7 +358,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
         };
         let task = TaskDir::of(&common_dir, &w.branch);
         let last = [
-            last_change(&common_dir, &w.branch, &w.state_dir, &s),
+            last_change(&common_dir, &w.branch, &w.state, &s),
             task.newest(),
         ]
         .into_iter()

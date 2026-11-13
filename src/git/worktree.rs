@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use gix::ObjectId;
 
+use crate::fsutil;
 use crate::git::Commit;
 
 /// Snapshot registrations are named `<SNAPSHOT_PREFIX><first SNAPSHOT_HEX hex
@@ -59,7 +60,7 @@ pub fn register_branch(
     index: impl FnOnce() -> Vec<u8>,
 ) -> Result<()> {
     if dir.join("HEAD").exists() && dir.join("index").exists() {
-        write_atomic(
+        fsutil::write_atomic(
             &dir.join("gitdir"),
             format!("{}\n", gitfile.display()).as_bytes(),
         )?;
@@ -80,27 +81,16 @@ pub fn register_branch(
 /// without an index.
 fn write_admin(dir: &Path, gitfile: &Path, index: &[u8], head: &str) -> Result<()> {
     fs::create_dir_all(dir)?;
-    write_atomic(&dir.join("commondir"), b"../..\n")?;
-    write_atomic(
+    fsutil::write_atomic(&dir.join("commondir"), b"../..\n")?;
+    fsutil::write_atomic(
         &dir.join("gitdir"),
         format!("{}\n", gitfile.display()).as_bytes(),
     )?;
     // Keeps `git worktree prune` from deleting the entry while unmounted.
-    write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
-    write_atomic(&dir.join("index"), index)?;
-    write_atomic(&dir.join("HEAD"), head.as_bytes())?;
+    fsutil::write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
+    fsutil::write_atomic(&dir.join("index"), index)?;
+    fsutil::write_atomic(&dir.join("HEAD"), head.as_bytes())?;
     Ok(())
-}
-
-/// Replaces `path` with `data` atomically (via `<path>.gitfold-tmp`).
-pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("gitfold-tmp");
-    let mut file = fs::File::create(&tmp)?;
-    std::io::Write::write_all(&mut file, data)?;
-    // Synced before the rename, so a power loss leaves the old file or the new
-    // one, never an empty one.
-    file.sync_all()?;
-    fs::rename(&tmp, path)
 }
 
 /// Keeps `commit` reachable for `git gc` with ref `name` (a workspace's base is
@@ -108,7 +98,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// update-ref`, which handles every ref backend (files, packed, reftable).
 pub fn pin(common_dir: &Path, name: &str, commit: &gix::ObjectId) -> Result<()> {
     let commit = commit.to_string();
-    git(
+    super::cmd::run(
         common_dir,
         &["update-ref", "-m", "gitfold: workspace base", name, &commit],
     )
@@ -119,22 +109,12 @@ pub fn unpin(common_dir: &Path, name: &str) -> Result<()> {
     if crate::git::resolve(name).is_err() {
         return Ok(());
     }
-    git(common_dir, &["update-ref", "-d", name])
+    super::cmd::run(common_dir, &["update-ref", "-d", name])
 }
 
 /// The ref keeping workspace `id`'s base from `git gc`.
 pub fn pin_ref(id: &str) -> String {
     format!("refs/gitfold/{id}")
-}
-
-pub(crate) fn git(common_dir: &Path, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(common_dir)
-        .args(args)
-        .status()?;
-    anyhow::ensure!(status.success(), "git {} failed ({status})", args.join(" "));
-    Ok(())
 }
 
 /// Files in a worktree's admin directory that mean a git operation is under
@@ -155,22 +135,45 @@ const BUSY: [&str; 9] = [
 /// Why git is not idle in the worktree with admin directory `admin` on
 /// `branch`, if it isn't: HEAD elsewhere (detached for a rebase or bisect, or
 /// switched away), an operation running or stopped half-way, or a ref locked.
-pub fn git_busy(common_dir: &Path, admin: &Path, branch: &str) -> Option<String> {
+pub fn git_busy(common_dir: &Path, admin: &Path, branch: &str) -> Option<GitBusy> {
     let head = fs::read_to_string(admin.join("HEAD")).unwrap_or_default();
     if head.trim() != format!("ref: refs/heads/{branch}") {
-        return Some(format!("its HEAD is not on {branch} ({})", head.trim()));
+        return Some(GitBusy::HeadElsewhere {
+            branch: branch.to_string(),
+            head: head.trim().to_string(),
+        });
     }
     let exists = |p: PathBuf| fs::symlink_metadata(p).is_ok();
     if let Some(f) = BUSY.iter().find(|f| exists(admin.join(f))) {
-        return Some(format!("a git operation is in progress ({f})"));
+        return Some(GitBusy::Operation(f));
     }
     let ref_lock = format!("refs/heads/{branch}.lock");
     (exists(common_dir.join(ref_lock)) || exists(common_dir.join("packed-refs.lock")))
-        .then(|| REF_LOCKED.to_string())
+        .then_some(GitBusy::RefLocked)
 }
 
-/// What `git_busy` says while a ref is locked (git updating it).
-pub const REF_LOCKED: &str = "a ref is locked";
+/// Why git is not idle in a worktree (see `git_busy`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum GitBusy {
+    /// HEAD is not on the branch (detached for a rebase or bisect, switched).
+    HeadElsewhere { branch: String, head: String },
+    /// An operation running or stopped half-way: the file that says so.
+    Operation(&'static str),
+    /// A ref is locked: git is updating it right now.
+    RefLocked,
+}
+
+impl std::fmt::Display for GitBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GitBusy::HeadElsewhere { branch, head } => {
+                write!(f, "its HEAD is not on {branch} ({head})")
+            }
+            GitBusy::Operation(file) => write!(f, "a git operation is in progress ({file})"),
+            GitBusy::RefLocked => write!(f, "a ref is locked"),
+        }
+    }
+}
 
 /// `<common>/gitfold`: the workspaces' state directories, by id.
 pub fn state_root(common_dir: &Path) -> PathBuf {
@@ -193,22 +196,6 @@ pub fn workspace_branch(id: &str) -> String {
 pub fn is_snapshot_registration(name: &str) -> bool {
     name.strip_prefix(SNAPSHOT_PREFIX)
         .is_some_and(|hex| hex.len() == SNAPSHOT_HEX && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// `git` with `args` in `common_dir`, returning its standard output.
-pub(crate) fn git_output(common_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(common_dir)
-        .args(args)
-        .output()?;
-    anyhow::ensure!(
-        out.status.success(),
-        "git {} failed ({})",
-        args.join(" "),
-        out.status
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Refuses (a git operation in progress, `Refusal::Changes`) if git is busy in

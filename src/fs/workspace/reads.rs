@@ -22,11 +22,9 @@ use anyhow::Result;
 use log::warn;
 
 use super::Workspace;
+use crate::settings;
 
 pub const READS: &str = "reads";
-
-/// The git config key, below `branch.<branch>`, of a branch's own setting.
-pub const BRANCH_KEY: &str = "gitfoldTrackReads";
 
 /// The paths recorded, and the log they are appended to.
 pub(super) struct Reads {
@@ -62,21 +60,7 @@ fn paths(data: &[u8]) -> HashSet<Vec<u8>> {
 /// else `default` (the mount's). Read when it opens, and by `gitfold
 /// track-reads` while open.
 pub fn tracked(common_dir: &Path, branch: &str, default: bool) -> bool {
-    // The repository's own config file, read now (the daemon's repository
-    // handle has the config from mount time); where `git config` writes it.
-    let path = common_dir.join("config");
-    let Ok(config) = gix::config::File::from_path_no_includes(path, gix::config::Source::Local)
-    else {
-        return default;
-    };
-    match config.boolean_by("branch", Some(branch.as_bytes().into()), BRANCH_KEY) {
-        Ok(Some(on)) => on,
-        Ok(None) => default,
-        Err(_) => {
-            warn!("branch.{branch}.{BRANCH_KEY} is not a boolean");
-            default
-        }
-    }
+    settings::branch_bool(common_dir, branch, settings::TRACK_READS).unwrap_or(default)
 }
 
 impl Workspace {

@@ -164,7 +164,7 @@ impl GitFold {
     fn ws_entry(&self, ino: u64) -> Option<(Arc<Workspace>, u64)> {
         match inode::decode(ino)? {
             inode::Ino::Ws { slot, local } if local != 0 && !workspace::is_virtual_local(local) => {
-                Some((self.workspaces.get(slot).ok()?.ok()?, local))
+                Some((self.workspaces.get(slot).ok()?.workspace()?, local))
             }
             _ => None,
         }

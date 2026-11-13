@@ -13,14 +13,15 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use fuser::Errno;
 use gix::objs::tree::EntryKind;
 
 use super::markers::Kind;
 use super::times::shown_mtime;
-use super::{Entry, Layers, Lower, Obj, Workspace, join, not_found};
+use super::{Layers, ListEntry, Lower, Obj, Workspace, join, not_found};
+use crate::fsutil;
 use crate::git;
 use crate::store::Store;
 
@@ -47,34 +48,6 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn cstring(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
-}
-
-/// Sets the atime and mtime of `path` (not following a symlink); `None` leaves one.
-fn set_times(path: &Path, atime: Option<SystemTime>, mtime: Option<SystemTime>) -> io::Result<()> {
-    let times = [timespec(atime), timespec(mtime)];
-    let path =
-        CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    let flags = libc::AT_SYMLINK_NOFOLLOW;
-    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), flags) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn timespec(t: Option<SystemTime>) -> libc::timespec {
-    match t {
-        Some(t) => {
-            let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-            libc::timespec {
-                tv_sec: d.as_secs() as libc::time_t,
-                tv_nsec: d.subsec_nanos() as _,
-            }
-        }
-        None => libc::timespec {
-            tv_sec: 0,
-            tv_nsec: libc::UTIME_OMIT,
-        },
-    }
 }
 
 impl Workspace {
@@ -206,7 +179,7 @@ impl Workspace {
                 fs::set_permissions(&tmp, fs::Permissions::from_mode(rec.perm().into()))?;
             }
             if let Some(time) = time {
-                set_times(&tmp, Some(time), Some(time))?;
+                fsutil::set_times(&tmp, Some(time), Some(time))?;
             }
             fs::rename(&tmp, &target)
         })();
@@ -286,7 +259,7 @@ impl Workspace {
             fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))?;
         }
         if atime.is_some() || mtime.is_some() {
-            set_times(&target, atime, mtime)?;
+            fsutil::set_times(&target, atime, mtime)?;
         }
         Ok(())
     }
@@ -499,7 +472,7 @@ impl Workspace {
         for (name, entry) in self.entries(store, layers, path)? {
             let child = join(path, &name);
             match entry {
-                Entry::LowerFile(id) => {
+                ListEntry::LowerFile(id) => {
                     plan.bytes += store.file(id).map_or(0, |f| f.size);
                     plan.files.push((child, id));
                     if plan.files.len() > COPY_ON_RENAME_FILES || plan.bytes > COPY_ON_RENAME_BYTES
@@ -508,11 +481,11 @@ impl Workspace {
                     }
                 }
                 // Also a submodule: an empty directory.
-                Entry::LowerDir => {
+                ListEntry::LowerDir => {
                     plan.dirs.push(child.clone());
                     self.plan_copy(store, layers, &child, plan)?;
                 }
-                Entry::Upper
+                ListEntry::Upper
                     if matches!(
                         self.visible_lower(store, layers, &child),
                         Some(Lower::Tree(_))
@@ -520,7 +493,7 @@ impl Workspace {
                 {
                     self.plan_copy(store, layers, &child, plan)?
                 }
-                Entry::Upper => {}
+                ListEntry::Upper => {}
             }
         }
         Ok(())

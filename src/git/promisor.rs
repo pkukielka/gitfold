@@ -24,7 +24,7 @@ use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::process::CommandExt;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, LazyLock, OnceLock};
@@ -361,10 +361,8 @@ fn fetch(remote: &str, ids: &[ObjectId]) -> Result<()> {
         ),
         refused,
     };
-    let mut command = Command::new("git");
+    let mut command = super::cmd::command(&git_dir);
     command
-        .arg("--git-dir")
-        .arg(&git_dir)
         .args(args)
         // No terminal to ask on: fail rather than wait for a password.
         .env("GIT_TERMINAL_PROMPT", "0")

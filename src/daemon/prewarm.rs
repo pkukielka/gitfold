@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::settings;
 use clap::ValueEnum;
 use log::{info, warn};
 use parking_lot::Mutex;
@@ -28,6 +29,13 @@ pub enum Prewarm {
     Content,
 }
 
+/// Its name on the command line and in git config, as clap parses it.
+impl std::fmt::Display for Prewarm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_possible_value().expect("not skipped").get_name())
+    }
+}
+
 #[derive(Default)]
 struct Stats {
     dirs: AtomicU64,
@@ -35,25 +43,16 @@ struct Stats {
     bytes: AtomicU64,
 }
 
-/// The git config key holding a branch's prewarm mode, as in
-/// `branch.<name>.gitfoldPrewarm`: git keeps it with the branch (and deletes
-/// it with it).
-pub const BRANCH_KEY: &str = "gitfoldPrewarm";
-
 /// The prewarm mode set for the workspace of `branch` (`git config
 /// branch.<branch>.gitfoldPrewarm none|meta|content`), if any, in the
 /// repository's config file (not included ones). Read when it opens, so a
 /// change counts from the next open.
 pub fn for_branch(common_dir: &Path, branch: &str) -> Option<Prewarm> {
-    // The repository's own config file, read now (the daemon's repository
-    // handle has the config from mount time); where `git config` writes it.
-    let path = common_dir.join("config");
-    let config = gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok()?;
-    let value = config.string_by("branch", Some(branch.as_bytes().into()), BRANCH_KEY)?;
-    let value = value.to_string();
-    Prewarm::from_str(value.trim(), true)
+    let value = settings::branch(common_dir, branch, settings::PREWARM)?;
+    Prewarm::from_str(&value, true)
         .inspect_err(|_| {
-            warn!("branch.{branch}.{BRANCH_KEY}: {value:?} is not none, meta or content")
+            let key = settings::branch_key(branch, settings::PREWARM);
+            warn!("{key}: {value:?} is not none, meta or content")
         })
         .ok()
 }
@@ -204,11 +203,10 @@ fn launch(walks: Vec<Walk>) {
         // while mounted), under the name `stop_below` looks for.
         let mut command = Command::new("/proc/self/exe");
         command.arg0("gitfold");
-        let mode_name = ValueEnum::to_possible_value(&walk.mode).expect("not skipped");
         command
             .arg("prewarm-walk")
             .arg(&walk.root)
-            .args(["--mode", mode_name.get_name()])
+            .args(["--mode", &walk.mode.to_string()])
             .args(["--threads", &walk.threads.to_string()])
             .stdin(Stdio::null());
         let spawned = command.spawn();

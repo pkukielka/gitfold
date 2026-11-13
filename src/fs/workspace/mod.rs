@@ -57,6 +57,7 @@ use parking_lot::{Mutex, RwLock};
 use crate::git;
 use crate::git::worktree;
 use crate::inode;
+use crate::state::{self, StateDir};
 use crate::store::{Store, TEntry};
 use markers::Markers;
 use nodes::Nodes;
@@ -70,14 +71,6 @@ pub const TASKLINK_LOCAL: u64 = inode::WS_LOCAL_MASK - 1;
 /// Whether `local` is a virtual entry of the workspace root, without a node.
 pub fn is_virtual_local(local: u64) -> bool {
     local == GITFILE_LOCAL || local == TASKLINK_LOCAL
-}
-
-/// The base commit recorded in workspace state directory `state_dir`.
-pub(crate) fn read_base(state_dir: &Path) -> Result<git::Commit> {
-    let base_file = state_dir.join("base");
-    let hex = fs::read_to_string(&base_file)
-        .with_context(|| format!("reading {}", base_file.display()))?;
-    git::resolve(hex.trim())
 }
 
 /// What a path is in the merged view.
@@ -174,12 +167,12 @@ struct Layers {
 /// kernel actually receives (see `nodes`).
 pub struct Listing {
     dir: Vec<u8>,
-    pub entries: Vec<(Vec<u8>, Entry)>,
+    pub entries: Vec<(Vec<u8>, ListEntry)>,
 }
 
 /// A listing entry. Upper entries are stat-ed when served, not when listed, so
 /// writes into a file don't invalidate its directory's cached listing.
-pub enum Entry {
+pub enum ListEntry {
     Upper,
     LowerDir,
     LowerFile(u32),
@@ -215,14 +208,14 @@ impl Page<'_> {
             .peek(self.parent, name, &self.listing.dir)
     }
 
-    pub fn obj(&self, name: &[u8], entry: &Entry) -> Result<Obj, Errno> {
+    pub fn obj(&self, name: &[u8], entry: &ListEntry) -> Result<Obj, Errno> {
         Ok(match entry {
-            Entry::Upper => {
+            ListEntry::Upper => {
                 let path = self.ws.upper_path(&join(&self.listing.dir, name));
                 Obj::Upper(self.ws.upper_meta(&path)?)
             }
-            Entry::LowerDir => Obj::LowerDir,
-            Entry::LowerFile(file_id) => Obj::LowerFile {
+            ListEntry::LowerDir => Obj::LowerDir,
+            ListEntry::LowerFile(file_id) => Obj::LowerFile {
                 file_id: *file_id,
                 stamp: (!self.layers.times.is_empty())
                     .then(|| self.layers.times.get(&join(&self.listing.dir, name)))
@@ -273,25 +266,23 @@ fn not_found(e: &io::Error) -> bool {
 }
 
 impl Workspace {
-    /// Opens the workspace stored in `state_dir`, creating it at `new_base` if new;
-    /// `admin` is its worktree's admin directory in `common_dir`.
+    /// Opens the workspace of `branch` stored in `state`, creating it at
+    /// `new_base` if new.
     pub fn open(
         store: &Store,
         common_dir: PathBuf,
-        state_dir: PathBuf,
-        admin: PathBuf,
+        state: StateDir,
         branch: &str,
         new_base: Option<git::Commit>,
-        gitfile: Vec<u8>,
     ) -> Result<Workspace> {
         let created = new_base.is_some();
         let base = match new_base {
             Some(base) => base,
-            None => read_base(&state_dir)?,
+            None => state.read_base()?,
         };
         // Loaded first (a partial clone fetches): a failed open leaves no state.
         let base_tree = store.load_tree(base.tree)?;
-        let upper = state_dir.join("upper");
+        let upper = state.upper();
         fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
         let task = task::TaskDir::of(&common_dir, branch);
         let shown = String::from_utf8_lossy(&task.name).into_owned();
@@ -316,29 +307,30 @@ impl Workspace {
             }
         };
         if created {
-            // For people looking at the state directory; the id is escaped.
-            worktree::write_atomic(&state_dir.join("branch"), format!("{branch}\n").as_bytes())?;
-            // Written last and atomically: its presence means "workspace exists".
-            worktree::write_atomic(&state_dir.join("base"), format!("{}\n", base.id).as_bytes())?;
+            state::write_branch(&state.dir, branch)?;
+            // Written last: its presence means "workspace exists".
+            state::write_base(&state.dir, &base.id)?;
         }
         let layers = Layers {
             base: base.id,
             base_tree,
-            markers: Markers::open(&state_dir.join("markers"))?,
-            times: Times::open(&state_dir.join("times"))?,
+            markers: Markers::open(&state.markers())?,
+            times: Times::open(&state.times())?,
         };
         // Copy-ups a crash interrupted; their target was never replaced.
-        let tmp = state_dir.join("tmp");
+        let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
-        let pin_ref =
-            worktree::pin_ref(&state_dir.file_name().unwrap_or_default().to_string_lossy());
+        let pin_ref = worktree::pin_ref(&state.id);
+        // The registration's directory name is deterministic, so the `.git`
+        // file can be written before the workspace exists.
+        let gitfile = format!("gitdir: {}\n", state.admin.display()).into_bytes();
         Ok(Workspace {
             upper,
             task,
             common_dir,
-            state_dir,
-            admin,
+            state_dir: state.dir,
+            admin: state.admin,
             branch: branch.to_string(),
             pin_ref,
             pinned: Mutex::new(None),
@@ -511,17 +503,17 @@ impl Workspace {
         store: &Store,
         layers: &Layers,
         path: &[u8],
-    ) -> Result<Vec<(Vec<u8>, Entry)>, Errno> {
+    ) -> Result<Vec<(Vec<u8>, ListEntry)>, Errno> {
         if !self.resolve_in(store, layers, path)?.is_dir() {
             return Err(Errno::ENOTDIR);
         }
         // Upper entries win; lower ones come straight from the tree table, without
         // a stat or a path walk each.
-        let mut entries: Vec<(Vec<u8>, Entry)> = Vec::new();
+        let mut entries: Vec<(Vec<u8>, ListEntry)> = Vec::new();
         match fs::read_dir(self.upper_path(path)) {
             Ok(dir) => entries.extend(
                 dir.flatten()
-                    .map(|e| (e.file_name().as_bytes().to_vec(), Entry::Upper)),
+                    .map(|e| (e.file_name().as_bytes().to_vec(), ListEntry::Upper)),
             ),
             Err(e) if not_found(&e) => {}
             Err(e) => return Err(e.into()),
@@ -540,9 +532,9 @@ impl Workspace {
                     continue;
                 }
                 let entry = if e.is_dir() {
-                    Entry::LowerDir
+                    ListEntry::LowerDir
                 } else {
-                    Entry::LowerFile(e.id)
+                    ListEntry::LowerFile(e.id)
                 };
                 entries.push((name.to_vec(), entry));
             }

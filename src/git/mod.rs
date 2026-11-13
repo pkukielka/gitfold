@@ -3,11 +3,13 @@
 //! `gix::Repository` is not `Sync`, so each thread lazily gets its own handle
 //! derived from one shared `ThreadSafeRepository`.
 //!
+//! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `lock`: the repository lock.
 //! - `promisor`: partial clones, fetching what loads miss.
 
+pub mod cmd;
 pub mod index;
 pub mod lock;
 pub mod promisor;
@@ -225,9 +227,7 @@ pub fn is_bare() -> bool {
 /// Anything else is an error, not a reason to fall back: a fallback could
 /// ignore more than git does.
 pub fn excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
+    let out = cmd::command(git_dir)
         .args(["config", "--path", "--get", "core.excludesFile"])
         .output()?;
     match out.status.code() {

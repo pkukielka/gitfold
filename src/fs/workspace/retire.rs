@@ -7,14 +7,13 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use super::{Workspace, status};
-use crate::git::worktree::workspace_id;
 use crate::git::{self, worktree};
 use crate::refusal::Refusal;
+use crate::state::StateDir;
 use crate::store::Store;
 
 /// How many paths an error message lists before "and N more".
@@ -116,21 +115,19 @@ pub fn check_workspace(
 ) -> Result<usize> {
     // `..` would point it at the git directory itself.
     check_name(branch)?;
-    let id = workspace_id(branch);
-    let state_dir = worktree::state_root(common_dir).join(&id);
-    let admin = worktree::ws_admin_dir(common_dir, &id);
-    if !state_dir.exists() && !admin.exists() {
+    let state = StateDir::of(common_dir, branch);
+    if !state.dir.exists() && !state.admin.exists() {
         return Err(Refusal::NotFound.error(format!("no workspace for branch {branch}")));
     }
     let changes = |message: String| Refusal::Changes.error(message);
     // Commits reachable only from the worktree (a rebase stopped half-way, a
     // detached HEAD) would be lost with its admin directory.
     if !force
-        && admin.exists()
-        && let Some(why) = worktree::git_busy(common_dir, &admin, branch)
+        && state.admin.exists()
+        && let Some(why) = worktree::git_busy(common_dir, &state.admin, branch)
     {
         // A locked ref is git at work right now: retried by `--wait`.
-        return Err(match why == worktree::REF_LOCKED {
+        return Err(match why == worktree::GitBusy::RefLocked {
             true => Refusal::InUse.error(format!(
                 "workspace {branch}: {why} (git is updating it); try again, or use --wait"
             )),
@@ -141,14 +138,14 @@ pub fn check_workspace(
     }
     // Staged changes live in the worktree's index, which upper may not show (a
     // file staged, then edited back).
-    if !force && admin.join("index").exists() && !index_matches_head(&admin)? {
+    if !force && state.index().exists() && !index_matches_head(&state.admin)? {
         return Err(changes(format!(
             "workspace {branch} has staged changes; commit them, or use --force to discard them"
         )));
     }
     let mut ignored = 0;
-    if !force && state_dir.join("base").exists() {
-        let mut s = status::status(store, common_dir, &state_dir)?;
+    if !force && state.opened() {
+        let mut s = status::status(store, common_dir, &state)?;
         // Changes are measured against the base; behind the tip (the branch moved
         // after the daemon last saw it), a file edited back to the base's content
         // would look unchanged. Catch up as the daemon would have.
@@ -158,15 +155,8 @@ pub fn check_workspace(
                 if let Some(ws) = open {
                     return ws.sync(store);
                 }
-                let ws = Workspace::open(
-                    store,
-                    common_dir.to_path_buf(),
-                    state_dir.clone(),
-                    admin.clone(),
-                    branch,
-                    None,
-                    Vec::new(),
-                )?;
+                let ws =
+                    Workspace::open(store, common_dir.to_path_buf(), state.clone(), branch, None)?;
                 ws.sync(store)
             };
             catch_up().map_err(|e| {
@@ -175,7 +165,7 @@ pub fn check_workspace(
                      failed ({e:#}); mount it, open it once, or use --force"
                 ))
             })?;
-            s = status::status(store, common_dir, &state_dir)?;
+            s = status::status(store, common_dir, &state)?;
         }
         ignored = s.ignored;
         let note = base_note(branch, &s.base);
@@ -208,14 +198,12 @@ pub fn check_workspace(
 /// counted `ignored` files in it); returns what was done.
 pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Result<String> {
     check_name(branch)?;
-    let id = workspace_id(branch);
-    let state_dir = worktree::state_root(common_dir).join(&id);
-    let admin = worktree::ws_admin_dir(common_dir, &id);
+    let state = StateDir::of(common_dir, branch);
     // The registration first: without it, the state alone is resumed correctly
     // (the registration is recreated); the reverse is not.
-    remove_dir(&admin)?;
-    remove_dir(&state_dir)?;
-    worktree::unpin(common_dir, &worktree::pin_ref(&id))?;
+    remove_dir(&state.admin)?;
+    remove_dir(&state.dir)?;
+    worktree::unpin(common_dir, &worktree::pin_ref(&state.id))?;
     Ok(match ignored {
         0 => format!("removed workspace {branch}"),
         n => format!("removed workspace {branch} (and {n} ignored files in it)"),
@@ -225,9 +213,7 @@ pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Resu
 /// Whether the index of the worktree with admin directory `admin` matches its
 /// HEAD commit.
 fn index_matches_head(admin: &Path) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("--git-dir")
-        .arg(admin)
+    let status = git::cmd::command(admin)
         .args(["diff-index", "--cached", "--quiet", "HEAD", "--"])
         .status()?;
     match status.code() {
