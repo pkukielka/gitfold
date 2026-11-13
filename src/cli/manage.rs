@@ -16,7 +16,7 @@ use crate::fs::workspace::retire::{
     base_note, check_name, check_workspace, removable_workspace, remove_dir,
     remove_snapshot_registration, remove_workspace,
 };
-use crate::fs::workspace::{fork, status};
+use crate::fs::workspace::{fork, reads, status};
 use crate::git;
 use crate::git::worktree::{self, workspace_branch, workspace_id};
 use crate::refusal::Refusal;
@@ -51,6 +51,7 @@ pub fn branch(
     name: &str,
     from: Option<&str>,
     prewarm: Option<Prewarm>,
+    track_reads: Option<bool>,
     with_changes: bool,
 ) -> Result<()> {
     // Mount names starting with `@` are snapshots; such a branch would be
@@ -89,18 +90,14 @@ pub fn branch(
                 fork::copy_stored(&common_dir, &source, dst)
             })
         })?;
-        if let Some(mode) = prewarm {
-            set_prewarm(repo, name, mode)?;
-        }
+        set_branch_settings(repo, name, prewarm, track_reads)?;
         println!("{done}; open it as <mountpoint>/{name}");
         return Ok(());
     }
     let mut args = vec!["branch", "--", name];
     args.extend(from);
     git(repo, &args)?;
-    if let Some(mode) = prewarm {
-        set_prewarm(repo, name, mode)?;
-    }
+    set_branch_settings(repo, name, prewarm, track_reads)?;
     println!("created branch {name}; open it as <mountpoint>/{name}");
     Ok(())
 }
@@ -124,6 +121,48 @@ pub fn prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
         Err(e) => return Err(e.context("set, but not applied to the mount")),
     }
     Ok(())
+}
+
+/// Stores the workspace settings `gitfold branch` was given for `name`.
+fn set_branch_settings(
+    repo: &Path,
+    name: &str,
+    prewarm: Option<Prewarm>,
+    track_reads: Option<bool>,
+) -> Result<()> {
+    if let Some(mode) = prewarm {
+        set_prewarm(repo, name, mode)?;
+    }
+    if let Some(on) = track_reads {
+        set_track_reads(repo, name, on)?;
+    }
+    Ok(())
+}
+
+/// `gitfold track-reads`: stores whether branch `name`'s workspace records
+/// reads, and applies it at once if mounted.
+pub fn track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
+    let common_dir = git::init(repo)?;
+    ensure!(git::branch_exists(name), "no branch {name}");
+    set_track_reads(repo, name, on)?;
+    let request = control::Request::TrackReads {
+        branch: name.to_string(),
+    };
+    match control::request(&common_dir, &request, None) {
+        Ok(Some(done)) => println!("{done}"),
+        Ok(None) => println!("set; applied when {name} opens"),
+        Err(e) if control::is_older_daemon(&e) => {
+            println!("set; the mounted gitfold is older: applied when {name} opens next")
+        }
+        Err(e) => return Err(e.context("set, but not applied to the mount")),
+    }
+    Ok(())
+}
+
+/// Stores whether branch `name`'s workspace records reads, in git config.
+fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
+    let key = format!("branch.{name}.{}", reads::BRANCH_KEY);
+    git(repo, &["config", &key, if on { "true" } else { "false" }])
 }
 
 /// Stores `mode` as branch `name`'s prewarm mode, in git config.
@@ -174,7 +213,7 @@ pub fn changes(repo: &Path, name: &str, nul: bool) -> Result<()> {
 /// `path` as git prints it with `core.quotePath` on (the default): as is,
 /// unless it has a control character, a double quote, a backslash or a byte
 /// above 0x7f; then in double quotes, with C escapes and octal for the rest.
-fn quote(path: &[u8]) -> Vec<u8> {
+pub(super) fn quote(path: &[u8]) -> Vec<u8> {
     let plain = |b: u8| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\';
     if path.iter().all(|&b| plain(b)) {
         return path.to_vec();
@@ -199,13 +238,13 @@ fn quote(path: &[u8]) -> Vec<u8> {
     out
 }
 
-struct Listed {
+pub(super) struct Listed {
     id: String,
-    branch: String,
+    pub(super) branch: String,
     state_dir: PathBuf,
 }
 
-fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
+pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
     let dir = worktree::state_root(common_dir);
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,

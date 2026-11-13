@@ -381,11 +381,19 @@ impl GitFold {
             Ino::GitFile { slot } => Ok(Content::Whole(self.snapshots.get(slot)?.gitfile.clone())),
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {
                 WsNode::GitFile(ws) => Ok(Content::Whole(ws.gitfile.clone())),
-                WsNode::Entry(ws, local) => match ws.read(&self.store, local, offset, size)? {
-                    Read::Upper(data) => Ok(Content::Range(data)),
-                    // Keyed like snapshot files, so the cache is shared with them.
-                    Read::Lower(file_id) => cached(inode::file(file_id), &|| self.blob(file_id)),
-                },
+                WsNode::Entry(ws, local) => {
+                    // The kernel caches contents: this is the first read of it.
+                    if offset == 0 {
+                        ws.note_read(local);
+                    }
+                    match ws.read(&self.store, local, offset, size)? {
+                        Read::Upper(data) => Ok(Content::Range(data)),
+                        // Keyed like snapshot files, so the cache is shared with them.
+                        Read::Lower(file_id) => {
+                            cached(inode::file(file_id), &|| self.blob(file_id))
+                        }
+                    }
+                }
                 _ => Err(Errno::EISDIR),
             },
             _ => Err(Errno::EISDIR),

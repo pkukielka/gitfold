@@ -164,6 +164,76 @@ unmount_fs
 for b in cw cw2; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null; done
 R branch -q -D cw cw2
 
+echo "== overlaps: reads and writes changed elsewhere"
+R branch st1; R branch st2; R branch st3
+check "track-reads needs a branch" fails "$BIN" -C "$REPO" track-reads nope on
+mount_fs
+eq "track-reads on before it opens" "st1 isn't open: applied when it opens" "$("$BIN" -C "$REPO" track-reads st1 on 2>&1)"
+cat "$MNT/st1/a.txt" "$MNT/st1/d/b.txt" >/dev/null
+echo w >>"$MNT/st1/d/c.txt"; echo x >"$MNT/st1/x.txt"; echo nd >"$MNT/st1/nd"
+echo n >"$MNT/st1/n.txt"; G "$MNT/st1" add n.txt; G "$MNT/st1" commit -qm n -- n.txt
+for _ in $(seq 50); do [ "$(cat "$COMMON/gitfold/st1/base")" = "$(R rev-parse st1)" ] && break; sleep 0.1; done
+eq "reads recorded once each, in order (git's read of n.txt too)" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/st1/reads" | sed 's/ $//')"
+echo x >"$MNT/st2/x.txt"; mkdir "$MNT/st2/nd"; echo y >"$MNT/st2/nd/y"
+R switch -q main; echo m >>"$REPO/a.txt"; echo m >>"$REPO/d/c.txt"; echo m >"$REPO/n.txt"; echo m >"$REPO/e.txt"
+R add -A; R commit -qm main-moves
+out=$("$BIN" -C "$REPO" overlaps st1 --against main 2>&1); rc=$?
+eq "against main: a read file, a changed one, a committed one (exit 6)" "6
+R	main	a.txt
+W	main	d/c.txt
+W	main	n.txt" "$rc
+$out"
+eq "the default target: main (no upstream)" "$out" "$("$BIN" -C "$REPO" overlaps st1 2>&1)"
+eq "inside the workspace, it is that one" "$out" "$(cd "$MNT/st1/d" && "$BIN" overlaps 2>&1)"
+R update-ref refs/remotes/origin/main main; R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+R update-ref refs/remotes/origin/st1 st1; R config branch.st1.remote origin; R config branch.st1.merge refs/heads/st1
+eq "the default target: origin/HEAD, not the upstream (its own remote branch)" "W	origin/main	d/c.txt
+W	origin/main	n.txt" "$("$BIN" -C "$REPO" overlaps st1 --writes 2>&1)"
+R update-ref -d refs/remotes/origin/HEAD; R update-ref -d refs/remotes/origin/main; R update-ref -d refs/remotes/origin/st1
+R config --unset branch.st1.remote; R config --unset branch.st1.merge
+R tag st2 main
+eq "--writes" "W	main	d/c.txt
+W	main	n.txt" "$("$BIN" -C "$REPO" overlaps st1 --writes 2>&1)"
+eq "--reads: also a file it wrote" "R	main	a.txt
+R	main	n.txt" "$("$BIN" -C "$REPO" overlaps st1 --reads 2>&1)"
+check "--reads with --writes is a usage error" fails "$BIN" -C "$REPO" overlaps st1 --reads --writes
+eq "against another workspace: its uncommitted changes, a file over its directory (a tag st2 ignored)" "W	st2	nd
+W	st2	x.txt" "$("$BIN" -C "$REPO" overlaps st1 --against st2 2>&1)"
+R tag -d st2 >/dev/null
+out=$("$BIN" -C "$REPO" overlaps st1 --against-workspaces 2>&1)
+eq "--against-workspaces: every other one" "W	st2	nd
+W	st2	x.txt" "$(grep st2 <<<"$out")"
+eq "earlier tests' too (agent/one changed a.txt, which st1 read), not main" "yes no" "$(grep -q 'R	agent/one	a.txt' <<<"$out" && echo yes) $(grep -q main <<<"$out" && echo yes || echo no)"
+eq "both: one line per target" "4" "$("$BIN" -C "$REPO" overlaps st1 --against main --against-workspaces --writes 2>&1 | wc -l)"
+out=$("$BIN" -C "$REPO" overlaps st2 --against main 2>"$T/st.err"); rc=$?
+eq "untracked: writes only, saying so; no overlaps (exit 0)" "0  yes" "$rc $out $(grep -q "reads aren't tracked in st2" "$T/st.err" && echo yes)"
+out=$("$BIN" -C "$REPO" overlaps st2 --reads 2>&1); rc=$?
+eq "untracked with --reads: exit 3" 3 "$rc"
+out=$("$BIN" -C "$REPO" overlaps st1 --against st1 2>&1); rc=$?
+eq "against itself refused" "1 yes" "$rc $(grep -q 'compared with itself' <<<"$out" && echo yes)"
+eq "-z" "W	main	d/c.txt" "$("$BIN" -C "$REPO" overlaps st1 --writes -z 2>&1 | tr '\0' '\n' | head -1)"
+eq "a fork inherits the reads" "R	main	a.txt
+R	main	n.txt" "$("$BIN" -C "$REPO" branch -w --from st1 st1f >/dev/null 2>&1; "$BIN" -C "$REPO" overlaps st1f --reads 2>&1)"
+eq "and the setting" true "$(R config --get branch.st1f.gitfoldTrackReads)"
+eq "track-reads off, applied at once" "stopped recording reads in st1" "$("$BIN" -C "$REPO" track-reads st1 off 2>&1)"
+cat "$MNT/st1/d/c.txt" >/dev/null
+eq "nothing more recorded; what was recorded stays" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/st1/reads" | sed 's/ $//')"
+unmount_fs
+eq "unmounted, the same" "R	main	a.txt
+W	main	d/c.txt
+W	main	n.txt" "$("$BIN" -C "$REPO" overlaps st1 --against main 2>/dev/null)"
+eq "an unknown branch: exit 3" 3 "$("$BIN" -C "$REPO" overlaps nope >/dev/null 2>&1; echo $?)"
+mount_fs --track-reads --prewarm content
+cat "$MNT/st2/a.txt" "$MNT/st1/a.txt" >/dev/null
+eq "the mount's --track-reads: st2 records" "R	main	a.txt" "$("$BIN" -C "$REPO" overlaps st2 --reads 2>&1)"
+eq "a branch's off wins" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/st1/reads" | sed 's/ $//')"
+for _ in $(seq 50); do grep -q 'st2: prewarm content walks as meta' "$LOG" && break; sleep 0.1; done
+check "a tracked workspace's content prewarm walks as meta" grep -q 'st2: prewarm content walks as meta' "$LOG"
+unmount_fs
+for b in st1 st1f st2; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null; done
+R branch -q -D st1 st1f st2 st3
+R reset -q --hard HEAD~1
+
 echo "== remove"
 check "uncommitted changes refused" fails "$BIN" -C "$REPO" remove agent/one
 out=$("$BIN" -C "$REPO" remove agent/one 2>&1); eq "refusal lists the paths" yes "$(grep -q new.txt <<<"$out" && echo yes)"

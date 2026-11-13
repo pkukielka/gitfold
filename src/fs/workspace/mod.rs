@@ -20,6 +20,7 @@
 //! - `markers`: persisted whiteouts and opaque markers.
 //! - `times`: timestamps of files dropped from upper.
 //! - `rebase`: moving the base to the branch tip.
+//! - `reads`: the files read in it (`gitfold overlaps`).
 //! - `status`: a workspace's changes, read from its state directory (for
 //!   `list` and `remove`).
 //! - `write`: mutations and copy-up.
@@ -27,6 +28,7 @@
 pub mod fork;
 mod markers;
 mod nodes;
+pub mod reads;
 mod rebase;
 pub mod retire;
 pub mod status;
@@ -141,6 +143,8 @@ pub struct Workspace {
     /// Paths of upper files written since the last check for ones identical to
     /// the base again (see `rebase`).
     touched: Mutex<HashSet<Vec<u8>>>,
+    /// The files read, if recorded (see `reads`).
+    reads: Mutex<Option<reads::Reads>>,
 }
 
 /// The lower layer and how upper overrides it.
@@ -313,6 +317,7 @@ impl Workspace {
             listings: Mutex::new(HashMap::new()),
             removing: AtomicBool::new(false),
             touched: Mutex::new(HashSet::new()),
+            reads: Mutex::new(None),
         })
     }
 

@@ -29,7 +29,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::workspace::Workspace;
+use super::workspace::{Workspace, reads};
 use crate::daemon::prewarm::{self, Prewarm, Spawned};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
@@ -60,6 +60,8 @@ pub struct Workspaces {
     stat: StatInfo,
     prewarm: Prewarm,
     prewarm_threads: usize,
+    /// Whether workspaces record reads unless their branch says (`reads`).
+    track_reads: bool,
     /// Indexed by slot; (full path below the mount root, entry).
     list: RwLock<Vec<(String, Entry)>>,
     by_path: Mutex<HashMap<String, u32>>,
@@ -85,6 +87,7 @@ impl Workspaces {
         stat: StatInfo,
         prewarm: Prewarm,
         prewarm_threads: usize,
+        track_reads: bool,
     ) -> Self {
         Workspaces {
             common_dir,
@@ -92,6 +95,7 @@ impl Workspaces {
             stat,
             prewarm,
             prewarm_threads,
+            track_reads,
             list: RwLock::new(Vec::new()),
             by_path: Mutex::new(HashMap::new()),
             creating: Mutex::new(()),
@@ -187,8 +191,51 @@ impl Workspaces {
         if self.prewarm == Prewarm::None || self.get_open(branch).is_none() {
             return;
         }
-        let mode = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm);
+        let mode = self.branch_mode(branch);
         prewarm::spawn(self.mount_point.join(branch), mode, self.prewarm_threads);
+    }
+
+    /// The prewarm mode of the workspace of `branch`: its own if set, else the
+    /// mount's. With reads tracked, `content` walks as `meta`: a walk reading
+    /// every file first would leave the agent's reads to the kernel's cache,
+    /// unseen.
+    fn branch_mode(&self, branch: &str) -> Prewarm {
+        match prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm) {
+            Prewarm::Content if self.tracks_reads(branch) => {
+                warn!("workspace {branch}: prewarm content walks as meta while reads are tracked");
+                Prewarm::Meta
+            }
+            mode => mode,
+        }
+    }
+
+    fn tracks_reads(&self, branch: &str) -> bool {
+        reads::tracked(&self.common_dir, branch, self.track_reads)
+    }
+
+    /// `gitfold track-reads`: starts or stops recording reads in the workspace
+    /// of `branch` as its setting (just set) says, if it is open. Says what it
+    /// did.
+    pub fn track_reads_now(&self, branch: &str) -> anyhow::Result<String> {
+        let Some(ws) = self.get_open(branch) else {
+            return Ok(format!("{branch} isn't open: applied when it opens"));
+        };
+        let on = self.tracks_reads(branch);
+        ws.track_reads(on)?;
+        // A content walk running would be recorded as the agent's reads: walked
+        // again as meta (see `branch_mode`).
+        let path = self.mount_point.join(branch);
+        let content = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm)
+            == Prewarm::Content;
+        if on && content && self.prewarm != Prewarm::None && prewarm::stop_under(&path) {
+            prewarm::spawn(path, Prewarm::Meta, self.prewarm_threads);
+        }
+        Ok(match on {
+            // Files already read are cached by the kernel: their next reads
+            // aren't seen.
+            true => format!("recording reads in {branch} from now on"),
+            false => format!("stopped recording reads in {branch}"),
+        })
     }
 
     /// `gitfold prewarm`: walks the workspace of `branch` in its mode (just set)
@@ -199,7 +246,7 @@ impl Workspaces {
         if self.get_open(branch).is_none() {
             return format!("{branch} isn't open: walked when it opens");
         }
-        match prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm) {
+        match self.branch_mode(branch) {
             Prewarm::None => match prewarm::stop_under(&path) {
                 true => format!("stopped walking {}", path.display()),
                 false => format!("{} isn't being walked", path.display()),
@@ -537,6 +584,9 @@ impl Workspaces {
             gitfile,
         )
         .map_err(|e| fail("opening", e))?;
+        if let Err(e) = ws.track_reads(self.tracks_reads(branch)) {
+            warn!("workspace {branch}: not recording reads: {e:#}");
+        }
         let (base, base_tree) = ws.base();
         // Nothing else keeps the base reachable once the branch moves on (amend,
         // rebase, reset): without the ref, `git gc` could prune it.

@@ -28,7 +28,8 @@ use crate::refusal::Refusal;
 
 /// Files of a state directory a fork copies (`upper` is copied as a tree;
 /// `branch` is written for the fork; `tmp` holds only interrupted copy-ups).
-const COPIED: [&str; 3] = ["base", "markers", "times"];
+/// `reads` too: the changes copied were built on those reads.
+const COPIED: [&str; 4] = ["base", "markers", "times", super::reads::READS];
 
 /// The source's git index, copied into the new state directory with the rest
 /// (under the same lock) and moved into the fork's registration.
@@ -128,7 +129,7 @@ pub fn fork(
         let _ = worktree::unpin(common_dir, &to_pin);
         return Err(e);
     }
-    copy_prewarm_mode(common_dir, from, to);
+    copy_settings(common_dir, from, to);
     Ok(match copied {
         true => format!("created branch {to} at {from}, with its uncommitted changes"),
         false => {
@@ -290,16 +291,20 @@ fn mount_of(gitfile: &Path, branch: &str) -> Option<PathBuf> {
     Some(mount)
 }
 
-/// Gives `to` the prewarm mode set for `from`, if any.
-fn copy_prewarm_mode(common_dir: &Path, from: &str, to: &str) {
-    let key = |b: &str| format!("branch.{b}.{BRANCH_KEY}");
-    // Not set: `git config --get` fails.
-    let Ok(mode) = worktree::git_output(common_dir, &["config", "--local", "--get", &key(from)])
-    else {
-        return;
-    };
-    if !mode.trim().is_empty() {
-        let _ = worktree::git(common_dir, &["config", "--local", &key(to), mode.trim()]);
+/// Gives `to` the workspace settings set for `from`, if any: its prewarm mode
+/// and read tracking.
+fn copy_settings(common_dir: &Path, from: &str, to: &str) {
+    for name in [BRANCH_KEY, super::reads::BRANCH_KEY] {
+        let key = |b: &str| format!("branch.{b}.{name}");
+        // Not set: `git config --get` fails.
+        let Ok(value) =
+            worktree::git_output(common_dir, &["config", "--local", "--get", &key(from)])
+        else {
+            continue;
+        };
+        if !value.trim().is_empty() {
+            let _ = worktree::git(common_dir, &["config", "--local", &key(to), value.trim()]);
+        }
     }
 }
 

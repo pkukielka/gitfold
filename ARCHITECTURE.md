@@ -121,6 +121,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
+| `src/fs/workspace/reads.rs` | read tracking: the files read in a workspace, for `gitfold overlaps` |
 | `src/fs/workspace/status.rs` | a workspace's uncommitted changes and ignored files, read from its state directory (for `list` and `remove`) |
 | `src/fs/workspace/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
@@ -140,7 +141,8 @@ Then, per request (`fs/workspace/`):
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
 | `src/daemon/control.rs` | the daemon's control socket (`remove` and `branch --with-changes` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
-| `src/cli/manage.rs` | `branch`, `list`, `changes`, `remove`, `prune` and `prewarm` commands |
+| `src/cli/manage.rs` | `branch`, `list`, `changes`, `remove`, `prune`, `prewarm` and `track-reads` commands |
+| `src/cli/overlaps.rs` | `gitfold overlaps`: what a workspace read or changed that changed elsewhere since |
 | `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/fs/workspace/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
@@ -1025,6 +1027,49 @@ something more; one command keeps the naming and checks in one place); holding
 `creating` across a whole fork (every other workspace's open waited for a copy
 of gigabytes).
 
+### Overlaps: reads seen by the filesystem, writes from stored state
+
+**What:** `gitfold overlaps` compares what a workspace touched with what a target
+changed since the two diverged (`git diff <base>...<target>`, plus a target
+workspace's uncommitted changes). Writes are the workspace's commits since it
+diverged from the target and its stored uncommitted changes. Reads are the one
+thing only the filesystem sees: with tracking on, the daemon appends each
+file's path to `.git/gitfold/<id>/reads` at its first read from offset 0
+(NUL-terminated, once per path; a partial last path, from a crash or an append
+in progress, is dropped). The kernel caches contents, so that read is the only
+one the daemon gets; later reads cost nothing.
+
+**Why:**
+
+- **Off by default, per workspace:** a whole-tree grep records every file, and
+  a first full read of Apache Spark took 6% longer. The mount's
+  `--track-reads` is the default; a branch's `gitfoldTrackReads` wins either
+  way, like its prewarm mode, and `gitfold track-reads` applies it to an open
+  workspace (a control request).
+- **Content prewarm walks as meta** in a tracked workspace: the walk would read
+  every file first, and the agent's reads would come from the kernel's cache,
+  unseen. A per-workspace downgrade, not a refusal of the mount option: a
+  branch can turn tracking off.
+- **One command for reads, writes and other workspaces:** a target that is a
+  workspace brings its uncommitted changes, so comparing two workspaces is
+  `--against <BRANCH>`, and every workspace `--against-workspaces`. A path
+  matches through directories too (one workspace replaced `d` with a file,
+  another changed `d/x`).
+- **An `R` line is dropped where a `W` line names the same path and target**
+  (unless `--reads`): git's own reads of a file the agent wrote (`git add`)
+  would otherwise repeat every `W`. Reads of `.gitignore` and `.gitattributes`
+  are left out: `git status` reads one in every directory it walks.
+- **The default target is `origin/HEAD`** (else `main`), not the branch's
+  upstream: after `git push -u` that is the branch's own remote branch, which
+  its work is ahead of, so nothing would ever overlap. A target that is also a
+  branch is diffed as `refs/heads/<name>` (git would prefer a tag of that
+  name).
+
+**Rejected:** separate commands for stale reads and for workspaces changing the same paths (`stale`, `overlaps`), each a case of this one;
+refusing `--track-reads` with `--prewarm content` (branches can say
+otherwise); line-level conflicts in `overlaps` (`git merge-tree` already says, for
+a merge someone actually asks about).
+
 ## Rejected ideas (index)
 
 | idea | why not | where |
@@ -1054,6 +1099,7 @@ of gigabytes).
 | gitoxide caches | ~1.9 GB, no speedup | [memory](#memory-hygiene) |
 | LRU content cache | no measured benefit | [memory](#memory-hygiene) |
 | Holding `creating` across a fork | every open waited for a copy | [forks](#forks-commands-on-a-workspaces-stored-state) |
+| Read tracking on by default | a whole-tree grep records every file; 6% slower first reads | [overlaps](#overlaps-reads-seen-by-the-filesystem-writes-from-stored-state) |
 
 ## Known limitations
 
