@@ -24,10 +24,13 @@ use anyhow::{Context, Result};
 use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 
+use super::markers::hidden;
 use super::markers::{Markers, PathSet};
-use super::{Lower, ancestors, hidden, join, not_found};
+use super::{ancestors, join};
+use crate::fsutil::not_found;
 use crate::git;
 use crate::state::StateDir;
+use crate::store::Lower;
 use crate::store::{ModeCheck, matches_stored};
 use crate::store::{Store, TreeTable};
 

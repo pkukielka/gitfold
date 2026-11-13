@@ -19,12 +19,12 @@ use anyhow::{Result, bail};
 use gix::ObjectId;
 
 use super::manage::{quote, workspaces};
-use crate::fs::workspace::retire::{base_note, check_name};
-use crate::fs::workspace::status;
 use crate::git;
 use crate::refusal::Refusal;
 use crate::state::StateDir;
 use crate::state::reads;
+use crate::state::retire::{base_note, check_name};
+use crate::state::status;
 use crate::store::Store;
 
 /// Which lines to print.

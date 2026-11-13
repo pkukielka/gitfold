@@ -32,9 +32,6 @@ pub mod fork;
 mod nodes;
 pub mod reads;
 mod rebase;
-pub mod retire;
-pub mod status;
-pub mod task;
 mod write;
 
 use std::collections::{HashMap, HashSet};
@@ -56,6 +53,7 @@ use crate::git;
 use crate::git::worktree;
 use crate::inode;
 use crate::state::markers::{self, Markers, hidden};
+use crate::state::task::TaskDir;
 use crate::state::times::{self, Stamp, Times};
 use crate::state::{self, StateDir, ancestors, join};
 use crate::store::Lower;
@@ -96,7 +94,7 @@ impl Obj {
 pub struct Workspace {
     upper: PathBuf,
     /// The task folder, unless the base tracks a path of its name (`task`).
-    task: Option<task::TaskDir>,
+    task: Option<TaskDir>,
     common_dir: PathBuf,
     state_dir: PathBuf,
     /// The worktree's admin directory (`.git/worktrees/gitfold-ws-<id>`).
@@ -239,7 +237,7 @@ impl Workspace {
         let base_tree = store.load_tree(base.tree)?;
         let upper = state.upper();
         fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
-        let task = task::TaskDir::of(&common_dir, branch);
+        let task = TaskDir::of(&common_dir, branch);
         let shown = String::from_utf8_lossy(&task.name).into_owned();
         let in_upper = upper.join(std::ffi::OsStr::from_bytes(&task.name));
         let task = if store.tree(base_tree).find(&task.name).is_some() {
@@ -545,4 +543,11 @@ impl Workspace {
             Obj::LowerDir => Err(Errno::EINVAL),
         }
     }
+}
+
+/// Brings the stored base of the closed workspace of `branch` up to its branch
+/// tip, as opening it does (`state::retire` checks it then).
+pub fn catch_up(store: &Store, common_dir: &Path, branch: &str) -> Result<()> {
+    let state = StateDir::of(common_dir, branch);
+    Workspace::open(store, common_dir.to_path_buf(), state, branch, None)?.sync(store)
 }

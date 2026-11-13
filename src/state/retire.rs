@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::{Workspace, status};
+use super::status;
 use crate::git::{self, worktree};
 use crate::refusal::Refusal;
 use crate::state::StateDir;
@@ -97,21 +97,23 @@ pub fn remove_workspace(
     common_dir: &Path,
     branch: &str,
     force: bool,
+    catch_up: &dyn Fn() -> Result<()>,
 ) -> Result<String> {
-    let ignored = check_workspace(store, common_dir, branch, force, None)?;
+    let ignored = check_workspace(store, common_dir, branch, force, catch_up)?;
     delete_workspace(common_dir, branch, ignored)
 }
 
 /// Fails if the workspace of `branch` doesn't exist, or (unless `force`) has
 /// uncommitted changes or a git operation in progress; returns how many
-/// ignored files it holds. `open`: the workspace, if the daemon has it open
-/// (its base kept at the branch tip), else it is opened to catch up if needed.
+/// ignored files it holds. `catch_up` brings its stored base up to the branch
+/// tip, if it is behind (`Workspace::sync` of the open workspace, or
+/// `fs::workspace::catch_up` of a closed one).
 pub fn check_workspace(
     store: &Store,
     common_dir: &Path,
     branch: &str,
     force: bool,
-    open: Option<&Workspace>,
+    catch_up: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
     // `..` would point it at the git directory itself.
     check_name(branch)?;
@@ -151,14 +153,6 @@ pub fn check_workspace(
         // would look unchanged. Catch up as the daemon would have.
         let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
         if tip.is_some_and(|tip| tip.id != s.base) {
-            let catch_up = || {
-                if let Some(ws) = open {
-                    return ws.sync(store);
-                }
-                let ws =
-                    Workspace::open(store, common_dir.to_path_buf(), state.clone(), branch, None)?;
-                ws.sync(store)
-            };
             catch_up().map_err(|e| {
                 changes(format!(
                     "workspace {branch}: its base is behind the branch tip and catching up \

@@ -7,8 +7,12 @@
 //! `times`, `reads`, `tmp/`. Its worktree registration (the admin directory,
 //! with its index and HEAD) is `.git/worktrees/gitfold-ws-<id>/`.
 
+pub mod fork;
 pub mod markers;
 pub mod reads;
+pub mod retire;
+pub mod status;
+pub mod task;
 pub mod times;
 
 use std::fs;

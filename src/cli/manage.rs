@@ -11,17 +11,18 @@ use anyhow::{Context, Result, ensure};
 
 use crate::daemon::control;
 use crate::daemon::prewarm::Prewarm;
-use crate::fs::workspace::retire::{
-    base_note, check_name, check_workspace, removable_workspace, remove_dir,
-    remove_snapshot_registration, remove_workspace,
-};
-use crate::fs::workspace::task::TaskDir;
-use crate::fs::workspace::{fork, status};
+use crate::fs::workspace::catch_up;
 use crate::git;
 use crate::git::worktree;
 use crate::refusal::Refusal;
 use crate::settings;
+use crate::state::retire::{
+    base_note, check_name, check_workspace, removable_workspace, remove_dir,
+    remove_snapshot_registration, remove_workspace,
+};
+use crate::state::task::TaskDir;
 use crate::state::{self, StateDir};
+use crate::state::{fork, status};
 use crate::store::Store;
 
 /// Takes the repository's daemon lock exclusively, failing if a gitfold daemon
@@ -435,9 +436,13 @@ fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Resul
         Ok(match check {
             true => removable_workspace(
                 name,
-                check_workspace(&store, common_dir, name, force, None)?,
+                check_workspace(&store, common_dir, name, force, &|| {
+                    catch_up(&store, common_dir, name)
+                })?,
             ),
-            false => remove_workspace(&store, common_dir, name, force)?,
+            false => remove_workspace(&store, common_dir, name, force, &|| {
+                catch_up(&store, common_dir, name)
+            })?,
         })
     })
 }

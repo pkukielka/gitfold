@@ -8,7 +8,8 @@ use std::time::Duration;
 use log::warn;
 
 use super::{Busy, Mark, Workspaces, busy_error};
-use crate::fs::workspace::{Workspace, fork};
+use crate::fs::workspace::Workspace;
+use crate::state::fork;
 
 /// How long unmounting waits for long requests in progress.
 const CLOSE_WAIT: Duration = Duration::from_secs(60);
