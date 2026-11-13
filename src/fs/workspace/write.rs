@@ -300,7 +300,7 @@ impl Workspace {
         parent: u64,
         name: &[u8],
     ) -> Result<Vec<u8>, Errno> {
-        if parent == 0 && name == b".git" {
+        if self.is_virtual(parent, name) {
             return Err(Errno::EPERM);
         }
         let parent_obj = self.resolve_in(store, layers, parent_path)?;
@@ -397,8 +397,8 @@ impl Workspace {
     /// Removes `name` from `parent`: the upper copy if any, plus a whiteout if a
     /// lower entry would otherwise show through.
     fn remove(&self, store: &Store, parent: u64, name: &[u8], dir: bool) -> Result<(), Errno> {
-        if parent == 0 && name == b".git" {
-            return Err(Errno::EPERM); // virtual
+        if self.is_virtual(parent, name) {
+            return Err(Errno::EPERM);
         }
         let mut layers = self.layers.write();
         let path = join(&self.path(parent)?, name);
@@ -584,7 +584,7 @@ impl Workspace {
         new_name: &[u8],
         noreplace: bool,
     ) -> Result<(), Errno> {
-        if new_parent == 0 && new_name == b".git" {
+        if self.is_virtual(parent, name) || self.is_virtual(new_parent, new_name) {
             return Err(Errno::EPERM);
         }
         let mut layers = self.layers.write();

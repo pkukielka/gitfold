@@ -124,6 +124,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/reads.rs` | read tracking: the files read in a workspace, for `gitfold overlaps` |
 | `src/fs/workspace/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes` and `remove`) |
 | `src/fs/workspace/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
+| `src/fs/workspace/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
@@ -1069,6 +1070,38 @@ one the daemon gets; later reads cost nothing.
 refusing `--track-reads` with `--prewarm content` (branches can say
 otherwise); line-level conflicts in `overlaps` (`git merge-tree` already says, for
 a merge someone actually asks about).
+
+### The task folder: a virtual link to plain files
+
+**What:** every workspace root shows a virtual symlink, `.task`
+(`gitfold.taskDir`), to `.git/gitfold/.tasks/<id>/` (`gitfold.tasksDir/<id>/`),
+served like the virtual `.git` file: a reserved local id (`TASKLINK_LOCAL`), no
+node, not removable or renamable.
+
+**Why:**
+
+- **Outside the state directory,** so `remove` and branch deletion keep it:
+  what a task produced besides code (specs, handoffs, notes) is worth more
+  than its scratch files, and a branch of the same name finds it again.
+- **Plain files, not part of the workspace view:** the view is cached by the
+  kernel for a year (it changes only through the mount), so files written
+  straight into the folder, by an orchestrator or in someone's notes, would
+  stay unseen; behind a link they are ordinary files, seen at once, written at
+  disk speed and watchable with inotify. Rebases, copy-up, whiteouts and the
+  status walk never meet them.
+- **Git doesn't follow symlinks:** `git clean -fdx` can't empty the folder
+  (removing the link fails; it warns), and only the link needs an
+  `info/exclude` entry. `git stash --all` fails on the link instead (a
+  known limitation; `git stash -u` doesn't touch ignored files).
+- **Turned off where the base tracks the name, or upper has it:** the link
+  would hide those files; the name is configurable instead.
+
+**Rejected:** a directory inside the workspace view, its paths mapped to the
+folder (the first version): stale under the kernel's caching for files written
+outside the mount, emptied by `git clean -fdx`, and entangled with rebases
+and copy-up; a sandbox allowing writes only below the working directory was
+its argument, but committing already needs writes to `.git`, where the folder
+is by default. Keeping the folder in the state directory (lost with `remove`).
 
 ## Rejected ideas (index)
 

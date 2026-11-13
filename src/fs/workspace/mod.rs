@@ -21,6 +21,7 @@
 //! - `times`: timestamps of files dropped from upper.
 //! - `rebase`: moving the base to the branch tip.
 //! - `reads`: the files read in it (`gitfold overlaps`).
+//! - `task`: the task folder (`.task/`), kept apart from the changes.
 //! - `status`: a workspace's changes, read from its state directory (for
 //!   `list` and `remove`).
 //! - `write`: mutations and copy-up.
@@ -32,6 +33,7 @@ pub mod reads;
 mod rebase;
 pub mod retire;
 pub mod status;
+pub mod task;
 mod times;
 mod write;
 
@@ -60,6 +62,13 @@ use times::{Stamp, Times};
 
 /// `local` of the virtual `.git` file in the workspace root.
 pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
+/// `local` of the virtual symlink to the task folder in the workspace root.
+pub const TASKLINK_LOCAL: u64 = inode::WS_LOCAL_MASK - 1;
+
+/// Whether `local` is a virtual entry of the workspace root, without a node.
+pub fn is_virtual_local(local: u64) -> bool {
+    local == GITFILE_LOCAL || local == TASKLINK_LOCAL
+}
 
 /// The base commit recorded in workspace state directory `state_dir`.
 pub(crate) fn read_base(state_dir: &Path) -> Result<git::Commit> {
@@ -109,6 +118,8 @@ impl Lower {
 
 pub struct Workspace {
     upper: PathBuf,
+    /// The task folder, unless the base tracks a path of its name (`task`).
+    task: Option<task::TaskDir>,
     common_dir: PathBuf,
     state_dir: PathBuf,
     /// The worktree's admin directory (`.git/worktrees/gitfold-ws-<id>`).
@@ -280,6 +291,28 @@ impl Workspace {
         let base_tree = store.load_tree(base.tree)?;
         let upper = state_dir.join("upper");
         fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
+        let task = task::TaskDir::of(&common_dir, branch);
+        let shown = String::from_utf8_lossy(&task.name).into_owned();
+        let in_upper = upper.join(std::ffi::OsStr::from_bytes(&task.name));
+        let task = if store.tree(base_tree).find(&task.name).is_some() {
+            log::warn!(
+                "workspace {branch}: no task folder: its base tracks {shown} (set gitfold.taskDir)"
+            );
+            None
+        } else if fs::symlink_metadata(&in_upper).is_ok() {
+            log::warn!(
+                "workspace {branch}: no task folder: it has a file {shown} (set gitfold.taskDir)"
+            );
+            None
+        } else {
+            match task.prepare(&common_dir) {
+                Ok(()) => Some(task),
+                Err(e) => {
+                    log::warn!("workspace {branch}: no task folder: {e:#}");
+                    None
+                }
+            }
+        };
         if created {
             // For people looking at the state directory; the id is escaped.
             worktree::write_atomic(&state_dir.join("branch"), format!("{branch}\n").as_bytes())?;
@@ -300,6 +333,7 @@ impl Workspace {
             worktree::pin_ref(&state_dir.file_name().unwrap_or_default().to_string_lossy());
         Ok(Workspace {
             upper,
+            task,
             common_dir,
             state_dir,
             admin,
@@ -319,6 +353,22 @@ impl Workspace {
             touched: Mutex::new(HashSet::new()),
             reads: Mutex::new(None),
         })
+    }
+
+    /// Whether `name` in directory `parent` is virtual (`.git`, the task folder's
+    /// link): not created, removed or renamed through the mount.
+    fn is_virtual(&self, parent: u64, name: &[u8]) -> bool {
+        parent == 0 && (name == b".git" || self.task_name() == Some(name))
+    }
+
+    /// The name of the task folder's link in the root, if it has one.
+    pub fn task_name(&self) -> Option<&[u8]> {
+        self.task.as_ref().map(|t| t.name.as_slice())
+    }
+
+    /// The task folder's link target: its directory.
+    pub fn task_target(&self) -> Option<&[u8]> {
+        self.task.as_ref().map(|t| t.dir.as_os_str().as_bytes())
     }
 
     /// The base commit and its tree.

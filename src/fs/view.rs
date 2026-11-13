@@ -10,7 +10,7 @@ use gix::objs::tree::EntryKind;
 use log::error;
 
 use super::GitFold;
-use super::workspace::{GITFILE_LOCAL, Obj, Read, Workspace};
+use super::workspace::{GITFILE_LOCAL, Obj, Read, TASKLINK_LOCAL, Workspace};
 use crate::git;
 use crate::inode::{self, Ino};
 
@@ -23,6 +23,8 @@ pub(super) enum WsNode {
     /// A namespace directory (full path, e.g. `feature`).
     Namespace(String),
     GitFile(Arc<Workspace>),
+    /// The symlink to the task folder, in the workspace root.
+    TaskLink(Arc<Workspace>),
     /// A file or directory; local 0 is the workspace root.
     Entry(Arc<Workspace>, u64),
 }
@@ -125,6 +127,7 @@ impl GitFold {
             (Err(path), 0) => WsNode::Namespace(path),
             (Err(_), _) => return Err(Errno::ENOENT),
             (Ok(ws), GITFILE_LOCAL) => WsNode::GitFile(ws),
+            (Ok(ws), TASKLINK_LOCAL) if ws.task_name().is_some() => WsNode::TaskLink(ws),
             (Ok(ws), local) => WsNode::Entry(ws, local),
         })
     }
@@ -179,6 +182,10 @@ impl GitFold {
                     let size = ws.gitfile.len() as u64;
                     Ok(self.make_attr(ino, FileType::RegularFile, 0o444, size, time))
                 }
+                WsNode::TaskLink(ws) => {
+                    let size = ws.task_target().unwrap_or_default().len() as u64;
+                    Ok(self.make_attr(ino, FileType::Symlink, 0o777, size, time))
+                }
                 WsNode::Entry(ws, local) => {
                     let obj = ws.resolve_local(&self.store, local)?;
                     self.obj_attr(ino, &obj)
@@ -201,7 +208,7 @@ impl GitFold {
     pub(super) fn lookup_attr(&self, parent: INodeNo, name: &[u8]) -> Result<FileAttr, Errno> {
         if let Ino::Ws { slot, local } = decode(parent.0)?
             && let WsNode::Entry(ws, _) = self.ws_node(slot, local)?
-            && !(local == 0 && name == b".git")
+            && !(local == 0 && (name == b".git" || ws.task_name() == Some(name)))
         {
             // The lookup already resolved the entry; `attr` would do it again.
             let (child, obj) = ws.lookup(&self.store, local, name)?;
@@ -227,10 +234,13 @@ impl GitFold {
                     self.resolve_name(&[prefix.as_bytes(), b"/", name].concat())
                 }
                 WsNode::Entry(_, 0) if name == b".git" => Ok(inode::ws(slot, GITFILE_LOCAL)),
+                WsNode::Entry(ws, 0) if ws.task_name() == Some(name) => {
+                    Ok(inode::ws(slot, TASKLINK_LOCAL))
+                }
                 // Workspace entries are looked up (and their nodes claimed) only by
                 // `lookup_attr`.
                 WsNode::Entry(..) => Err(Errno::EIO),
-                WsNode::GitFile(_) => Err(Errno::ENOTDIR),
+                WsNode::GitFile(_) | WsNode::TaskLink(_) => Err(Errno::ENOTDIR),
             },
             _ => Err(Errno::ENOTDIR),
         }
@@ -262,7 +272,7 @@ impl GitFold {
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {
                 WsNode::Namespace(prefix) => self.emit_names(&prefix, dots, offset, emit),
                 WsNode::Entry(ws, _) => self.emit_ws(&ws, slot, local, offset, plus, emit),
-                WsNode::GitFile(_) => Err(Errno::ENOTDIR),
+                WsNode::GitFile(_) | WsNode::TaskLink(_) => Err(Errno::ENOTDIR),
             },
             _ => Err(Errno::ENOTDIR),
         }
@@ -299,11 +309,21 @@ impl GitFold {
             (dot, &b"."[..], self.attr(dot)?),
             (inode::ROOT, &b".."[..], self.attr(inode::ROOT)?),
         ];
-        let gitfile = (local == 0).then(|| inode::ws(slot, GITFILE_LOCAL));
-        let gitfile_attr = gitfile.map(|ino| self.attr(ino)).transpose()?;
+        // The root's virtual entries, after its listing: `.git`, the task link.
+        let mut virtuals = Vec::new();
+        if local == 0 {
+            virtuals.push((inode::ws(slot, GITFILE_LOCAL), b".git".to_vec()));
+            if let Some(name) = ws.task_name() {
+                virtuals.push((inode::ws(slot, TASKLINK_LOCAL), name.to_vec()));
+            }
+        }
+        let virtuals = virtuals
+            .into_iter()
+            .map(|(ino, name)| Ok((ino, name, self.attr(ino)?)))
+            .collect::<Result<Vec<_>, Errno>>()?;
         ws.page(&self.store, local, |page| -> Result<(), Errno> {
             let entries = &page.listing.entries;
-            let total = (dots.len() + entries.len() + usize::from(gitfile.is_some())) as u64;
+            let total = (dots.len() + entries.len() + virtuals.len()) as u64;
             if offset >= total {
                 // The kernel's closing request past the end: it won't page this
                 // listing again. (Dropping it after the last full page would make
@@ -340,8 +360,12 @@ impl GitFold {
                     return full.map(drop);
                 }
             }
-            if let (Some(ino), Some(attr)) = (gitfile, gitfile_attr) {
-                emit(total, ino, b".git", attr);
+            let first = skip.saturating_sub(dots.len() + entries.len());
+            for (k, (ino, name, attr)) in virtuals.iter().enumerate().skip(first) {
+                let i = dots.len() + entries.len() + k;
+                if emit(i as u64 + 1, *ino, name, *attr) {
+                    return Ok(());
+                }
             }
             Ok(())
         })?
@@ -405,6 +429,7 @@ impl GitFold {
         match decode(ino.0)? {
             Ino::File(id) => Ok(self.blob(id)?.to_vec()),
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {
+                WsNode::TaskLink(ws) => Ok(ws.task_target().unwrap_or_default().to_vec()),
                 WsNode::Entry(ws, local) => match ws.readlink(&self.store, local)? {
                     Read::Upper(target) => Ok(target),
                     Read::Lower(file_id) => Ok(self.blob(file_id)?.to_vec()),
@@ -421,7 +446,7 @@ impl GitFold {
         match decode(ino.0)? {
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {
                 WsNode::Entry(ws, local) => Ok((slot, ws, local)),
-                WsNode::GitFile(_) => Err(Errno::EPERM),
+                WsNode::GitFile(_) | WsNode::TaskLink(_) => Err(Errno::EPERM),
                 WsNode::Namespace(_) => Err(Errno::EROFS),
             },
             _ => Err(Errno::EROFS),

@@ -93,6 +93,17 @@ pub fn fork(
             return Err(e.context(format!("copying the workspace of {from}")));
         }
     }
+    // What the task gathered (spec, notes) goes with its changes, copied before
+    // the branch exists: once it does, opening it makes an empty folder.
+    let to_task = super::task::TaskDir::of(common_dir, to);
+    let kept_task = to_task.dir.exists();
+    let task_copied = match to_task.copy_from(&super::task::TaskDir::of(common_dir, from)) {
+        Ok(copied) => copied,
+        Err(e) => {
+            log::warn!("copying the task folder of {from} into {to}: {e:#}");
+            false
+        }
+    };
     let finish = || -> Result<()> {
         // git writes the index itself, not through the mount: a commit during
         // the copy would pair an older index with a newer tip.
@@ -127,14 +138,24 @@ pub fn fork(
         let _ = fs::remove_dir_all(&dst);
         let _ = fs::remove_dir_all(&to_admin);
         let _ = worktree::unpin(common_dir, &to_pin);
+        if task_copied {
+            let _ = fs::remove_dir_all(&to_task.dir);
+        }
         return Err(e);
     }
     copy_settings(common_dir, from, to);
-    Ok(match copied {
+    let done = match copied {
         true => format!("created branch {to} at {from}, with its uncommitted changes"),
         false => {
             format!("created branch {to} at {from} (it had no workspace yet: no changes to copy)")
         }
+    };
+    Ok(match kept_task {
+        true => format!(
+            "{done}; kept the task folder an earlier branch {to} left (not {from}'s): {}",
+            to_task.dir.display()
+        ),
+        false => done,
     })
 }
 

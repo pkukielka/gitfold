@@ -303,6 +303,26 @@ are left out of `R` lines: `git status` reads one in every directory. Without tr
 and says so; `--reads` then fails (exit 3). A fork inherits what its source
 read, and its setting; turning tracking off keeps what was recorded.
 
+**The task folder.** Every workspace has a `.task` link to a directory for
+what belongs to the task but not to its commits: a spec, drafts, notes, a
+handoff, a PR description. The directory is `.git/gitfold/.tasks/<id>/`, plain
+files outside the mount: kept after `gitfold remove` and after the branch is
+deleted (a branch of the same name opened later finds it again), written at
+disk speed, and seen at once whoever writes them, an orchestrator or you
+included. Git doesn't follow the link, so it never sees or cleans what is in
+it (`git clean -fdx` fails to delete the link, warns, and moves on); an entry
+in the repository's `info/exclude`, which every worktree shares, keeps the
+link out of `git status`. `gitfold branch -w` copies the folder with the
+changes; `gitfold list` shows the first line of `.task/status` (what the agent
+says it is doing), and writes in the folder count as activity. The link can't
+be removed or renamed (`EPERM`). Two settings, in the repository's config:
+`gitfold.taskDir` names the link (default `.task`; one name, for a project that
+uses `.task`), and `gitfold.tasksDir` keeps the folders elsewhere, an absolute
+path or `~/...` (say in your notes; then `<dir>/<id>/`). A workspace whose base
+tracks a path of the link's name, or that has one among its changes, has no
+task folder (the daemon logs why). Sandboxed agents need write access to the
+folder's directory: by default inside `.git`, which committing needs anyway.
+
 **Finish.** Push or merge the branch from anywhere, then remove the workspace
 with `gitfold remove <BRANCH>`, mounted or not (see
 [Cleaning up](#cleaning-up) for when it refuses). `gitfold list` shows
@@ -332,7 +352,8 @@ last tip, see above), as real files; `markers` records deleted files so they
 stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress.
-Don't modify `.git/gitfold/` while mounted.
+Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
+can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
 **Limitations.**
 
@@ -355,6 +376,11 @@ Don't modify `.git/gitfold/` while mounted.
   like. Builds cost much less: a full `cargo build` of gitfold takes 15.99 s
   instead of 13.64 s, an incremental one 3.91 s instead of 1.85 s (see
   [Performance](#performance)).
+- `git stash --all` (`-a`, which stashes ignored files too) fails in a
+  workspace: it can't remove the task folder's link (`EPERM`) and leaves the
+  working tree as it was, with a stash `git stash pop` refuses (`.task already
+  exists`). Use `git stash -u`, which leaves ignored files alone; drop such a
+  stash with `git stash drop`. `git clean -fdx` only warns about the link.
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
 

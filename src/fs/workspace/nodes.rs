@@ -15,7 +15,7 @@
 
 use gix::hashtable::hash_table::HashTable;
 
-use super::{GITFILE_LOCAL, join};
+use super::{is_virtual_local, join};
 use crate::inode;
 
 /// Parent of nodes whose path no longer exists.
@@ -118,7 +118,7 @@ impl Nodes {
     /// The path's preferred local id, or the next one not taken (probing).
     fn free_local(&self, path: &[u8]) -> u64 {
         let mut local = inode::path_local(path);
-        while self.get(local).is_some() || local == GITFILE_LOCAL {
+        while self.get(local).is_some() || is_virtual_local(local) {
             local = ((local + 1) & inode::WS_LOCAL_MASK).max(1);
         }
         local
