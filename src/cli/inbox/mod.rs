@@ -26,6 +26,7 @@ use anyhow::{Context, Result};
 
 use crate::git;
 use crate::inotify::{self, Inotify};
+use crate::settings;
 use crate::state::task::{TaskDir, inbox_name};
 use crate::state::workspace_id;
 use message::{Message, json_str, messages, rfc3339, take};
@@ -38,6 +39,15 @@ const PARENT_CHECK: Duration = Duration::from_secs(5);
 pub(super) fn task_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
     git::require_branch(branch)?;
     Ok(TaskDir::of(common_dir, branch).dir)
+}
+
+/// The inbox of `branch`, which must exist as a branch.
+fn inbox_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
+    git::require_branch(branch)?;
+    let local = settings::Local::read(common_dir);
+    Ok(TaskDir::with(&local, common_dir, branch)
+        .dir
+        .join(inbox_name(&local)))
 }
 
 /// `now + secs`, or `None` (no deadline) if that overflows or no time is given.
@@ -95,7 +105,7 @@ pub fn inbox(args: InboxArgs) -> Result<i32> {
 /// a Claude Code hook instead. Returns the exit code.
 fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
     let common_dir = git::init(repo)?;
-    let dir = task_dir(&common_dir, branch)?.join(inbox_name(&common_dir));
+    let dir = inbox_dir(&common_dir, branch)?;
     if args.peek {
         for path in messages(&dir)? {
             let Ok(bytes) = fs::read(&path) else {
@@ -244,7 +254,7 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
         words => words.join(" "),
     };
     let common_dir = git::init(repo)?;
-    let dir = task_dir(&common_dir, &to)?.join(inbox_name(&common_dir));
+    let dir = inbox_dir(&common_dir, &to)?;
     fs::create_dir_all(&dir)?;
     let one_line = |s: &str| s.replace(['\r', '\n'], " ");
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;

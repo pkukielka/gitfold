@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use super::write_path;
 use crate::git;
+use crate::settings;
 use crate::state::retire::{base_note, check_name};
 use crate::state::status;
 use crate::state::task::TaskDir;
@@ -114,6 +115,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
     let store = Store::default();
     let list = state::list(&common_dir)?;
+    let local = settings::Local::read(&common_dir);
     if list.is_empty() {
         println!("no workspaces");
         return Ok(());
@@ -146,7 +148,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             }
             false => String::new(),
         };
-        let task = TaskDir::of(&common_dir, &w.branch);
+        let task = TaskDir::with(&local, &common_dir, &w.branch);
         let last = [
             last_change(&common_dir, &w.branch, &w.state, &s),
             task.newest(),

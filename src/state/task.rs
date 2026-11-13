@@ -20,18 +20,11 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use log::warn;
 
 use crate::fsutil;
 use crate::git;
 use crate::settings;
 use crate::state::{state_root, workspace_id};
-
-/// The folder's name unless `gitfold.taskDir` says otherwise.
-const DEFAULT_NAME: &str = ".task";
-
-/// The inbox's name unless `gitfold.inbox` says otherwise.
-const DEFAULT_INBOX: &str = "inbox";
 
 /// The file whose first line `gitfold list` shows.
 const STATUS: &str = "status";
@@ -48,34 +41,13 @@ impl TaskDir {
     /// The task folder of `branch` in repository `common_dir`, as configured;
     /// a setting that can't be used is warned about and the default used.
     pub fn of(common_dir: &Path, branch: &str) -> TaskDir {
-        let local = settings::Local::read(common_dir);
-        // One name in the workspace root, not one of its special names.
-        let name = match local.repository(settings::TASK_DIR) {
-            Some(name) if !name.contains('/') && ![".", "..", ".git"].contains(&name.as_str()) => {
-                name
-            }
-            Some(name) => {
-                warn!("gitfold.taskDir {name:?} isn't a single name: using {DEFAULT_NAME}");
-                DEFAULT_NAME.to_string()
-            }
-            None => DEFAULT_NAME.to_string(),
-        };
-        let default = || state_root(common_dir).join(".tasks");
-        // Relative paths would depend on each process's current directory.
-        let root = match local
-            .repository(settings::TASKS_DIR)
-            .map(|d| expand_home(&d))
-        {
-            Some(dir) if dir.is_absolute() => dir,
-            Some(dir) => {
-                warn!(
-                    "gitfold.tasksDir {} isn't absolute: using the default",
-                    dir.display()
-                );
-                default()
-            }
-            None => default(),
-        };
+        TaskDir::with(&settings::Local::read(common_dir), common_dir, branch)
+    }
+
+    /// `of`, with the repository's settings already read.
+    pub fn with(local: &settings::Local, common_dir: &Path, branch: &str) -> TaskDir {
+        let name = local.task_dir();
+        let root = (local.tasks_dir()).unwrap_or_else(|| state_root(common_dir).join(".tasks"));
         TaskDir {
             name: name.into_bytes(),
             dir: root.join(workspace_id(branch)),
@@ -153,26 +125,9 @@ impl TaskDir {
     }
 }
 
-/// The name of a task folder's inbox: `gitfold.inbox` if it is one plain name
-/// (not starting with a dot), else `inbox`.
-pub fn inbox_name(common_dir: &Path) -> String {
-    match settings::repository(common_dir, settings::INBOX) {
-        Some(name) if !name.contains('/') && !name.starts_with('.') => name,
-        Some(name) => {
-            warn!("gitfold.inbox {name:?} isn't a plain name: using {DEFAULT_INBOX}");
-            DEFAULT_INBOX.to_string()
-        }
-        None => DEFAULT_INBOX.to_string(),
-    }
-}
-
-fn expand_home(dir: &str) -> PathBuf {
-    let home = || std::env::home_dir().unwrap_or_default();
-    match dir.strip_prefix("~") {
-        Some("") => home(),
-        Some(rest) if rest.starts_with('/') => home().join(&rest[1..]),
-        _ => PathBuf::from(dir),
-    }
+/// The name of a task folder's inbox (see `settings::Local::inbox`).
+pub fn inbox_name(local: &settings::Local) -> String {
+    local.inbox()
 }
 
 #[cfg(test)]
@@ -213,7 +168,7 @@ mod tests {
         let t = TaskDir::of(dir, "agent/x");
         assert_eq!(t.name, b".task");
         assert_eq!(t.dir, dir.join("gitfold/.tasks/agent%2Fx"));
-        assert_eq!(inbox_name(dir), "inbox");
+        assert_eq!(inbox_name(&settings::Local::read(dir)), "inbox");
     }
 
     #[test]
@@ -227,7 +182,7 @@ mod tests {
             (t.name.as_slice(), t.dir.as_path()),
             (&b".notes"[..], Path::new("/srv/tasks/b"))
         );
-        assert_eq!(inbox_name(&dir.0), "mail");
+        assert_eq!(inbox_name(&settings::Local::read(&dir.0)), "mail");
     }
 
     #[test]
@@ -249,7 +204,11 @@ mod tests {
             let t = TaskDir::of(dir, "b");
             assert_eq!(t.name, b".task", "taskDir {task_dir}");
             assert_eq!(t.dir, dir.join("gitfold/.tasks/b"), "tasksDir {tasks_dir}");
-            assert_eq!(inbox_name(dir), "inbox", "inbox {inbox}");
+            assert_eq!(
+                inbox_name(&settings::Local::read(dir)),
+                "inbox",
+                "inbox {inbox}"
+            );
         }
     }
 

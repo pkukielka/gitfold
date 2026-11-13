@@ -92,10 +92,11 @@ pub fn fork(
     }
     // What the task gathered (spec, notes) goes with its changes, copied before
     // the branch exists: once it does, opening it makes an empty folder.
-    let to_task = TaskDir::of(common_dir, to);
+    let local = settings::Local::read(common_dir);
+    let to_task = TaskDir::with(&local, common_dir, to);
     let kept_task = to_task.dir.exists();
-    let inbox = inbox_name(common_dir);
-    let task_copied = match to_task.copy_from(&TaskDir::of(common_dir, from), &inbox) {
+    let from_task = TaskDir::with(&local, common_dir, from);
+    let task_copied = match to_task.copy_from(&from_task, &inbox_name(&local)) {
         Ok(copied) => copied,
         Err(e) => {
             log::warn!("copying the task folder of {from} into {to}: {e:#}");
@@ -141,7 +142,7 @@ pub fn fork(
         }
         return Err(e);
     }
-    settings::copy_branch(common_dir, from, to);
+    settings::copy_branch(&local, common_dir, from, to);
     let done = match copied {
         true => format!("created branch {to} at {from}, with its uncommitted changes"),
         false => {
