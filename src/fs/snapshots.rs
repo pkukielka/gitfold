@@ -258,7 +258,7 @@ impl Snapshots {
             .find(|s| s.commit == commit.id)
             .cloned();
         let snapshot = match existing {
-            Some(s) => Snapshot::clone(&s),
+            Some(s) => (*s).clone(), // a new slot shares its tables
             None => self.create(store, spec, commit, loaded, &path)?,
         };
         let slot = {

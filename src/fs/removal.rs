@@ -147,8 +147,9 @@ impl Removal {
             );
         }
         // Not open: checked while it can't be opened (catching up may write).
-        let closed =
-            (self.workspaces).check_closed(name, || self.check_workspace(name, force, None))?;
+        let closed = self
+            .workspaces
+            .check_closed(name, || self.check_workspace(name, force, None))?;
         let ignored = match closed {
             Some(ignored) => ignored,
             None => {

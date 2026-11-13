@@ -44,8 +44,7 @@ impl ContentCache {
                 let now = activity.load(Ordering::Relaxed);
                 if now == seen && now != trimmed {
                     // Freed after unlocking: reads don't wait on the frees.
-                    let old = std::mem::take(&mut *blobs.lock());
-                    drop(old);
+                    drop(std::mem::take(&mut *blobs.lock()));
                     unsafe { libc::malloc_trim(0) };
                     trimmed = now;
                 }
