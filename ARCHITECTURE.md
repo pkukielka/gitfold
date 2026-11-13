@@ -46,7 +46,7 @@ Non-goals for now: macOS and Windows; applying checkout filters
           |
    fs/view.rs (what an inode is)
       |                  |                   |                 |
-   fs/workspaces.rs   fs/snapshots.rs     store.rs          fs/content.rs
+   fs/workspaces/     fs/snapshots.rs     store.rs          fs/content.rs
    names: branches,   @<rev> registry     shared tree       per-inode
    namespaces            |                tables, file ids  read cache
       |                  |                   |                 |
@@ -114,13 +114,15 @@ Then, per request (`fs/workspace/`):
 | `src/fs/mod.rs` | FUSE adapter: translates requests and owns kernel-facing policy (TTLs, init flags, `ENOSYS` replies) |
 | `src/fs/view.rs` | what an inode is: attributes, lookups, directory listings, content |
 | `src/fs/snapshots.rs` | `@<rev>` registry: creating snapshots, listing them per namespace |
-| `src/fs/workspaces.rs` | name resolution below the root; workspace and namespace registry; opening workspaces |
+| `src/fs/workspaces/mod.rs` | name resolution below the root; workspace and namespace registry; opening workspaces |
+| `src/fs/workspaces/requests.rs` | the daemon's side of `branch --with-changes`: busy marks, the request lock |
 | `src/fs/workspace/mod.rs` | one workspace: merged lower/upper view, lookups, cached listings, reads |
 | `src/fs/workspace/write.rs` | copy-up and mutations |
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/status.rs` | a workspace's uncommitted changes and ignored files, read from its state directory (for `list` and `remove`) |
+| `src/fs/workspace/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
@@ -136,7 +138,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
-| `src/daemon/control.rs` | the daemon's control socket (`remove` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/daemon/control.rs` | the daemon's control socket (`remove` and `branch --with-changes` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
 | `src/cli/manage.rs` | `branch`, `list`, `changes`, `remove`, `prune` and `prewarm` commands |
 | `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
@@ -984,6 +986,45 @@ missing, and a plain
 fork's notes: the store needs every blob's size anyway); a global fetch lock (a
 slow fetch stalled every open, reads included); a total time limit (above).
 
+### Forks: commands on a workspace's stored state
+
+**What:** `gitfold branch --with-changes` (a fork) copies a workspace through
+its state directory (`.git/gitfold/<id>/`: base, upper, markers, times) and its
+registration's index, never through the mount, so it costs what the
+workspace's changes weigh, not its tree. It follows a contract later commands
+on the stored state can share:
+
+- **Unmounted:** the command takes the repository lock (`git::lock`) and works
+  on the state directory itself (`cli::local_or_daemon`).
+- **Mounted:** it sends a control request; each feature has its own verb, so a
+  daemon that doesn't know it refuses it ("older gitfold") instead of
+  guessing. Requests that may take long (`Request::is_long`) are answered on
+  threads of their own, so `stop-prewarm` never waits behind a copy.
+- **In the daemon:** the branches are marked busy (`Workspaces::mark_busy`)
+  while `creating` is held only to decide, so other workspaces open as usual.
+  Readers (a fork's source) share a mark; removals, checks and a fork's target
+  take it exclusively. Opening a branch waits for its readers (up to 30 s,
+  never holding `creating`: a fork reading its source may need it) and is
+  refused (`EBUSY`) while it is marked exclusively; readers arriving back to
+  back can hold an open off until then. Unmount waits for the long requests in
+  progress (`close_requests`, up to 60 s: one stuck in a fetch doesn't keep the
+  daemon alive). An open workspace is copied under its `layers` write lock,
+  which every change through the mount takes (shared or exclusive), so a copy
+  never sees a write half-done; reads of that workspace wait too.
+- **git's own writes** (the index, refs) don't go through the mount: a fork
+  resolves the source's tip before and after its copy and refuses if it moved,
+  and refuses a workspace with a git operation in progress, checked again
+  under the lock (a `git stash` started meanwhile holds `index.lock` while it
+  waits there). With `core.splitIndex`, the shared index files are linked too.
+- **New state** is made in a dot directory (skipped by `list`) and renamed into
+  place, and the fork's branch is created last (`update-ref` with an empty old
+  value): nothing sees it half-made.
+
+**Rejected:** a separate `fork` command (a fork is a branch created with
+something more; one command keeps the naming and checks in one place); holding
+`creating` across a whole fork (every other workspace's open waited for a copy
+of gigabytes).
+
 ## Rejected ideas (index)
 
 | idea | why not | where |
@@ -1012,6 +1053,7 @@ slow fetch stalled every open, reads included); a total time limit (above).
 | Answering searches with `git grep` | silently wrong results, not faster | [prewarm](#prewarm-instead-of-tricks) |
 | gitoxide caches | ~1.9 GB, no speedup | [memory](#memory-hygiene) |
 | LRU content cache | no measured benefit | [memory](#memory-hygiene) |
+| Holding `creating` across a fork | every open waited for a copy | [forks](#forks-commands-on-a-workspaces-stored-state) |
 
 ## Known limitations
 

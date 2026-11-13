@@ -118,8 +118,9 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <BRANCH> [--from <REV>] [--prewarm <MODE>]
+gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>]
                                               # create a branch for a workspace
+                                              # (-w: with a workspace's changes)
 gitfold list                                  # workspaces and their changes
 gitfold changes [<BRANCH>] [-z]               # a workspace's changed paths
 gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
@@ -248,6 +249,18 @@ to the new branch tip. No file changes content, mode or mtime in the process,
 so commands chained after a commit (`git commit && git status`) see the same
 files either way, and committed files, as well as files git rewrote unchanged
 (`stash`, `rebase --abort`), stop taking space in `upper/`.
+
+**Fork.** `gitfold branch -w <BRANCH> [--from <SOURCE>]` (`--with-changes`)
+creates `<BRANCH>` at `<SOURCE>`'s tip with a copy of `<SOURCE>`'s uncommitted
+changes and git index: the new workspace shows the same files and the same `git
+status`, staged changes included, and from then on each changes on its own.
+Without `--from`, the source is the workspace the command runs in. Only the
+changes are copied (with reflinks on btrfs and XFS), so a fork costs what they
+weigh, not the tree: an agent can try several approaches from the same
+half-done state, or hand it to a reviewer. It works mounted or not; a source
+never opened as a workspace gives just the new branch. A source with a git
+operation in progress (a commit, a rebase) is refused, as is one whose branch
+moves during the copy: retry once it is done.
 
 **Finish.** Push or merge the branch from anywhere, then remove the workspace
 with `gitfold remove <BRANCH>`, mounted or not (see

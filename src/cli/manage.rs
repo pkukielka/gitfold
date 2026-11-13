@@ -16,7 +16,7 @@ use crate::fs::workspace::retire::{
     base_note, check_name, check_workspace, removable_workspace, remove_dir,
     remove_snapshot_registration, remove_workspace,
 };
-use crate::fs::workspace::status;
+use crate::fs::workspace::{fork, status};
 use crate::git;
 use crate::git::worktree::{self, workspace_branch, workspace_id};
 use crate::refusal::Refusal;
@@ -46,7 +46,13 @@ fn exclusive(common_dir: &Path) -> Result<crate::git::lock::Lock> {
 }
 
 /// `gitfold branch`: creates a branch to open as a workspace.
-pub fn branch(repo: &Path, name: &str, from: Option<&str>, prewarm: Option<Prewarm>) -> Result<()> {
+pub fn branch(
+    repo: &Path,
+    name: &str,
+    from: Option<&str>,
+    prewarm: Option<Prewarm>,
+    with_changes: bool,
+) -> Result<()> {
     // Mount names starting with `@` are snapshots; such a branch would be
     // unreachable as a workspace.
     ensure!(
@@ -60,6 +66,35 @@ pub fn branch(repo: &Path, name: &str, from: Option<&str>, prewarm: Option<Prewa
         git::branch_exists(name) || !state_dir.exists(),
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
+    if with_changes {
+        // `git branch` checks names itself; `update-ref` would take `HEAD`, and
+        // refuse other bad names only after the copy.
+        let valid = worktree::git_output(&common_dir, &["check-ref-format", "--branch", name]);
+        ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
+        // A workspace to copy: `from`, or the one we are in.
+        let source = super::branch_or_current(from.map(str::to_string), repo).map_err(|_| {
+            anyhow::anyhow!("not in a gitfold workspace: name the source with --from")
+        })?;
+        check_name(&source)?;
+        if !git::branch_exists(&source) {
+            let message = format!("--with-changes copies a branch's workspace: no branch {source}");
+            return Err(Refusal::NotFound.error(message));
+        }
+        let request = control::Request::Fork {
+            from: source.clone(),
+            to: name.to_string(),
+        };
+        let done = super::local_or_daemon(&common_dir, &request, "branch --with-changes", || {
+            fork::fork(&common_dir, &source, name, None, |dst| {
+                fork::copy_stored(&common_dir, &source, dst)
+            })
+        })?;
+        if let Some(mode) = prewarm {
+            set_prewarm(repo, name, mode)?;
+        }
+        println!("{done}; open it as <mountpoint>/{name}");
+        return Ok(());
+    }
     let mut args = vec!["branch", "--", name];
     args.extend(from);
     git(repo, &args)?;

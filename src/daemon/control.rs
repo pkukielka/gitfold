@@ -70,11 +70,19 @@ pub enum Request {
     /// Walk the workspace of `branch` now in its mode (just set), if it is
     /// open; stop walking it if that is `none`.
     Prewarm { branch: String },
+    /// Create branch `to` at `from`'s tip with `from`'s uncommitted changes.
+    Fork { from: String, to: String },
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
 }
 
 impl Request {
+    /// Whether answering may take long (copying or reading a workspace's
+    /// changes): such requests are answered on threads of their own.
+    fn is_long(&self) -> bool {
+        matches!(self, Request::Fork { .. })
+    }
+
     fn encode(&self) -> Vec<u8> {
         match self {
             // `check` as another verb: daemons that don't know it refuse it.
@@ -85,6 +93,7 @@ impl Request {
             Request::StopPrewarm => "stop-prewarm\n".to_string(),
             Request::ResumePrewarm => "resume-prewarm\n".to_string(),
             Request::Prewarm { branch } => format!("prewarm\n{branch}\n"),
+            Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
             Request::Version => "version\n".to_string(),
         }
         .into_bytes()
@@ -102,6 +111,10 @@ impl Request {
             ["resume-prewarm", ""] => Ok(Request::ResumePrewarm),
             ["prewarm", branch, ""] => Ok(Request::Prewarm {
                 branch: branch.to_string(),
+            }),
+            ["fork", from, to, ""] => Ok(Request::Fork {
+                from: from.to_string(),
+                to: to.to_string(),
             }),
             ["version", ""] => Ok(Request::Version),
             _ => bail!(UNKNOWN),
@@ -124,7 +137,8 @@ fn with_path<T>(
 
 /// Sends `request` to the daemon of `common_dir`: `Ok(None)` if no daemon
 /// listens, else its answer, or its refusal as the error. Waits at most
-/// `timeout` for the answer, if given (requests are answered one at a time).
+/// `timeout` for the answer, if given (requests are answered one at a time,
+/// but for long ones: see `Request::is_long`).
 pub fn request(
     common_dir: &Path,
     request: &Request,
@@ -181,9 +195,10 @@ pub fn bind(common_dir: &Path) -> Result<UnixListener> {
 /// `handle`.
 pub fn serve(
     listener: UnixListener,
-    handle: impl Fn(Request) -> Result<String> + Send + 'static,
+    handle: impl Fn(Request) -> Result<String> + Send + Sync + 'static,
 ) -> Result<()> {
     let uid = unsafe { libc::getuid() };
+    let handle = std::sync::Arc::new(handle);
     thread::Builder::new()
         .name("control".into())
         .spawn(move || {
@@ -199,24 +214,25 @@ pub fn serve(
                 }
                 let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
                 let mut bytes = Vec::new();
-                let answer = match stream.read_to_end(&mut bytes) {
-                    Ok(_) => Request::decode(&bytes).and_then(&handle),
+                let request = match stream.read_to_end(&mut bytes) {
+                    Ok(_) => Request::decode(&bytes),
                     Err(e) => Err(e.into()),
                 };
-                let reply = match answer {
-                    Ok(message) => {
-                        debug!("control: {message}");
-                        format!("ok\n{message}")
+                match request {
+                    // On a thread of its own, so the requests that must not
+                    // wait (`stop-prewarm`) don't wait behind it.
+                    Ok(request) if request.is_long() => {
+                        let handle = handle.clone();
+                        let spawned = thread::Builder::new()
+                            .name("control request".into())
+                            .spawn(move || reply(&mut stream, handle(request)));
+                        if let Err(e) = spawned {
+                            warn!("control socket: no thread for a request: {e}");
+                        }
                     }
-                    // The kind of a refusal on a line of its own, last, so the
-                    // message stays readable for clients that don't know it.
-                    Err(e) => match Refusal::of(&e) {
-                        Some(refusal) => format!("error\n{e:#}{REFUSAL}{}", refusal.name()),
-                        None => format!("error\n{e:#}"),
-                    },
-                };
-                // The client may have gone (Ctrl-C); nothing to do then.
-                let _ = stream.write_all(reply.as_bytes());
+                    Ok(request) => reply(&mut stream, handle(request)),
+                    Err(e) => reply(&mut stream, Err(e)),
+                }
             }
         })?;
     Ok(())
@@ -236,4 +252,22 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
         )
     };
     (r == 0).then_some(cred.uid)
+}
+
+/// Sends `answer` to the client on `stream`: `ok` or `error`, a newline, the message.
+fn reply(stream: &mut UnixStream, answer: Result<String>) {
+    let reply = match answer {
+        Ok(message) => {
+            debug!("control: {message}");
+            format!("ok\n{message}")
+        }
+        // The kind of a refusal on a line of its own, last, so the message stays
+        // readable for clients that don't know it.
+        Err(e) => match Refusal::of(&e) {
+            Some(refusal) => format!("error\n{e:#}{REFUSAL}{}", refusal.name()),
+            None => format!("error\n{e:#}"),
+        },
+    };
+    // The client may have gone (Ctrl-C); nothing to do then.
+    let _ = stream.write_all(reply.as_bytes());
 }

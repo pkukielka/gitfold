@@ -26,3 +26,27 @@ pub fn branch_or_current(branch: Option<String>, repo: &Path) -> Result<String> 
         _ => bail!("not in a gitfold workspace: name the branch"),
     }
 }
+
+/// Runs `local` under the repository lock if no daemon holds it (unmounted),
+/// else sends `request` (named `what` in errors) to the daemon, which does the
+/// same while mounted. See ARCHITECTURE.md, "Commands on a workspace's stored
+/// state".
+pub fn local_or_daemon(
+    common_dir: &Path,
+    request: &crate::daemon::control::Request,
+    what: &str,
+    local: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    match crate::git::lock::lock(common_dir)? {
+        Some(_lock) => local(),
+        None => match crate::daemon::control::request(common_dir, request, None)? {
+            Some(done) => Ok(done),
+            None => Err(crate::refusal::Refusal::InUse.error(format!(
+                "{} is locked by another gitfold command, or by a gitfold daemon that doesn't \
+                 take {what} requests (an older gitfold, or one starting or exiting); retry, \
+                 or remount it",
+                common_dir.display()
+            ))),
+        },
+    }
+}

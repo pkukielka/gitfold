@@ -219,8 +219,10 @@ impl Filesystem for GitFold {
     }
 
     fn destroy(&mut self) {
-        // Waits for a removal in progress.
+        // Waits for a removal, and the long requests (copying a workspace), in
+        // progress.
         *self.removals_closed.lock() = true;
+        self.workspaces.close_requests();
         self.workspaces.sync_all(&self.store);
         self.counters.log(self.store.stats());
     }
