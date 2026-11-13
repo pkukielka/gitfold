@@ -247,3 +247,13 @@ pub fn excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
         )),
     }
 }
+
+/// The repository `start` is in, found as git finds it (upwards from `start`;
+/// in a linked worktree, a gitfold workspace included, its git directory),
+/// for `git::init`.
+pub fn discover(start: &Path) -> Result<PathBuf> {
+    let shown = std::path::absolute(start).unwrap_or_else(|_| start.to_path_buf());
+    let (path, _trust) = gix::discover::upwards(&shown)
+        .with_context(|| format!("no git repository at or above {}", shown.display()))?;
+    Ok(path.into_repository_and_work_tree_directories().0)
+}

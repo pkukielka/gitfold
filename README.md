@@ -55,7 +55,7 @@ build.
 
    ```
    cd ~/mnt/repo/@HEAD~5                       # any revision, read-only
-   gitfold branch ~/src/monorepo my-task       # create a branch...
+   gitfold branch my-task --from main          # create a branch...
    cd ~/mnt/repo/my-task                       # ...and work in it
    echo fix >> README.md
    git commit -am "Fix" && git push -u origin HEAD
@@ -66,8 +66,8 @@ build.
    (both from outside the mount):
 
    ```
-   cd ~
-   gitfold remove ~/src/monorepo my-task
+   cd ~/src/monorepo
+   gitfold remove my-task
    gitfold unmount ~/mnt/repo
    ```
 
@@ -118,16 +118,19 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <REPO> <NAME> [--from <REV>] [--prewarm <MODE>]
+gitfold branch <BRANCH> [--from <REV>] [--prewarm <MODE>]
                                               # create a branch for a workspace
-gitfold list <REPO>                           # workspaces and their changes
-gitfold remove <REPO> <NAME> [--force] [--check] [--wait <SECS>]
-                                              # delete a workspace, or @<rev>
-gitfold prune <REPO>                          # delete snapshot registrations
-gitfold prewarm <REPO> <NAME> <MODE>          # a workspace's prewarm mode
+gitfold list                                  # workspaces and their changes
+gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
+                                              # delete a workspace, or a snapshot's
+gitfold prune                                 # delete snapshot registrations
+gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
 ```
 
-`<REPO>` is the repository's top-level work tree or its git directory (not a
+Commands other than `mount` work on the repository the current directory is
+in, as git does (a workspace under the mount included). `-C <PATH>` runs any
+command as if started in `<PATH>`, as `git -C` does. For `mount`, `<REPO>` is
+the repository's top-level work tree or its git directory (not a
 subdirectory). `<MOUNTPOINT>` must be an existing directory you own; use an
 empty one, since its contents are hidden while mounted. A repository can be
 mounted only once at a time (a second `gitfold mount` of it fails): two mounts
@@ -169,15 +172,15 @@ Options:
 | `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |
 
 A workspace can have its own prewarm mode, kept across remounts in the branch's
-git config: `gitfold branch <REPO> <NAME> --prewarm none`, or `git config
-branch.<NAME>.gitfoldPrewarm none` for an existing branch (read from the
+git config: `gitfold branch <BRANCH> --prewarm none`, or `git config
+branch.<BRANCH>.gitfoldPrewarm none` for an existing branch (read from the
 repository's own config file, where `git config` writes it, when the workspace
 opens; `--prewarm none` for the whole mount still wins). `gitfold prewarm
-<REPO> <NAME> none|meta|content` sets it and, while mounted, applies it at
+<BRANCH> none|meta|content` sets it and, while mounted, applies it at
 once: an open workspace is walked now (a read-only session turning into a
 coding one), or its walk stopped (`none`). `none` suits workspaces an agent
-only reads a few files in: a walk of a 1.4M-file tree costs about 1.26M FUSE
-requests and 100 CPU-seconds of the daemon.
+only reads a few files in: a walk of a tree of over a million files costs over
+a million FUSE requests and more than a minute of the daemon's CPU.
 
 ### Snapshots
 
@@ -206,7 +209,8 @@ first `rg` takes about 0.5 s instead of 2.9 s.
 open it:
 
 ```
-gitfold branch ~/src/monorepo agent/task-17 --from origin/main
+cd ~/src/monorepo
+gitfold branch agent/task-17 --from origin/main
 cd ~/mnt/repo/agent/task-17
 ```
 
@@ -245,8 +249,8 @@ files either way, and committed files, as well as files git rewrote unchanged
 (`stash`, `rebase --abort`), stop taking space in `upper/`.
 
 **Finish.** Push or merge the branch from anywhere, then remove the workspace
-with `gitfold remove <REPO> <BRANCH>`, mounted or not (see
-[Cleaning up](#cleaning-up) for when it refuses). `gitfold list <REPO>` shows
+with `gitfold remove <BRANCH>`, mounted or not (see
+[Cleaning up](#cleaning-up) for when it refuses). `gitfold list` shows
 how many files each workspace has changed and deleted, and how many ignored
 files (build output) it holds, with a note if its branch was deleted or its
 base is behind the branch tip (mount once to update it). Until it is removed,
@@ -369,11 +373,11 @@ So do a workspace's base following a branch that moved, and the checks of
     or other workspaces.
   - Kernel caches are reclaimable; if evicted, the next access is just slower.
   - On large trees, reclaim is what makes workspaces go cold. Reported from a
-    1.4M-file monorepo: each workspace held about 2 GB of kernel cache. Under
-    ten concurrent full-tree `git status` runs, free memory (`MemFree`) fell
-    below the kernel's low watermark while `MemAvailable` still showed about 89
-    GB, and reclaim dropped about 17 million cached directory entries, which
-    git then looked up again. That is the kernel's ordinary memory reclaim, not
+    monorepo of over a million files: each workspace held a couple of GB of
+    kernel cache. Under ten concurrent full-tree `git status` runs, free memory
+    (`MemFree`) fell below the kernel's low watermark while `MemAvailable` still
+    showed tens of GB, and reclaim dropped millions of cached directory entries,
+    which git then looked up again. That is the kernel's ordinary memory reclaim, not
     gitfold; size RAM for the workspaces in use at once.
 
 ### With coding agents
@@ -386,7 +390,7 @@ So do a workspace's base following a branch that moved, and the checks of
     --porcelain --untracked-files=normal --ignore-submodules=dirty`, with
     fsmonitor and hooks off, killed after about 2 s
     ([anthropics/claude-code#97752](https://github.com/anthropics/claude-code/issues/97752)):
-    about 9 per 8-command session, seconds each on a 1.4M-file tree. No
+    about 9 per 8-command session, seconds each on a tree of over a million files. No
     Claude Code setting controls it (`CLAUDE_CODE_BASH_EDIT_DIFF=0`
     doesn't). It has no `--ignored`, so git's untracked cache can serve it:
     run `git config core.untrackedCache true` once in the repository (the
@@ -417,14 +421,14 @@ So do a workspace's base following a branch that moved, and the checks of
 Worktree registrations are locked, so `git worktree prune` keeps them while
 unmounted; later mounts reuse them.
 
-- `gitfold prune <REPO>` deletes the snapshot registrations; snapshots are
+- `gitfold prune` deletes the snapshot registrations; snapshots are
   registered again when opened. It refuses while the repository is mounted.
-- `gitfold remove <REPO> @<rev>` deletes one snapshot's registration
+- `gitfold remove @<rev>` deletes one snapshot's registration
   (unmounted: of what `<rev>` names now). While mounted it also closes the
   snapshot (it leaves the mount root; opening it again registers it again), and
   keeps the registration while another open name (`@main` and `@<its hash>`)
   shows the same commit.
-- `gitfold remove <REPO> <BRANCH>` deletes a workspace: its registration, its
+- `gitfold remove <BRANCH>` deletes a workspace: its registration, its
   stored changes and its base ref. Its commits stay on the branch. It refuses if
   the workspace has uncommitted or staged changes (it lists them), or a git
   operation is in progress or stopped half-way in it (a merge with conflicts,

@@ -80,6 +80,7 @@ pub fn prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
     };
     match control::request(&common_dir, &request, None) {
         Ok(Some(done)) => println!("{done}"),
+        Ok(None) if mode == Prewarm::None => println!("set; {name} isn't walked"),
         Ok(None) => println!("set; {name} is walked when opened"),
         Err(e) if control::is_older_daemon(&e) => {
             println!("set; the mounted gitfold is older: {name} is walked when it opens next")

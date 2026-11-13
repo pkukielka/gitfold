@@ -789,7 +789,7 @@ it likes, and gitfold avoids every request it can:
   skips only read-only mounts, so `noatime` doesn't help). A cold directory
   therefore costs at least 2 READDIRPLUS requests (the second finds the end of
   the listing) and 1 GETATTR, which, dropped from the walker, only moves to the
-  first `git status` (reported from a 1.4M-file monorepo). The kernel's faster
+  first `git status` (reported from a monorepo of over a million files). The kernel's faster
   paths are out of reach: FUSE passthrough needs `CAP_SYS_ADMIN` (`EPERM`
   otherwise) and FUSE-over-io_uring is off by default (`enable_uring=N`), so
   cutting the number of requests is the lever.
@@ -820,8 +820,8 @@ socket), then stops any left below the mount point. At most `--prewarm-walks`
 (2) walks run at once, the others queue: ten agents opening workspaces at once
 started ten walks of half the CPUs each. Each walk uses 4 threads by default
 (`--prewarm-threads`): its requests are served by the daemon, where more only
-queue (reported: 16 µs per request with up to 4 in flight, 87-214 µs with
-8-16). A walk already running or queued for the same path isn't added; a
+queue (reported: under 20 µs per request with up to 4 in flight, several times
+that with 8-16). A walk already running or queued for the same path isn't added; a
 removal drops its queued walk (and restarts it if refused); stopping for an
 unmount stops every walk and starts none until the unmount, keeping them and
 those of what opens meanwhile; if it fails, `gitfold unmount` lets them start
@@ -833,7 +833,7 @@ walker killed from outside with SIGTERM (what `gitfold unmount` sends, for
 daemons without the request) only drops the queue. A workspace's own mode, if
 set (`branch.<name>.gitfoldPrewarm`, git config, so it stays with the branch),
 overrides `--prewarm`, except `--prewarm none`, which turns prewarm off for the
-whole mount. `gitfold prewarm <repo> <name> <mode>` sets it and asks the daemon
+whole mount. `gitfold prewarm <branch> <mode>` sets it and asks the daemon
 (control socket) to apply it to the workspace if open: walk it now, or stop its
 walk. `meta` (default) lists every directory and stats it afterwards
 (see the read-write mount note under
@@ -880,7 +880,7 @@ gets the speed with no correctness risk.
   once, at open (by default the packs on disk then, plus 10%, at least 32), and
   never grows it. On a mount that lived through days of fetches and repacks,
   lookups of objects in new packs then failed with "too few index slots"
-  (reported from a monorepo: 52 slots, 79 needed) until a remount. gitfold
+  (reported from a monorepo, after its pack count had grown by half) until a remount. gitfold
   opens it with at least 16,384 slots (~110 bytes each, ~2 MB; slots of
   deleted packs are reused).
   Two open gitoxide issues in the same area, reported from the monorepo and not
@@ -912,9 +912,10 @@ doesn't hold up other opens; a failed open leaves no state. Fetches take a lock
 per root tree: opens of the same commit wait for one fetch, others fetch in
 parallel.
 
-**Why** (from a fork running it on a 1.4M-file `blob:none` monorepo for weeks,
-reported): without it a workspace on a fetched branch failed to open (`EIO`),
-as did `remove` of it; 13% of the head tree's blobs were missing, and a plain
+**Why** (from a fork running it for weeks on a `blob:none` monorepo of over a
+million files, reported): without it a workspace on a fetched branch failed to
+open (`EIO`), as did `remove` of it; over a tenth of the head tree's blobs were
+missing, and a plain
 `git fetch` of a branch brought none of its changed files' blobs.
 
 - **The fetch is git's own lazy fetch** (promisor-remote.c): `git -c
