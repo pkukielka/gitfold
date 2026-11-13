@@ -312,9 +312,15 @@ impl Workspace {
         };
         if created {
             // For people looking at the state directory; the id is escaped.
-            worktree::write_atomic(&state_dir.join("branch"), format!("{branch}\n").as_bytes())?;
+            crate::fsutil::write_atomic(
+                &state_dir.join("branch"),
+                format!("{branch}\n").as_bytes(),
+            )?;
             // Written last and atomically: its presence means "workspace exists".
-            worktree::write_atomic(&state_dir.join("base"), format!("{}\n", base.id).as_bytes())?;
+            crate::fsutil::write_atomic(
+                &state_dir.join("base"),
+                format!("{}\n", base.id).as_bytes(),
+            )?;
         }
         let layers = Layers {
             base: base.id,

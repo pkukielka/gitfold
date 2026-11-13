@@ -129,8 +129,14 @@ impl TaskDir {
             self.dir.file_name().unwrap_or_default().to_string_lossy()
         ));
         let _ = fs::remove_dir_all(&tmp);
-        let copied =
-            copy_tree(&from.dir, &tmp, Some(inbox)).and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
+        // Dot names: files being written or taken; the inbox stays with `from`.
+        let skip = |rel: &Path| {
+            rel.file_name()
+                .is_some_and(|n| n.as_bytes().starts_with(b"."))
+                || rel == Path::new(inbox)
+        };
+        let copied = crate::fsutil::copy_tree(&from.dir, &tmp, &skip)
+            .and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
         if copied.is_err() {
             let _ = fs::remove_dir_all(&tmp);
         }
@@ -189,31 +195,6 @@ fn exclude(common_dir: &Path, name: &[u8]) -> Result<()> {
         .append(true)
         .open(&path)?;
     file.write_all(&add)?;
-    Ok(())
-}
-
-/// Copies directory `src` to new directory `dst`, files, symlinks and
-/// directories, with their modes.
-/// Leaves out names starting with a dot, and `skip` in `src` itself.
-fn copy_tree(src: &Path, dst: &Path, skip: Option<&str>) -> Result<()> {
-    fs::create_dir(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name.as_bytes().starts_with(b".") || skip.is_some_and(|s| name == s) {
-            continue;
-        }
-        let (from, to) = (entry.path(), dst.join(&name));
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&from, &to, None)?;
-        } else if kind.is_symlink() {
-            std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
-        } else {
-            fs::copy(&from, &to).with_context(|| format!("copying {}", from.display()))?;
-        }
-    }
-    fs::set_permissions(dst, fs::metadata(src)?.permissions())?;
     Ok(())
 }
 

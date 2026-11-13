@@ -10,8 +10,6 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use crate::git::worktree;
-
 #[derive(Clone, Copy)]
 pub(super) enum Kind {
     Whiteout,
@@ -94,7 +92,7 @@ impl Markers {
                 data.push(0);
             }
         }
-        worktree::write_atomic(&self.path, &data)?;
+        crate::fsutil::write_atomic(&self.path, &data)?;
         self.log = OpenOptions::new().append(true).open(&self.path)?;
         self.appended = 0;
         Ok(())

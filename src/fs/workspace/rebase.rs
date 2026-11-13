@@ -321,7 +321,7 @@ impl Workspace {
             }
         }
         layers.times.save()?;
-        worktree::write_atomic(
+        crate::fsutil::write_atomic(
             &self.state_dir.join("base"),
             format!("{}\n", new.id).as_bytes(),
         )?;

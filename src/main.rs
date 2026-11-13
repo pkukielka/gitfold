@@ -2,6 +2,7 @@ mod bench;
 mod cli;
 mod daemon;
 mod fs;
+mod fsutil;
 mod git;
 mod inode;
 mod refusal;

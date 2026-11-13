@@ -59,7 +59,7 @@ pub fn register_branch(
     index: impl FnOnce() -> Vec<u8>,
 ) -> Result<()> {
     if dir.join("HEAD").exists() && dir.join("index").exists() {
-        write_atomic(
+        crate::fsutil::write_atomic(
             &dir.join("gitdir"),
             format!("{}\n", gitfile.display()).as_bytes(),
         )?;
@@ -80,27 +80,16 @@ pub fn register_branch(
 /// without an index.
 fn write_admin(dir: &Path, gitfile: &Path, index: &[u8], head: &str) -> Result<()> {
     fs::create_dir_all(dir)?;
-    write_atomic(&dir.join("commondir"), b"../..\n")?;
-    write_atomic(
+    crate::fsutil::write_atomic(&dir.join("commondir"), b"../..\n")?;
+    crate::fsutil::write_atomic(
         &dir.join("gitdir"),
         format!("{}\n", gitfile.display()).as_bytes(),
     )?;
     // Keeps `git worktree prune` from deleting the entry while unmounted.
-    write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
-    write_atomic(&dir.join("index"), index)?;
-    write_atomic(&dir.join("HEAD"), head.as_bytes())?;
+    crate::fsutil::write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
+    crate::fsutil::write_atomic(&dir.join("index"), index)?;
+    crate::fsutil::write_atomic(&dir.join("HEAD"), head.as_bytes())?;
     Ok(())
-}
-
-/// Replaces `path` with `data` atomically (via `<path>.gitfold-tmp`).
-pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("gitfold-tmp");
-    let mut file = fs::File::create(&tmp)?;
-    std::io::Write::write_all(&mut file, data)?;
-    // Synced before the rename, so a power loss leaves the old file or the new
-    // one, never an empty one.
-    file.sync_all()?;
-    fs::rename(&tmp, path)
 }
 
 /// Keeps `commit` reachable for `git gc` with ref `name` (a workspace's base is

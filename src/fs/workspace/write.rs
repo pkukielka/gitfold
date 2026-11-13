@@ -13,7 +13,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::SystemTime;
 
 use fuser::Errno;
 use gix::objs::tree::EntryKind;
@@ -47,34 +47,6 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn cstring(path: &Path) -> io::Result<CString> {
     CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput.into())
-}
-
-/// Sets the atime and mtime of `path` (not following a symlink); `None` leaves one.
-fn set_times(path: &Path, atime: Option<SystemTime>, mtime: Option<SystemTime>) -> io::Result<()> {
-    let times = [timespec(atime), timespec(mtime)];
-    let path =
-        CString::new(path.as_os_str().as_bytes()).map_err(|_| io::ErrorKind::InvalidInput)?;
-    let flags = libc::AT_SYMLINK_NOFOLLOW;
-    if unsafe { libc::utimensat(libc::AT_FDCWD, path.as_ptr(), times.as_ptr(), flags) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn timespec(t: Option<SystemTime>) -> libc::timespec {
-    match t {
-        Some(t) => {
-            let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-            libc::timespec {
-                tv_sec: d.as_secs() as libc::time_t,
-                tv_nsec: d.subsec_nanos() as _,
-            }
-        }
-        None => libc::timespec {
-            tv_sec: 0,
-            tv_nsec: libc::UTIME_OMIT,
-        },
-    }
 }
 
 impl Workspace {
@@ -206,7 +178,7 @@ impl Workspace {
                 fs::set_permissions(&tmp, fs::Permissions::from_mode(rec.perm().into()))?;
             }
             if let Some(time) = time {
-                set_times(&tmp, Some(time), Some(time))?;
+                crate::fsutil::set_times(&tmp, Some(time), Some(time))?;
             }
             fs::rename(&tmp, &target)
         })();
@@ -286,7 +258,7 @@ impl Workspace {
             fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))?;
         }
         if atime.is_some() || mtime.is_some() {
-            set_times(&target, atime, mtime)?;
+            crate::fsutil::set_times(&target, atime, mtime)?;
         }
         Ok(())
     }

@@ -15,10 +15,9 @@
 
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use super::{Workspace, read_base};
 use crate::git;
@@ -80,7 +79,7 @@ pub fn fork(
             fs::remove_dir_all(&tmp)?;
         }
         let made = copy(&tmp).and_then(|()| {
-            worktree::write_atomic(&tmp.join("branch"), format!("{to}\n").as_bytes())?;
+            crate::fsutil::write_atomic(&tmp.join("branch"), format!("{to}\n").as_bytes())?;
             fs::rename(&tmp, &dst)?;
             Ok(())
         });
@@ -181,75 +180,7 @@ pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &Path, dst: &Path) -
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).context("copying the git index"),
     }
-    copy_tree(&src.join("upper"), &dst.join("upper"))
-}
-
-/// Copies the tree at `src` (a directory, if it exists) to `dst`, keeping
-/// modes and modification times of files, symlinks and directories.
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
-    let meta = match fs::symlink_metadata(src) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", src.display())),
-    };
-    fs::create_dir(dst).with_context(|| format!("creating {}", dst.display()))?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let (from, to) = (entry.path(), dst.join(entry.file_name()));
-        let kind = entry.file_type()?;
-        if kind.is_dir() {
-            copy_tree(&from, &to)?;
-        } else if kind.is_symlink() {
-            symlink(fs::read_link(&from)?, &to)?;
-            set_times(&to, &entry.metadata()?)?;
-        } else if kind.is_file() {
-            let meta = entry.metadata()?;
-            copy_file(&from, &to, &meta).with_context(|| format!("copying {}", from.display()))?;
-            set_times(&to, &meta)?;
-        } else {
-            bail!("{}: not a file, symlink or directory", from.display());
-        }
-    }
-    fs::set_permissions(dst, meta.permissions())?;
-    set_times(dst, &meta)
-}
-
-/// Copies file `from` (with metadata `meta`) to `to`, with its mode. A file its
-/// owner can't read (the mount allows it, see `open_upper`) is read with the
-/// owner's read bit set meanwhile.
-fn copy_file(from: &Path, to: &Path, meta: &fs::Metadata) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = meta.permissions().mode();
-    if mode & 0o400 != 0 {
-        return fs::copy(from, to).map(drop);
-    }
-    fs::set_permissions(from, fs::Permissions::from_mode(mode | 0o400))?;
-    let copied = fs::copy(from, to);
-    fs::set_permissions(from, fs::Permissions::from_mode(mode))?;
-    copied?;
-    fs::set_permissions(to, fs::Permissions::from_mode(mode))
-}
-
-/// Sets `path`'s access and modification times (not following a symlink) to
-/// `meta`'s.
-fn set_times(path: &Path, meta: &fs::Metadata) -> Result<()> {
-    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
-    let times = [
-        libc::timespec {
-            tv_sec: meta.atime(),
-            tv_nsec: meta.atime_nsec(),
-        },
-        libc::timespec {
-            tv_sec: meta.mtime(),
-            tv_nsec: meta.mtime_nsec(),
-        },
-    ];
-    let flags = libc::AT_SYMLINK_NOFOLLOW;
-    if unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), flags) } != 0 {
-        return Err(std::io::Error::last_os_error())
-            .with_context(|| format!("setting the times of {}", path.display()));
-    }
-    Ok(())
+    crate::fsutil::copy_tree(&src.join("upper"), &dst.join("upper"), &|_| false)
 }
 
 /// Registers the fork's worktree at `to_admin` with the source's index copied
