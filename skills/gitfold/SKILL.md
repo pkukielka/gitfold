@@ -59,6 +59,22 @@ Read-only: writes fail with `EACCES` or `EROFS`, as do `checkout`, `reset
 Don't commit in one: commits move its HEAD away from its files. To change
 something, create a branch and work in its workspace.
 
+## The task folder
+
+Every workspace has a `.task` folder (a link to plain files outside the
+workspace) that git doesn't see, can't clean, and that outlives the workspace
+and its branch. Keep there what belongs to the task but not to its commits:
+
+- `spec.md`: what to build (an orchestrator can write it before you start);
+- `status`: one line on what you are doing now; `gitfold list` shows it;
+- `notes/`, drafts, design sketches, findings worth keeping;
+- `handoff.md`: what the next agent needs to know;
+- `pr.md`: the PR description, for `gh pr create --body-file .task/pr.md`.
+
+A fork (`gitfold branch -w`) copies it. Use `git stash -u` rather than
+`git stash --all`, which fails on the folder's link. Its name can differ per repository
+(`git config gitfold.taskDir`); check with `ls -a` at the workspace root.
+
 ## Starting work
 
 ```

@@ -159,10 +159,11 @@ impl GitFold {
     }
 
     /// The workspace and local id of a workspace entry inode (not a workspace or
-    /// namespace directory itself, nor `.git`, which have no node).
+    /// namespace directory itself, nor `.git` or the task link, which have no
+    /// node).
     fn ws_entry(&self, ino: u64) -> Option<(Arc<Workspace>, u64)> {
         match inode::decode(ino)? {
-            inode::Ino::Ws { slot, local } if local != 0 && local != workspace::GITFILE_LOCAL => {
+            inode::Ino::Ws { slot, local } if local != 0 && !workspace::is_virtual_local(local) => {
                 Some((self.workspaces.get(slot).ok()?.ok()?, local))
             }
             _ => None,
@@ -548,7 +549,7 @@ impl Filesystem for GitFold {
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
         if let Some(inode::Ino::Ws { slot, local }) = inode::decode(ino.0)
             && local != 0
-            && local != workspace::GITFILE_LOCAL
+            && !workspace::is_virtual_local(local)
             && let Some(ws) = self.workspaces.get_for_forget(slot)
         {
             ws.forget(local, nlookup);

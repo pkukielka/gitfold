@@ -251,6 +251,59 @@ for b in st1 st1f st2; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null; done
 R branch -q -D st1 st1f st2 st3
 R reset -q --hard HEAD~1
 
+echo "== the task folder"
+R branch tk; R branch tk3; R branch old
+R switch -q -c tracked main; echo t >"$REPO/.task"; R add -f .task; R commit -qm tracked-task; R switch -q main
+mount_fs
+TK=$MNT/tk; TASKS=$COMMON/gitfold/.tasks
+eq "every workspace links to it" "$TASKS/tk" "$(readlink "$TK/.task")"
+echo "writing the parser" >"$TK/.task/status"; echo spec >"$TK/.task/spec.md"; mkdir "$TK/.task/notes"
+eq "listed in the workspace root, with .git" ".git .task" "$(ls -A "$TK" | grep '^\.' | xargs)"
+eq "stored apart from the changes" spec "$(cat "$TASKS/tk/spec.md")"
+echo ext >"$TASKS/tk/ext.md"
+eq "a file written outside the mount is there at once" ext "$(cat "$TK/.task/ext.md" 2>&1)"
+eq "git doesn't see it" "" "$(git -C "$TK" status --porcelain 2>&1)"
+eq "nor changes" "" "$("$BIN" -C "$REPO" changes tk 2>&1)"
+eq "excluded once, for every worktree" 1 "$(grep -cx '/.task' "$COMMON/info/exclude")"
+eq "list shows its status" "writing the parser" "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "tk" { $1=$2=$3=$4=$5=$6=""; sub(/^ +/, ""); print }')"
+git -C "$TK" clean -qfdx >/dev/null 2>&1
+eq "git clean -fdx leaves it" "spec yes" "$(cat "$TK/.task/spec.md" 2>&1) $(test -L "$TK/.task" && echo yes)"
+check "the link can't be removed" fails rm "$TK/.task"
+check "nor renamed" fails mv "$TK/.task" "$TK/elsewhere"
+echo d >"$TK/draft.md"; mv "$TK/draft.md" "$TK/.task/draft.md"
+eq "files move in (copied across: another file system for the mount)" "d 0" "$(cat "$TK/.task/draft.md") $(ls "$TK" | grep -c draft.md)"
+eq "a fork copies it" "writing the parser" "$("$BIN" -C "$REPO" branch -w --from tk tk2 >/dev/null 2>&1; cat "$MNT/tk2/.task/status" 2>&1)"
+mkdir -p "$TASKS/fk-old"; echo old >"$TASKS/fk-old/status"
+out=$("$BIN" -C "$REPO" branch -w --from tk fk-old 2>&1)
+eq "a fork onto an earlier branch's folder keeps it, saying so" "yes old" "$(grep -q 'kept the task folder an earlier branch fk-old left' <<<"$out" && echo yes) $(cat "$TASKS/fk-old/status")"
+eq "the tracked .task of a base wins: no link there" t "$(cat "$MNT/tracked/.task" 2>&1)"
+check "and the daemon says why" grep -q 'tracked: no task folder: its base tracks .task' "$LOG"
+echo mine >"$MNT/old/notes2"
+unmount_fs
+"$BIN" -C "$REPO" remove --force tk >/dev/null
+check "remove keeps it" test -f "$TASKS/tk/spec.md"
+R config gitfold.taskDir .notes
+mount_fs
+eq "back when the branch opens again, under the configured name" "writing the parser" "$(cat "$MNT/tk/.notes/status" 2>&1)"
+check "the old name is gone" test ! -e "$MNT/tk/.task"
+unmount_fs
+R config gitfold.taskDir notes2
+mount_fs
+eq "a workspace with a change of that name keeps its file, no link" "mine no" "$(cat "$MNT/old/notes2" 2>&1) $(test -L "$MNT/old/notes2" && echo yes || echo no)"
+unmount_fs
+R config gitfold.taskDir a/b; R config gitfold.tasksDir relative/dir
+mount_fs
+eq "a taskDir that isn't one name, a relative tasksDir: the defaults" "$TASKS/tk3" "$(readlink "$MNT/tk3/.task")"
+unmount_fs
+R config gitfold.taskDir .task; R config gitfold.tasksDir "$T/tasks"
+mount_fs
+eq "gitfold.tasksDir: elsewhere" "$T/tasks/tk3" "$(readlink "$MNT/tk3/.task")"
+unmount_fs
+R config --unset gitfold.taskDir; R config --unset gitfold.tasksDir
+for b in tk tk2 tk3 fk-old old tracked; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null 2>&1; done
+R branch -q -D tk tk2 tk3 fk-old old tracked
+rm -rf "$TASKS" "$T/tasks"
+
 echo "== remove"
 check "uncommitted changes refused" fails "$BIN" -C "$REPO" remove agent/one
 out=$("$BIN" -C "$REPO" remove agent/one 2>&1); eq "refusal lists the paths" yes "$(grep -q new.txt <<<"$out" && echo yes)"

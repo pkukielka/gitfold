@@ -16,6 +16,7 @@ use crate::fs::workspace::retire::{
     base_note, check_name, check_workspace, removable_workspace, remove_dir,
     remove_snapshot_registration, remove_workspace,
 };
+use crate::fs::workspace::task::TaskDir;
 use crate::fs::workspace::{fork, reads, status};
 use crate::git;
 use crate::git::worktree::{self, workspace_branch, workspace_id};
@@ -348,7 +349,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
         false => String::new(),
     };
     println!(
-        "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  note",
+        "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  status",
         "branch", "changed", "deleted", "ignored", "base", "last"
     );
     for w in list {
@@ -371,7 +372,21 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
             }
             false => String::new(),
         };
-        let last = last_change(&common_dir, &w.branch, &w.state_dir, &s).map_or("-".into(), age);
+        let task = TaskDir::of(&common_dir, &w.branch);
+        let last = [
+            last_change(&common_dir, &w.branch, &w.state_dir, &s),
+            task.newest(),
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .map_or("-".into(), age);
+        // What the agent says it is doing, then what gitfold notes.
+        let status = match (task.status(), base_note(&w.branch, &s.base)) {
+            (Some(status), "") => status,
+            (Some(status), note) => format!("{status} ({note})"),
+            (None, note) => format!("({note})").replace("()", ""),
+        };
         println!(
             "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {}",
             w.branch,
@@ -380,7 +395,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
             s.ignored,
             s.base.to_hex_with_len(12).to_string(),
             last,
-            base_note(&w.branch, &s.base)
+            status
         );
     }
     Ok(())
