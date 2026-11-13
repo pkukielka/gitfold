@@ -1,54 +1,22 @@
-//! The requests the daemon serves on workspaces for `gitfold branch
+//! The control requests the daemon serves on workspaces: `gitfold branch
 //! --with-changes` while mounted (see ARCHITECTURE.md, "Forks: commands on a
-//! workspace's stored state"), and the busy marks and request lock they take.
+//! workspace's stored state") and the request lock long ones take, and
+//! applying a branch's prewarm mode or read tracking (`gitfold prewarm`,
+//! `gitfold track-reads`) to its open workspace.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use log::warn;
 
-use super::{Busy, Mark, Workspaces, busy_error};
-use crate::fs::workspace::Workspace;
+use super::Workspaces;
+use super::busy::Mark;
+use crate::daemon::prewarm::{self, Prewarm, Spawned};
 use crate::state::fork;
 
 /// How long unmounting waits for long requests in progress.
 const CLOSE_WAIT: Duration = Duration::from_secs(60);
 
 impl Workspaces {
-    /// Marks `branch` busy (see `busy`) until the returned guard drops, and
-    /// returns its workspace if open. `creating` is held only for this, so
-    /// other workspaces open as usual while the request works. A branch busy
-    /// already is refused.
-    fn mark_busy(
-        &self,
-        branch: &str,
-        mark: Mark,
-    ) -> anyhow::Result<(Option<Arc<Workspace>>, Busy<'_>)> {
-        let _creating = self.creating.lock();
-        if !self.try_mark(branch, mark) {
-            return Err(busy_error(branch));
-        }
-        let busy = Busy {
-            set: &self.busy,
-            branch: branch.to_string(),
-            mark,
-        };
-        Ok((self.get_open(branch), busy))
-    }
-
-    /// Marks `branch` busy as `mark` says, if that agrees with its marks: any
-    /// number of readers, or one exclusive mark.
-    pub(super) fn try_mark(&self, branch: &str, mark: Mark) -> bool {
-        let mut busy = self.busy.lock();
-        let marks = busy.entry(branch.to_string()).or_default();
-        match mark {
-            Mark::Reader if !marks.exclusive => marks.readers += 1,
-            Mark::Exclusive if !marks.exclusive && marks.readers == 0 => marks.exclusive = true,
-            _ => return false,
-        }
-        true
-    }
-
     /// Stops taking long requests and waits for those in progress (unmount),
     /// up to `CLOSE_WAIT`: one stuck in a fetch mustn't keep the daemon alive.
     pub fn close_requests(&self) {
@@ -85,6 +53,65 @@ impl Workspaces {
             None => fork::fork(common, from, to, mount, |dst| {
                 fork::copy_stored(common, from, dst)
             }),
+        }
+    }
+
+    /// `gitfold track-reads`: starts or stops recording reads in the workspace
+    /// of `branch` as its setting (just set) says, if it is open. Says what it
+    /// did.
+    pub fn track_reads_now(&self, branch: &str) -> anyhow::Result<String> {
+        let Some(ws) = self.get_open(branch) else {
+            return Ok(format!("{branch} isn't open: applied when it opens"));
+        };
+        let on = self.tracks_reads(branch);
+        ws.track_reads(on)?;
+        // A content walk running would be recorded as the agent's reads: walked
+        // again as meta (see `branch_mode`).
+        let path = self.mount_point.join(branch);
+        let content = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm)
+            == Prewarm::Content;
+        if on && content && self.prewarm != Prewarm::None && prewarm::stop_under(&path) {
+            prewarm::spawn(path, Prewarm::Meta, self.prewarm_threads);
+        }
+        Ok(match on {
+            // Files already read are cached by the kernel: their next reads
+            // aren't seen.
+            true => format!("recording reads in {branch} from now on"),
+            false => format!("stopped recording reads in {branch}"),
+        })
+    }
+    /// `gitfold prewarm`: walks the workspace of `branch` in its mode (just set)
+    /// if it is open, from the start (a walk in another mode may be running),
+    /// or stops walking it for `none`. Says what it did.
+    pub fn prewarm_now(&self, branch: &str) -> String {
+        let path = self.mount_point.join(branch);
+        if self.get_open(branch).is_none() {
+            return format!("{branch} isn't open: walked when it opens");
+        }
+        match self.branch_mode(branch) {
+            Prewarm::None => match prewarm::stop_under(&path) {
+                true => format!("stopped walking {}", path.display()),
+                false => format!("{} isn't being walked", path.display()),
+            },
+            _ if self.prewarm == Prewarm::None => {
+                "this mount walks nothing (--prewarm none): remount to walk".to_string()
+            }
+            mode => {
+                prewarm::stop_under(&path);
+                let spawned = prewarm::spawn(path.clone(), mode, self.prewarm_threads);
+                let path = path.display();
+                match spawned {
+                    Spawned::Now => format!("walking {path} ({mode})"),
+                    Spawned::Queued => format!("{path} queued for a walk ({mode})"),
+                    Spawned::Paused => {
+                        format!(
+                            "walks are stopped for an unmount: {path} is walked ({mode}) if it fails"
+                        )
+                    }
+                    // Started meanwhile, by another request.
+                    Spawned::Known => format!("{path} is being walked"),
+                }
+            }
         }
     }
 }
