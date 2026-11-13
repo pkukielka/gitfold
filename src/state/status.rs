@@ -26,12 +26,12 @@ use gix::objs::tree::EntryKind;
 
 use super::markers::hidden;
 use super::markers::{Markers, PathSet};
-use super::{ancestors, join};
+use super::{ancestors, join, upper_path};
 use crate::fsutil::not_found;
 use crate::git;
 use crate::state::StateDir;
+use crate::state::{ModeCheck, matches_stored};
 use crate::store::Lower;
-use crate::store::{ModeCheck, matches_stored};
 use crate::store::{Store, TreeTable};
 
 pub struct Status {
@@ -191,10 +191,6 @@ pub fn status(store: &Store, common_dir: &Path, state: &StateDir) -> Result<Stat
         newest,
         tree,
     })
-}
-
-fn upper_path(upper: &Path, path: &[u8]) -> std::path::PathBuf {
-    upper.join(std::ffi::OsStr::from_bytes(path))
 }
 
 /// The walk of upper behind `status`.

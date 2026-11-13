@@ -6,11 +6,6 @@
 //! per-directory array (`DirRec`).
 
 use std::cmp::Ordering;
-use std::fs;
-use std::io;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering as AtomicOrdering;
 
@@ -506,41 +501,4 @@ impl Store {
         }
         Some(cur)
     }
-}
-
-/// How `matches_stored` compares modes.
-#[derive(Clone, Copy)]
-pub enum ModeCheck {
-    /// All permission bits, as shown in the mount (an invisible rebase needs it).
-    Exact,
-    /// Only the executable bit, as git records it.
-    Git,
-}
-
-/// Whether the file at `path` (with metadata `meta`) has the content and mode
-/// of stored file `rec`.
-pub fn matches_stored(
-    path: &Path,
-    meta: &fs::Metadata,
-    rec: &FileRec,
-    modes: ModeCheck,
-) -> io::Result<bool> {
-    let data = if rec.kind == EntryKind::Link {
-        if !meta.file_type().is_symlink() {
-            return Ok(false);
-        }
-        fs::read_link(path)?.as_os_str().as_bytes().to_vec()
-    } else {
-        let same_mode = match modes {
-            ModeCheck::Exact => meta.mode() & 0o7777 == rec.perm().into(),
-            ModeCheck::Git => (meta.mode() & 0o100 != 0) == (rec.kind == EntryKind::BlobExecutable),
-        };
-        if !meta.is_file() || meta.len() != rec.size || !same_mode {
-            return Ok(false);
-        }
-        fs::read(path)?
-    };
-    let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &data)
-        .map_err(io::Error::other)?;
-    Ok(oid == rec.oid)
 }

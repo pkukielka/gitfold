@@ -6,12 +6,10 @@
 //! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
-//! - `lock`: the repository lock.
 //! - `promisor`: partial clones, fetching what loads miss.
 
 pub mod cmd;
 pub mod index;
-pub mod lock;
 pub mod promisor;
 pub mod worktree;
 

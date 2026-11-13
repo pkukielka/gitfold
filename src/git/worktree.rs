@@ -41,14 +41,6 @@ pub fn snapshot_admin_dir(common_dir: &Path, commit: &ObjectId) -> PathBuf {
     ))
 }
 
-/// Admin directory of the workspace with directory name `id`:
-/// `<common>/worktrees/gitfold-ws-<id>`.
-pub fn ws_admin_dir(common_dir: &Path, id: &str) -> PathBuf {
-    common_dir
-        .join("worktrees")
-        .join(format!("gitfold-ws-{id}"))
-}
-
 /// Registers a workspace on `branch` with admin directory `dir` (see
 /// `ws_admin_dir`). HEAD and the index belong to git once the worktree exists,
 /// so they are only written when it is new or incomplete (`index` is called

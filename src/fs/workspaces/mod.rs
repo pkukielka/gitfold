@@ -32,7 +32,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::workspace::Workspace;
+use super::workspace::{Purpose, Workspace};
 use crate::daemon::prewarm::{self, Prewarm};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
@@ -40,8 +40,8 @@ use crate::git::promisor;
 use crate::git::worktree;
 use crate::inode;
 use crate::refusal::Refusal;
+use crate::settings;
 use crate::state::StateDir;
-use crate::state::reads;
 use crate::store::Store;
 use busy::{Mark, Marks, busy_error, unmark};
 
@@ -236,7 +236,8 @@ impl Workspaces {
     }
 
     fn tracks_reads(&self, branch: &str) -> bool {
-        reads::tracked(&self.common_dir, branch, self.track_reads)
+        settings::branch_bool(&self.common_dir, branch, settings::TRACK_READS)
+            .unwrap_or(self.track_reads)
     }
 
     /// The open workspace of `branch`.
@@ -491,8 +492,15 @@ impl Workspaces {
         };
         let created = new_base.is_some();
         let path = self.mount_point.join(branch);
-        let ws = Workspace::open(store, self.common_dir.clone(), state, branch, new_base)
-            .map_err(|e| fail("opening", e))?;
+        let ws = Workspace::open(
+            store,
+            self.common_dir.clone(),
+            state,
+            branch,
+            new_base,
+            Purpose::Serve,
+        )
+        .map_err(|e| fail("opening", e))?;
         if let Err(e) = ws.track_reads(self.tracks_reads(branch)) {
             warn!("workspace {branch}: not recording reads: {e:#}");
         }

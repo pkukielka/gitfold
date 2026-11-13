@@ -28,10 +28,10 @@ use crate::settings;
 use crate::state::{state_root, workspace_id};
 
 /// The folder's name unless `gitfold.taskDir` says otherwise.
-pub const DEFAULT_NAME: &str = ".task";
+const DEFAULT_NAME: &str = ".task";
 
 /// The file whose first line `gitfold list` shows.
-pub const STATUS: &str = "status";
+const STATUS: &str = "status";
 
 /// Where a workspace's task folder is: its name in the workspace root, and the
 /// directory holding its files.

@@ -21,7 +21,7 @@ use anyhow::Result;
 use log::warn;
 
 use super::Workspace;
-use crate::state::reads::{READS, paths, whole};
+use crate::state::reads::{paths, whole};
 
 /// The paths recorded, and the log they are appended to.
 pub(super) struct Reads {
@@ -41,7 +41,7 @@ impl Workspace {
         if reads.is_some() {
             return Ok(());
         }
-        let path = self.state.dir.join(READS);
+        let path = self.state.reads();
         let data = match fs::read(&path) {
             Ok(data) => data,
             Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),

@@ -43,15 +43,18 @@ use anyhow::{Result, anyhow};
 use gix::objs::tree::EntryKind;
 use log::info;
 
-use super::markers::Kind;
 use super::times::{Stamp, shown_mtime};
-use super::{Layers, Lower, Workspace, ancestors, join, not_found};
+use super::{Layers, Workspace};
+use crate::fsutil::not_found;
 use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::state;
+use crate::state::markers::Kind;
+use crate::state::{ModeCheck, matches_stored};
+use crate::state::{ancestors, join};
+use crate::store::Lower;
 use crate::store::{EMPTY_TREE, Store, TEntry};
-use crate::store::{ModeCheck, matches_stored};
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
 /// build writing while a rebase waits for conflict resolution, say) they are

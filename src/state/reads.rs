@@ -6,18 +6,15 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
 
 use anyhow::Result;
 
-use crate::settings;
+use super::StateDir;
 
-pub const READS: &str = "reads";
-
-/// The paths recorded in the workspace stored in `state_dir`, or `None` if
-/// reads were never tracked there.
-pub fn recorded(state_dir: &Path) -> Result<Option<HashSet<Vec<u8>>>> {
-    match fs::read(state_dir.join(READS)) {
+/// The paths recorded in the workspace stored in `state`, or `None` if reads
+/// were never tracked there.
+pub fn recorded(state: &StateDir) -> Result<Option<HashSet<Vec<u8>>>> {
+    match fs::read(state.reads()) {
         Ok(data) => Ok(Some(paths(whole(&data)))),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -36,11 +33,4 @@ pub fn paths(data: &[u8]) -> HashSet<Vec<u8>> {
         .filter(|p| !p.is_empty())
         .map(<[u8]>::to_vec)
         .collect()
-}
-
-/// Whether the workspace of `branch` records reads: its own setting if any,
-/// else `default` (the mount's). Read when it opens, and by `gitfold
-/// track-reads` while open.
-pub fn tracked(common_dir: &Path, branch: &str, default: bool) -> bool {
-    settings::branch_bool(common_dir, branch, settings::TRACK_READS).unwrap_or(default)
 }

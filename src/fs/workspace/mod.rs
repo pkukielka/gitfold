@@ -16,19 +16,18 @@
 //! The base follows the branch tip (`rebase`), without visible effect.
 //!
 //! - `nodes`: local id ↔ (parent, name) table.
-//! - `fork`: copying an open workspace's state under its lock (the rest of a
-//!   fork is `state::fork`).
 //! - `rebase`: moving the base to the branch tip.
 //! - `reads`: recording the files read in it (`gitfold overlaps`).
+//! - `times`: timestamps of files dropped from upper (only the mount uses them).
 //! - `write`: mutations and copy-up.
 //!
 //! What a workspace stores, and what commands read from it without a mount
 //! (its changes, the removal rules, forks, the task folder), is `state`.
 
-pub mod fork;
 mod nodes;
-pub mod reads;
+mod reads;
 mod rebase;
+mod times;
 mod write;
 
 use std::collections::{HashMap, HashSet};
@@ -47,15 +46,13 @@ use parking_lot::{Mutex, RwLock};
 
 use crate::fsutil::not_found;
 use crate::git;
-use crate::git::worktree;
 use crate::inode;
-use crate::state::markers::{self, Markers, hidden};
+use crate::state::markers::{Markers, hidden};
 use crate::state::task::TaskDir;
-use crate::state::times::{self, Stamp, Times};
-use crate::state::{self, StateDir, ancestors, join};
-use crate::store::Lower;
-use crate::store::Store;
+use crate::state::{self, StateDir, join};
+use crate::store::{Lower, Store};
 use nodes::Nodes;
+use times::{Stamp, Times};
 
 /// `local` of the virtual `.git` file in the workspace root.
 pub const GITFILE_LOCAL: u64 = inode::WS_LOCAL_MASK;
@@ -223,6 +220,7 @@ impl Workspace {
         state: StateDir,
         branch: &str,
         new_base: Option<git::Commit>,
+        purpose: Purpose,
     ) -> Result<Workspace> {
         let created = new_base.is_some();
         let base = match new_base {
@@ -236,7 +234,9 @@ impl Workspace {
         let task = TaskDir::of(&common_dir, branch);
         let shown = String::from_utf8_lossy(&task.name).into_owned();
         let in_upper = upper.join(std::ffi::OsStr::from_bytes(&task.name));
-        let task = if store.tree(base_tree).find(&task.name).is_some() {
+        let task = if purpose == Purpose::CatchUp {
+            None
+        } else if store.tree(base_tree).find(&task.name).is_some() {
             log::warn!(
                 "workspace {branch}: no task folder: its base tracks {shown} (set gitfold.taskDir)"
             );
@@ -270,7 +270,7 @@ impl Workspace {
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
-        let pin_ref = worktree::pin_ref(&state.id);
+        let pin_ref = state.pin_ref();
         // The registration's directory name is deterministic, so the `.git`
         // file can be written before the workspace exists.
         let gitfile = format!("gitdir: {}\n", state.admin.display()).into_bytes();
@@ -320,11 +320,7 @@ impl Workspace {
     }
 
     fn upper_path(&self, path: &[u8]) -> PathBuf {
-        if path.is_empty() {
-            self.upper.clone()
-        } else {
-            self.upper.join(std::ffi::OsStr::from_bytes(path))
-        }
+        state::upper_path(&self.upper, path)
     }
 
     /// The path of node `local`. Callers that act on the result hold `layers`,
@@ -540,9 +536,39 @@ impl Workspace {
     }
 }
 
+impl Workspace {
+    /// Copies this open workspace's state into `dst` (see `copy_state_dir`),
+    /// with every write through the mount held off meanwhile.
+    pub fn copy_state(&self, dst: &Path) -> Result<()> {
+        let mut layers = self.layers.write();
+        // Copy-ups write under a shared `layers`; none is half-done now.
+        layers.times.save()?;
+        layers.markers.sync()?;
+        state::fork::copy_state_dir(&self.common_dir, &self.branch, &self.state, dst)
+    }
+}
+
 /// Brings the stored base of the closed workspace of `branch` up to its branch
 /// tip, as opening it does (`state::retire` checks it then).
 pub fn catch_up(store: &Store, common_dir: &Path, branch: &str) -> Result<()> {
     let state = StateDir::of(common_dir, branch);
-    Workspace::open(store, common_dir.to_path_buf(), state, branch, None)?.sync(store)
+    let ws = Workspace::open(
+        store,
+        common_dir.to_path_buf(),
+        state,
+        branch,
+        None,
+        Purpose::CatchUp,
+    )?;
+    ws.sync(store)
+}
+
+/// What a workspace is opened for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Shown under the mount: with its task folder.
+    Serve,
+    /// Only to bring its stored base up to the branch tip, closed (`catch_up`,
+    /// for `remove` and its `--check`): nothing set up that it doesn't need.
+    CatchUp,
 }

@@ -21,10 +21,10 @@ use gix::ObjectId;
 use super::manage::{quote, workspaces};
 use crate::git;
 use crate::refusal::Refusal;
-use crate::state::StateDir;
 use crate::state::reads;
 use crate::state::retire::{base_note, check_name};
 use crate::state::status;
+use crate::state::{StateDir, ancestors};
 use crate::store::Store;
 
 /// Which lines to print.
@@ -52,7 +52,7 @@ impl Target {
         let changed: HashSet<Vec<u8>> = paths.into_iter().collect();
         let dirs = changed
             .iter()
-            .flat_map(|p| parents(p))
+            .flat_map(|p| ancestors(p))
             .map(<[u8]>::to_vec)
             .collect();
         Target {
@@ -67,7 +67,7 @@ impl Target {
     fn touches(&self, path: &[u8]) -> bool {
         self.changed.contains(path)
             || self.dirs.contains(path)
-            || parents(path).any(|d| self.changed.contains(d))
+            || ancestors(path).any(|d| self.changed.contains(d))
     }
 }
 
@@ -76,14 +76,6 @@ impl Target {
 fn git_reads(path: &[u8]) -> bool {
     let name = path.rsplit(|b| *b == b'/').next().unwrap_or(path);
     name == b".gitignore" || name == b".gitattributes"
-}
-
-/// The directories above `path`, nearest last.
-fn parents(path: &[u8]) -> impl Iterator<Item = &[u8]> {
-    path.iter()
-        .enumerate()
-        .filter(|(_, b)| **b == b'/')
-        .map(|(i, _)| &path[..i])
 }
 
 /// `gitfold overlaps`: prints, for workspace `branch`, `R` (read) and `W`
@@ -122,7 +114,7 @@ pub fn overlaps(
         false => Vec::new(),
     };
     let read = match opened {
-        true => reads::recorded(&state.dir)?,
+        true => reads::recorded(&state)?,
         false => None,
     };
     match (&read, kinds) {
@@ -273,13 +265,6 @@ mod tests {
         );
         assert!(!t.touches(b"a/bc"), "a sibling with a common prefix");
         assert!(!t.touches(b"dx"));
-    }
-
-    #[test]
-    fn parents_nearest_last() {
-        let got: Vec<&[u8]> = parents(b"a/b/c").collect();
-        assert_eq!(got, [&b"a"[..], b"a/b"]);
-        assert_eq!(parents(b"top").count(), 0);
     }
 
     #[test]

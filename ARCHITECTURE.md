@@ -123,16 +123,15 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/write.rs` | copy-up and mutations |
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
+| `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/workspace/fork.rs` | copying an open workspace's state under its lock, for a fork |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
-| `src/store.rs` | shared tree tables, file ids, directory layout, index walk; what is at a path of a tree (`Lower`, `entry_at`), whether a file matches a stored one |
-| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory and registration; the files in it), ids, its base and branch files |
+| `src/store.rs` | shared tree tables, file ids, directory layout, index walk; what is at a path of a tree (`Lower`, `entry_at`) |
+| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory, registration and base pin; the files in it), ids, its base and branch files, paths below its root, whether an upper file matches a stored one |
 | `src/state/markers.rs` | whiteouts and opaque markers, as an append-only log |
-| `src/state/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
 | `src/state/reads.rs` | the read log's format (`gitfold overlaps`) |
 | `src/state/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`) |
 | `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
@@ -147,7 +146,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/cmd.rs` | running git itself (`command`, `run`, `output`) |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check |
-| `src/git/lock.rs` | the repository lock, held by a mounted daemon and by `remove`/`prune` |
+| `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
@@ -1011,7 +1010,7 @@ registration's index, never through the mount, so it costs what the
 workspace's changes weigh, not its tree. It follows a contract later commands
 on the stored state can share:
 
-- **Unmounted:** the command takes the repository lock (`git::lock`) and works
+- **Unmounted:** the command takes the repository lock (`lock`) and works
   on the state directory itself (`cli::local_or_daemon`).
 - **Mounted:** it sends a control request; each feature has its own verb, so a
   daemon that doesn't know it refuses it ("older gitfold") instead of

@@ -38,7 +38,7 @@ impl Workspaces {
 
     /// `gitfold branch --with-changes` while mounted: creates branch `to` at
     /// `from`'s tip with a copy of `from`'s uncommitted changes (see
-    /// `workspace::fork`), copying an open `from` under its lock. Both branches
+    /// `state::fork`), copying an open `from` under its lock. Both branches
     /// are busy meanwhile.
     pub fn fork(&self, from: &str, to: &str) -> anyhow::Result<String> {
         anyhow::ensure!(from != to, "a branch can't be created from itself");

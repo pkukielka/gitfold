@@ -89,31 +89,21 @@ pub fn remove_snapshot_registration(
     })
 }
 
-/// Deletes the workspace of `branch` (registration, state and base pin)
-/// unless it has uncommitted changes or a git operation in progress (`force`
-/// skips the checks). Returns what was done.
-pub fn remove_workspace(
-    store: &Store,
-    common_dir: &Path,
-    branch: &str,
-    force: bool,
-    catch_up: &dyn Fn() -> Result<()>,
-) -> Result<String> {
-    let ignored = check_workspace(store, common_dir, branch, force, catch_up)?;
-    delete_workspace(common_dir, branch, ignored)
-}
+/// Brings a workspace's stored base up to its branch tip: (store, common_dir,
+/// branch).
+pub type CatchUp<'a> = dyn Fn(&Store, &Path, &str) -> Result<()> + 'a;
 
 /// Fails if the workspace of `branch` doesn't exist, or (unless `force`) has
 /// uncommitted changes or a git operation in progress; returns how many
 /// ignored files it holds. `catch_up` brings its stored base up to the branch
-/// tip, if it is behind (`Workspace::sync` of the open workspace, or
-/// `fs::workspace::catch_up` of a closed one).
+/// tip, if it is behind: `fs::workspace::catch_up` for a closed workspace, or
+/// the open workspace's `sync`.
 pub fn check_workspace(
     store: &Store,
     common_dir: &Path,
     branch: &str,
     force: bool,
-    catch_up: &dyn Fn() -> Result<()>,
+    catch_up: &CatchUp<'_>,
 ) -> Result<usize> {
     // `..` would point it at the git directory itself.
     check_name(branch)?;
@@ -153,7 +143,7 @@ pub fn check_workspace(
         // would look unchanged. Catch up as the daemon would have.
         let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
         if tip.is_some_and(|tip| tip.id != s.base) {
-            catch_up().map_err(|e| {
+            catch_up(store, common_dir, branch).map_err(|e| {
                 changes(format!(
                     "workspace {branch}: its base is behind the branch tip and catching up \
                      failed ({e:#}); mount it, open it once, or use --force"
@@ -197,7 +187,7 @@ pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Resu
     // (the registration is recreated); the reverse is not.
     remove_dir(&state.admin)?;
     remove_dir(&state.dir)?;
-    worktree::unpin(common_dir, &worktree::pin_ref(&state.id))?;
+    worktree::unpin(common_dir, &state.pin_ref())?;
     Ok(match ignored {
         0 => format!("removed workspace {branch}"),
         n => format!("removed workspace {branch} (and {n} ignored files in it)"),

@@ -17,8 +17,8 @@ use crate::git::worktree;
 use crate::refusal::Refusal;
 use crate::settings;
 use crate::state::retire::{
-    base_note, check_name, check_workspace, removable_workspace, remove_dir,
-    remove_snapshot_registration, remove_workspace,
+    base_note, check_name, check_workspace, delete_workspace, removable_workspace, remove_dir,
+    remove_snapshot_registration,
 };
 use crate::state::task::TaskDir;
 use crate::state::{self, StateDir};
@@ -29,8 +29,8 @@ use crate::store::Store;
 /// holds it (mounted, or still exiting after an unmount): the daemon keeps
 /// workspace state in memory and owns the files below `.git/gitfold/`. Held
 /// until the returned file is dropped, so no mount starts meanwhile.
-fn exclusive(common_dir: &Path) -> Result<crate::git::lock::Lock> {
-    crate::git::lock::lock(common_dir)?.with_context(|| {
+fn exclusive(common_dir: &Path) -> Result<crate::lock::Lock> {
+    crate::lock::lock(common_dir)?.with_context(|| {
         format!(
             "{} is in use by a gitfold daemon; unmount it first",
             common_dir.display()
@@ -433,16 +433,10 @@ fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Resul
             return remove_snapshot_registration(common_dir, rev, &commit.id, false, check);
         }
         let store = Store::default();
+        let ignored = check_workspace(&store, common_dir, name, force, &catch_up)?;
         Ok(match check {
-            true => removable_workspace(
-                name,
-                check_workspace(&store, common_dir, name, force, &|| {
-                    catch_up(&store, common_dir, name)
-                })?,
-            ),
-            false => remove_workspace(&store, common_dir, name, force, &|| {
-                catch_up(&store, common_dir, name)
-            })?,
+            true => removable_workspace(name, ignored),
+            false => delete_workspace(common_dir, name, ignored)?,
         })
     })
 }
