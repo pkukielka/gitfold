@@ -7,7 +7,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -225,9 +224,7 @@ pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Resu
 /// Whether the index of the worktree with admin directory `admin` matches its
 /// HEAD commit.
 fn index_matches_head(admin: &Path) -> Result<bool> {
-    let status = Command::new("git")
-        .arg("--git-dir")
-        .arg(admin)
+    let status = git::cmd::command(admin)
         .args(["diff-index", "--cached", "--quiet", "HEAD", "--"])
         .status()?;
     match status.code() {

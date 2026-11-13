@@ -14,7 +14,6 @@
 use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Result, bail};
 use gix::ObjectId;
@@ -208,7 +207,7 @@ pub fn overlaps(
 /// `main`. Not the branch's upstream: after `git push -u` that is its own
 /// remote branch, which its work is ahead of.
 fn default_target(common_dir: &Path) -> Result<String> {
-    let out = git_cmd(common_dir)
+    let out = git::cmd::command(common_dir)
         .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
         .output()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -242,29 +241,13 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
 /// The paths `to` changed since it diverged from `from` (`git diff
 /// from...to`), both sides of a rename.
 fn diff(common_dir: &Path, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
-    let out = git_cmd(common_dir)
-        .args(["diff", "--name-only", "-z", "--no-renames"])
-        .arg(format!("{from}...{to}"))
-        .arg("--")
-        .output()?;
-    if !out.status.success() {
-        bail!(
-            "git diff {from}...{to} failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(out
-        .stdout
+    let range = format!("{from}...{to}");
+    let args = ["diff", "--name-only", "-z", "--no-renames", &range, "--"];
+    Ok(git::cmd::output_bytes(common_dir, &args)?
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
         .map(<[u8]>::to_vec)
         .collect())
-}
-
-fn git_cmd(common_dir: &Path) -> Command {
-    let mut command = Command::new("git");
-    command.arg("--git-dir").arg(common_dir);
-    command
 }
 
 #[cfg(test)]

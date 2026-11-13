@@ -117,7 +117,7 @@ pub fn fork(
         let branch = format!("refs/heads/{to}");
         let tip = tip.to_string();
         // `""`: the branch must not exist (another fork may have made it).
-        worktree::git(
+        git::cmd::run(
             common_dir,
             &[
                 "update-ref",
@@ -316,13 +316,12 @@ fn copy_settings(common_dir: &Path, from: &str, to: &str) {
     for name in [BRANCH_KEY, super::reads::BRANCH_KEY] {
         let key = |b: &str| format!("branch.{b}.{name}");
         // Not set: `git config --get` fails.
-        let Ok(value) =
-            worktree::git_output(common_dir, &["config", "--local", "--get", &key(from)])
+        let Ok(value) = git::cmd::output(common_dir, &["config", "--local", "--get", &key(from)])
         else {
             continue;
         };
         if !value.trim().is_empty() {
-            let _ = worktree::git(common_dir, &["config", "--local", &key(to), value.trim()]);
+            let _ = git::cmd::run(common_dir, &["config", "--local", &key(to), value.trim()]);
         }
     }
 }

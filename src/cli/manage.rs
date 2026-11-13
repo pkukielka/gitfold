@@ -5,7 +5,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, ensure};
@@ -23,16 +22,6 @@ use crate::git;
 use crate::git::worktree::{self, workspace_branch, workspace_id};
 use crate::refusal::Refusal;
 use crate::store::Store;
-
-fn git(repo: &Path, args: &[&str]) -> Result<()> {
-    let status = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(args)
-        .status()?;
-    ensure!(status.success(), "git {} failed ({status})", args.join(" "));
-    Ok(())
-}
 
 /// Takes the repository's daemon lock exclusively, failing if a gitfold daemon
 /// holds it (mounted, or still exiting after an unmount): the daemon keeps
@@ -72,7 +61,7 @@ pub fn branch(
     if with_changes {
         // `git branch` checks names itself; `update-ref` would take `HEAD`, and
         // refuse other bad names only after the copy.
-        let valid = worktree::git_output(&common_dir, &["check-ref-format", "--branch", name]);
+        let valid = git::cmd::output(&common_dir, &["check-ref-format", "--branch", name]);
         ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
         // A workspace to copy: `from`, or the one we are in.
         let source = super::branch_or_current(from.map(str::to_string), repo).map_err(|_| {
@@ -98,7 +87,7 @@ pub fn branch(
     }
     let mut args = vec!["branch", "--", name];
     args.extend(from);
-    git(repo, &args)?;
+    git::cmd::run(repo, &args)?;
     set_branch_settings(repo, name, prewarm, track_reads)?;
     println!("created branch {name}; open it as <mountpoint>/{name}");
     Ok(())
@@ -164,14 +153,14 @@ pub fn track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
 /// Stores whether branch `name`'s workspace records reads, in git config.
 fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
     let key = format!("branch.{name}.{}", reads::BRANCH_KEY);
-    git(repo, &["config", &key, if on { "true" } else { "false" }])
+    git::cmd::run(repo, &["config", &key, if on { "true" } else { "false" }])
 }
 
 /// Stores `mode` as branch `name`'s prewarm mode, in git config.
 fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
     let key = format!("branch.{name}.{}", crate::daemon::prewarm::BRANCH_KEY);
     let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
-    git(repo, &["config", &key, value.get_name()])
+    git::cmd::run(repo, &["config", &key, value.get_name()])
 }
 
 /// `gitfold changes`: the uncommitted changes of workspace `name` relative to

@@ -108,7 +108,7 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
 /// update-ref`, which handles every ref backend (files, packed, reftable).
 pub fn pin(common_dir: &Path, name: &str, commit: &gix::ObjectId) -> Result<()> {
     let commit = commit.to_string();
-    git(
+    super::cmd::run(
         common_dir,
         &["update-ref", "-m", "gitfold: workspace base", name, &commit],
     )
@@ -119,22 +119,12 @@ pub fn unpin(common_dir: &Path, name: &str) -> Result<()> {
     if crate::git::resolve(name).is_err() {
         return Ok(());
     }
-    git(common_dir, &["update-ref", "-d", name])
+    super::cmd::run(common_dir, &["update-ref", "-d", name])
 }
 
 /// The ref keeping workspace `id`'s base from `git gc`.
 pub fn pin_ref(id: &str) -> String {
     format!("refs/gitfold/{id}")
-}
-
-pub(crate) fn git(common_dir: &Path, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(common_dir)
-        .args(args)
-        .status()?;
-    anyhow::ensure!(status.success(), "git {} failed ({status})", args.join(" "));
-    Ok(())
 }
 
 /// Files in a worktree's admin directory that mean a git operation is under
@@ -193,22 +183,6 @@ pub fn workspace_branch(id: &str) -> String {
 pub fn is_snapshot_registration(name: &str) -> bool {
     name.strip_prefix(SNAPSHOT_PREFIX)
         .is_some_and(|hex| hex.len() == SNAPSHOT_HEX && hex.bytes().all(|b| b.is_ascii_hexdigit()))
-}
-
-/// `git` with `args` in `common_dir`, returning its standard output.
-pub(crate) fn git_output(common_dir: &Path, args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(common_dir)
-        .args(args)
-        .output()?;
-    anyhow::ensure!(
-        out.status.success(),
-        "git {} failed ({})",
-        args.join(" "),
-        out.status
-    );
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Refuses (a git operation in progress, `Refusal::Changes`) if git is busy in
