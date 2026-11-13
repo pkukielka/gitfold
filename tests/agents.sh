@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end test of the commands for running agents: overlaps, the task folder, inbox, send, watch.
-# usage: tests/agents.sh
-# Each section runs on a fresh repository below /tmp/gf-agents.XXXXXX (see
-# tests/lib.sh); SECTION=<text> runs only the sections whose name contains it.
+# End-to-end test of the commands for running agents: overlaps, the task
+# folder, inbox, send, watch.
+# usage: tests/agents.sh (or with the others: tests/run.sh); sections as in
+# tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")

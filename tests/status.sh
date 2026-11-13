@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# End-to-end test of what a workspace's status sees: deletions, half-way git operations, staged-only changes, ignore rules, modes, submodules and nested repositories, the index's cache tree.
-# usage: tests/status.sh
-# Each section runs on a fresh repository below /tmp/gf-status.XXXXXX (see
-# tests/lib.sh); SECTION=<text> runs only the sections whose name contains it.
+# End-to-end test of what a workspace's status sees: deletions, half-way git
+# operations, staged-only changes, ignore rules, modes, submodules and nested
+# repositories, the index's cache tree.
+# usage: tests/status.sh (or with the others: tests/run.sh); sections as in
+# tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
@@ -10,6 +11,9 @@ CACHE_TREE=$(realpath "$(dirname "$0")/cache-tree.pl")
 NAME=status
 . "$(dirname "$0")/lib.sh"
 . "$(dirname "$0")/fixture.sh"
+
+# A submodule entry (gitlink) at sm, committed.
+add_submodule() { R update-index --add --cacheinfo "160000,$(R rev-parse HEAD),sm"; R commit -qm submodule; }
 
 deletions_the_status_must_see() {
 add_submodule
@@ -204,28 +208,6 @@ unmount_fs
 check "remove cachetree" "$BIN" -C "$REPO" remove cachetree --force
 }
 
-names_that_appear_later_and_negative_ent() {
-mount_fs
-R branch ns/a
-ls "$MNT" >/dev/null; ls "$MNT/ns" >/dev/null
-check "missing branch absent" test ! -e "$MNT/later"
-check "missing rev absent" test ! -e "$MNT/@later-tag"
-check "missing namespaced branch absent" test ! -e "$MNT/ns/b"
-R branch later; R tag later-tag; R branch ns/b
-check "branch created afterwards opens" test -f "$MNT/later/a.txt"
-check "tag created afterwards opens" test -f "$MNT/@later-tag/a.txt"
-check "root listing shows them" sh -c "ls '$MNT' | grep -qx later && ls '$MNT' | grep -qx @later-tag"
-check "namespace listing shows a new branch" sh -c "test -d '$MNT/ns/b' && ls '$MNT/ns' | grep -qx b"
-check "dot names stay absent in the root" test ! -e "$MNT/.git"
-check "missing file in a workspace" test ! -e "$MNT/later/new.txt"
-echo n >"$MNT/later/new.txt"
-check "created after its negative lookup" test -f "$MNT/later/new.txt"
-check "missing file in a snapshot stays missing" test ! -e "$MNT/@later-tag/.ignore"
-unmount_fs
-check "remove later" "$BIN" -C "$REPO" remove later --force
-check "remove ns/b" "$BIN" -C "$REPO" remove ns/b --force
-}
-
 section "deletions the status must see" deletions_the_status_must_see
 section "git operation stopped half-way" git_operation_stopped_half_way
 section "staged-only changes, and the base after a commit" staged_only_changes_and_the_base_after_a
@@ -234,6 +216,5 @@ section "modes" modes
 section ".gitignore files git doesn't read" gitignore_files_git_doesn_t_read
 section "global ignore file as git reads it" global_ignore_file_as_git_reads_it
 section "nested repositories and a relative excludes file" nested_repositories_and_a_relative_exclu
-section "names that appear later, and negative entries" names_that_appear_later_and_negative_ent
 section "the index's cache tree (TREE extension)" the_index_s_cache_tree_tree_extension
 finish

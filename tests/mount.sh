@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# End-to-end test of mount and unmount (background, odd paths, a stopped or failing daemon, -C), version, many packs, prewarm.
-# usage: tests/mount.sh
-# Each section runs on a fresh repository below /tmp/gf-mount.XXXXXX (see
-# tests/lib.sh); SECTION=<text> runs only the sections whose name contains it.
+# End-to-end test of the mount: mount and unmount (background, odd paths, a
+# stopped or failing daemon, -C), version, names that appear later, many packs,
+# prewarm.
+# usage: tests/mount.sh (or with the others: tests/run.sh); sections as in
+# tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
@@ -71,6 +72,28 @@ check "a relative repository path works" test -f "$MNT/@HEAD/a.txt"
 check "unmount" "$BIN" unmount "$MNT"
 check "arguments after -- work" "$BIN" mount --log "$T/bg.log" -- "$REPO" "$MNT"
 check "unmount" "$BIN" unmount "$MNT"
+}
+
+names_that_appear_later_and_negative_ent() {
+mount_fs
+R branch ns/a
+ls "$MNT" >/dev/null; ls "$MNT/ns" >/dev/null
+check "missing branch absent" test ! -e "$MNT/later"
+check "missing rev absent" test ! -e "$MNT/@later-tag"
+check "missing namespaced branch absent" test ! -e "$MNT/ns/b"
+R branch later; R tag later-tag; R branch ns/b
+check "branch created afterwards opens" test -f "$MNT/later/a.txt"
+check "tag created afterwards opens" test -f "$MNT/@later-tag/a.txt"
+check "root listing shows them" sh -c "ls '$MNT' | grep -qx later && ls '$MNT' | grep -qx @later-tag"
+check "namespace listing shows a new branch" sh -c "test -d '$MNT/ns/b' && ls '$MNT/ns' | grep -qx b"
+check "dot names stay absent in the root" test ! -e "$MNT/.git"
+check "missing file in a workspace" test ! -e "$MNT/later/new.txt"
+echo n >"$MNT/later/new.txt"
+check "created after its negative lookup" test -f "$MNT/later/new.txt"
+check "missing file in a snapshot stays missing" test ! -e "$MNT/@later-tag/.ignore"
+unmount_fs
+check "remove later" "$BIN" -C "$REPO" remove later --force
+check "remove ns/b" "$BIN" -C "$REPO" remove ns/b --force
 }
 
 many_packs_added_while_mounted() {
@@ -175,7 +198,8 @@ G "$PW" branch -q -D pw4
 check "the opt-out goes with the branch" fails G "$PW" config --get branch.pw4.gitfoldPrewarm
 }
 
-# A 5000-file repository walked, given modes, then unmounted half-way:
+# One section, sharing a mount: a 5000-file repository walked, given modes,
+# then unmounted half-way.
 prewarm_story() { prewarm_walks_at_once_per_workspace_opt; gitfold_prewarm_a_mode_applied_to_an_ope; an_interrupted_unmount_prewarm_resumes_s; }
 
 unmount_of_a_stopped_daemon() {
@@ -226,6 +250,7 @@ check "unmount" "$BIN" unmount "$MNT"
 
 section "background mount and unmount" background_mount_and_unmount
 section "unmount: paths, odd repository names, the daemon's directory" unmount_paths_odd_repository_names_the_d
+section "names that appear later, and negative entries" names_that_appear_later_and_negative_ent
 section "many packs added while mounted" many_packs_added_while_mounted
 section "prewarm: walks, per-workspace modes, an interrupted unmount" prewarm_story
 section "unmount of a stopped daemon" unmount_of_a_stopped_daemon

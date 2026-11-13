@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# End-to-end test of the management commands: branch and its forks, list, changes, remove (exit codes, while mounted) and prune.
-# usage: tests/manage.sh
-# Each section runs on a fresh repository below /tmp/gf-manage.XXXXXX (see
-# tests/lib.sh); SECTION=<text> runs only the sections whose name contains it.
+# End-to-end test of the management commands: branch and its forks, list,
+# changes, remove (exit codes, while mounted) and prune.
+# usage: tests/manage.sh (or with the others: tests/run.sh); sections as in
+# tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
@@ -88,7 +88,7 @@ check "workspace reopens after remove" test -f "$MNT/agent/one/d/b.txt"
 unmount_fs
 }
 
-# Steps that share a repository, workspaces and a mount run as one section.
+# One section, sharing a repository, workspaces and a mount:
 # Branches made, listed, used from anywhere, then removed and pruned:
 story() { branch; list; the_repository_from_the_current_director; remove; prune; }
 
@@ -179,9 +179,9 @@ check "and no branch HEAD made" fails git -C "$REPO" rev-parse -q --verify refs/
 out=$("$BIN" -C "$REPO" branch -w fk9 2>&1)
 eq "outside a workspace, -w asks for --from" yes "$(grep -q 'name the source with --from' <<<"$out" && echo yes)"
 unmount_fs
-G "$REPO" config branch.fk.gitfoldPrewarm none
+R config branch.fk.gitfoldPrewarm none
 eq "fork unmounted" "created branch fk3 at fk, with its uncommitted changes; open it as <mountpoint>/fk3" "$("$BIN" -C "$REPO" branch -w --from fk fk3 2>&1)"
-eq "the prewarm mode comes along" none "$(G "$REPO" config --get branch.fk3.gitfoldPrewarm)"
+eq "the prewarm mode comes along" none "$(R config --get branch.fk3.gitfoldPrewarm)"
 eq "the same changes" "$("$BIN" -C "$REPO" changes fk)" "$("$BIN" -C "$REPO" changes fk3 2>&1)"
 eq "unmounted, names with slashes" "created branch sl/z at sl/x, with its uncommitted changes; open it as <mountpoint>/sl/z" "$("$BIN" -C "$REPO" branch -w --from sl/x sl/z 2>&1)"
 mount_fs
@@ -207,7 +207,7 @@ check "recreating it works then" "$BIN" -C "$REPO" branch five
 }
 
 the_lock_leaves_nothing_behind() {
-git init -q "$T/plain"; git -C "$T/plain" -c user.name=t -c user.email=t@t commit -q --allow-empty -m e
+git init -q "$T/plain"; G "$T/plain" commit -q --allow-empty -m e
 check "prune of a repository without gitfold state" "$BIN" -C "$T/plain" prune
 check "creates nothing in it" test ! -e "$T/plain/.git/gitfold"
 

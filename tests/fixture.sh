@@ -1,9 +1,7 @@
-# The repository the command suites (manage, status, mount, agents) start each
-# section from, and their git helpers; sourced after tests/lib.sh.
+# The repository each section of the command suites starts from, and `G`.
 
+# git in directory $1, as the test user.
 G() { git -C "$1" -c user.name=t -c user.email=t@t "${@:2}"; }
-# A submodule entry (gitlink) at sm, committed.
-add_submodule() { R update-index --add --cacheinfo "160000,$(R rev-parse HEAD),sm"; R commit -qm submodule; }
 
 # Every section starts from this: a repository with a.txt, d/b.txt, d/c.txt.
 fixture() {

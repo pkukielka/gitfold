@@ -719,6 +719,9 @@ mount and real git (build with `--release` first):
   tests/agents.sh` runs the sections whose name contains `inbox`, and
   `PARALLEL=1` runs them all at once (a few timing checks may then be flaky on
   a loaded machine). A section that ends early counts as a failure.
+- `tests/run.sh [SUITE...]`: the suites at once, summed up (by default all
+  but `workspace.sh`); `PARALLEL=1 tests/run.sh` takes about as long as the
+  slowest, and `SECTION=inbox tests/run.sh` finds the section in any of them.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
