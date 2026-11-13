@@ -317,16 +317,18 @@ fn launch(walks: Vec<(u64, Walk)>) {
             state.starting.remove(at);
         }
         let Some(child) = child else {
-            // Its slot is free: the next queued walk may start (not while
-            // stopped, as in `reap`).
-            if !state.stopped {
-                pending.extend(next_walks(&mut state));
-            }
+            // Its slot is free: the next queued walk may start.
+            pending.extend(next_walks(&mut state));
             continue;
         };
         let pid = child.id();
         info!("prewarm of {}: started", walk.root.display());
-        state.running.push((id, Walker::of(pid), walk));
+        let walker = Walker::of(pid);
+        if walker.pidfd.is_none() {
+            let e = std::io::Error::last_os_error();
+            warn!("prewarm walker {pid}: no pidfd ({e}); stopped by pid");
+        }
+        state.running.push((id, walker, walk));
         drop(state);
         // Reaped on a thread of its own, so it doesn't stay a zombie; then the
         // next one starts. Without a thread (the system refuses one: process
@@ -343,9 +345,13 @@ fn launch(walks: Vec<(u64, Walk)>) {
                 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
             {
             }
-            // The next ones would most likely fail the same way.
+            // The next ones would most likely fail the same way: neither the
+            // queued ones nor those taken to start here are started.
             let mut walks = WALKS.lock();
             walks.running.retain(|(i, _, _)| *i != id);
+            for (taken, _) in pending.drain(..) {
+                walks.starting.retain(|s| s.id != taken);
+            }
             if !walks.queued.is_empty() {
                 warn!("prewarm: {} queued walks dropped", walks.queued.len());
                 walks.queued.clear();
@@ -372,6 +378,10 @@ fn reap(mut child: std::process::Child, id: u64) {
         if killed && ours {
             warn!("a prewarm walker was stopped from outside (an unmount?): dropping queued walks");
             walks.queued.clear();
+            // Being started: stopped by `launch` once their process exists.
+            for s in walks.starting.iter_mut() {
+                s.cancelled = true;
+            }
         }
         match walks.stopped {
             true => Vec::new(),
@@ -505,12 +515,9 @@ pub fn stop_under(path: &Path) -> bool {
 /// from older daemons), for `gitfold unmount`.
 pub fn stop_below(mountpoint: &Path) {
     let mut walkers = Vec::new();
-    for (pid, dir) in crate::procs::own() {
-        // Opened before the check: if the pid was reused meanwhile, the
-        // check sees the process the pidfd names.
-        let candidate = Walker::of(pid);
+    let is_walker = |dir: &Path| {
         let Ok(cmdline) = fs::read(dir.join("cmdline")) else {
-            continue;
+            return false;
         };
         let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
         let is_gitfold = args.first().is_some_and(|argv0| {
@@ -520,8 +527,16 @@ pub fn stop_below(mountpoint: &Path) {
             .get(2)
             .is_some_and(|root| Path::new(OsStr::from_bytes(root)).starts_with(mountpoint));
         let walker = matches!(args.get(1), Some(&b"prewarm-walk" | &b"prewarm"));
-        if is_gitfold && walker && below {
-            walkers.push(candidate);
+        is_gitfold && walker && below
+    };
+    for (pid, dir) in crate::procs::own() {
+        // Checked again once its pidfd is open: if the pid was reused
+        // meanwhile, the second check sees the process the pidfd names.
+        if is_walker(&dir) {
+            let candidate = Walker::of(pid);
+            if is_walker(&dir) {
+                walkers.push(candidate);
+            }
         }
     }
     terminate(&walkers);
@@ -558,7 +573,7 @@ fn terminate(walkers: &[Walker]) {
                 libc::poll(
                     fds.as_mut_ptr(),
                     fds.len() as libc::nfds_t,
-                    wait.as_millis() as i32,
+                    wait.as_millis().max(1) as i32,
                 );
             },
         }
@@ -669,7 +684,7 @@ mod tests {
     fn stop_keeps_only_wanted_walks() {
         let mut walks = Walks {
             running: vec![(
-                1,
+                3,
                 Walker {
                     pid: 7,
                     pidfd: None,
@@ -692,7 +707,7 @@ mod tests {
             stopped: false,
             paused: Vec::new(),
             stops: 0,
-            starts: 2,
+            starts: 3,
         };
         let stopped: Vec<_> = walks.stop().iter().map(|w| w.pid).collect();
         assert_eq!(stopped, [7]);
