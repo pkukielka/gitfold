@@ -41,7 +41,7 @@ impl Workspace {
         if reads.is_some() {
             return Ok(());
         }
-        let path = self.state_dir.join(READS);
+        let path = self.state.dir.join(READS);
         let data = match fs::read(&path) {
             Ok(data) => data,
             Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),

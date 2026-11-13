@@ -260,7 +260,7 @@ impl Workspace {
     /// Whether the workspace's HEAD is on its branch and no git operation is
     /// running or stopped half-way in it.
     fn git_idle(&self) -> bool {
-        worktree::git_busy(&self.common_dir, &self.admin, &self.branch).is_none()
+        worktree::git_busy(&self.common_dir, &self.state.admin, &self.branch).is_none()
     }
 
     fn rebase(&self, store: &Store, new: &Commit, fetch: bool) -> Result<()> {
@@ -321,7 +321,7 @@ impl Workspace {
             }
         }
         layers.times.save()?;
-        state::write_base(&self.state_dir, &new.id)?;
+        state::write_base(&self.state.dir, &new.id)?;
         layers.base = new.id;
         layers.base_tree = new_tree;
         // Before anything below can fail: cached listings hold the old base's files.

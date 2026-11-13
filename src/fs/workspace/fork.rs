@@ -17,6 +17,6 @@ impl Workspace {
         // Copy-ups write under a shared `layers`; none is half-done now.
         layers.times.save()?;
         layers.markers.sync()?;
-        copy_state_dir(&self.common_dir, &self.branch, &self.state_dir, dst)
+        copy_state_dir(&self.common_dir, &self.branch, &self.state.dir, dst)
     }
 }

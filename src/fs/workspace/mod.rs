@@ -96,9 +96,8 @@ pub struct Workspace {
     /// The task folder, unless the base tracks a path of its name (`task`).
     task: Option<TaskDir>,
     common_dir: PathBuf,
-    state_dir: PathBuf,
-    /// The worktree's admin directory (`.git/worktrees/gitfold-ws-<id>`).
-    admin: PathBuf,
+    /// Where its state and its worktree registration are.
+    state: StateDir,
     branch: String,
     /// `refs/gitfold/<id>`, which keeps the base from `git gc`, and the commit it
     /// was last set to.
@@ -282,8 +281,7 @@ impl Workspace {
             upper,
             task,
             common_dir,
-            state_dir: state.dir,
-            admin: state.admin,
+            state,
             branch: branch.to_string(),
             pin_ref,
             pinned: Mutex::new(None),
