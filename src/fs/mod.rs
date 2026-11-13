@@ -47,7 +47,7 @@ use log::info;
 
 use crate::git::index::StatInfo;
 use crate::inode;
-use crate::settings::Prewarm;
+use crate::prewarm::Prewarm;
 use crate::store::Store;
 use content::ContentCache;
 pub use names::NameChanges;

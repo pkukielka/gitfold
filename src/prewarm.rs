@@ -15,9 +15,26 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-pub use crate::settings::Prewarm;
+use clap::ValueEnum;
 use log::{info, warn};
 use parking_lot::Mutex;
+
+/// How a freshly opened snapshot or workspace is walked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Prewarm {
+    None,
+    /// List every directory (readdirplus instantiates every inode).
+    Meta,
+    /// Also read every file into the page cache (costs RAM equal to tree size).
+    Content,
+}
+
+/// Its name on the command line and in git config, as clap parses it.
+impl std::fmt::Display for Prewarm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_possible_value().expect("not skipped").get_name())
+    }
+}
 
 #[derive(Default)]
 struct Stats {

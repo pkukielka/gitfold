@@ -8,9 +8,9 @@ use clap::builder::BoolishValueParser;
 
 use crate::daemon::control;
 use crate::git;
+use crate::prewarm::Prewarm;
 use crate::refusal::Refusal;
 use crate::settings;
-use crate::settings::Prewarm;
 use crate::state::StateDir;
 use crate::state::fork;
 use crate::state::retire::check_name;

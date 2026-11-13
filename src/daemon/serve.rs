@@ -9,9 +9,9 @@ use anyhow::Result;
 use fuser::{Config, MountOption};
 
 use super::control::{self, Request};
-use super::prewarm;
 use crate::fs::{self, GitFold, NameChanges};
-use crate::settings::Prewarm;
+use crate::mount_table;
+use crate::prewarm::{self, Prewarm};
 
 /// What `gitfold mount` says about the daemon (see its options there).
 pub struct Options {
@@ -61,7 +61,7 @@ pub fn run(options: Options) -> Result<()> {
         MountOption::DefaultPermissions,
         // The common dir, for people reading the mount table (`remove` detects
         // mounts by the lock).
-        MountOption::FSName(super::fs_name(&common_dir)),
+        MountOption::FSName(mount_table::fs_name(&common_dir)),
         MountOption::Subtype("gitfold".into()),
     ];
     config.n_threads = Some(threads.unwrap_or(cpus));

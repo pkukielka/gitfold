@@ -14,14 +14,14 @@ use gix::ObjectId;
 use log::{error, info, warn};
 use parking_lot::{Mutex, RwLock};
 
-use crate::daemon::prewarm;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
 use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
+use crate::prewarm;
+use crate::prewarm::Prewarm;
 use crate::refusal::Refusal;
-use crate::settings::Prewarm;
 use crate::store::{DirRec, Store};
 
 /// One root entry. Every name gets its own slot, and so its own directory

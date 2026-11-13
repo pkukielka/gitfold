@@ -16,7 +16,6 @@
 //! its changes, has no task folder.
 
 use std::fs;
-
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 

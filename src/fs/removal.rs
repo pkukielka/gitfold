@@ -16,12 +16,12 @@ use super::NameChanges;
 use super::snapshots::Snapshots;
 use super::workspace::Workspace;
 use super::workspaces::Workspaces;
-use crate::daemon::{self, prewarm, procs};
 use crate::fs::workspace;
 use crate::git;
 use crate::refusal::Refusal;
 use crate::state::retire;
 use crate::store::Store;
+use crate::{mount_table, prewarm, procs};
 
 pub struct Removal {
     pub(super) common_dir: PathBuf,
@@ -190,7 +190,7 @@ impl Removal {
     /// Refuses once the mount is being unmounted (`closed`), or detached
     /// (unmounted while busy): who uses what can't be told any more.
     fn refuse_if_unmounting(&self, closed: bool) -> Result<()> {
-        if closed || daemon::gitfold_source(&self.mount_point)?.is_none() {
+        if closed || mount_table::gitfold_source(&self.mount_point)?.is_none() {
             let shown = self.mount_point.display();
             return Err(Refusal::InUse.error(format!("{shown} is being unmounted")));
         }

@@ -7,6 +7,9 @@ mod git;
 mod inode;
 mod inotify;
 mod lock;
+mod mount_table;
+mod prewarm;
+mod procs;
 mod refusal;
 mod settings;
 mod state;
@@ -16,8 +19,6 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-
-use daemon::prewarm;
 
 #[derive(Parser)]
 #[command(about = "Git revisions as a filesystem", version = LONG_VERSION)]
@@ -138,7 +139,7 @@ enum Command {
     PrewarmWalk {
         root: PathBuf,
         #[arg(long, value_enum)]
-        mode: settings::Prewarm,
+        mode: prewarm::Prewarm,
         #[arg(long)]
         threads: usize,
     },

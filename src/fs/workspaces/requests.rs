@@ -10,8 +10,9 @@ use log::warn;
 
 use super::Workspaces;
 use super::busy::Mark;
-use crate::daemon::prewarm::{self, Spawned};
-use crate::settings::{self, Prewarm};
+use crate::prewarm::Prewarm;
+use crate::prewarm::{self, Spawned};
+use crate::settings;
 use crate::state::fork;
 
 /// How long unmounting waits for long requests in progress.

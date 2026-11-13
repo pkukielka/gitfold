@@ -13,8 +13,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::daemon::control;
-use crate::daemon::{self, procs, serve};
-use crate::settings::Prewarm;
+use crate::daemon::{self, serve};
+use crate::prewarm::Prewarm;
+use crate::{mount_table, prewarm, procs};
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
@@ -172,10 +173,10 @@ pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
     };
     let mountpoint = daemon::canonical(mountpoint)?;
     let shown = mountpoint.display();
-    let Some(source) = daemon::gitfold_source(&mountpoint)? else {
+    let Some(source) = mount_table::gitfold_source(&mountpoint)? else {
         bail!("{shown} is not a gitfold mount");
     };
-    let common_dir = daemon::common_dir_of_source(&source);
+    let common_dir = mount_table::common_dir_of_source(&source);
     let answer = control::request(&common_dir, &control::Request::Version, Some(WAIT));
     let (code, message) = match answer {
         Ok(Some(daemon)) => {
@@ -230,7 +231,7 @@ const WAIT: Duration = Duration::from_secs(3);
 pub fn unmount(mountpoint: &Path) -> Result<()> {
     let mountpoint = daemon::canonical(mountpoint)?;
     let shown = mountpoint.display();
-    let Some(source) = daemon::gitfold_source(&mountpoint)? else {
+    let Some(source) = mount_table::gitfold_source(&mountpoint)? else {
         bail!("{shown} is not a gitfold mount");
     };
     // Not one of the processes using it.
@@ -238,12 +239,12 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     // Prewarm walkers keep the mount busy, which would make this only detach it.
     // The daemon stops them, and starts no more; killing them from here is for
     // daemons without the request (it would start queued ones meanwhile).
-    let common_dir = daemon::common_dir_of_source(&source);
+    let common_dir = mount_table::common_dir_of_source(&source);
     // Briefly: a daemon that is stopped, hung or busy with a removal must not
     // keep it from unmounting.
     let stop = control::Request::StopPrewarm;
     let _ = control::request(&common_dir, &stop, Some(WAIT));
-    daemon::prewarm::stop_below(&mountpoint);
+    prewarm::stop_below(&mountpoint);
     // If it doesn't go ahead, the mount stays: let the daemon walk again.
     let resume = |e: anyhow::Error| {
         let resume = control::Request::ResumePrewarm;
