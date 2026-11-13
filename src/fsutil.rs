@@ -81,8 +81,9 @@ pub enum Unreadable {
     /// Reads it with the owner's read bit set meanwhile: for a tree nothing
     /// else uses at the time (a workspace's upper, under its lock).
     Lift,
-    /// Fails, leaving the source as it is (a tree others may be using).
-    Fail,
+    /// Leaves it out of the copy, and the source as it is (a tree others may
+    /// be using).
+    Skip,
 }
 
 /// Copies directory `src` to new directory `dst`: files, symlinks and
@@ -126,8 +127,10 @@ fn copy_below(
             copy_times(&to, &entry.metadata()?)?;
         } else if kind.is_file() {
             let meta = entry.metadata()?;
-            copy_file(&from, &to, &meta, unreadable)
-                .with_context(|| format!("copying {}", from.display()))?;
+            if unreadable == Unreadable::Skip && meta.permissions().mode() & 0o400 == 0 {
+                continue;
+            }
+            copy_file(&from, &to, &meta).with_context(|| format!("copying {}", from.display()))?;
             copy_times(&to, &meta)?;
         } else {
             bail!("{}: not a file, symlink or directory", from.display());
@@ -138,15 +141,10 @@ fn copy_below(
 }
 
 /// Copies file `from` (with metadata `meta`) to `to`, with its mode; one its
-/// owner can't read as `unreadable` says.
-fn copy_file(
-    from: &Path,
-    to: &Path,
-    meta: &fs::Metadata,
-    unreadable: Unreadable,
-) -> io::Result<()> {
+/// owner can't read with the owner's read bit set meanwhile.
+fn copy_file(from: &Path, to: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let mode = meta.permissions().mode();
-    if mode & 0o400 != 0 || unreadable == Unreadable::Fail {
+    if mode & 0o400 != 0 {
         return fs::copy(from, to).map(drop);
     }
     fs::set_permissions(from, fs::Permissions::from_mode(mode | 0o400))?;
@@ -186,6 +184,33 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
+    /// A file its owner can't read: copied with its mode lifted meanwhile
+    /// (`Lift`), or left out with the source untouched (`Skip`); either way
+    /// the source ends as it was.
+    #[test]
+    fn unreadable_files() {
+        let dir = scratch("unreadable");
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("open"), "o").unwrap();
+        fs::write(src.join("private"), "p").unwrap();
+        fs::set_permissions(src.join("private"), fs::Permissions::from_mode(0o200)).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        copy_tree(&src, &dir.join("lifted"), &|_| false, Unreadable::Lift).unwrap();
+        assert_eq!(mode(&dir.join("lifted/private")), 0o200);
+        fs::set_permissions(
+            dir.join("lifted/private"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(dir.join("lifted/private")).unwrap(), "p");
+        copy_tree(&src, &dir.join("skipped"), &|_| false, Unreadable::Skip).unwrap();
+        assert!(dir.join("skipped/open").exists());
+        assert!(!dir.join("skipped/private").exists());
+        assert_eq!(mode(&src.join("private")), 0o200, "the source as it was");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     /// A missing source is an error, not an empty copy.
     #[test]
     fn copy_of_nothing_fails() {
@@ -195,7 +220,7 @@ mod tests {
                 &dir.join("none"),
                 &dir.join("dst"),
                 &|_| false,
-                Unreadable::Fail
+                Unreadable::Skip
             )
             .is_err()
         );

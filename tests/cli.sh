@@ -286,7 +286,8 @@ eq "files move in (copied across: another file system for the mount)" "d 0" "$(c
 eq "a fork copies it" "writing the parser" "$("$BIN" -C "$REPO" branch -w --from tk tk2 >/dev/null 2>&1; cat "$MNT/tk2/.task/status" 2>&1)"
 echo secret >"$TASKS/tk/private"; chmod 000 "$TASKS/tk/private"
 "$BIN" -C "$REPO" branch -w --from tk tk4 >/dev/null 2>&1
-eq "a fork leaves an unreadable file of the source's folder as it is" 0 "$(stat -c %a "$TASKS/tk/private")"
+eq "a fork copies the folder but a file it can't read, which it leaves as it is" "status no 0" \
+    "$(ls "$TASKS/tk4" | grep -x status) $(test -e "$TASKS/tk4/private" && echo copied || echo no) $(stat -c %a "$TASKS/tk/private")"
 chmod 600 "$TASKS/tk/private"; rm "$TASKS/tk/private"
 mkdir -p "$TASKS/fk-old"; echo old >"$TASKS/fk-old/status"
 out=$("$BIN" -C "$REPO" branch -w --from tk fk-old 2>&1)
