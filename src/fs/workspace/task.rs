@@ -236,11 +236,17 @@ fn copy_tree(src: &Path, dst: &Path, skip: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// A scratch git directory holding `config` (a git config file's text).
-    fn git_dir(name: &str, config: &str) -> PathBuf {
+    /// An empty scratch directory for test `name`.
+    fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("gitfold-task-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A scratch git directory holding `config` (a git config file's text).
+    fn git_dir(name: &str, config: &str) -> PathBuf {
+        let dir = scratch(name);
         fs::write(dir.join("config"), config).unwrap();
         dir
     }
@@ -294,8 +300,7 @@ mod tests {
 
     #[test]
     fn copy_leaves_inbox_and_dot_files() {
-        let root = std::env::temp_dir().join(format!("gitfold-task-{}-copy", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = scratch("copy");
         let (from, to) = (root.join("from"), root.join("to"));
         for p in ["notes", "inbox"] {
             fs::create_dir_all(from.join(p)).unwrap();

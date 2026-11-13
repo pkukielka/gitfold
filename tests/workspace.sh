@@ -10,9 +10,6 @@ BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
 TESTS=$(realpath "$(dirname "$0")")
 NAME=workspace
 . "$(dirname "$0")/lib.sh"
-REPO=$T/repo
-MNT=$T/mnt
-LOG=$T/gitfold.log
 
 mkdir -p "$MNT"
 git clone -q "$SRC" "$REPO"
@@ -192,8 +189,7 @@ check "unknown branch absent" test ! -e "$MNT/no-such-branch"
 
 echo "== kill -9 during a prewarm"
 unmount_fs
-"$BIN" mount --foreground --prewarm content --prewarm-threads 1 "$REPO" "$MNT" >>"$LOG" 2>&1 & KPID=$!
-for _ in $(seq 100); do mountpoint -q "$MNT" && break; sleep 0.05; done
+mount_fs --prewarm content --prewarm-threads 1; KPID=$PID
 ls "$MNT/@HEAD" >/dev/null; sleep 0.3                    # a walker is reading
 check "a prewarm walker runs as its own process" pgrep -f "[g]itfold prewarm-walk $MNT/@HEAD"
 kill -9 $KPID; wait $KPID 2>/dev/null

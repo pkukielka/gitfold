@@ -7,26 +7,26 @@
 # - stdin is /dev/null: a command reading it ends instead of waiting on the
 #   terminal or the runner (pipes in a test still feed what they pipe).
 # - BIN becomes a wrapper giving every gitfold command GF_TIMEOUT seconds
-#   (default 120) but `mount --foreground`, so one stuck command fails its
-#   check instead of holding up the run.
+#   (default 120), so one stuck command fails its check instead of holding
+#   up the run; long-lived daemons (`mount_fs`) run REAL_BIN.
+# - REPO, MNT and LOG are below T; `R` runs git in REPO.
 # - `section NAME FUNCTION` runs a section in a subshell of its own (see
-#   there); SECTION=<text> runs only the sections whose name contains it.
+#   there); SECTION=<text> runs only the sections whose name contains it,
+#   and PARALLEL=1 runs them all at once (the output kept in order).
 
 exec </dev/null
 ROOT=$(mktemp -d "/tmp/gf-$NAME.XXXXXX")
 T=$ROOT
-FAILS=0
+REPO=$T/repo MNT=$T/mnt LOG=$T/gitfold.log
 REAL_BIN=$BIN
 BIN=$ROOT/gitfold
-cat >"$BIN" <<EOF
-#!/bin/sh
-for a in "\$@"; do [ "\$a" = --foreground ] && exec "$REAL_BIN" "\$@"; done
-exec timeout ${GF_TIMEOUT:-120} "$REAL_BIN" "\$@"
-EOF
+printf '#!/bin/sh\nexec timeout %s "%s" "$@"\n' "${GF_TIMEOUT:-120}" "$REAL_BIN" >"$BIN"
 chmod +x "$BIN"
 
 pass() { echo "ok   $*"; }
-fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); echo "$*" >>"$ROOT/.fails"; }
+fail() { echo "FAIL $*"; echo "$*" >>"$ROOT/.fails"; }
+fails() { ! "$@"; }
+R() { git -C "$REPO" -c user.name=t -c user.email=t@t "$@"; }
 check() { # description, command...
     local desc=$1; shift
     if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
@@ -36,7 +36,7 @@ eq() { # description, expected, actual
 }
 
 mount_fs() {
-    "$BIN" mount --foreground "$@" "$REPO" "$MNT" >>"$LOG" 2>&1 &
+    "$REAL_BIN" mount --foreground "$@" "$REPO" "$MNT" >>"$LOG" 2>&1 &
     PID=$!
     for _ in $(seq 100); do mountpoint -q "$MNT" && return; sleep 0.05; done
     echo "mount failed"; cat "$LOG"; exit 1
@@ -57,26 +57,38 @@ unmount_below() {
 # Runs function $2 as section $1, unless SECTION is set and $1 doesn't contain
 # it: in a subshell, with T, REPO, MNT and LOG of its own and the suite's
 # `fixture` run first, and whatever it mounted unmounted after, so sections
-# share no state. Failures are counted through a file, across subshells.
+# share no state. Failures are counted through a file, across subshells; a
+# section that ends early (`set -u`, a failed mount) counts as one. With
+# PARALLEL=1, sections run at once; `finish` prints their output in order.
 SECTION_N=0
 section() {
     SECTION_N=$((SECTION_N + 1))
     if [ -n "${SECTION:-}" ] && [[ "$1" != *"$SECTION"* ]]; then
         return
     fi
-    echo "== $1"
+    if [ -n "${PARALLEL:-}" ]; then
+        run_section "$@" >"$ROOT/$SECTION_N.out" 2>&1 &
+    else
+        run_section "$@"
+    fi
+}
+run_section() {
     (
         T=$ROOT/$SECTION_N
         REPO=$T/repo MNT=$T/mnt LOG=$T/gitfold.log
-        mkdir -p "$T" "$MNT" "$REPO"
+        mkdir -p "$MNT" "$REPO"
         trap 'unmount_below "$T"' EXIT
-        fixture
-        "$2"
+        echo "== $1"
+        ( fixture; "$2" ) || fail "$1: the section ended early (exit $?)"
     )
 }
 
 # Ends the run: the summary, the exit code; removes T unless KEEP=1.
 finish() {
+    if [ -n "${PARALLEL:-}" ]; then
+        wait
+        for i in $(seq "$SECTION_N"); do [ ! -f "$ROOT/$i.out" ] || cat "$ROOT/$i.out"; done
+    fi
     local n=0
     [ -f "$ROOT/.fails" ] && n=$(wc -l <"$ROOT/.fails")
     echo "== $n failure(s)"

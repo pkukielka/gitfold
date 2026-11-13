@@ -10,14 +10,10 @@ set -uo pipefail
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
 NAME=rebase
 . "$(dirname "$0")/lib.sh"
-REPO=$T/repo
-MNT=$T/mnt
-LOG=$T/gitfold.log
 
 W=$MNT/ws
 STATE=$REPO/.git/gitfold/ws
 G() { git -C "$W" -c user.name=t -c user.email=t@t -c core.editor=true "$@"; }
-R() { git -C "$REPO" -c user.name=t -c user.email=t@t "$@"; }
 # Waits until the workspace's base is the branch tip.
 wait_base() {
     for _ in $(seq 100); do
@@ -32,7 +28,6 @@ view() {
         find . -path ./.git -prune -o -type f -print0 | sort -z | xargs -0 md5sum) | md5sum
 }
 upper_files() { find "$STATE/upper" -type f -o -type l | wc -l; }
-fails() { ! "$@"; }
 clean() { [ -z "$(G status --porcelain -uall)" ] && [ -z "$(G diff-files --name-only)" ]; }
 
 mkdir -p "$MNT" "$REPO"

@@ -10,12 +10,9 @@ set -uo pipefail
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
 NAME=promisor
 . "$(dirname "$0")/lib.sh"
-MNT=$T/mnt
-LOG=$T/gitfold.log
 # uploadpack.packObjectsHook is read only from protected (global) config.
 export HOME=$T/home XDG_CONFIG_HOME=$T/xdg
 
-fails() { ! "$@"; }
 S() { git -C "$T/seed" -c user.name=t -c user.email=t@t "$@"; }
 C() { git -C "$REPO" -c user.name=t -c user.email=t@t "$@"; }
 # A fresh blob:none clone of the remote at $1.
