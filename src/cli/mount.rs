@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::daemon::control;
-use crate::daemon::prewarm::Prewarm;
 use crate::daemon::{self, procs, serve};
+use crate::settings::Prewarm;
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);

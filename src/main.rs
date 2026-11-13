@@ -138,7 +138,7 @@ enum Command {
     PrewarmWalk {
         root: PathBuf,
         #[arg(long, value_enum)]
-        mode: prewarm::Prewarm,
+        mode: settings::Prewarm,
         #[arg(long)]
         threads: usize,
     },

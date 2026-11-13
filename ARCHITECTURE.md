@@ -137,13 +137,13 @@ Then, per request (`fs/workspace/`):
 | `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
-| `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): reading, writing, copying for a fork |
+| `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing (the prewarm modes, `Prewarm`, are here), copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
 | `src/refusal.rs` | why a command refused (typed, with its own exit code), carried over the control socket; every command's exit codes |
 | `src/main.rs` | the commands (clap: their help; the arguments are a struct next to each command's code) and their dispatch, exit codes, `M_MMAP_THRESHOLD` |
 | `src/inotify.rs` | an inotify watch on one directory (`watch`, `inbox --wait`) |
-| `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access |
+| `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access, `info/exclude` |
 | `src/git/cmd.rs` | running git itself (`command`, `run`, `output`) |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check |

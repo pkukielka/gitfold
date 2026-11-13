@@ -15,46 +15,15 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::settings;
-use clap::ValueEnum;
+pub use crate::settings::Prewarm;
 use log::{info, warn};
 use parking_lot::Mutex;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Prewarm {
-    None,
-    /// List every directory (readdirplus instantiates every inode).
-    Meta,
-    /// Also read every file into the page cache (costs RAM equal to tree size).
-    Content,
-}
-
-/// Its name on the command line and in git config, as clap parses it.
-impl std::fmt::Display for Prewarm {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.to_possible_value().expect("not skipped").get_name())
-    }
-}
 
 #[derive(Default)]
 struct Stats {
     dirs: AtomicU64,
     files: AtomicU64,
     bytes: AtomicU64,
-}
-
-/// The prewarm mode set for the workspace of `branch` (`git config
-/// branch.<branch>.gitfoldPrewarm none|meta|content`), if any, in the
-/// repository's config file (not included ones). Read when it opens, so a
-/// change counts from the next open.
-pub fn for_branch(common_dir: &Path, branch: &str) -> Option<Prewarm> {
-    let value = settings::branch(common_dir, branch, settings::PREWARM)?;
-    Prewarm::from_str(&value, true)
-        .inspect_err(|_| {
-            let key = settings::branch_key(branch, settings::PREWARM);
-            warn!("{key}: {value:?} is not none, meta or content")
-        })
-        .ok()
 }
 
 /// A walk to run.

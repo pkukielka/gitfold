@@ -9,8 +9,9 @@ use anyhow::Result;
 use fuser::{Config, MountOption};
 
 use super::control::{self, Request};
-use super::prewarm::{self, Prewarm};
+use super::prewarm;
 use crate::fs::{self, GitFold, NameChanges};
+use crate::settings::Prewarm;
 
 /// What `gitfold mount` says about the daemon (see its options there).
 pub struct Options {

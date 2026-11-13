@@ -218,6 +218,36 @@ pub fn is_bare() -> bool {
     with_repo(|repo| repo.is_bare())
 }
 
+/// Adds `pattern` to `info/exclude` (shared by every worktree) if missing,
+/// after a comment saying `why`, in one append: no temporary file for two
+/// processes to share.
+pub fn exclude(common_dir: &Path, pattern: &[u8], why: &str) -> Result<()> {
+    use std::io::Write;
+    let path = common_dir.join("info").join("exclude");
+    let text = match std::fs::read(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e.into()),
+    };
+    if text.split(|b| *b == b'\n').any(|l| l == pattern) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path.parent().context("info")?)?;
+    let mut add = Vec::new();
+    if !text.is_empty() && !text.ends_with(b"\n") {
+        add.push(b'\n');
+    }
+    add.extend_from_slice(format!("# {why}\n").as_bytes());
+    add.extend_from_slice(pattern);
+    add.push(b'\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    file.write_all(&add)?;
+    Ok(())
+}
+
 /// The global ignore file git uses in the repository or worktree with git
 /// directory `git_dir`: `core.excludesFile` as git itself reads it there
 /// (worktree config, conditional includes, `~`), none if it is set but empty,

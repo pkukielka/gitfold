@@ -45,9 +45,9 @@ use fuser::{
 };
 use log::info;
 
-use crate::daemon::prewarm::Prewarm;
 use crate::git::index::StatInfo;
 use crate::inode;
+use crate::settings::Prewarm;
 use crate::store::Store;
 use content::ContentCache;
 pub use names::NameChanges;

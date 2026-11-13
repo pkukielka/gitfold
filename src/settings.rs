@@ -13,14 +13,33 @@
 use std::path::Path;
 
 use anyhow::Result;
+use clap::ValueEnum;
 use log::warn;
 
 use crate::git;
 
 /// `branch.<branch>.gitfoldPrewarm`: none, meta or content.
-pub const PREWARM: &str = "gitfoldPrewarm";
+const PREWARM: &str = "gitfoldPrewarm";
 /// `branch.<branch>.gitfoldTrackReads`: a boolean.
-pub const TRACK_READS: &str = "gitfoldTrackReads";
+const TRACK_READS: &str = "gitfoldTrackReads";
+
+/// How the daemon walks a freshly opened snapshot or workspace, to have the
+/// kernel cache it (see `daemon::prewarm`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Prewarm {
+    None,
+    /// List every directory (readdirplus instantiates every inode).
+    Meta,
+    /// Also read every file into the page cache (costs RAM equal to tree size).
+    Content,
+}
+
+/// Its name on the command line and in git config, as clap parses it.
+impl std::fmt::Display for Prewarm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.to_possible_value().expect("not skipped").get_name())
+    }
+}
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 pub const TASK_DIR: &str = "taskDir";
@@ -82,20 +101,41 @@ pub fn repository(common_dir: &Path, key: &str) -> Option<String> {
     Local::read(common_dir).repository(key)
 }
 
-/// `branch.<branch>.<key>` (see `Local::branch`).
-pub fn branch(common_dir: &Path, branch: &str, key: &str) -> Option<String> {
-    Local::read(common_dir).branch(branch, key)
+/// The prewarm mode set for the workspace of `branch`, if any; a value that
+/// isn't one is warned about and counts as unset. Read when it opens, so a
+/// change counts from the next open.
+pub fn prewarm(common_dir: &Path, branch: &str) -> Option<Prewarm> {
+    let value = Local::read(common_dir).branch(branch, PREWARM)?;
+    Prewarm::from_str(&value, true)
+        .inspect_err(|_| {
+            let key = branch_key(branch, PREWARM);
+            warn!("{key}: {value:?} is not none, meta or content")
+        })
+        .ok()
 }
 
-/// `branch.<branch>.<key>` as a boolean (see `Local::branch_bool`).
-pub fn branch_bool(common_dir: &Path, branch: &str, key: &str) -> Option<bool> {
-    Local::read(common_dir).branch_bool(branch, key)
+/// Whether the workspace of `branch` records reads, if set (see
+/// `Local::branch_bool`).
+pub fn track_reads(common_dir: &Path, branch: &str) -> Option<bool> {
+    Local::read(common_dir).branch_bool(branch, TRACK_READS)
+}
+
+/// Stores `mode` as the prewarm mode of branch `branch`'s workspace (see
+/// `set_branch`).
+pub fn set_prewarm(git_dir: &Path, branch: &str, mode: Prewarm) -> Result<()> {
+    set_branch(git_dir, branch, PREWARM, &mode.to_string())
+}
+
+/// Stores whether branch `branch`'s workspace records reads (see
+/// `set_branch`).
+pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
+    set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
 /// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
 /// own config file (where it is read), given the repository's or one of its
 /// worktrees' git directory.
-pub fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()> {
+fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()> {
     git::cmd::run(
         git_dir,
         &["config", "--local", &branch_key(branch, key), value],
