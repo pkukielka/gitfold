@@ -5,6 +5,7 @@
 //! in process once it is mostly history; a record cut short by a crash is
 //! ignored.
 
+use crate::fsutil;
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
@@ -92,7 +93,7 @@ impl Markers {
                 data.push(0);
             }
         }
-        crate::fsutil::write_atomic(&self.path, &data)?;
+        fsutil::write_atomic(&self.path, &data)?;
         self.log = OpenOptions::new().append(true).open(&self.path)?;
         self.appended = 0;
         Ok(())

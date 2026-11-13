@@ -21,6 +21,7 @@ use gix::objs::tree::EntryKind;
 use super::markers::Kind;
 use super::times::shown_mtime;
 use super::{Layers, ListEntry, Lower, Obj, Workspace, join, not_found};
+use crate::fsutil;
 use crate::git;
 use crate::store::Store;
 
@@ -178,7 +179,7 @@ impl Workspace {
                 fs::set_permissions(&tmp, fs::Permissions::from_mode(rec.perm().into()))?;
             }
             if let Some(time) = time {
-                crate::fsutil::set_times(&tmp, Some(time), Some(time))?;
+                fsutil::set_times(&tmp, Some(time), Some(time))?;
             }
             fs::rename(&tmp, &target)
         })();
@@ -258,7 +259,7 @@ impl Workspace {
             fs::set_permissions(&target, fs::Permissions::from_mode(mode & 0o7777))?;
         }
         if atime.is_some() || mtime.is_some() {
-            crate::fsutil::set_times(&target, atime, mtime)?;
+            fsutil::set_times(&target, atime, mtime)?;
         }
         Ok(())
     }

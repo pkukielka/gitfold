@@ -42,12 +42,24 @@ pub fn set_times(
 }
 
 fn timespec(t: Option<SystemTime>) -> libc::timespec {
-    match t {
-        Some(t) => {
-            let d = t.duration_since(UNIX_EPOCH).unwrap_or_default();
-            libc::timespec {
-                tv_sec: d.as_secs() as libc::time_t,
-                tv_nsec: d.subsec_nanos() as _,
+    match t.map(|t| t.duration_since(UNIX_EPOCH)) {
+        Some(Ok(d)) => libc::timespec {
+            tv_sec: d.as_secs() as libc::time_t,
+            tv_nsec: d.subsec_nanos() as _,
+        },
+        // Before 1970: negative seconds, and nanoseconds counted forward.
+        Some(Err(e)) => {
+            let d = e.duration();
+            let (secs, nanos) = (d.as_secs() as libc::time_t, d.subsec_nanos());
+            match nanos {
+                0 => libc::timespec {
+                    tv_sec: -secs,
+                    tv_nsec: 0,
+                },
+                n => libc::timespec {
+                    tv_sec: -secs - 1,
+                    tv_nsec: (1_000_000_000 - n) as _,
+                },
             }
         }
         None => libc::timespec {
@@ -63,8 +75,7 @@ fn copy_times(path: &Path, meta: &fs::Metadata) -> Result<()> {
         .with_context(|| format!("setting the times of {}", path.display()))
 }
 
-/// Copies directory `src` (nothing if it doesn't exist) to new directory
-/// `dst`: files, symlinks and directories, with their modes and times,
+/// Copies directory `src` to new directory `dst`: files, symlinks and directories, with their modes and times,
 /// leaving out what `skip` says (given the path relative to `src`). Anything
 /// else (a socket, a device) is an error.
 pub fn copy_tree(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
@@ -72,11 +83,7 @@ pub fn copy_tree(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool) -> Result
 }
 
 fn copy_below(src: &Path, dst: &Path, rel: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
-    let meta = match fs::symlink_metadata(src) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", src.display())),
-    };
+    let meta = fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?;
     fs::create_dir(dst).with_context(|| format!("creating {}", dst.display()))?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -104,8 +111,7 @@ fn copy_below(src: &Path, dst: &Path, rel: &Path, skip: &dyn Fn(&Path) -> bool) 
 }
 
 /// Copies file `from` (with metadata `meta`) to `to`, with its mode. A file its
-/// owner can't read (a workspace allows it) is read with the owner's read bit
-/// set meanwhile.
+/// owner can't read is read with the owner's read bit set meanwhile.
 fn copy_file(from: &Path, to: &Path, meta: &fs::Metadata) -> io::Result<()> {
     let mode = meta.permissions().mode();
     if mode & 0o400 != 0 {
@@ -116,4 +122,44 @@ fn copy_file(from: &Path, to: &Path, meta: &fs::Metadata) -> io::Result<()> {
     fs::set_permissions(from, fs::Permissions::from_mode(mode))?;
     copied?;
     fs::set_permissions(to, fs::Permissions::from_mode(mode))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("gitfold-fsutil-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Times before 1970 are kept, fractions of a second included.
+    #[test]
+    fn times_before_1970() {
+        let dir = scratch("times");
+        let file = dir.join("f");
+        fs::write(&file, "x").unwrap();
+        for t in [
+            UNIX_EPOCH - Duration::new(86_400, 250_000_000),
+            UNIX_EPOCH - Duration::from_secs(1),
+            UNIX_EPOCH + Duration::new(1_700_000_000, 5),
+        ] {
+            set_times(&file, Some(t), Some(t)).unwrap();
+            assert_eq!(fs::metadata(&file).unwrap().modified().unwrap(), t);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A missing source is an error, not an empty copy.
+    #[test]
+    fn copy_of_nothing_fails() {
+        let dir = scratch("missing");
+        assert!(copy_tree(&dir.join("none"), &dir.join("dst"), &|_| false).is_err());
+        assert!(!dir.join("dst").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
 }

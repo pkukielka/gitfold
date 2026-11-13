@@ -134,7 +134,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
-| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory and registration), its base |
+| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory and registration; the files in it), its base and branch files |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): reading, writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |

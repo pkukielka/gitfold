@@ -29,7 +29,7 @@ pub fn run(git_dir: &Path, args: &[&str]) -> Result<()> {
 
 /// Runs git with `args`, returning what it printed; a failure's error holds
 /// what git said.
-pub fn output_bytes(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+pub fn output(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = command(git_dir).args(args).output()?;
     if !out.status.success() {
         bail!(
@@ -40,9 +40,4 @@ pub fn output_bytes(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
         );
     }
     Ok(out.stdout)
-}
-
-/// `output_bytes` as text.
-pub fn output(git_dir: &Path, args: &[&str]) -> Result<String> {
-    Ok(String::from_utf8_lossy(&output_bytes(git_dir, args)?).into_owned())
 }

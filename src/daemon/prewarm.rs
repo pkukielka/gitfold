@@ -29,11 +29,14 @@ pub enum Prewarm {
     Content,
 }
 
+/// Its name on the command line and in git config.
 impl std::fmt::Display for Prewarm {
-    /// Its name on the command line and in git config: `none`, `meta`, `content`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let value = self.to_possible_value().expect("not skipped");
-        f.write_str(value.get_name())
+        f.write_str(match self {
+            Prewarm::None => "none",
+            Prewarm::Meta => "meta",
+            Prewarm::Content => "content",
+        })
     }
 }
 
@@ -52,8 +55,8 @@ pub fn for_branch(common_dir: &Path, branch: &str) -> Option<Prewarm> {
     let value = settings::branch(common_dir, branch, settings::PREWARM)?;
     Prewarm::from_str(&value, true)
         .inspect_err(|_| {
-            let key = settings::PREWARM;
-            warn!("branch.{branch}.{key}: {value:?} is not none, meta or content")
+            let key = settings::branch_key(branch, settings::PREWARM);
+            warn!("{key}: {value:?} is not none, meta or content")
         })
         .ok()
 }

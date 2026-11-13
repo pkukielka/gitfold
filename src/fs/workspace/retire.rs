@@ -116,16 +116,15 @@ pub fn check_workspace(
     // `..` would point it at the git directory itself.
     check_name(branch)?;
     let state = StateDir::of(common_dir, branch);
-    let (state_dir, admin) = (&state.dir, &state.admin);
-    if !state_dir.exists() && !admin.exists() {
+    if !state.dir.exists() && !state.admin.exists() {
         return Err(Refusal::NotFound.error(format!("no workspace for branch {branch}")));
     }
     let changes = |message: String| Refusal::Changes.error(message);
     // Commits reachable only from the worktree (a rebase stopped half-way, a
     // detached HEAD) would be lost with its admin directory.
     if !force
-        && admin.exists()
-        && let Some(why) = worktree::git_busy(common_dir, admin, branch)
+        && state.admin.exists()
+        && let Some(why) = worktree::git_busy(common_dir, &state.admin, branch)
     {
         // A locked ref is git at work right now: retried by `--wait`.
         return Err(match why == worktree::GitBusy::RefLocked {
@@ -139,7 +138,7 @@ pub fn check_workspace(
     }
     // Staged changes live in the worktree's index, which upper may not show (a
     // file staged, then edited back).
-    if !force && admin.join("index").exists() && !index_matches_head(admin)? {
+    if !force && state.index().exists() && !index_matches_head(&state.admin)? {
         return Err(changes(format!(
             "workspace {branch} has staged changes; commit them, or use --force to discard them"
         )));
@@ -156,15 +155,8 @@ pub fn check_workspace(
                 if let Some(ws) = open {
                     return ws.sync(store);
                 }
-                let ws = Workspace::open(
-                    store,
-                    common_dir.to_path_buf(),
-                    state_dir.clone(),
-                    admin.clone(),
-                    branch,
-                    None,
-                    Vec::new(),
-                )?;
+                let state = StateDir::of(common_dir, branch);
+                let ws = Workspace::open(store, common_dir.to_path_buf(), state, branch, None)?;
                 ws.sync(store)
             };
             catch_up().map_err(|e| {
@@ -207,11 +199,10 @@ pub fn check_workspace(
 pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Result<String> {
     check_name(branch)?;
     let state = StateDir::of(common_dir, branch);
-    let (state_dir, admin) = (&state.dir, &state.admin);
     // The registration first: without it, the state alone is resumed correctly
     // (the registration is recreated); the reverse is not.
-    remove_dir(admin)?;
-    remove_dir(state_dir)?;
+    remove_dir(&state.admin)?;
+    remove_dir(&state.dir)?;
     worktree::unpin(common_dir, &worktree::pin_ref(&state.id))?;
     Ok(match ignored {
         0 => format!("removed workspace {branch}"),

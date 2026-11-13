@@ -69,12 +69,12 @@ pub type LineCounts = Option<(u32, u32)>;
 
 impl Status {
     /// The lines `change` at `path` added and removed relative to the base,
-    /// with upper in `state_dir`: the base's blob against upper's file (a
+    /// with upper in `state`: the base's blob against upper's file (a
     /// symlink's target, as git diffs it).
     pub fn line_counts(
         &self,
         store: &Store,
-        state_dir: &Path,
+        state: &StateDir,
         change: Change,
         path: &[u8],
     ) -> Result<LineCounts> {
@@ -87,7 +87,7 @@ impl Status {
             Some(Lower::Gitlink) => b"Subproject commit\n".to_vec(),
             _ => Vec::new(),
         };
-        let upper = upper_path(&state_dir.join("upper"), path);
+        let upper = upper_path(&state.upper(), path);
         let after = match change {
             Change::Deleted => Vec::new(),
             _ => {
@@ -133,23 +133,21 @@ impl Status {
     }
 }
 
-/// The changes of the workspace stored in `state_dir`, in repository `common_dir`.
+/// The changes of the workspace stored in `state`, in repository `common_dir`.
 pub fn status(store: &Store, common_dir: &Path, state: &StateDir) -> Result<Status> {
-    let state_dir = &state.dir;
     let base = state.read_base()?;
     let tree = store.load_tree(base.tree)?;
-    let (whiteouts, opaque) = Markers::read(&state_dir.join("markers"))?;
-    let upper = state_dir.join("upper");
+    let (whiteouts, opaque) = Markers::read(&state.markers())?;
+    let upper = state.upper();
     let mut buf = Vec::new();
     // The worktree's own view of the config (worktree config, `includeIf`).
-    let config_dir = if state.admin.exists() {
-        state.admin.clone()
-    } else {
-        common_dir.to_path_buf()
+    let config_dir = match state.admin.exists() {
+        true => &state.admin,
+        false => common_dir,
     };
     let ignore = gix::ignore::Search::from_git_dir(
         common_dir,
-        git::excludes_file(&config_dir)?,
+        git::excludes_file(config_dir)?,
         &mut buf,
         Default::default(),
     )?;

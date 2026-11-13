@@ -103,7 +103,6 @@ pub fn overlaps(
     let common_dir = git::init(repo)?;
     git::require_branch(branch)?;
     let state = StateDir::of(&common_dir, branch);
-    let state_dir = &state.dir;
     let opened = state.opened();
     let base = match opened {
         true => state.read_base()?.id,
@@ -122,7 +121,7 @@ pub fn overlaps(
         false => Vec::new(),
     };
     let read = match opened {
-        true => reads::recorded(state_dir)?,
+        true => reads::recorded(&state.dir)?,
         false => None,
     };
     match (&read, kinds) {
@@ -244,7 +243,7 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
 fn diff(common_dir: &Path, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
     let range = format!("{from}...{to}");
     let args = ["diff", "--name-only", "-z", "--no-renames", &range, "--"];
-    Ok(git::cmd::output_bytes(common_dir, &args)?
+    Ok(git::cmd::output(common_dir, &args)?
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
         .map(<[u8]>::to_vec)

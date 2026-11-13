@@ -21,8 +21,6 @@ use crate::git;
 pub const PREWARM: &str = "gitfoldPrewarm";
 /// `branch.<branch>.gitfoldTrackReads`: a boolean.
 pub const TRACK_READS: &str = "gitfoldTrackReads";
-/// Every per-branch setting (a fork copies them all).
-const BRANCH_KEYS: [&str; 2] = [PREWARM, TRACK_READS];
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 pub const TASK_DIR: &str = "taskDir";
@@ -31,56 +29,89 @@ pub const TASKS_DIR: &str = "tasksDir";
 /// `gitfold.inbox`: the inbox's name in a task folder.
 pub const INBOX: &str = "inbox";
 
-/// The repository's own config file, read now.
-fn local(common_dir: &Path) -> Option<gix::config::File> {
-    let path = common_dir.join("config");
-    gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok()
-}
+/// The repository's own config file, read once: for several settings at a
+/// time (a task folder's name and place, a fork's settings).
+pub struct Local(Option<gix::config::File>);
 
-/// `gitfold.<key>`, trimmed, if set and not empty.
-pub fn repository(common_dir: &Path, key: &str) -> Option<String> {
-    let value = local(common_dir)?
-        .string_by("gitfold", None, key)?
-        .to_string();
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
-}
+impl Local {
+    /// The repository's config file as it is now.
+    pub fn read(common_dir: &Path) -> Local {
+        let path = common_dir.join("config");
+        Local(gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok())
+    }
 
-/// `branch.<branch>.<key>`, trimmed, if set.
-pub fn branch(common_dir: &Path, branch: &str, key: &str) -> Option<String> {
-    let config = local(common_dir)?;
-    let value = config.string_by("branch", Some(branch.as_bytes().into()), key)?;
-    Some(value.to_string().trim().to_string())
-}
+    /// `gitfold.<key>`, trimmed, if set and not empty.
+    pub fn repository(&self, key: &str) -> Option<String> {
+        let value = self.0.as_ref()?.string_by("gitfold", None, key)?;
+        non_empty(value.to_string())
+    }
 
-/// `branch.<branch>.<key>` as a boolean, if set; a value that isn't one is
-/// warned about and counts as unset.
-pub fn branch_bool(common_dir: &Path, branch: &str, key: &str) -> Option<bool> {
-    let config = local(common_dir)?;
-    match config.boolean_by("branch", Some(branch.as_bytes().into()), key) {
-        Ok(value) => value,
-        Err(_) => {
-            warn!("branch.{branch}.{key} is not a boolean");
-            None
+    /// `branch.<branch>.<key>`, trimmed, if set and not empty.
+    pub fn branch(&self, branch: &str, key: &str) -> Option<String> {
+        let config = self.0.as_ref()?;
+        let value = config.string_by("branch", Some(branch.as_bytes().into()), key)?;
+        non_empty(value.to_string())
+    }
+
+    /// `branch.<branch>.<key>` as a boolean, if set; a value that isn't one is
+    /// warned about and counts as unset.
+    pub fn branch_bool(&self, branch: &str, key: &str) -> Option<bool> {
+        let config = self.0.as_ref()?;
+        match config.boolean_by("branch", Some(branch.as_bytes().into()), key) {
+            Ok(value) => value,
+            Err(_) => {
+                warn!("{} is not a boolean", branch_key(branch, key));
+                None
+            }
         }
     }
 }
 
-/// Sets `branch.<branch>.<key>` to `value`, with git, in repository (or
-/// worktree) `git_dir`.
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+/// The full name of setting `key` of `branch`: `branch.<branch>.<key>`.
+pub fn branch_key(branch: &str, key: &str) -> String {
+    format!("branch.{branch}.{key}")
+}
+
+/// `gitfold.<key>` (see `Local::repository`).
+pub fn repository(common_dir: &Path, key: &str) -> Option<String> {
+    Local::read(common_dir).repository(key)
+}
+
+/// `branch.<branch>.<key>` (see `Local::branch`).
+pub fn branch(common_dir: &Path, branch: &str, key: &str) -> Option<String> {
+    Local::read(common_dir).branch(branch, key)
+}
+
+/// `branch.<branch>.<key>` as a boolean (see `Local::branch_bool`).
+pub fn branch_bool(common_dir: &Path, branch: &str, key: &str) -> Option<bool> {
+    Local::read(common_dir).branch_bool(branch, key)
+}
+
+/// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
+/// own config file (where it is read), given the repository's or one of its
+/// worktrees' git directory.
 pub fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()> {
     git::cmd::run(
         git_dir,
-        &["config", &format!("branch.{branch}.{key}"), value],
+        &["config", "--local", &branch_key(branch, key), value],
     )
 }
 
-/// Gives branch `to` the settings set for branch `from` (a fork).
+/// Gives branch `to` the settings set for branch `from` (a fork); one that
+/// can't be written is warned about.
 pub fn copy_branch(common_dir: &Path, from: &str, to: &str) {
-    for key in BRANCH_KEYS {
-        if let Some(value) = branch(common_dir, from, key).filter(|v| !v.is_empty()) {
-            let to_key = format!("branch.{to}.{key}");
-            let _ = git::cmd::run(common_dir, &["config", "--local", &to_key, &value]);
+    let local = Local::read(common_dir);
+    // Every per-branch setting.
+    for key in [PREWARM, TRACK_READS] {
+        if let Some(value) = local.branch(from, key)
+            && let Err(e) = set_branch(common_dir, to, key, &value)
+        {
+            warn!("copying {} to {to}: {e:#}", branch_key(from, key));
         }
     }
 }

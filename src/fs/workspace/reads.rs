@@ -22,6 +22,7 @@ use anyhow::Result;
 use log::warn;
 
 use super::Workspace;
+use crate::settings;
 
 pub const READS: &str = "reads";
 
@@ -59,8 +60,7 @@ fn paths(data: &[u8]) -> HashSet<Vec<u8>> {
 /// else `default` (the mount's). Read when it opens, and by `gitfold
 /// track-reads` while open.
 pub fn tracked(common_dir: &Path, branch: &str, default: bool) -> bool {
-    crate::settings::branch_bool(common_dir, branch, crate::settings::TRACK_READS)
-        .unwrap_or(default)
+    settings::branch_bool(common_dir, branch, settings::TRACK_READS).unwrap_or(default)
 }
 
 impl Workspace {

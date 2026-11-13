@@ -19,14 +19,22 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use super::{Workspace, read_base};
+use super::Workspace;
+use crate::fsutil;
 use crate::git;
-use crate::git::worktree::{self, workspace_id};
+use crate::git::worktree;
+use crate::settings;
+use crate::state::{self, StateDir};
 
 /// Files of a state directory a fork copies (`upper` is copied as a tree;
 /// `branch` is written for the fork; `tmp` holds only interrupted copy-ups).
 /// `reads` too: the changes copied were built on those reads.
-const COPIED: [&str; 4] = ["base", "markers", "times", super::reads::READS];
+const COPIED: [&str; 4] = [
+    state::BASE,
+    state::MARKERS,
+    state::TIMES,
+    super::reads::READS,
+];
 
 /// The source's git index, copied into the new state directory with the rest
 /// (under the same lock) and moved into the fork's registration.
@@ -49,11 +57,9 @@ pub fn fork(
     );
     git::require_branch(from)?;
     ensure!(!git::branch_exists(to), "branch {to} exists already");
-    let root = worktree::state_root(common_dir);
-    let (from_id, to_id) = (workspace_id(from), workspace_id(to));
-    let dst = root.join(&to_id);
-    let to_admin = worktree::ws_admin_dir(common_dir, &to_id);
-    let to_pin = worktree::pin_ref(&to_id);
+    let (source, target) = (StateDir::of(common_dir, from), StateDir::of(common_dir, to));
+    let (dst, to_admin) = (&target.dir, &target.admin);
+    let to_pin = worktree::pin_ref(&target.id);
     // Left by an earlier branch of that name: reusing them would mix its state
     // in, and a failure here would delete them.
     ensure!(
@@ -67,20 +73,19 @@ pub fn fork(
         "the base pin {to_pin} of an earlier branch {to} is left; delete it with `git \
          update-ref -d {to_pin}`"
     );
-    let from_admin = worktree::ws_admin_dir(common_dir, &from_id);
     worktree::refuse_if_busy(common_dir, from, "branch from it once that is done")?;
     let tip_ref = format!("refs/heads/{from}");
     let before = git::resolve(&tip_ref)?.id;
-    let copied = crate::state::StateDir::of(common_dir, from).opened();
+    let copied = source.opened();
     if copied {
-        let tmp = root.join(format!(".fork-{to_id}"));
+        let tmp = worktree::state_root(common_dir).join(format!(".fork-{}", target.id));
         // Left by an interrupted fork.
         if tmp.exists() {
             fs::remove_dir_all(&tmp)?;
         }
         let made = copy(&tmp).and_then(|()| {
-            crate::fsutil::write_atomic(&tmp.join("branch"), format!("{to}\n").as_bytes())?;
-            fs::rename(&tmp, &dst)?;
+            state::write_branch(&tmp, to)?;
+            fs::rename(&tmp, dst)?;
             Ok(())
         });
         if let Err(e) = made {
@@ -108,9 +113,9 @@ pub fn fork(
         if copied {
             // Keeps the fork's base from `git gc` even if the source is removed
             // before the fork is first opened.
-            let base = read_base(&dst)?;
+            let base = target.read_base()?;
             worktree::pin(common_dir, &to_pin, &base.id)?;
-            register(&from_admin, from, to, &dst, &to_admin, mount)?;
+            register(&source.admin, from, to, dst, to_admin, mount)?;
         }
         let branch = format!("refs/heads/{to}");
         let tip = tip.to_string();
@@ -131,15 +136,15 @@ pub fn fork(
         // Undone: the branch is created last, so nothing has opened the fork;
         // the registration and pin were checked absent, so they are this
         // fork's.
-        let _ = fs::remove_dir_all(&dst);
-        let _ = fs::remove_dir_all(&to_admin);
+        let _ = fs::remove_dir_all(dst);
+        let _ = fs::remove_dir_all(to_admin);
         let _ = worktree::unpin(common_dir, &to_pin);
         if task_copied {
             let _ = fs::remove_dir_all(&to_task.dir);
         }
         return Err(e);
     }
-    crate::settings::copy_branch(common_dir, from, to);
+    settings::copy_branch(common_dir, from, to);
     let done = match copied {
         true => format!("created branch {to} at {from}, with its uncommitted changes"),
         false => {
@@ -164,13 +169,13 @@ pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &Path, dst: &Path) -
     // started since (a stash, a commit) holds `index.lock` while it rewrites
     // files, and would be copied half-done.
     worktree::refuse_if_busy(common_dir, branch, "branch from it once that is done")?;
-    let index = worktree::ws_admin_dir(common_dir, &workspace_id(branch)).join("index");
+    let index = StateDir::of(common_dir, branch).index();
     fs::create_dir_all(dst)?;
     for name in COPIED {
         match fs::copy(src.join(name), dst.join(name)) {
             Ok(_) => {}
             // Markers and times exist only once something needed them.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound && name != "base" => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && name != state::BASE => {}
             Err(e) => return Err(e).with_context(|| format!("copying {name}")),
         }
     }
@@ -180,7 +185,12 @@ pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &Path, dst: &Path) -
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e).context("copying the git index"),
     }
-    crate::fsutil::copy_tree(&src.join("upper"), &dst.join("upper"), &|_| false)
+    // Made when the workspace opens; a workspace never written to may lack it.
+    let upper = src.join(state::UPPER);
+    match upper.exists() {
+        true => fsutil::copy_tree(&upper, &dst.join(state::UPPER), &|_| false),
+        false => Ok(()),
+    }
 }
 
 /// Registers the fork's worktree at `to_admin` with the source's index copied
@@ -254,6 +264,10 @@ impl Workspace {
 
 /// `copy_state_dir` for the stored (closed) workspace of `branch`.
 pub fn copy_stored(common_dir: &Path, branch: &str, dst: &Path) -> Result<()> {
-    let src = crate::state::StateDir::of(common_dir, branch).dir;
-    copy_state_dir(common_dir, branch, &src, dst)
+    copy_state_dir(
+        common_dir,
+        branch,
+        &StateDir::of(common_dir, branch).dir,
+        dst,
+    )
 }

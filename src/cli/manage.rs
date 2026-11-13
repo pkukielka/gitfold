@@ -21,7 +21,7 @@ use crate::git;
 use crate::git::worktree::{self, workspace_branch};
 use crate::refusal::Refusal;
 use crate::settings;
-use crate::state::StateDir;
+use crate::state::{self, StateDir};
 use crate::store::Store;
 
 /// Takes the repository's daemon lock exclusively, failing if a gitfold daemon
@@ -152,7 +152,7 @@ pub fn track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
 
 /// Stores whether branch `name`'s workspace records reads, in git config.
 fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
-    let value = if on { "true" } else { "false" };
+    let value = &on.to_string();
     settings::set_branch(repo, name, settings::TRACK_READS, value)
 }
 
@@ -178,7 +178,6 @@ pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
         git::require_branch(name)?;
         return Ok(());
     }
-    let state_dir = &state.dir;
     let store = Store::default();
     let s = status::status(&store, &common_dir, &state)?;
     let note = base_note(name, &s.base);
@@ -191,7 +190,7 @@ pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
     for &(change, path) in &changes {
         write!(out, "{}\t", change.letter())?;
         if stat {
-            match s.line_counts(&store, state_dir, change, path)? {
+            match s.line_counts(&store, &state, change, path)? {
                 Some((added, removed)) => {
                     write!(out, "{added}\t{removed}\t")?;
                     total = (total.0 + added, total.1 + removed);
@@ -244,18 +243,18 @@ fn age(time: SystemTime) -> String {
     }
 }
 
-/// When workspace `branch` (stored in `state_dir`, with status `s`) last
+/// When workspace `branch` (stored in `state`, with status `s`) last
 /// changed: its newest upper entry, its deletion log, or its branch's reflog
 /// (commits: committed files leave upper).
 fn last_change(
     common_dir: &Path,
     branch: &str,
-    state_dir: &Path,
+    state: &StateDir,
     s: &status::Status,
 ) -> Option<SystemTime> {
     let mtime = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
     let reflog = common_dir.join("logs/refs/heads").join(branch);
-    [s.newest, mtime(state_dir.join("markers")), mtime(reflog)]
+    [s.newest, mtime(state.markers()), mtime(reflog)]
         .into_iter()
         .flatten()
         .max()
@@ -310,9 +309,7 @@ pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
         if id.starts_with('.') {
             continue;
         }
-        let branch = fs::read_to_string(entry.path().join("branch"))
-            .map(|b| b.trim_end_matches('\n').to_string())
-            .unwrap_or_else(|_| workspace_branch(&id));
+        let branch = state::read_branch(&entry.path()).unwrap_or_else(|| workspace_branch(&id));
         list.push(Listed {
             branch,
             state: StateDir::of_id(common_dir, &id),
@@ -351,7 +348,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
             true => {
                 let (mut added, mut removed) = (0, 0);
                 for (change, path) in s.changes(&store) {
-                    if let Some((a, r)) = s.line_counts(&store, &w.state.dir, change, path)? {
+                    if let Some((a, r)) = s.line_counts(&store, &w.state, change, path)? {
                         (added, removed) = (added + a, removed + r);
                     }
                 }
@@ -361,7 +358,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
         };
         let task = TaskDir::of(&common_dir, &w.branch);
         let last = [
-            last_change(&common_dir, &w.branch, &w.state.dir, &s),
+            last_change(&common_dir, &w.branch, &w.state, &s),
             task.newest(),
         ]
         .into_iter()

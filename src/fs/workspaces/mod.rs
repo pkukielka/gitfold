@@ -34,7 +34,7 @@ use crate::daemon::prewarm::{self, Prewarm, Spawned};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
-use crate::git::worktree::{self, workspace_id};
+use crate::git::worktree;
 use crate::inode;
 use crate::refusal::Refusal;
 use crate::state::StateDir;
@@ -45,6 +45,16 @@ pub enum Slot {
     Workspace(Arc<Workspace>),
     /// A namespace directory, with its full path (e.g. `feature`).
     Namespace(String),
+}
+
+impl Slot {
+    /// The workspace, if it is one.
+    pub fn workspace(self) -> Option<Arc<Workspace>> {
+        match self {
+            Slot::Workspace(ws) => Some(ws),
+            Slot::Namespace(_) => None,
+        }
+    }
 }
 
 /// What is registered in a slot.
@@ -494,14 +504,14 @@ impl Workspaces {
     /// lock: a partial clone fetches what is missing, which can take long.
     /// Failing here leaves no state behind.
     fn preload(&self, store: &Store, branch: &str) -> Result<(), Errno> {
-        let state_dir = StateDir::of(&self.common_dir, branch).dir;
+        let state = StateDir::of(&self.common_dir, branch);
         let load = |commit: &git::Commit| {
             store
                 .load_tree(commit.tree)
                 .map_err(|e| load_failed(&format!("loading workspace {branch}"), e))
         };
         let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
-        match super::workspace::read_base(&state_dir).ok() {
+        match state.read_base().ok() {
             // Resuming needs only the base: the sync thread moves it to the tip,
             // fetching then if it can't now.
             Some(base) => {
@@ -542,7 +552,7 @@ impl Workspaces {
     /// per branch).
     fn refuse_open(&self, branch: &str) -> Result<(), Errno> {
         self.wait_for_readers(branch, Instant::now())?;
-        let admin = worktree::ws_admin_dir(&self.common_dir, &workspace_id(branch));
+        let admin = StateDir::of(&self.common_dir, branch).admin;
         if let Some(other) = self.checked_out_elsewhere(branch, &admin) {
             warn!(
                 "branch {branch} is already checked out in {other}; create another branch from it"
@@ -568,12 +578,11 @@ impl Workspaces {
             self.wait_for_readers(branch, started)?;
         };
         self.refuse_open(branch)?;
-        let id = workspace_id(branch);
-        let admin = worktree::ws_admin_dir(&self.common_dir, &id);
         let fail = |what: &str, e: anyhow::Error| {
             load_failed(&format!("{what} for workspace {branch}"), e)
         };
-        let state = StateDir::of_id(&self.common_dir, &id);
+        let state = StateDir::of(&self.common_dir, branch);
+        let admin = state.admin.clone();
         let new_base = if state.opened() {
             None
         } else {
@@ -581,19 +590,8 @@ impl Workspaces {
         };
         let created = new_base.is_some();
         let path = self.mount_point.join(branch);
-        // The gitfile content must be known before the workspace exists; the admin
-        // directory name is deterministic.
-        let gitfile = format!("gitdir: {}\n", admin.display()).into_bytes();
-        let ws = Workspace::open(
-            store,
-            self.common_dir.clone(),
-            state.dir,
-            admin.clone(),
-            branch,
-            new_base,
-            gitfile,
-        )
-        .map_err(|e| fail("opening", e))?;
+        let ws = Workspace::open(store, self.common_dir.clone(), state, branch, new_base)
+            .map_err(|e| fail("opening", e))?;
         if let Err(e) = ws.track_reads(self.tracks_reads(branch)) {
             warn!("workspace {branch}: not recording reads: {e:#}");
         }

@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use log::warn;
 
+use crate::fsutil;
 use crate::git::worktree::{self, workspace_id};
 use crate::settings;
 
@@ -44,7 +45,8 @@ impl TaskDir {
     /// The task folder of `branch` in repository `common_dir`, as configured;
     /// a setting that can't be used is warned about and the default used.
     pub fn of(common_dir: &Path, branch: &str) -> TaskDir {
-        let get = |key: &str| settings::repository(common_dir, key);
+        let local = settings::Local::read(common_dir);
+        let get = |key: &str| local.repository(key);
         // One name in the workspace root, not one of its special names.
         let name = match get(settings::TASK_DIR) {
             Some(name) if !name.contains('/') && ![".", "..", ".git"].contains(&name.as_str()) => {
@@ -135,7 +137,7 @@ impl TaskDir {
                 .is_some_and(|n| n.as_bytes().starts_with(b"."))
                 || rel == Path::new(inbox)
         };
-        let copied = crate::fsutil::copy_tree(&from.dir, &tmp, &skip)
+        let copied = fsutil::copy_tree(&from.dir, &tmp, &skip)
             .and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
         if copied.is_err() {
             let _ = fs::remove_dir_all(&tmp);

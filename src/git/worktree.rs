@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use gix::ObjectId;
 
+use crate::fsutil;
 use crate::git::Commit;
 
 /// Snapshot registrations are named `<SNAPSHOT_PREFIX><first SNAPSHOT_HEX hex
@@ -59,7 +60,7 @@ pub fn register_branch(
     index: impl FnOnce() -> Vec<u8>,
 ) -> Result<()> {
     if dir.join("HEAD").exists() && dir.join("index").exists() {
-        crate::fsutil::write_atomic(
+        fsutil::write_atomic(
             &dir.join("gitdir"),
             format!("{}\n", gitfile.display()).as_bytes(),
         )?;
@@ -80,15 +81,15 @@ pub fn register_branch(
 /// without an index.
 fn write_admin(dir: &Path, gitfile: &Path, index: &[u8], head: &str) -> Result<()> {
     fs::create_dir_all(dir)?;
-    crate::fsutil::write_atomic(&dir.join("commondir"), b"../..\n")?;
-    crate::fsutil::write_atomic(
+    fsutil::write_atomic(&dir.join("commondir"), b"../..\n")?;
+    fsutil::write_atomic(
         &dir.join("gitdir"),
         format!("{}\n", gitfile.display()).as_bytes(),
     )?;
     // Keeps `git worktree prune` from deleting the entry while unmounted.
-    crate::fsutil::write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
-    crate::fsutil::write_atomic(&dir.join("index"), index)?;
-    crate::fsutil::write_atomic(&dir.join("HEAD"), head.as_bytes())?;
+    fsutil::write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
+    fsutil::write_atomic(&dir.join("index"), index)?;
+    fsutil::write_atomic(&dir.join("HEAD"), head.as_bytes())?;
     Ok(())
 }
 

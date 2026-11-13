@@ -40,16 +40,12 @@ impl Workspaces {
     pub(super) fn try_mark(&self, branch: &str, mark: Mark) -> bool {
         let mut busy = self.busy.lock();
         let marks = busy.entry(branch.to_string()).or_default();
-        let free = match mark {
-            Mark::Reader => !marks.exclusive,
-            Mark::Exclusive => !marks.exclusive && marks.readers == 0,
-        };
-        match (free, mark) {
-            (true, Mark::Reader) => marks.readers += 1,
-            (true, Mark::Exclusive) => marks.exclusive = true,
-            (false, _) => {}
+        match mark {
+            Mark::Reader if !marks.exclusive => marks.readers += 1,
+            Mark::Exclusive if !marks.exclusive && marks.readers == 0 => marks.exclusive = true,
+            _ => return false,
         }
-        free
+        true
     }
 
     /// Stops taking long requests and waits for those in progress (unmount),
