@@ -27,7 +27,7 @@ use log::{debug, warn};
 
 /// The daemon answered that it doesn't know the request.
 #[derive(Debug)]
-pub struct OlderDaemon;
+struct OlderDaemon;
 
 impl std::fmt::Display for OlderDaemon {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

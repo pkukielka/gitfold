@@ -2,6 +2,7 @@
 //! shows (its repository), written by the daemon and read back by commands
 //! (`unmount`, `version`) and the daemon's removals.
 
+use std::fmt::Write;
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
@@ -69,7 +70,7 @@ pub fn fs_name(common_dir: &Path) -> String {
     let mut name = String::new();
     for &b in common_dir.as_os_str().as_bytes() {
         if matches!(b, b'%' | b',' | b'\\') || !b.is_ascii() {
-            name.push_str(&format!("%{b:02X}"));
+            let _ = write!(name, "%{b:02X}");
         } else {
             name.push(b as char);
         }

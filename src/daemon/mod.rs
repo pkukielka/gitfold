@@ -147,7 +147,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
     }
 }
 
-pub enum Unmounted {
+enum Unmounted {
     Done,
     /// It was busy (e.g. a shell's working directory inside): detached at once;
     /// the daemon keeps serving the processes using it, and exits when the last
@@ -156,7 +156,7 @@ pub enum Unmounted {
 }
 
 /// Unmounts `mountpoint`, or detaches it if it is busy.
-pub fn unmount_or_detach(mountpoint: &Path) -> Result<Unmounted> {
+fn unmount_or_detach(mountpoint: &Path) -> Result<Unmounted> {
     if unmount(mountpoint)? {
         return Ok(Unmounted::Done);
     }
