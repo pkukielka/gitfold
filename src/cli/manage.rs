@@ -484,3 +484,42 @@ pub fn prune(repo: &Path) -> Result<()> {
     println!("removed {removed} snapshot registrations");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoted_as_git_quotes() {
+        assert_eq!(quote(b"plain/path.txt"), b"plain/path.txt");
+        assert_eq!(quote(b"t\tb"), b"\"t\\tb\"");
+        assert_eq!(quote(b"q\"b\\s"), b"\"q\\\"b\\\\s\"");
+        assert_eq!(quote("é".as_bytes()), b"\"\\303\\251\"");
+        assert_eq!(quote(b"\x7f"), b"\"\\177\"");
+    }
+
+    #[test]
+    fn shortstat_as_git() {
+        assert_eq!(shortstat(1, (1, 0)), " 1 file changed, 1 insertion(+)");
+        assert_eq!(shortstat(2, (0, 3)), " 2 files changed, 3 deletions(-)");
+        assert_eq!(
+            shortstat(3, (2, 1)),
+            " 3 files changed, 2 insertions(+), 1 deletion(-)"
+        );
+        assert_eq!(shortstat(1, (0, 0)), " 1 file changed");
+    }
+
+    #[test]
+    fn ages() {
+        let ago = |s| SystemTime::now() - Duration::from_secs(s);
+        assert_eq!(age(ago(5)), "5s");
+        assert_eq!(age(ago(125)), "2m");
+        assert_eq!(age(ago(3 * 3600 + 5)), "3h");
+        assert_eq!(age(ago(5 * 86400)), "5d");
+        assert_eq!(
+            age(SystemTime::now() + Duration::from_secs(60)),
+            "0s",
+            "the future"
+        );
+    }
+}

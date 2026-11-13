@@ -3,14 +3,15 @@
 # what a tree load finds missing from the promisor remote (src/git/promisor.rs).
 # All local: a bare file:// remote that allows filters and raw-SHA wants.
 # usage: tests/promisor.sh
-# Creates /tmp/gf-pc-test; removes it at the end unless KEEP=1.
+# Works below /tmp/gf-promisor.XXXXXX (see tests/lib.sh), removed at the end
+# unless KEEP=1.
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
-T=/tmp/gf-pc-test
+NAME=promisor
+. "$(dirname "$0")/lib.sh"
 MNT=$T/mnt
 LOG=$T/gitfold.log
-. "$(dirname "$0")/lib.sh"
 # uploadpack.packObjectsHook is read only from protected (global) config.
 export HOME=$T/home XDG_CONFIG_HOME=$T/xdg
 
@@ -37,9 +38,7 @@ hook() { # the server's pack-objects hook: $1 = a script body run before pack-ob
 }
 no_hook() { git config --global --unset uploadpack.packObjectsHook; }
 
-# A mount left by an interrupted run must go first: rm would delete through it.
-mountpoint -q "$MNT" 2>/dev/null && "$BIN" unmount "$MNT" >/dev/null
-rm -rf "$T"; mkdir -p "$MNT" "$HOME" "$XDG_CONFIG_HOME"
+mkdir -p "$MNT" "$HOME" "$XDG_CONFIG_HOME"
 git init -q "$T/seed"
 (cd "$T/seed" && mkdir -p a/b c && for i in $(seq 40); do
     echo "f$i" >a/f$i; echo "g$i" >a/b/g$i; echo "h$i" >c/h$i; done
@@ -257,6 +256,4 @@ eq "each missing object once (a repeated subtree walked once)" "$DISTINCT" "$(gr
 
 cd /; "$BIN" unmount "$MNT" >/dev/null; wait "$PID" 2>/dev/null
 
-echo "== $FAILS failure(s)"
-[ -n "${KEEP:-}" ] || rm -rf "$T"
-exit $((FAILS > 0))
+finish

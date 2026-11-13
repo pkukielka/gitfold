@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 # End-to-end test of writable workspaces on a scratch clone of a repository.
 # usage: tests/workspace.sh <source-repo>   (e.g. ~/work/spark)
-# Creates /tmp/gf-ws-test/{repo,mnt}; removes them at the end unless KEEP=1.
+# Works below /tmp/gf-workspace.XXXXXX (see tests/lib.sh), removed at the end
+# unless KEEP=1.
 set -uo pipefail
 
 SRC=$(realpath "$1")
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
 TESTS=$(realpath "$(dirname "$0")")
-T=/tmp/gf-ws-test
+NAME=workspace
+. "$(dirname "$0")/lib.sh"
 REPO=$T/repo
 MNT=$T/mnt
 LOG=$T/gitfold.log
-. "$(dirname "$0")/lib.sh"
 
-rm -rf "$T"; mkdir -p "$MNT"
+mkdir -p "$MNT"
 git clone -q "$SRC" "$REPO"
 git -C "$REPO" branch test1
 git -C "$REPO" branch feature/x
@@ -210,6 +211,4 @@ mount_fs
 
 unmount_fs
 check "no stale mount" sh -c "! mountpoint -q '$MNT'"
-echo "== $FAILS failure(s)"
-[ -n "${KEEP:-}" ] || rm -rf "$T"
-exit $((FAILS > 0))
+finish

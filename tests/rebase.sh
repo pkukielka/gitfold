@@ -3,15 +3,16 @@
 # git operations that move the branch: commits, merges and rebases with
 # conflicts, stash, amend, resets, bisect, external moves.
 # usage: tests/rebase.sh
-# Creates /tmp/gf-rb-test/{repo,mnt}; removes them at the end unless KEEP=1.
+# Works below /tmp/gf-rebase.XXXXXX (see tests/lib.sh), removed at the end
+# unless KEEP=1.
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
-T=/tmp/gf-rb-test
+NAME=rebase
+. "$(dirname "$0")/lib.sh"
 REPO=$T/repo
 MNT=$T/mnt
 LOG=$T/gitfold.log
-. "$(dirname "$0")/lib.sh"
 
 W=$MNT/ws
 STATE=$REPO/.git/gitfold/ws
@@ -34,7 +35,7 @@ upper_files() { find "$STATE/upper" -type f -o -type l | wc -l; }
 fails() { ! "$@"; }
 clean() { [ -z "$(G status --porcelain -uall)" ] && [ -z "$(G diff-files --name-only)" ]; }
 
-rm -rf "$T"; mkdir -p "$MNT" "$REPO"
+mkdir -p "$MNT" "$REPO"
 R init -q -b main
 (
     cd "$REPO"
@@ -257,6 +258,4 @@ check "clean after second remount" clean
 check "no sync errors logged" sh -c "! grep -q 'moving the base' '$LOG'"
 
 unmount_fs
-echo "== $FAILS failure(s)"
-[ -n "${KEEP:-}" ] || rm -rf "$T"
-exit $((FAILS > 0))
+finish
