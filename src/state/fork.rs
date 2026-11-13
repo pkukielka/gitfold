@@ -112,7 +112,7 @@ pub fn fork(
             // Keeps the fork's base from `git gc` even if the source is removed
             // before the fork is first opened.
             let base = target.read_base()?;
-            worktree::pin(common_dir, &to_pin, &base.id)?;
+            target.pin(&base.id)?;
             register(&source.admin, from, to, dst, to_admin, mount)?;
         }
         let branch = format!("refs/heads/{to}");

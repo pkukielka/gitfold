@@ -270,7 +270,7 @@ impl Workspace {
     /// warning, where it can't have one (see `task_folder`).
     pub fn with_task_folder(mut self, store: &Store) -> Workspace {
         let base_tree = self.layers.get_mut().base_tree;
-        self.task = task_folder(store, base_tree, &self.upper, &self.state);
+        self.task = task_folder(store, base_tree, &self.state);
         self
     }
 
@@ -529,7 +529,7 @@ impl Workspace {
 /// `state::task`), set up; none, with a warning, where it can't have one.
 /// None if its base tracks a path of the folder's name or upper has one, or if
 /// the folder couldn't be made.
-fn task_folder(store: &Store, base_tree: u32, upper: &Path, state: &StateDir) -> Option<TaskDir> {
+fn task_folder(store: &Store, base_tree: u32, state: &StateDir) -> Option<TaskDir> {
     let (common_dir, branch) = (&state.common_dir, &state.branch);
     let task = TaskDir::of(common_dir, branch);
     let shown = String::from_utf8_lossy(&task.name).into_owned();
@@ -539,7 +539,7 @@ fn task_folder(store: &Store, base_tree: u32, upper: &Path, state: &StateDir) ->
         );
         return None;
     }
-    if fs::symlink_metadata(state::upper_path(upper, &task.name)).is_ok() {
+    if fs::symlink_metadata(state::upper_path(&state.upper(), &task.name)).is_ok() {
         log::warn!(
             "workspace {branch}: no task folder: it has a file {shown} (set gitfold.taskDir)"
         );
