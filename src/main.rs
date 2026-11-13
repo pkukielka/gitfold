@@ -9,7 +9,7 @@ mod store;
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use fuser::{Config, MountOption};
 
@@ -18,15 +18,22 @@ use daemon::{control, prewarm};
 #[derive(Parser)]
 #[command(about = "Git revisions as a filesystem", version = LONG_VERSION)]
 struct Cli {
+    /// Run as if started in PATH (like `git -C`); default: the current directory.
+    #[arg(short = 'C', global = true, value_name = "PATH")]
+    dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Mount a repository: revisions as <mountpoint>/@<rev>/..., branches as
-    /// <mountpoint>/<branch>/... Runs in the background until `gitfold unmount`.
+    /// Mount a repository: its revisions and branches as folders.
+    ///
+    /// Revisions appear as <MOUNTPOINT>/@<REV>/..., branches as
+    /// <MOUNTPOINT>/<BRANCH>/... Runs in the background until `gitfold
+    /// unmount`.
     Mount {
+        /// The repository: its top-level work tree or its git directory.
         repo: PathBuf,
         mountpoint: PathBuf,
         /// Stay in the foreground, logging to stderr (for service managers).
@@ -52,36 +59,47 @@ enum Command {
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
         prewarm_walks: u64,
     },
-    /// Unmount, even while a shell is inside the mount, and wait for gitfold to
-    /// exit.
+    /// Unmount, and wait for gitfold to exit.
+    ///
+    /// Works even while a shell is inside the mount: then it detaches the mount
+    /// and waits for the processes using it to leave.
     Unmount { mountpoint: PathBuf },
-    /// Print this gitfold's version and, given a mount point, the version its
-    /// daemon runs. Exit codes: 0 the same build, 3 another build (remount to
-    /// upgrade), 4 a daemon too old to tell, 5 no answer (busy), 1 other errors.
+    /// Print this gitfold's version, and its daemon's.
+    ///
+    /// Given a mount point, also the version its daemon runs. Exit codes: 0 the
+    /// same build, 3 another build (remount to upgrade), 4 a daemon too old to
+    /// tell, 5 no answer (busy), 1 other errors.
     Version { mountpoint: Option<PathBuf> },
-    /// Create a branch to open as a workspace (<mountpoint>/<name>).
+    /// Create a branch to open as a workspace.
+    ///
+    /// The workspace is <MOUNTPOINT>/<BRANCH>.
     Branch {
-        repo: PathBuf,
-        name: String,
-        /// Start point (default: the current HEAD).
+        branch: String,
+        /// Start point (default: HEAD of the worktree you are in, as for `git
+        /// branch`).
         #[arg(long)]
         from: Option<String>,
         /// Prewarm mode for this workspace, kept across remounts (in git
-        /// config, branch.<name>.gitfoldPrewarm); a mount's `--prewarm none`
+        /// config, branch.<BRANCH>.gitfoldPrewarm); a mount's `--prewarm none`
         /// still wins.
         #[arg(long, value_enum)]
         prewarm: Option<prewarm::Prewarm>,
     },
-    /// List the repository's workspaces, their uncommitted changes and ignored files.
-    List { repo: PathBuf },
-    /// Delete a workspace (its registration, stored changes and base ref; its
-    /// commits stay on the branch), or a snapshot's registration (@<rev>).
-    /// Works mounted too, unless the workspace or snapshot is in use. Exit
-    /// codes: 3 not found, 4 uncommitted changes (or a git operation in
-    /// progress), 5 in use, 1 other errors, 2 usage errors.
+    /// List the workspaces and their changes.
+    ///
+    /// For each: how many files it changed and deleted, how many ignored files
+    /// it holds, its base commit, and notes (branch deleted, base behind).
+    List,
+    /// Delete a workspace, or a snapshot's registration.
+    ///
+    /// A workspace: its registration, stored changes and base ref (its commits
+    /// stay on the branch). A snapshot (@<rev>): its registration. Works
+    /// mounted too, unless it is in use. Exit codes: 3 not found, 4 uncommitted
+    /// changes (or a git operation in progress), 5 in use, 1 other errors, 2
+    /// usage errors.
     Remove {
-        repo: PathBuf,
-        /// A branch, or @<rev> for a snapshot.
+        /// A workspace's branch, or @<rev> for a snapshot.
+        #[arg(value_name = "BRANCH|@REV")]
         name: String,
         /// Discard uncommitted changes.
         #[arg(long)]
@@ -93,16 +111,17 @@ enum Command {
         #[arg(long, value_name = "SECS", default_value_t = 0)]
         wait: u64,
     },
-    /// Delete the snapshot registrations (recreated when opened again). The
-    /// repository must not be mounted.
-    Prune { repo: PathBuf },
-    /// Set a workspace's prewarm mode (as `branch --prewarm`), and while
-    /// mounted apply it at once: walk the workspace if it is open, or stop
-    /// walking it (none).
+    /// Delete the snapshot registrations.
+    ///
+    /// They are registered again when opened. The repository must not be
+    /// mounted.
+    Prune,
+    /// Set a workspace's prewarm mode.
+    ///
+    /// As `branch --prewarm`, kept in git config; while mounted also applied at
+    /// once: the workspace is walked if open, or its walk stopped (none).
     Prewarm {
-        repo: PathBuf,
-        /// The workspace's branch.
-        name: String,
+        branch: String,
         #[arg(value_enum)]
         mode: prewarm::Prewarm,
     },
@@ -142,7 +161,15 @@ fn main() -> Result<()> {
     unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) };
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,fuser=error"))
         .init();
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    // As `git -C`: everything (relative paths too) as if started there.
+    if let Some(dir) = &cli.dir {
+        std::env::set_current_dir(dir)
+            .with_context(|| format!("-C {}: can't change to it", dir.display()))?;
+    }
+    // The repository commands work on: the one the current directory is in.
+    let repo = || git::discover(std::path::Path::new("."));
+    match cli.command {
         Command::Mount {
             repo,
             mountpoint,
@@ -249,27 +276,25 @@ fn main() -> Result<()> {
             code => std::process::exit(code),
         },
         Command::Branch {
-            repo,
-            name,
+            branch,
             from,
             prewarm,
-        } => cli::manage::branch(&repo, &name, from.as_deref(), prewarm)?,
-        Command::List { repo } => cli::manage::list(&repo)?,
+        } => cli::manage::branch(&repo()?, &branch, from.as_deref(), prewarm)?,
+        Command::List => cli::manage::list(&repo()?)?,
         Command::Remove {
-            repo,
             name,
             force,
             check,
             wait,
         } => {
             let wait = std::time::Duration::from_secs(wait);
-            if let Err(e) = cli::manage::remove(&repo, &name, force, check, wait) {
+            if let Err(e) = cli::manage::remove(&repo()?, &name, force, check, wait) {
                 eprintln!("Error: {e:?}");
                 std::process::exit(refusal::Refusal::of(&e).map_or(1, |r| r.exit_code()));
             }
         }
-        Command::Prune { repo } => cli::manage::prune(&repo)?,
-        Command::Prewarm { repo, name, mode } => cli::manage::prewarm(&repo, &name, mode)?,
+        Command::Prune => cli::manage::prune(&repo()?)?,
+        Command::Prewarm { branch, mode } => cli::manage::prewarm(&repo()?, &branch, mode)?,
         Command::PrewarmWalk {
             root,
             mode,

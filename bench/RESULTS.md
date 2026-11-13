@@ -522,8 +522,8 @@ time (867 / 876 ms without, 860 / 840 ms with).
 
 ## 2026-11-12, prewarm threads per walk: 4 instead of half the CPUs
 
-Reported from a 1.4M-file monorepo: a request cost 16 µs with up to 4 in
-flight and 87-214 µs with 8-16, so two walks of half the CPUs each (the old
+Reported from a monorepo of over a million files: a request cost under 20 µs
+with up to 4 in flight and several times that with 8-16, so two walks of half the CPUs each (the old
 default) kept the daemon saturated. The default is now 4 threads per walk.
 
 Chromium bench clone, 24 CPUs, otherwise idle, metadata walk right after

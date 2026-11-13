@@ -48,14 +48,9 @@ pub fn start(mountpoint: &Path, log: &Path) -> Result<()> {
         .open(log)
         .with_context(|| format!("opening {}", log.display()))?;
     let ours_from = out.metadata()?.len() as usize;
-    // `--foreground` right after the subcommand, so a `--` among the arguments
-    // can't turn it into a positional one.
-    let mut args = std::env::args_os().skip(1);
     let mut command = Command::new(std::env::current_exe()?);
     command
-        .args(args.next())
-        .arg("--foreground")
-        .args(args)
+        .args(daemon_args(std::env::args_os().skip(1)))
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
@@ -250,4 +245,63 @@ fn timed_out(e: &anyhow::Error) -> bool {
                 std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
             )
         })
+}
+
+/// The daemon's arguments, from `gitfold mount`'s: `--foreground` right after the
+/// subcommand (so a `--` among the arguments can't turn it into a positional
+/// one), and without `-C`, already applied: the daemon starts in this process's
+/// directory.
+fn daemon_args(args: impl Iterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut out = Vec::new();
+    let (mut args, mut mount_seen) = (args.peekable(), false);
+    while let Some(arg) = args.next() {
+        let bytes = std::os::unix::ffi::OsStrExt::as_bytes(arg.as_os_str());
+        match bytes {
+            // Everything after it is positional.
+            b"--" => {
+                out.push(arg);
+                out.extend(args);
+                break;
+            }
+            b"-C" => {
+                args.next();
+            }
+            _ if bytes.starts_with(b"-C") => {}
+            b"mount" if !mount_seen => {
+                mount_seen = true;
+                out.push(arg);
+                out.push("--foreground".into());
+            }
+            _ => out.push(arg),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::daemon_args;
+
+    fn args(s: &str) -> Vec<String> {
+        let input = s.split(' ').map(std::ffi::OsString::from);
+        daemon_args(input)
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn foreground_after_mount_without_c() {
+        assert_eq!(args("mount r m"), ["mount", "--foreground", "r", "m"]);
+        assert_eq!(args("-C x mount r m"), ["mount", "--foreground", "r", "m"]);
+        assert_eq!(args("mount -C x r m"), ["mount", "--foreground", "r", "m"]);
+        assert_eq!(
+            args("-Cx mount --log l r m"),
+            ["mount", "--foreground", "--log", "l", "r", "m"]
+        );
+        assert_eq!(
+            args("mount -- -C mount"),
+            ["mount", "--foreground", "--", "-C", "mount"]
+        );
+    }
 }
