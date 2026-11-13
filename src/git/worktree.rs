@@ -54,10 +54,7 @@ pub fn register_branch(
     index: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
     if dir.join("HEAD").exists() && dir.join("index").exists() {
-        fsutil::write_atomic(
-            &dir.join("gitdir"),
-            format!("{}\n", gitfile.display()).as_bytes(),
-        )?;
+        write_gitdir(dir, gitfile)?;
     } else {
         write_admin(dir, gitfile, index, &format!("ref: refs/heads/{branch}\n"))?;
     }
@@ -76,10 +73,7 @@ fn write_admin(
 ) -> Result<()> {
     fs::create_dir_all(dir)?;
     fsutil::write_atomic(&dir.join("commondir"), b"../..\n")?;
-    fsutil::write_atomic(
-        &dir.join("gitdir"),
-        format!("{}\n", gitfile.display()).as_bytes(),
-    )?;
+    write_gitdir(dir, gitfile)?;
     // Keeps `git worktree prune` from deleting the entry while unmounted.
     fsutil::write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
     index(&dir.join("index"))?;
@@ -87,10 +81,17 @@ fn write_admin(
     Ok(())
 }
 
+/// Points the registration with admin directory `dir` at the mount's `.git`
+/// file `gitfile`.
+fn write_gitdir(dir: &Path, gitfile: &Path) -> std::io::Result<()> {
+    let line = format!("{}\n", gitfile.display());
+    fsutil::write_atomic(&dir.join("gitdir"), line.as_bytes())
+}
+
 /// Keeps `commit` reachable for `git gc` with ref `name` (a workspace's base is
 /// not otherwise referenced once its branch moves on). Goes through `git
 /// update-ref`, which handles every ref backend (files, packed, reftable).
-pub fn pin(common_dir: &Path, name: &str, commit: &gix::ObjectId) -> Result<()> {
+pub fn pin(common_dir: &Path, name: &str, commit: &ObjectId) -> Result<()> {
     let commit = commit.to_string();
     super::cmd::run(
         common_dir,
