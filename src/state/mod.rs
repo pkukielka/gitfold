@@ -31,6 +31,7 @@ pub const TIMES: &str = "times";
 pub const TMP: &str = "tmp";
 
 /// Where the stored state of one workspace is.
+#[derive(Clone)]
 pub struct StateDir {
     /// The branch, escaped (`worktree::workspace_id`).
     pub id: String,

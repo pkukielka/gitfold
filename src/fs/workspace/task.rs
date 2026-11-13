@@ -137,7 +137,8 @@ impl TaskDir {
                 .is_some_and(|n| n.as_bytes().starts_with(b"."))
                 || rel == Path::new(inbox)
         };
-        let copied = fsutil::copy_tree(&from.dir, &tmp, &skip)
+        // The source's agent may be using it: its files are left as they are.
+        let copied = fsutil::copy_tree(&from.dir, &tmp, &skip, fsutil::Unreadable::Fail)
             .and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
         if copied.is_err() {
             let _ = fs::remove_dir_all(&tmp);

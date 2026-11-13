@@ -242,6 +242,9 @@ eq "-z" "W	main	d/c.txt" "$("$BIN" -C "$REPO" overlaps st1 --writes -z 2>&1 | tr
 eq "a fork inherits the reads" "R	main	a.txt
 R	main	n.txt" "$("$BIN" -C "$REPO" branch -w --from st1 st1f >/dev/null 2>&1; "$BIN" -C "$REPO" overlaps st1f --reads 2>&1)"
 eq "and the setting" true "$(R config --get branch.st1f.gitfoldTrackReads)"
+printf '[branch "st3"]\n\tgitfoldTrackReads\n' >>"$COMMON/config"
+"$BIN" -C "$REPO" branch -w --from st3 st3f >/dev/null 2>&1
+eq "a valueless gitfoldTrackReads (true, for git) is copied as true" true "$(R config --get branch.st3f.gitfoldTrackReads)"
 eq "track-reads off, applied at once" "stopped recording reads in st1" "$("$BIN" -C "$REPO" track-reads st1 off 2>&1)"
 cat "$MNT/st1/d/c.txt" >/dev/null
 eq "nothing more recorded; what was recorded stays" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/st1/reads" | sed 's/ $//')"
@@ -281,6 +284,10 @@ check "nor renamed" fails mv "$TK/.task" "$TK/elsewhere"
 echo d >"$TK/draft.md"; mv "$TK/draft.md" "$TK/.task/draft.md"
 eq "files move in (copied across: another file system for the mount)" "d 0" "$(cat "$TK/.task/draft.md") $(ls "$TK" | grep -c draft.md)"
 eq "a fork copies it" "writing the parser" "$("$BIN" -C "$REPO" branch -w --from tk tk2 >/dev/null 2>&1; cat "$MNT/tk2/.task/status" 2>&1)"
+echo secret >"$TASKS/tk/private"; chmod 000 "$TASKS/tk/private"
+"$BIN" -C "$REPO" branch -w --from tk tk4 >/dev/null 2>&1
+eq "a fork leaves an unreadable file of the source's folder as it is" 0 "$(stat -c %a "$TASKS/tk/private")"
+chmod 600 "$TASKS/tk/private"; rm "$TASKS/tk/private"
 mkdir -p "$TASKS/fk-old"; echo old >"$TASKS/fk-old/status"
 out=$("$BIN" -C "$REPO" branch -w --from tk fk-old 2>&1)
 eq "a fork onto an earlier branch's folder keeps it, saying so" "yes old" "$(grep -q 'kept the task folder an earlier branch fk-old left' <<<"$out" && echo yes) $(cat "$TASKS/fk-old/status")"

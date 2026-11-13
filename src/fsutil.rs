@@ -75,17 +75,43 @@ fn copy_times(path: &Path, meta: &fs::Metadata) -> Result<()> {
         .with_context(|| format!("setting the times of {}", path.display()))
 }
 
-/// Copies directory `src` to new directory `dst`: files, symlinks and directories, with their modes and times,
-/// leaving out what `skip` says (given the path relative to `src`). Anything
-/// else (a socket, a device) is an error.
-pub fn copy_tree(src: &Path, dst: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
-    copy_below(src, dst, Path::new(""), skip)
+/// What `copy_tree` does with a file its owner can't read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Unreadable {
+    /// Reads it with the owner's read bit set meanwhile: for a tree nothing
+    /// else uses at the time (a workspace's upper, under its lock).
+    Lift,
+    /// Fails, leaving the source as it is (a tree others may be using).
+    Fail,
 }
 
-fn copy_below(src: &Path, dst: &Path, rel: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
+/// Copies directory `src` to new directory `dst`: files, symlinks and
+/// directories, with their modes and times, leaving out what `skip` says
+/// (given the path relative to `src`). Anything else (a socket, a device) is
+/// an error.
+pub fn copy_tree(
+    src: &Path,
+    dst: &Path,
+    skip: &dyn Fn(&Path) -> bool,
+    unreadable: Unreadable,
+) -> Result<()> {
+    copy_below(src, dst, Path::new(""), skip, unreadable)
+}
+
+fn copy_below(
+    src: &Path,
+    dst: &Path,
+    rel: &Path,
+    skip: &dyn Fn(&Path) -> bool,
+    unreadable: Unreadable,
+) -> Result<()> {
     let meta = fs::symlink_metadata(src).with_context(|| format!("reading {}", src.display()))?;
+    if !meta.is_dir() {
+        bail!("{}: not a directory", src.display());
+    }
+    let entries = fs::read_dir(src).with_context(|| format!("listing {}", src.display()))?;
     fs::create_dir(dst).with_context(|| format!("creating {}", dst.display()))?;
-    for entry in fs::read_dir(src)? {
+    for entry in entries {
         let entry = entry?;
         let rel = rel.join(entry.file_name());
         if skip(&rel) {
@@ -94,13 +120,14 @@ fn copy_below(src: &Path, dst: &Path, rel: &Path, skip: &dyn Fn(&Path) -> bool) 
         let (from, to) = (entry.path(), dst.join(entry.file_name()));
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            copy_below(&from, &to, &rel, skip)?;
+            copy_below(&from, &to, &rel, skip, unreadable)?;
         } else if kind.is_symlink() {
             symlink(fs::read_link(&from)?, &to)?;
             copy_times(&to, &entry.metadata()?)?;
         } else if kind.is_file() {
             let meta = entry.metadata()?;
-            copy_file(&from, &to, &meta).with_context(|| format!("copying {}", from.display()))?;
+            copy_file(&from, &to, &meta, unreadable)
+                .with_context(|| format!("copying {}", from.display()))?;
             copy_times(&to, &meta)?;
         } else {
             bail!("{}: not a file, symlink or directory", from.display());
@@ -110,11 +137,16 @@ fn copy_below(src: &Path, dst: &Path, rel: &Path, skip: &dyn Fn(&Path) -> bool) 
     copy_times(dst, &meta)
 }
 
-/// Copies file `from` (with metadata `meta`) to `to`, with its mode. A file its
-/// owner can't read is read with the owner's read bit set meanwhile.
-fn copy_file(from: &Path, to: &Path, meta: &fs::Metadata) -> io::Result<()> {
+/// Copies file `from` (with metadata `meta`) to `to`, with its mode; one its
+/// owner can't read as `unreadable` says.
+fn copy_file(
+    from: &Path,
+    to: &Path,
+    meta: &fs::Metadata,
+    unreadable: Unreadable,
+) -> io::Result<()> {
     let mode = meta.permissions().mode();
-    if mode & 0o400 != 0 {
+    if mode & 0o400 != 0 || unreadable == Unreadable::Fail {
         return fs::copy(from, to).map(drop);
     }
     fs::set_permissions(from, fs::Permissions::from_mode(mode | 0o400))?;
@@ -158,7 +190,15 @@ mod tests {
     #[test]
     fn copy_of_nothing_fails() {
         let dir = scratch("missing");
-        assert!(copy_tree(&dir.join("none"), &dir.join("dst"), &|_| false).is_err());
+        assert!(
+            copy_tree(
+                &dir.join("none"),
+                &dir.join("dst"),
+                &|_| false,
+                Unreadable::Fail
+            )
+            .is_err()
+        );
         assert!(!dir.join("dst").exists());
         fs::remove_dir_all(dir).unwrap();
     }

@@ -29,14 +29,10 @@ pub enum Prewarm {
     Content,
 }
 
-/// Its name on the command line and in git config.
+/// Its name on the command line and in git config, as clap parses it.
 impl std::fmt::Display for Prewarm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Prewarm::None => "none",
-            Prewarm::Meta => "meta",
-            Prewarm::Content => "content",
-        })
+        f.write_str(self.to_possible_value().expect("not skipped").get_name())
     }
 }
 

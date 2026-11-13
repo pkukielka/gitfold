@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, ensure};
 
 use super::Workspace;
-use crate::fsutil;
+use crate::fsutil::{self, Unreadable};
 use crate::git;
 use crate::git::worktree;
 use crate::settings;
@@ -186,10 +186,17 @@ pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &Path, dst: &Path) -
         Err(e) => return Err(e).context("copying the git index"),
     }
     // Made when the workspace opens; a workspace never written to may lack it.
+    // Under the workspace's lock (or unmounted): its unreadable files can be
+    // lifted for the copy.
     let upper = src.join(state::UPPER);
-    match upper.exists() {
-        true => fsutil::copy_tree(&upper, &dst.join(state::UPPER), &|_| false),
-        false => Ok(()),
+    match fs::symlink_metadata(&upper) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        _ => fsutil::copy_tree(
+            &upper,
+            &dst.join(state::UPPER),
+            &|_| false,
+            Unreadable::Lift,
+        ),
     }
 }
 

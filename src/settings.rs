@@ -106,9 +106,18 @@ pub fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Resul
 /// can't be written is warned about.
 pub fn copy_branch(common_dir: &Path, from: &str, to: &str) {
     let local = Local::read(common_dir);
-    // Every per-branch setting.
-    for key in [PREWARM, TRACK_READS] {
-        if let Some(value) = local.branch(from, key)
+    // Every per-branch setting; a boolean as git reads it (`key` alone is true).
+    let values = [
+        (PREWARM, local.branch(from, PREWARM)),
+        (
+            TRACK_READS,
+            local
+                .branch_bool(from, TRACK_READS)
+                .map(|on| on.to_string()),
+        ),
+    ];
+    for (key, value) in values {
+        if let Some(value) = value
             && let Err(e) = set_branch(common_dir, to, key, &value)
         {
             warn!("copying {} to {to}: {e:#}", branch_key(from, key));

@@ -155,8 +155,8 @@ pub fn check_workspace(
                 if let Some(ws) = open {
                     return ws.sync(store);
                 }
-                let state = StateDir::of(common_dir, branch);
-                let ws = Workspace::open(store, common_dir.to_path_buf(), state, branch, None)?;
+                let ws =
+                    Workspace::open(store, common_dir.to_path_buf(), state.clone(), branch, None)?;
                 ws.sync(store)
             };
             catch_up().map_err(|e| {
