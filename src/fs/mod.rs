@@ -127,7 +127,8 @@ impl GitFold {
         }
     }
 
-    /// The workspaces, for `gitfold prewarm` (`Workspaces::prewarm_now`).
+    /// The workspaces, for the control requests on them (`prewarm`,
+    /// `track-reads`, a fork).
     pub fn workspaces(&self) -> Arc<Workspaces> {
         self.workspaces.clone()
     }
@@ -158,16 +159,32 @@ impl GitFold {
         self.obj_attr(inode::ws(slot, child), &obj)
     }
 
-    /// The workspace and local id of a workspace entry inode (not a workspace or
-    /// namespace directory itself, nor `.git` or the task link, which have no
-    /// node).
+    /// The workspace and local id of a workspace entry inode (see `ws_node_ino`).
     fn ws_entry(&self, ino: u64) -> Option<(Arc<Workspace>, u64)> {
-        match inode::decode(ino)? {
-            inode::Ino::Ws { slot, local } if local != 0 && !workspace::is_virtual_local(local) => {
-                Some((self.workspaces.get(slot).ok()?.workspace()?, local))
-            }
-            _ => None,
+        let (slot, local) = ws_node_ino(ino)?;
+        match self.workspaces.get(slot).ok()? {
+            workspaces::Slot::Workspace(ws) => Some((ws, local)),
+            workspaces::Slot::Namespace(_) => None,
         }
+    }
+}
+
+/// (slot, local id) of a workspace entry inode with a node: not a workspace or
+/// namespace directory itself, nor `.git` or the task link.
+fn ws_node_ino(ino: u64) -> Option<(u32, u64)> {
+    match inode::decode(ino)? {
+        inode::Ino::Ws { slot, local } if local != 0 && !workspace::is_virtual_local(local) => {
+            Some((slot, local))
+        }
+        _ => None,
+    }
+}
+
+/// Replies with `attr`, or the error.
+fn reply_attr(result: Result<FileAttr, Errno>, reply: ReplyAttr) {
+    match result {
+        Ok(attr) => reply.attr(&IMMUTABLE_TTL, &attr),
+        Err(e) => reply.error(e),
     }
 }
 
@@ -263,10 +280,7 @@ impl Filesystem for GitFold {
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         bump(&self.counters.getattr);
-        match self.attr(ino.0) {
-            Ok(attr) => reply.attr(&IMMUTABLE_TTL, &attr),
-            Err(e) => reply.error(e),
-        }
+        reply_attr(self.attr(ino.0), reply)
     }
 
     fn setattr(
@@ -302,10 +316,7 @@ impl Filesystem for GitFold {
             )?;
             self.attr(ino.0)
         });
-        match result {
-            Ok(attr) => reply.attr(&IMMUTABLE_TTL, &attr),
-            Err(e) => reply.error(e),
-        }
+        reply_attr(result, reply)
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
@@ -547,9 +558,7 @@ impl Filesystem for GitFold {
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
-        if let Some(inode::Ino::Ws { slot, local }) = inode::decode(ino.0)
-            && local != 0
-            && !workspace::is_virtual_local(local)
+        if let Some((slot, local)) = ws_node_ino(ino.0)
             && let Some(ws) = self.workspaces.get_for_forget(slot)
         {
             ws.forget(local, nlookup);

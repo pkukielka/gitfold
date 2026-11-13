@@ -31,9 +31,9 @@ impl Workspaces {
 
     /// Held while a long request works (see `requests`); refused once closed.
     fn request(&self) -> anyhow::Result<parking_lot::RwLockReadGuard<'_, bool>> {
-        let open = self.requests.read();
-        anyhow::ensure!(!*open, "the mount is being unmounted");
-        Ok(open)
+        let closed = self.requests.read();
+        anyhow::ensure!(!*closed, "the mount is being unmounted");
+        Ok(closed)
     }
 
     /// `gitfold branch --with-changes` while mounted: creates branch `to` at
@@ -63,12 +63,13 @@ impl Workspaces {
         let Some(ws) = self.get_open(branch) else {
             return Ok(format!("{branch} isn't open: applied when it opens"));
         };
-        let on = self.tracks_reads(branch);
+        let settings = self.branch_settings(branch);
+        let on = settings.track_reads;
         ws.track_reads(on)?;
         // A content walk running would be recorded as the agent's reads: walked
         // again as meta (see `branch_mode`).
         let path = self.mount_point.join(branch);
-        let content = self.configured_prewarm(branch) == Prewarm::Content;
+        let content = settings.prewarm == Prewarm::Content;
         if on && content && self.prewarm != Prewarm::None && prewarm::stop_under(&path) {
             prewarm::spawn(path, Prewarm::Meta, self.prewarm_threads);
         }
