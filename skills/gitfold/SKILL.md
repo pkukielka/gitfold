@@ -35,6 +35,8 @@ or snapshot (not the mount root itself), like git; `-C <PATH>` as with git.
 - **Your changes, cheaply:** `gitfold changes` prints `A`/`M`/`D` per path
   (like `git diff --name-status`, untracked files included) from stored state,
   without the full-tree scan `git status` does. Prefer it on large trees.
+  `gitfold changes --stat` adds lines added and removed, like
+  `git diff --numstat`.
 - **Commits from elsewhere are fine:** if the branch moves (a commit, rebase or
   reset done in another worktree), the workspace follows within about a second
   without its files changing.
@@ -88,8 +90,10 @@ even on a huge tree. Each workspace then changes on its own.
   none` skips the background walk that lists the whole tree when a workspace
   opens.
 - **Watching them:** `gitfold list` shows each workspace's changed, deleted and
-  ignored file counts. `gitfold changes <BRANCH>` shows one's changed paths.
-  Both read stored state, so polling many workspaces is cheap.
+  ignored file counts, and how long ago it last changed (a file or a commit):
+  an agent idle for long stands out. `--stat` adds line totals.
+  `gitfold changes <BRANCH>` shows one's changed paths. All read stored
+  state, so polling many workspaces is cheap.
 - **Is the work stale, or colliding?** `gitfold overlaps` (inside a workspace, or
   `gitfold overlaps <BRANCH>`) lists paths the workspace changed (`W`) or read (`R`) that its
   remote's default branch (`origin/HEAD`, else `main`) changed since they

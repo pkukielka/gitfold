@@ -5,7 +5,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, ensure};
 use clap::ValueEnum;
@@ -176,9 +176,12 @@ fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
 /// its base (normally its branch's tip), untracked files included and ignored
 /// ones not, whatever is staged: what `git add -A` and `git diff --cached
 /// --name-status <base>` would print, paths quoted as git quotes them, or
-/// NUL-terminated and unquoted (`nul`). Read from its stored state, without
-/// listing the tree; mounted or not. A branch never opened has none.
-pub fn changes(repo: &Path, name: &str, nul: bool) -> Result<()> {
+/// NUL-terminated and unquoted (`nul`). With `stat`, each line also has the
+/// lines added and removed (`-` for binary files), as `git diff --numstat`,
+/// and a summary line follows, as `git diff --shortstat`. Read from its stored
+/// state, without listing the tree; mounted or not. A branch never opened has
+/// none.
+pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
     check_name(name)?;
     let common_dir = git::init(repo)?;
     let state_dir = worktree::state_root(&common_dir).join(workspace_id(name));
@@ -193,8 +196,19 @@ pub fn changes(repo: &Path, name: &str, nul: bool) -> Result<()> {
         eprintln!("note: {name}: {note}; changes are against the stored base");
     }
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    for (change, path) in s.changes(&store) {
+    let changes = s.changes(&store);
+    let mut total = (0, 0);
+    for &(change, path) in &changes {
         write!(out, "{}\t", change.letter())?;
+        if stat {
+            match s.line_counts(&store, &state_dir, change, path)? {
+                Some((added, removed)) => {
+                    write!(out, "{added}\t{removed}\t")?;
+                    total = (total.0 + added, total.1 + removed);
+                }
+                None => write!(out, "-\t-\t")?,
+            }
+        }
         match nul {
             true => {
                 out.write_all(path)?;
@@ -206,8 +220,55 @@ pub fn changes(repo: &Path, name: &str, nul: bool) -> Result<()> {
             }
         }
     }
+    if stat && !nul && !changes.is_empty() {
+        writeln!(out, "{}", shortstat(changes.len(), total))?;
+    }
     out.flush()?;
     Ok(())
+}
+
+/// The summary `git diff --shortstat` prints: ` 2 files changed, 3
+/// insertions(+), 1 deletion(-)`, leaving out zero counts unless both are.
+fn shortstat(files: usize, (added, removed): (u32, u32)) -> String {
+    let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut out = format!(" {} changed", plural(files as u64, "file", "files"));
+    if added > 0 {
+        out += &format!(", {}(+)", plural(added.into(), "insertion", "insertions"));
+    }
+    if removed > 0 {
+        out += &format!(", {}(-)", plural(removed.into(), "deletion", "deletions"));
+    }
+    out
+}
+
+/// How long ago `time` was, briefly: `40s`, `12m`, `3h`, `5d`.
+fn age(time: SystemTime) -> String {
+    let secs = SystemTime::now()
+        .duration_since(time)
+        .map_or(0, |d| d.as_secs());
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m", secs / 60),
+        3600..86400 => format!("{}h", secs / 3600),
+        _ => format!("{}d", secs / 86400),
+    }
+}
+
+/// When workspace `branch` (stored in `state_dir`, with status `s`) last
+/// changed: its newest upper entry, its deletion log, or its branch's reflog
+/// (commits: committed files leave upper).
+fn last_change(
+    common_dir: &Path,
+    branch: &str,
+    state_dir: &Path,
+    s: &status::Status,
+) -> Option<SystemTime> {
+    let mtime = |p: PathBuf| fs::metadata(p).and_then(|m| m.modified()).ok();
+    let reflog = common_dir.join("logs/refs/heads").join(branch);
+    [s.newest, mtime(state_dir.join("markers")), mtime(reflog)]
+        .into_iter()
+        .flatten()
+        .max()
 }
 
 /// `path` as git prints it with `core.quotePath` on (the default): as is,
@@ -274,7 +335,7 @@ pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
 }
 
 /// `gitfold list`: the repository's workspaces and their uncommitted changes.
-pub fn list(repo: &Path) -> Result<()> {
+pub fn list(repo: &Path, stat: bool) -> Result<()> {
     let common_dir = git::init(repo)?;
     let store = Store::default();
     let list = workspaces(&common_dir)?;
@@ -282,23 +343,45 @@ pub fn list(repo: &Path) -> Result<()> {
         println!("no workspaces");
         return Ok(());
     }
+    let lines = match stat {
+        true => format!(" {:>8} {:>8}", "+lines", "-lines"),
+        false => String::new(),
+    };
     println!(
-        "{:<40} {:>8} {:>8} {:>8}  {:<12} note",
-        "branch", "changed", "deleted", "ignored", "base"
+        "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  note",
+        "branch", "changed", "deleted", "ignored", "base", "last"
     );
     for w in list {
-        match status::status(&store, &common_dir, &w.state_dir) {
-            Ok(s) => println!(
-                "{:<40} {:>8} {:>8} {:>8}  {:<12} {}",
-                w.branch,
-                s.changed.len(),
-                s.deleted.len(),
-                s.ignored,
-                s.base.to_hex_with_len(12).to_string(),
-                base_note(&w.branch, &s.base)
-            ),
-            Err(e) => println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.id),
-        }
+        let s = match status::status(&store, &common_dir, &w.state_dir) {
+            Ok(s) => s,
+            Err(e) => {
+                println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.id);
+                continue;
+            }
+        };
+        let lines = match stat {
+            true => {
+                let (mut added, mut removed) = (0, 0);
+                for (change, path) in s.changes(&store) {
+                    if let Some((a, r)) = s.line_counts(&store, &w.state_dir, change, path)? {
+                        (added, removed) = (added + a, removed + r);
+                    }
+                }
+                format!(" {:>8} {:>8}", format!("+{added}"), format!("-{removed}"))
+            }
+            false => String::new(),
+        };
+        let last = last_change(&common_dir, &w.branch, &w.state_dir, &s).map_or("-".into(), age);
+        println!(
+            "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {}",
+            w.branch,
+            s.changed.len(),
+            s.deleted.len(),
+            s.ignored,
+            s.base.to_hex_with_len(12).to_string(),
+            last,
+            base_note(&w.branch, &s.base)
+        );
     }
     Ok(())
 }

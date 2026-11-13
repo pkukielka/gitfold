@@ -48,6 +48,12 @@ check "outside any repository, an error naming the directory" sh -c "cd / && '$B
 eq "from inside .git" "$L" "$(cd "$REPO/.git" && "$BIN" list 2>&1)"
 EXPECT=$(printf 'M\ta.txt\nD\td/b.txt\nA\tnew.txt')
 eq "changes while mounted: modified, deleted, added, by path" "$EXPECT" "$("$BIN" -C "$REPO" changes agent/one 2>&1)"
+eq "--stat: lines added and removed, and git's summary" "M	1	0	a.txt
+D	0	1	d/b.txt
+A	1	0	new.txt
+ 3 files changed, 2 insertions(+), 1 deletion(-)" "$("$BIN" -C "$REPO" changes --stat agent/one 2>&1)"
+eq "list: when each last changed (a file written; a commit)" "yes yes" "$(awk '$1 == "agent/one" || $1 == "two" { print ($6 ~ /^[0-9]+s$/ ? "yes" : $6) }' <<<"$L" | xargs)"
+eq "list --stat: the lines in total" "+2 -1" "$("$BIN" -C "$REPO" list --stat 2>&1 | awk '$1 == "agent/one" { print $5, $6 }')"
 eq "changes -z: NUL-terminated" "M	a.txt|D	d/b.txt|A	new.txt|" "$("$BIN" -C "$REPO" changes -z agent/one | tr '\0' '|')"
 eq "a committed workspace has none" "" "$("$BIN" -C "$REPO" changes two 2>&1)"
 check "an unknown workspace refused" fails "$BIN" -C "$REPO" changes nope
@@ -78,12 +84,23 @@ echo t >"$WC/t	b"
 EXPECT=$(printf 'A\t.gitignore\nM\ta.txt\nA\td\nD\td/b.txt\nD\td/c.txt\nA\tlink\nA\t"t\\tb"')
 eq "file over a directory, symlink, exec bit, ignored file left out, quoted tab" "$EXPECT" "$("$BIN" -C "$REPO" changes ch 2>&1)"
 eq "-z leaves the path as is" "yes" "$("$BIN" -C "$REPO" changes -z ch | tr '\0' '\n' | grep -qx "A	t	b" && echo yes)"
+printf 'a\0b' >"$WC/bin"
+eq "--stat: an exec bit only, a binary file, a file over a directory, a symlink" "M	0	0	a.txt
+A	-	-	bin
+A	1	0	d
+D	0	1	d/b.txt
+A	1	0	link" "$("$BIN" -C "$REPO" changes --stat ch 2>&1 | grep -E '	(a\.txt|bin|d|d/b\.txt|link)$')"
+rm "$WC/bin"
 eq "a branch never opened has no changes" "" "$("$BIN" -C "$REPO" changes fresh 2>&1)"
 check "an invalid name refused" fails "$BIN" -C "$REPO" changes ..
 unmount_fs
 R update-ref refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m moved)"
 out=$("$BIN" -C "$REPO" changes ch 2>&1 >/dev/null)
 eq "a branch moved since: a note on stderr" yes "$(grep -q 'base behind the branch tip' <<<"$out" && echo yes)"
+find "$COMMON/gitfold/ch" -exec touch -h -d '3 days ago' {} +; touch -d '3 days ago' "$COMMON/logs/refs/heads/ch"
+eq "list: nothing changed for 3 days" 3d "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print $6 }')"
+R update-ref -m commit refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m again)"
+eq "a commit alone (the branch's reflog) counts" yes "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print ($6 ~ /^[0-9]+s$/ ? "yes" : $6) }')"
 "$BIN" -C "$REPO" remove --force ch >/dev/null; R branch -q -D ch fresh
 
 echo "== branch --with-changes (a fork)"
