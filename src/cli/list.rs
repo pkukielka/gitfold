@@ -16,16 +16,18 @@ use crate::state::task::TaskDir;
 use crate::state::{self, StateDir};
 use crate::store::Store;
 
-/// `gitfold changes`: the uncommitted changes of workspace `name` relative to
+/// `gitfold changes`: the uncommitted changes of a workspace relative to
 /// its base (normally its branch's tip), untracked files included and ignored
 /// ones not, whatever is staged: what `git add -A` and `git diff --cached
 /// --name-status <base>` would print, paths quoted as git quotes them, or
-/// NUL-terminated and unquoted (`nul`). With `stat`, each line also has the
+/// NUL-terminated and unquoted (`-z`). With `--stat`, each line also has the
 /// lines added and removed (`-` for binary files), as `git diff --numstat`,
 /// and a summary line follows, as `git diff --shortstat`. Read from its stored
 /// state, without listing the tree; mounted or not. A branch never opened has
 /// none.
-pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
+pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
+    let ChangesArgs { branch, nul, stat } = args;
+    let name = &super::branch_or_current(branch, repo)?;
     check_name(name)?;
     let common_dir = git::init(repo)?;
     let state = StateDir::of(&common_dir, name);
@@ -107,7 +109,8 @@ fn last_change(
 }
 
 /// `gitfold list`: the repository's workspaces and their uncommitted changes.
-pub fn list(repo: &Path, stat: bool) -> Result<()> {
+pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
+    let ListArgs { stat } = args;
     let common_dir = git::init(repo)?;
     let store = Store::default();
     let list = state::list(&common_dir)?;
@@ -172,7 +175,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
     Ok(())
 }
 
-/// The arguments of `gitfold list` (see `main`).
+/// The arguments of `gitfold list`.
 #[derive(clap::Args)]
 pub struct ListArgs {
     /// Also the lines added and removed, in total (reads every changed
@@ -181,7 +184,7 @@ pub struct ListArgs {
     pub stat: bool,
 }
 
-/// The arguments of `gitfold changes` (see `main`).
+/// The arguments of `gitfold changes`.
 #[derive(clap::Args)]
 pub struct ChangesArgs {
     /// The workspace's branch (default: the workspace you are in).

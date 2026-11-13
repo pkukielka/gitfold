@@ -34,9 +34,16 @@ fn exclusive(common_dir: &Path) -> Result<crate::lock::Lock> {
 /// `gitfold remove`: deletes a workspace (its registration, state and base
 /// pin; its commits stay on the branch), or a snapshot registration
 /// (`@<rev>`). While mounted, the daemon does it (see `daemon::control`). With
-/// `check`, only checks what would be refused. Retries for up to `wait` while
-/// it is in use.
-pub fn remove(repo: &Path, name: &str, force: bool, check: bool, wait: Duration) -> Result<()> {
+/// `--check`, only checks what would be refused. Retries for up to `--wait`
+/// seconds while it is in use.
+pub fn remove(repo: &Path, args: RemoveArgs) -> Result<()> {
+    let RemoveArgs {
+        name,
+        force,
+        check,
+        wait,
+    } = args;
+    let (name, wait) = (name.as_str(), Duration::from_secs(wait));
     check_name(name)?;
     let common_dir = git::init(repo)?;
     let started = Instant::now();
@@ -103,7 +110,7 @@ pub fn prune(repo: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The arguments of `gitfold remove` (see `main`).
+/// The arguments of `gitfold remove`.
 #[derive(clap::Args)]
 pub struct RemoveArgs {
     /// A workspace's branch, or @<rev> for a snapshot.

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 
 use crate::git;
+use crate::inotify::{self, Inotify};
 
 use super::message::{is_message, json_str};
 use super::{deadline, remaining, task_dir};
@@ -18,24 +19,24 @@ use super::{deadline, remaining, task_dir};
 const SETTLE: Duration = Duration::from_millis(100);
 
 /// `gitfold watch`: waits until something in `target` (`[<BRANCH>:]<DIR>`, a
-/// directory of a task folder; `branch`'s when no branch is given) is written,
+/// directory of a task folder; the current workspace's when no branch is
+/// given) is written,
 /// created, moved in, deleted or moved out, then prints what (`C` or `D`, a tab
 /// and the name, each name's last change; or JSON), collecting a burst of them,
 /// and exits; `D` and `.` if the directory itself goes. Prints nothing if
 /// `timeout` passes first.
-pub fn watch(
-    repo: &Path,
-    branch: Option<&str>,
-    target: &str,
-    timeout: Option<u64>,
-    json: bool,
-) -> Result<()> {
+pub fn watch(repo: &Path, args: WatchArgs) -> Result<()> {
+    let WatchArgs {
+        target,
+        timeout,
+        json,
+    } = args;
     let common_dir = git::init(repo)?;
     let (branch, dir) = match target.split_once(':') {
         Some((b, d)) => (b.to_string(), d),
-        None => match branch {
-            Some(b) => (b.to_string(), target),
-            None => bail!("not in a gitfold workspace: name the task as <BRANCH>:<DIR>"),
+        None => match crate::cli::branch_or_current(None, repo) {
+            Ok(b) => (b, target.as_str()),
+            Err(_) => bail!("not in a gitfold workspace: name the task as <BRANCH>:<DIR>"),
         },
     };
     let dir = dir.trim_matches('/');
@@ -58,17 +59,13 @@ pub fn watch(
     }
     let changed = libc::IN_CLOSE_WRITE | libc::IN_MOVED_TO | libc::IN_CREATE;
     let deleted = libc::IN_DELETE | libc::IN_MOVED_FROM;
-    let watch = crate::inotify::Inotify::watch(&path, changed | deleted)?;
+    let watch = Inotify::watch(&path, changed | deleted)?;
     let deadline = deadline(timeout);
     // Each name's last change: a file replaced in one burst ends as changed.
     let mut events: BTreeMap<Vec<u8>, char> = BTreeMap::new();
     let mut settle: Option<Instant> = None;
     'reading: loop {
-        let limit = match settle {
-            Some(until) => Some(until.saturating_duration_since(Instant::now())),
-            None => remaining(deadline),
-        };
-        let batch = watch.read(limit)?;
+        let batch = watch.read(remaining(settle.or(deadline)))?;
         if batch.is_empty() {
             break; // timed out, or settled
         }
@@ -76,7 +73,7 @@ pub fn watch(
             if mask & libc::IN_Q_OVERFLOW != 0 {
                 bail!("too many changes at once in {dir}: some weren't seen; look at it");
             }
-            if mask & crate::inotify::LOST != 0 {
+            if mask & inotify::LOST != 0 {
                 events.insert(b".".to_vec(), 'D');
                 break 'reading;
             }
@@ -103,7 +100,7 @@ pub fn watch(
     Ok(())
 }
 
-/// The arguments of `gitfold watch` (see `main`).
+/// The arguments of `gitfold watch`.
 #[derive(clap::Args)]
 pub struct WatchArgs {
     pub target: String,

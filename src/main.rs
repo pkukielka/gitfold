@@ -15,7 +15,6 @@ mod store;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use clap::builder::BoolishValueParser;
 use clap::{Parser, Subcommand};
 
 use daemon::prewarm;
@@ -37,7 +36,7 @@ enum Command {
     /// Revisions appear as <MOUNTPOINT>/@<REV>/..., branches as
     /// <MOUNTPOINT>/<BRANCH>/... Runs in the background until `gitfold
     /// unmount`.
-    Mount(daemon::serve::MountArgs),
+    Mount(cli::mount::MountArgs),
     /// Unmount, and wait for gitfold to exit.
     ///
     /// Works even while a shell is inside the mount: then it detaches the mount
@@ -126,22 +125,14 @@ enum Command {
     ///
     /// As `branch --prewarm`, kept in git config; while mounted also applied at
     /// once: the workspace is walked if open, or its walk stopped (none).
-    Prewarm {
-        branch: String,
-        #[arg(value_enum)]
-        mode: prewarm::Prewarm,
-    },
+    Prewarm(cli::branch::PrewarmArgs),
     /// Record the files read in a workspace, for `gitfold overlaps`, or stop.
     ///
     /// As `branch --track-reads`, kept in git config, whatever the mount's
     /// --track-reads says; while mounted also applied at once. Files read
     /// before tracking starts aren't seen (the kernel caches them). Stopping
     /// keeps what was recorded.
-    TrackReads {
-        branch: String,
-        #[arg(value_name = "on|off", value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set)]
-        on: bool,
-    },
+    TrackReads(cli::branch::TrackReadsArgs),
     /// Walk a freshly opened snapshot or workspace (started by the daemon).
     #[command(hide = true)]
     PrewarmWalk {
@@ -196,128 +187,22 @@ fn run() -> Result<i32> {
         std::env::set_current_dir(dir)
             .with_context(|| format!("-C {}: can't change to it", dir.display()))?;
     }
-    // The repository commands work on: the one the current directory is in.
-    let repo = || git::discover(std::path::Path::new("."));
+    let repo = cli::repo;
     match cli.command {
-        Command::Mount(args) => {
-            let mountpoint = daemon::check(&args.mountpoint)?;
-            if !args.foreground {
-                cli::mount::background(&mountpoint, args.log)?;
-                return Ok(0);
-            }
-            daemon::serve::run(args, mountpoint)?;
-        }
+        Command::Mount(args) => cli::mount::mount(args)?,
         Command::Unmount { mountpoint } => cli::mount::unmount(&mountpoint)?,
         Command::Version { mountpoint } => return cli::mount::version(mountpoint.as_deref()),
-        Command::Branch(cli::branch::BranchArgs {
-            branch,
-            from,
-            prewarm,
-            track_reads,
-            with_changes,
-        }) => {
-            let repo = repo()?;
-            cli::branch::branch(
-                &repo,
-                &branch,
-                from.as_deref(),
-                prewarm,
-                track_reads,
-                with_changes,
-            )?;
-        }
-        Command::List(cli::list::ListArgs { stat }) => cli::list::list(&repo()?, stat)?,
-        Command::Changes(cli::list::ChangesArgs { branch, nul, stat }) => {
-            let repo = repo()?;
-            let branch = cli::branch_or_current(branch, &repo)?;
-            cli::list::changes(&repo, &branch, nul, stat)?
-        }
-        Command::Overlaps(cli::overlaps::OverlapsArgs {
-            branch,
-            against,
-            against_workspaces,
-            reads,
-            writes,
-            nul,
-        }) => {
-            let kinds = match (reads, writes) {
-                (true, _) => cli::overlaps::Kinds::Reads,
-                (_, true) => cli::overlaps::Kinds::Writes,
-                _ => cli::overlaps::Kinds::Both,
-            };
-            let repo = repo()?;
-            let branch = cli::branch_or_current(branch, &repo)?;
-            if cli::overlaps::overlaps(&repo, &branch, &against, against_workspaces, kinds, nul)? {
-                return Ok(cli::overlaps::FOUND);
-            }
-        }
-        Command::Watch(cli::inbox::WatchArgs {
-            target,
-            timeout,
-            json,
-        }) => {
-            let repo = repo()?;
-            let current = cli::branch_or_current(None, &repo).ok();
-            let target = if target == "." { String::new() } else { target };
-            cli::inbox::watch(&repo, current.as_deref(), &target, timeout, json)?;
-        }
-        Command::Inbox(cli::inbox::InboxArgs {
-            branch,
-            wait,
-            timeout,
-            peek,
-            json,
-            claude_hook,
-        }) => {
-            // A hook runs in every session: outside a workspace, nothing to do.
-            let found = repo().and_then(|repo| Ok((cli::branch_or_current(branch, &repo)?, repo)));
-            let (branch, repo) = match found {
-                Ok(found) => found,
-                Err(_) if claude_hook.is_some() => return Ok(0),
-                Err(e) => return Err(e),
-            };
-            let args = cli::inbox::Options {
-                wait,
-                timeout,
-                peek,
-                json,
-                hook: claude_hook,
-            };
-            match cli::inbox::inbox(&repo, &branch, args) {
-                Ok(code) => return Ok(code),
-                // A hook's error would show on every tool call: logged, not raised.
-                Err(e) if claude_hook.is_some() => log::warn!("gitfold inbox: {e:#}"),
-                Err(e) => return Err(e),
-            }
-        }
-        Command::Send(cli::inbox::SendArgs {
-            to,
-            text,
-            from,
-            subject,
-        }) => {
-            let repo = repo()?;
-            let from = from
-                .or_else(|| cli::branch_or_current(None, &repo).ok())
-                .unwrap_or_else(|| "user".to_string());
-            let body = match text.as_slice() {
-                [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())?,
-                words => words.join(" "),
-            };
-            cli::inbox::send(&repo, &to, &from, subject.as_deref(), &body)?;
-        }
-        Command::Remove(cli::remove::RemoveArgs {
-            name,
-            force,
-            check,
-            wait,
-        }) => {
-            let wait = std::time::Duration::from_secs(wait);
-            cli::remove::remove(&repo()?, &name, force, check, wait)?;
-        }
+        Command::Branch(args) => cli::branch::branch(&repo()?, args)?,
+        Command::List(args) => cli::list::list(&repo()?, args)?,
+        Command::Changes(args) => cli::list::changes(&repo()?, args)?,
+        Command::Overlaps(args) => return cli::overlaps::overlaps(&repo()?, args),
+        Command::Watch(args) => cli::inbox::watch(&repo()?, args)?,
+        Command::Inbox(args) => return cli::inbox::inbox(args),
+        Command::Send(args) => cli::inbox::send(&repo()?, args)?,
+        Command::Remove(args) => cli::remove::remove(&repo()?, args)?,
         Command::Prune => cli::remove::prune(&repo()?)?,
-        Command::Prewarm { branch, mode } => cli::branch::prewarm(&repo()?, &branch, mode)?,
-        Command::TrackReads { branch, on } => cli::branch::track_reads(&repo()?, &branch, on)?,
+        Command::Prewarm(args) => cli::branch::prewarm(&repo()?, args)?,
+        Command::TrackReads(args) => cli::branch::track_reads(&repo()?, args)?,
         Command::PrewarmWalk {
             root,
             mode,

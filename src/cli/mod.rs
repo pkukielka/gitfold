@@ -14,9 +14,15 @@ pub mod mount;
 pub mod overlaps;
 pub mod remove;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+
+/// The repository commands work on: the one the current directory is in (its
+/// git directory).
+pub fn repo() -> Result<PathBuf> {
+    crate::git::discover(Path::new("."))
+}
 
 /// `branch` if given, else the branch of the workspace the current directory is
 /// in: `repo`, the git directory found from it (`git::discover`), is then the

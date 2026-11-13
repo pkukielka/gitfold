@@ -42,7 +42,7 @@ pub(super) fn messages(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// The message name in `.taken-<pid>-<name>` if process `<pid>` is gone.
-pub(super) fn abandoned(name: &str) -> Option<&str> {
+fn abandoned(name: &str) -> Option<&str> {
     let (pid, original) = name.strip_prefix(".taken-")?.split_once('-')?;
     let pid: libc::pid_t = pid.parse().ok()?;
     // SAFETY: signal 0 only checks that the process exists.
@@ -53,8 +53,8 @@ pub(super) fn abandoned(name: &str) -> Option<&str> {
 
 /// A message's headers and body.
 pub(super) struct Message {
-    pub(super) file: String,
-    pub(super) headers: Vec<(String, String)>,
+    file: String,
+    headers: Vec<(String, String)>,
     pub(super) body: String,
 }
 
@@ -63,7 +63,7 @@ impl Message {
     /// lines, else all body (a file written by hand). CRLF counts as LF.
     pub(super) fn parse(file: &Path, text: &str) -> Message {
         let text = text.replace("\r\n", "\n");
-        pub(super) fn header(l: &str) -> Option<(&str, &str)> {
+        fn header(l: &str) -> Option<(&str, &str)> {
             let ok = |k: &str| {
                 !k.is_empty()
                     && k.chars()

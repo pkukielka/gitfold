@@ -25,10 +25,9 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 
 use crate::git;
+use crate::inotify::{self, Inotify};
 use crate::state::task::{TaskDir, inbox_name};
 use crate::state::workspace_id;
-
-use crate::inotify::{self, Inotify};
 use message::{Message, json_str, messages, rfc3339, take};
 
 /// How often a rewake waiter checks that the session that started it is
@@ -64,22 +63,37 @@ pub enum Hook {
     Rewake,
 }
 
-/// What `gitfold inbox` was asked to do.
-pub struct Options {
-    pub wait: bool,
-    pub timeout: Option<u64>,
-    pub peek: bool,
-    pub json: bool,
-    pub hook: Option<Hook>,
+/// `gitfold inbox`: takes the messages in a workspace's inbox and prints them
+/// (see `take_all`). Returns the exit code. As a Claude Code hook, which runs
+/// in every session, it does nothing outside a workspace, and only logs its
+/// errors: they would show on every tool call.
+pub fn inbox(args: InboxArgs) -> Result<i32> {
+    let hook = args.claude_hook.is_some();
+    let found = super::repo().and_then(|repo| {
+        let branch = super::branch_or_current(args.branch.clone(), &repo)?;
+        Ok((repo, branch))
+    });
+    let (repo, branch) = match found {
+        Ok(found) => found,
+        Err(_) if hook => return Ok(0),
+        Err(e) => return Err(e),
+    };
+    match take_all(&repo, &branch, &args) {
+        Err(e) if hook => {
+            log::warn!("gitfold inbox: {e:#}");
+            Ok(0)
+        }
+        result => result,
+    }
 }
 
-/// `gitfold inbox`: takes the messages in the inbox of `branch` and prints
-/// them (each as written, an empty line between; or one JSON object per line).
-/// With `wait`, if there are none, waits for one (up to `timeout`, if given).
-/// With `peek`, only lists them, taking nothing: `from` and `subject` (or the
-/// body's first line), one per line; nothing when empty. With `hook`, hands
-/// them to a Claude Code hook instead. Returns the exit code.
-pub fn inbox(repo: &Path, branch: &str, args: Options) -> Result<i32> {
+/// Takes the messages in the inbox of `branch` and prints them (each as
+/// written, an empty line between; or one JSON object per line). With `wait`,
+/// if there are none, waits for one (up to `timeout`, if given). With `peek`,
+/// only lists them, taking nothing: `from` and `subject` (or the body's first
+/// line), one per line; nothing when empty. With `claude_hook`, hands them to
+/// a Claude Code hook instead. Returns the exit code.
+fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
     let common_dir = git::init(repo)?;
     let dir = task_dir(&common_dir, branch)?.join(inbox_name(&common_dir));
     if args.peek {
@@ -101,10 +115,10 @@ pub fn inbox(repo: &Path, branch: &str, args: Options) -> Result<i32> {
         }
         return Ok(0);
     }
-    if args.hook == Some(Hook::PostToolUse) && in_subagent()? {
+    if args.claude_hook == Some(Hook::PostToolUse) && in_subagent()? {
         return Ok(0);
     }
-    let rewake = args.hook == Some(Hook::Rewake);
+    let rewake = args.claude_hook == Some(Hook::Rewake);
     let wait = args.wait || rewake;
     // One rewake waiter per inbox: each `Stop` starts one.
     let _lock = match rewake {
@@ -161,7 +175,7 @@ pub fn inbox(repo: &Path, branch: &str, args: Options) -> Result<i32> {
             .join("\n"),
     };
     let intro = "New messages in your gitfold inbox (each is taken: it won't be shown again):\n\n";
-    let code = match args.hook {
+    let code = match args.claude_hook {
         None => {
             print!("{text}");
             0
@@ -212,9 +226,29 @@ fn lock(dir: &Path) -> Result<Option<fs::File>> {
     Ok((!held).then_some(file))
 }
 
-/// `gitfold send`: leaves a message from `from` in the inbox of branch `to`:
-/// `from:` and `time:` headers, `subject:` if given, then `body`.
-pub fn send(repo: &Path, to: &str, from: &str, subject: Option<&str>, body: &str) -> Result<()> {
+/// `gitfold send`: leaves a message in the inbox of branch `to`: `from:`
+/// (default: the current workspace, else `user`) and `time:` headers,
+/// `subject:` if given, then the text (`-`: read from stdin).
+pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
+    let SendArgs {
+        to,
+        text,
+        from,
+        subject,
+    } = args;
+    let from = from
+        .or_else(|| super::branch_or_current(None, repo).ok())
+        .unwrap_or_else(|| "user".to_string());
+    let body = match text.as_slice() {
+        [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())?,
+        words => words.join(" "),
+    };
+    let (to, from, subject, body) = (
+        to.as_str(),
+        from.as_str(),
+        subject.as_deref(),
+        body.as_str(),
+    );
     let common_dir = git::init(repo)?;
     let dir = task_dir(&common_dir, to)?.join(inbox_name(&common_dir));
     fs::create_dir_all(&dir)?;
@@ -260,7 +294,7 @@ pub fn send(repo: &Path, to: &str, from: &str, subject: Option<&str>, body: &str
     Ok(())
 }
 
-/// The arguments of `gitfold inbox` (see `main`).
+/// The arguments of `gitfold inbox`.
 #[derive(clap::Args)]
 pub struct InboxArgs {
     /// The workspace's branch (default: the workspace you are in).
@@ -283,10 +317,10 @@ pub struct InboxArgs {
     /// `Stop` hook with `asyncRewake`: waits for one, then wakes the idle
     /// session). See skills/gitfold/SKILL.md.
     #[arg(long, value_enum, value_name = "EVENT", conflicts_with = "peek")]
-    pub claude_hook: Option<crate::cli::inbox::Hook>,
+    pub claude_hook: Option<Hook>,
 }
 
-/// The arguments of `gitfold send` (see `main`).
+/// The arguments of `gitfold send`.
 #[derive(clap::Args)]
 pub struct SendArgs {
     /// The recipient's branch.
