@@ -23,11 +23,17 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-/// Moves file `src` to `dst` (same filesystem), its data on disk first: as
-/// `write_atomic`, for a file already written.
+/// Moves file `src` to `dst`, its data on disk first: as `write_atomic`, for a
+/// file already written. Across filesystems, copied that way.
 pub fn rename_synced(src: &Path, dst: &Path) -> io::Result<()> {
     fs::File::open(src)?.sync_all()?;
-    fs::rename(src, dst)
+    match fs::rename(src, dst) {
+        Err(e) if e.kind() == io::ErrorKind::CrossesDevices => {
+            write_atomic(dst, &fs::read(src)?)?;
+            fs::remove_file(src)
+        }
+        moved => moved,
+    }
 }
 
 /// Whether `e` means there is nothing at a path: not found, or a component of

@@ -47,7 +47,9 @@ impl TaskDir {
     /// `of`, with the repository's settings already read.
     pub fn with(local: &settings::Local, common_dir: &Path, branch: &str) -> TaskDir {
         let name = local.task_dir();
-        let root = (local.tasks_dir()).unwrap_or_else(|| state_root(common_dir).join(".tasks"));
+        let root = local
+            .tasks_dir()
+            .unwrap_or_else(|| state_root(common_dir).join(".tasks"));
         TaskDir {
             name: name.into_bytes(),
             dir: root.join(workspace_id(branch)),
@@ -125,11 +127,6 @@ impl TaskDir {
     }
 }
 
-/// The name of a task folder's inbox (see `settings::Local::inbox`).
-pub fn inbox_name(local: &settings::Local) -> String {
-    local.inbox()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,7 +165,7 @@ mod tests {
         let t = TaskDir::of(dir, "agent/x");
         assert_eq!(t.name, b".task");
         assert_eq!(t.dir, dir.join("gitfold/.tasks/agent%2Fx"));
-        assert_eq!(inbox_name(&settings::Local::read(dir)), "inbox");
+        assert_eq!(settings::Local::read(dir).inbox(), "inbox");
     }
 
     #[test]
@@ -182,7 +179,7 @@ mod tests {
             (t.name.as_slice(), t.dir.as_path()),
             (&b".notes"[..], Path::new("/srv/tasks/b"))
         );
-        assert_eq!(inbox_name(&settings::Local::read(&dir.0)), "mail");
+        assert_eq!(settings::Local::read(&dir.0).inbox(), "mail");
     }
 
     #[test]
@@ -204,11 +201,7 @@ mod tests {
             let t = TaskDir::of(dir, "b");
             assert_eq!(t.name, b".task", "taskDir {task_dir}");
             assert_eq!(t.dir, dir.join("gitfold/.tasks/b"), "tasksDir {tasks_dir}");
-            assert_eq!(
-                inbox_name(&settings::Local::read(dir)),
-                "inbox",
-                "inbox {inbox}"
-            );
+            assert_eq!(settings::Local::read(dir).inbox(), "inbox", "inbox {inbox}");
         }
     }
 

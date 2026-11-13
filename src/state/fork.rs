@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use super::task::{TaskDir, inbox_name};
+use super::task::TaskDir;
 use crate::fsutil::{self, Unreadable};
 use crate::git;
 use crate::git::worktree;
@@ -96,7 +96,7 @@ pub fn fork(
     let to_task = TaskDir::with(&local, common_dir, to);
     let kept_task = to_task.dir.exists();
     let from_task = TaskDir::with(&local, common_dir, from);
-    let task_copied = match to_task.copy_from(&from_task, &inbox_name(&local)) {
+    let task_copied = match to_task.copy_from(&from_task, &local.inbox()) {
         Ok(copied) => copied,
         Err(e) => {
             log::warn!("copying the task folder of {from} into {to}: {e:#}");
@@ -158,8 +158,9 @@ pub fn fork(
     })
 }
 
-/// Copies the stored state `src` of a workspace into new directory `dst`: the files in `COPIED`, the `upper` tree with modes and times (the
-/// index the fork starts with recorded them), and its registration's git index.
+/// Copies the stored state `src` of a workspace into new directory `dst`: the
+/// files in `COPIED`, the `upper` tree with modes and times (the index the fork
+/// starts with recorded them), and its registration's git index.
 /// Run on a source nothing writes to meanwhile.
 pub fn copy_state_dir(src: &StateDir, dst: &Path) -> Result<()> {
     let (common_dir, branch) = (&src.common_dir, &src.branch);
@@ -229,7 +230,7 @@ fn register(
     worktree::register_branch(to_admin, to, &gitfile, index)?;
     // Still there if the registration existed already (and kept its index).
     match fs::remove_file(&copied) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+        Err(e) if !fsutil::not_found(&e) => return Err(e.into()),
         _ => {}
     }
     // With `core.splitIndex`, the index refers to a shared index file next to

@@ -1,7 +1,7 @@
 //! Messages and watching, on the task folders (`state::task`):
 //! `gitfold watch`, `gitfold inbox` and `gitfold send`.
 //!
-//! An inbox is a directory of a task folder (`task::inbox_name`) holding one
+//! An inbox is a directory of a task folder (`gitfold.inbox`, see `settings::Local::inbox`) holding one
 //! file per message, named `<nanoseconds>-<from id>` so that names sort by
 //! arrival. A message is header lines (`from:`, `time:`, optionally
 //! `subject:`), an empty line, then the body. Senders write a dot-named file
@@ -27,7 +27,7 @@ use anyhow::{Context, Result};
 use crate::git;
 use crate::inotify::{self, Inotify};
 use crate::settings;
-use crate::state::task::{TaskDir, inbox_name};
+use crate::state::task::TaskDir;
 use crate::state::workspace_id;
 use message::{Message, json_str, messages, rfc3339, take};
 
@@ -47,7 +47,7 @@ fn inbox_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
     let local = settings::Local::read(common_dir);
     Ok(TaskDir::with(&local, common_dir, branch)
         .dir
-        .join(inbox_name(&local)))
+        .join(local.inbox()))
 }
 
 /// `now + secs`, or `None` (no deadline) if that overflows or no time is given.
