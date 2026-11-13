@@ -362,9 +362,11 @@ fn launch(walks: Vec<(u64, Walk)>) {
             // queued ones nor those taken to start here are started.
             let mut walks = WALKS.lock();
             walks.running.retain(|(i, _, _)| *i != id);
-            let taken = pending.len();
-            for (taken, _) in pending.drain(..) {
-                walks.starting.retain(|s| s.id != taken);
+            let mut taken = 0;
+            for (id, _) in pending.drain(..) {
+                let wanted = |s: &Starting| s.id == id && !s.cancelled;
+                taken += usize::from(walks.starting.iter().any(wanted));
+                walks.starting.retain(|s| s.id != id);
             }
             let dropped = taken + walks.queued.len();
             if dropped > 0 {
