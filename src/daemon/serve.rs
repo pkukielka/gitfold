@@ -38,6 +38,10 @@ pub fn run(options: Options) -> Result<()> {
         prewarm_walks,
         track_reads,
     } = options;
+    // Children (git, prewarm walkers) are waited for: an ignored SIGCHLD
+    // inherited from whatever started the daemon would have the kernel reap
+    // them first.
+    unsafe { libc::signal(libc::SIGCHLD, libc::SIG_DFL) };
     super::unmount_on_signal(mountpoint.clone());
     prewarm::set_max_walks(prewarm_walks as usize);
     // Absolute: the repository handle keeps the path it was opened with.
