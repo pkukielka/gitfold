@@ -32,7 +32,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::workspace::{Purpose, Workspace};
+use super::workspace::Workspace;
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
@@ -497,15 +497,9 @@ impl Workspaces {
         };
         let created = new_base.is_some();
         let path = self.mount_point.join(branch);
-        let ws = Workspace::open(
-            store,
-            self.common_dir.clone(),
-            state,
-            branch,
-            new_base,
-            Purpose::Serve,
-        )
-        .map_err(|e| fail("opening", e))?;
+        let ws = Workspace::open(store, state, new_base)
+            .map_err(|e| fail("opening", e))?
+            .with_task_folder(store);
         if let Err(e) = ws.track_reads(self.tracks_reads(branch)) {
             warn!("workspace {branch}: not recording reads: {e:#}");
         }

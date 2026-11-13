@@ -75,7 +75,7 @@ impl Workspace {
         let mut line = path.clone();
         line.push(0);
         if let Err(e) = reads.log.write_all(&line) {
-            warn!("recording a read in workspace {}: {e}", self.branch);
+            warn!("recording a read in workspace {}: {e}", self.state.branch);
             return;
         }
         reads.seen.insert(path);

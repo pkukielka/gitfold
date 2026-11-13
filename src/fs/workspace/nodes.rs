@@ -31,6 +31,12 @@ struct Node {
     name_off: u32,
 }
 
+/// Node `local` in `nodes` (a free function: callers borrow other fields
+/// meanwhile).
+fn find(nodes: &HashTable<Node>, local: u64) -> Option<&Node> {
+    nodes.find(local_hash(local), |n| n.local == local)
+}
+
 /// Hash of a local id (path-derived ids leave the high bits zero, which the
 /// table's control bytes come from).
 fn local_hash(local: u64) -> u64 {
@@ -62,7 +68,7 @@ pub(super) struct Nodes {
 
 impl Nodes {
     fn get(&self, local: u64) -> Option<&Node> {
-        self.nodes.find(local_hash(local), |n| n.local == local)
+        find(&self.nodes, local)
     }
 
     fn get_mut(&mut self, local: u64) -> Option<&mut Node> {
@@ -148,9 +154,7 @@ impl Nodes {
     fn index(&mut self, local: u64, parent: u64, name: &[u8]) {
         let (nodes, names) = (&self.nodes, &self.names);
         let hash_of = |&l: &u64| {
-            let n = nodes
-                .find(local_hash(l), |n| n.local == l)
-                .expect("indexed nodes exist");
+            let n = find(nodes, l).expect("indexed nodes exist");
             key_hash(n.parent, name_of(names, n))
         };
         self.by_name
@@ -189,9 +193,7 @@ impl Nodes {
     fn take(&mut self, parent: u64, name: &[u8]) -> Option<u64> {
         let (nodes, names) = (&self.nodes, &self.names);
         let is = |&local: &u64| {
-            nodes
-                .find(local_hash(local), |n| n.local == local)
-                .is_some_and(|n| n.parent == parent && name_of(names, n) == name)
+            find(nodes, local).is_some_and(|n| n.parent == parent && name_of(names, n) == name)
         };
         let entry = self.by_name.find_entry(key_hash(parent, name), is).ok()?;
         Some(entry.remove().0)

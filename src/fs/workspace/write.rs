@@ -22,8 +22,8 @@ use super::times::shown_mtime;
 use super::{Layers, ListEntry, Obj, Workspace};
 use crate::fsutil::{self, not_found};
 use crate::git;
-use crate::state::join;
 use crate::state::markers::Kind;
+use crate::state::{ancestors, join, parent};
 use crate::store::{Lower, Store};
 
 /// Mode of directories created in upper to hold changed files: what the
@@ -99,23 +99,33 @@ impl Workspace {
     /// Makes sure directory `path` (visible in the merged view) exists in upper.
     pub(super) fn ensure_upper_dir(&self, path: &[u8]) -> Result<(), Errno> {
         // Usually it exists: one stat instead of a mkdir per component.
-        if fs::symlink_metadata(self.upper_path(path)).is_ok_and(|m| m.is_dir()) {
+        if path.is_empty() || self.is_upper_dir(path) {
             return Ok(());
         }
-        let mut prefix: Vec<u8> = Vec::new();
-        for comp in path.split(|b| *b == b'/').filter(|c| !c.is_empty()) {
-            if !prefix.is_empty() {
-                prefix.push(b'/');
-            }
-            prefix.extend_from_slice(comp);
-            let dir = self.upper_path(&prefix);
-            match fs::DirBuilder::new().create(&dir) {
-                Ok(()) => fs::set_permissions(&dir, fs::Permissions::from_mode(DIR_MODE))?,
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e.into()),
+        for dir in ancestors(path).chain([path]) {
+            if self.mkdir_upper(dir)? {
+                self.set_dir_mode(dir)?;
             }
         }
         Ok(())
+    }
+
+    /// Creates directory `path` in upper, if it isn't there; returns whether it
+    /// did. Its mode is then the caller's to set (`set_dir_mode`), once it has
+    /// recorded the directory for any rollback.
+    fn mkdir_upper(&self, path: &[u8]) -> Result<bool, Errno> {
+        match fs::DirBuilder::new().create(self.upper_path(path)) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Gives upper directory `path` the mode upper directories have (not the
+    /// umask's).
+    fn set_dir_mode(&self, path: &[u8]) -> Result<(), Errno> {
+        let mode = fs::Permissions::from_mode(DIR_MODE);
+        Ok(fs::set_permissions(self.upper_path(path), mode)?)
     }
 
     /// Whether a lower entry would show at `path` without an upper one.
@@ -158,8 +168,7 @@ impl Workspace {
         truncate: bool,
         time: Option<SystemTime>,
     ) -> Result<(), Errno> {
-        let parent = &path[..path.iter().rposition(|b| *b == b'/').unwrap_or(0)];
-        self.ensure_upper_dir(parent)?;
+        self.ensure_upper_dir(parent(path))?;
         let rec = store.file(file_id).ok_or(Errno::EIO)?;
         let target = self.upper_path(path);
         let content = if truncate && rec.kind != EntryKind::Link {
@@ -193,7 +202,7 @@ impl Workspace {
     pub fn write(&self, store: &Store, local: u64, offset: u64, data: &[u8]) -> Result<u32, Errno> {
         let layers = self.layers.read();
         let path = self.path(local)?;
-        self.touched(&path);
+        self.touch(&path);
         // A copy-up turns a lower entry into an upper one, even if the write then
         // fails (listings stat upper entries when serving them, so plain writes
         // need no invalidation).
@@ -239,7 +248,7 @@ impl Workspace {
         }
         let layers = self.layers.read();
         let path = self.path(local)?;
-        self.touched(&path);
+        self.touch(&path);
         if self.copy_up(store, &layers, &path, size == Some(0))? {
             self.changed();
         }
@@ -306,7 +315,7 @@ impl Workspace {
         let parent_path = self.path(parent)?;
         let path = self.new_entry_path(store, &layers, &parent_path, parent, name)?;
         let upper = self.upper_path(&path);
-        self.touched(&path);
+        self.touch(&path);
         let made = make(&upper);
         if made.is_ok() || upper.symlink_metadata().is_ok() {
             // The entry exists from here on, whatever fails below.
@@ -407,9 +416,7 @@ impl Workspace {
             // Markers below an empty directory are moot once it is gone (and
             // covered by its whiteout, logged above).
             for kind in [Kind::Whiteout, Kind::Opaque] {
-                for p in layers.markers.below(kind, &path) {
-                    layers.markers.set(kind, &p, false)?;
-                }
+                layers.markers.clear_below(kind, &path)?;
             }
         }
         layers.markers.set(Kind::Opaque, &path, false)?;
@@ -452,10 +459,7 @@ impl Workspace {
             layers.times.set(file, None); // no longer lower files
         }
         layers.times.save()?;
-        layers.markers.set(Kind::Opaque, path, true)?;
-        for p in layers.markers.below(Kind::Whiteout, path) {
-            layers.markers.set(Kind::Whiteout, &p, false)?;
-        }
+        layers.markers.make_opaque(path)?;
         self.changed();
         Ok(())
     }
@@ -510,23 +514,17 @@ impl Workspace {
         plan: &CopyPlan,
         created: &mut Vec<Vec<u8>>,
     ) -> Result<(), Errno> {
-        let mkdir = |dir: &[u8], created: &mut Vec<Vec<u8>>| -> Result<(), Errno> {
-            let upper = self.upper_path(dir);
-            match fs::DirBuilder::new().create(&upper) {
-                Ok(()) => {
-                    created.push(dir.to_vec());
-                    fs::set_permissions(&upper, fs::Permissions::from_mode(DIR_MODE))?;
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(e.into()),
+        self.ensure_upper_dir(parent(path))?;
+        let mut mkdir = |dir: &[u8]| -> Result<(), Errno> {
+            if self.mkdir_upper(dir)? {
+                created.push(dir.to_vec());
+                self.set_dir_mode(dir)?;
             }
             Ok(())
         };
-        let parent = &path[..path.iter().rposition(|b| *b == b'/').unwrap_or(0)];
-        self.ensure_upper_dir(parent)?;
-        mkdir(path, created)?;
+        mkdir(path)?;
         for dir in &plan.dirs {
-            mkdir(dir, created)?;
+            mkdir(dir)?;
         }
         for (file, id) in &plan.files {
             let shown = shown_mtime(layers.times.get(file));
@@ -598,10 +596,7 @@ impl Workspace {
         if replace_lower_dir {
             // Empty in the view: nothing to copy, just an opaque upper directory.
             self.ensure_upper_dir(&dst)?;
-            layers.markers.set(Kind::Opaque, &dst, true)?;
-            for p in layers.markers.below(Kind::Whiteout, &dst) {
-                layers.markers.set(Kind::Whiteout, &p, false)?;
-            }
+            layers.markers.make_opaque(&dst)?;
             self.changed();
         }
         self.copy_up(store, &layers, &src, false)?;
@@ -623,7 +618,7 @@ impl Workspace {
                 }
             }
         } else {
-            self.touched(&dst);
+            self.touch(&dst);
         }
         let was_opaque = layers.markers.set(Kind::Opaque, &src, false)?;
         let dst_whiteout = layers.markers.set(Kind::Whiteout, &dst, false)?;
