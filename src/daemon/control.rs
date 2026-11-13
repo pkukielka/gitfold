@@ -70,6 +70,9 @@ pub enum Request {
     /// Walk the workspace of `branch` now in its mode (just set), if it is
     /// open; stop walking it if that is `none`.
     Prewarm { branch: String },
+    /// Record reads in the workspace of `branch` or stop, as its setting (just
+    /// set) says, if it is open.
+    TrackReads { branch: String },
     /// Create branch `to` at `from`'s tip with `from`'s uncommitted changes.
     Fork { from: String, to: String },
     /// Which gitfold build the daemon runs (`crate::VERSION`).
@@ -93,6 +96,7 @@ impl Request {
             Request::StopPrewarm => "stop-prewarm\n".to_string(),
             Request::ResumePrewarm => "resume-prewarm\n".to_string(),
             Request::Prewarm { branch } => format!("prewarm\n{branch}\n"),
+            Request::TrackReads { branch } => format!("track-reads\n{branch}\n"),
             Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
             Request::Version => "version\n".to_string(),
         }
@@ -110,6 +114,9 @@ impl Request {
             ["stop-prewarm", ""] => Ok(Request::StopPrewarm),
             ["resume-prewarm", ""] => Ok(Request::ResumePrewarm),
             ["prewarm", branch, ""] => Ok(Request::Prewarm {
+                branch: branch.to_string(),
+            }),
+            ["track-reads", branch, ""] => Ok(Request::TrackReads {
                 branch: branch.to_string(),
             }),
             ["fork", from, to, ""] => Ok(Request::Fork {

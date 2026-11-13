@@ -90,6 +90,21 @@ even on a huge tree. Each workspace then changes on its own.
 - **Watching them:** `gitfold list` shows each workspace's changed, deleted and
   ignored file counts. `gitfold changes <BRANCH>` shows one's changed paths.
   Both read stored state, so polling many workspaces is cheap.
+- **Is the work stale, or colliding?** `gitfold overlaps` (inside a workspace, or
+  `gitfold overlaps <BRANCH>`) lists paths the workspace changed (`W`) or read (`R`) that its
+  remote's default branch (`origin/HEAD`, else `main`) changed since they
+  diverged. `--against <REV>` picks
+  another target. `--against <BRANCH>` of another workspace includes its
+  uncommitted changes, and `--against-workspaces` checks every other one: two
+  agents editing the same files. It exits 6 if anything overlaps, 0 if not,
+  so it's a cheap check before pushing or a poll for a supervisor. A `W` path
+  often merges cleanly; the merge preview below tells for sure.
+- **Recording reads:** `R` lines need read tracking, off by default. Turn it
+  on per workspace with `gitfold branch <BRANCH> --track-reads on` (or
+  `gitfold track-reads <BRANCH> on` for an existing one), or for the whole
+  mount with `gitfold mount --track-reads`. Turn it on before the agent
+  starts: files read before aren't seen. Agents that grep the whole tree
+  record every file, which makes `R` lines noise; leave it off for them.
 - **Merge previews:** to see what several branches look like merged, before
   merging anything, make the merge commit with git and open it as a snapshot.
   No working tree, index or ref is touched (git 2.38 or later). This is a

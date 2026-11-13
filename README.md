@@ -118,15 +118,19 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>]
+gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>] [--track-reads on|off]
                                               # create a branch for a workspace
                                               # (-w: with a workspace's changes)
 gitfold list                                  # workspaces and their changes
 gitfold changes [<BRANCH>] [-z]               # a workspace's changed paths
+gitfold overlaps [<BRANCH>] [--against <REV>]... [--against-workspaces] [--reads|--writes] [-z]
+                                              # what it read or changed that
+                                              # changed elsewhere since
 gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
                                               # delete a workspace, or a snapshot's
 gitfold prune                                 # delete snapshot registrations
 gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
+gitfold track-reads <BRANCH> on|off           # record a workspace's reads
 ```
 
 Commands other than `mount` work on the repository the current directory is
@@ -170,6 +174,7 @@ Options:
 | `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.16 s for a workspace). |
 | `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
+| `--track-reads` | off | Record the files agents read in workspaces, for `gitfold overlaps` (a first full read of Apache Spark took 6% longer). A workspace's own setting wins (`gitfold track-reads`). |
 | `--threads N` | number of CPUs | FUSE worker threads. |
 | `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |
 
@@ -262,6 +267,42 @@ never opened as a workspace gives just the new branch. A source with a git
 operation in progress (a commit, a rebase) is refused, as is one whose branch
 moves during the copy: retry once it is done.
 
+**Overlaps.** `gitfold overlaps [<BRANCH>]` lists what a workspace touched that
+changed elsewhere since: `W` for a path it changed (committed on its branch or
+not) that the target changed too, `R` for a file it read that the target
+changed, then the target and the path:
+
+```
+R	main	src/parser.rs
+W	main	src/lexer.rs
+W	agent/task-18	docs/api.md
+```
+
+The target is the remote's default branch (`origin/HEAD`, else `main`), or
+each `--against <REV>` (not the branch's upstream: after `git push -u` that is
+its own remote branch);
+a target's changes are its commits since it diverged from the workspace's base.
+A branch with a workspace adds that workspace's uncommitted changes, so
+`--against <BRANCH>` gives the paths two workspaces both changed, and
+`--against-workspaces` compares with every other workspace. A path counts if
+the target changed it, a directory above it, or (a directory replaced by a
+file) a path below it. It exits 6 if anything overlaps, 0 if not. `W` is about
+paths, not lines: two agents editing different parts of one file usually merge
+cleanly (`git merge-tree --write-tree` tells for sure).
+
+`R` lines need read tracking, off by default (an agent grepping the whole tree
+reads every file): `gitfold mount --track-reads` turns it on for the mount,
+`gitfold branch --track-reads on|off` or `gitfold track-reads <BRANCH> on|off`
+for one workspace, whatever the mount says (in git config,
+`branch.<BRANCH>.gitfoldTrackReads`; applied at once while mounted). Only a
+file's first read from its start reaches gitfold (the kernel caches contents),
+so reads that start mid-file (`tail -c`) are missed, and files read before
+tracking started aren't seen. For the same reason, a tracked workspace's
+`content` prewarm walks as `meta`. `.gitignore` and `.gitattributes` files
+are left out of `R` lines: `git status` reads one in every directory. Without tracking, `overlaps` shows `W` lines
+and says so; `--reads` then fails (exit 3). A fork inherits what its source
+read, and its setting; turning tracking off keeps what was recorded.
+
 **Finish.** Push or merge the branch from anywhere, then remove the workspace
 with `gitfold remove <BRANCH>`, mounted or not (see
 [Cleaning up](#cleaning-up) for when it refuses). `gitfold list` shows
@@ -284,7 +325,7 @@ escaped (`agent%2Ftask-17`). The worktree registration is
 `upper/` holds every file that differs from the workspace's base (the branch's
 last tip, see above), as real files; `markers` records deleted files so they
 stay deleted; `times` the timestamps of files dropped from upper (committed,
-or restored unchanged); `base` is that commit, kept from `git gc` by the ref
+or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress.
 Don't modify `.git/gitfold/` while mounted.
 

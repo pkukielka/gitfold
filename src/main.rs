@@ -10,6 +10,7 @@ mod store;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use clap::builder::BoolishValueParser;
 use clap::{Parser, Subcommand};
 use fuser::{Config, MountOption};
 
@@ -58,6 +59,12 @@ enum Command {
         /// Walks running at once; the others wait.
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
         prewarm_walks: u64,
+        /// Record the files agents read in workspaces, for `gitfold overlaps`
+        /// (branches can say otherwise: `gitfold track-reads`). A tracked
+        /// workspace's prewarm `content` walks as `meta`: its walk would read
+        /// every file before the agent.
+        #[arg(long)]
+        track_reads: bool,
     },
     /// Unmount, and wait for gitfold to exit.
     ///
@@ -95,6 +102,11 @@ enum Command {
         /// still wins.
         #[arg(long, value_enum)]
         prewarm: Option<prewarm::Prewarm>,
+        /// Record the files read in this workspace, for `gitfold overlaps`, or
+        /// not, whatever the mount's --track-reads says (in git config,
+        /// branch.<BRANCH>.gitfoldTrackReads).
+        #[arg(long, value_name = "on|off", value_parser = BoolishValueParser::new())]
+        track_reads: Option<bool>,
     },
     /// List the workspaces and their changes.
     ///
@@ -110,6 +122,39 @@ enum Command {
     Changes {
         /// The workspace's branch (default: the workspace you are in).
         branch: Option<String>,
+        /// End each line with NUL instead of a newline, paths unquoted.
+        #[arg(short = 'z')]
+        nul: bool,
+    },
+    /// List what a workspace read or changed that changed elsewhere since.
+    ///
+    /// One line per path and target: `W` for a path the workspace changed
+    /// (committed on its branch or not) that the target changed too, `R` for a
+    /// file it read (recorded while tracked: `gitfold track-reads`) that the
+    /// target changed, then the target and the path, quoted as git quotes
+    /// paths. A target's changes are its commits since it diverged from the
+    /// workspace's base, plus, for a branch with a workspace, that workspace's
+    /// uncommitted changes. Paths, not lines: a `W` path often merges cleanly
+    /// (`git merge-tree` tells). Read from stored state, mounted or not. Exit
+    /// codes: 0 no overlaps, 6 some, 3 no such branch (or no
+    /// reads recorded, with --reads), 1 other errors, 2 usage errors.
+    Overlaps {
+        /// The workspace's branch (default: the workspace you are in).
+        branch: Option<String>,
+        /// What to compare with (repeatable; default: origin/HEAD, the remote's
+        /// default branch, else main).
+        #[arg(long, value_name = "REV")]
+        against: Vec<String>,
+        /// Compare with every other workspace (instead of the default target;
+        /// with --against, as well).
+        #[arg(long)]
+        against_workspaces: bool,
+        /// Only files read.
+        #[arg(long, conflicts_with = "writes")]
+        reads: bool,
+        /// Only paths changed.
+        #[arg(long)]
+        writes: bool,
         /// End each line with NUL instead of a newline, paths unquoted.
         #[arg(short = 'z')]
         nul: bool,
@@ -148,6 +193,17 @@ enum Command {
         branch: String,
         #[arg(value_enum)]
         mode: prewarm::Prewarm,
+    },
+    /// Record the files read in a workspace, for `gitfold overlaps`, or stop.
+    ///
+    /// As `branch --track-reads`, kept in git config, whatever the mount's
+    /// --track-reads says; while mounted also applied at once. Files read
+    /// before tracking starts aren't seen (the kernel caches them). Stopping
+    /// keeps what was recorded.
+    TrackReads {
+        branch: String,
+        #[arg(value_name = "on|off", value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set)]
+        on: bool,
     },
     /// Walk a freshly opened snapshot or workspace (started by the daemon).
     #[command(hide = true)]
@@ -204,6 +260,7 @@ fn main() -> Result<()> {
             prewarm,
             prewarm_threads,
             prewarm_walks,
+            track_reads,
         } => {
             let mountpoint = daemon::check(&mountpoint)?;
             if !foreground {
@@ -256,6 +313,7 @@ fn main() -> Result<()> {
                     prewarm,
                     prewarm_threads: prewarm_threads
                         .unwrap_or(prewarm::THREADS.min(cpus / 2).max(1)),
+                    track_reads,
                 },
                 names.clone(),
             );
@@ -285,6 +343,7 @@ fn main() -> Result<()> {
                         Ok("prewarm resumed".into())
                     }
                     control::Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
+                    control::Request::TrackReads { branch } => workspaces.track_reads_now(&branch),
                     control::Request::Fork { from, to } => workspaces
                         .fork(&from, &to)
                         .inspect(|done| log::info!("{done}")),
@@ -306,6 +365,7 @@ fn main() -> Result<()> {
             branch,
             from,
             prewarm,
+            track_reads,
             with_changes,
         } => {
             let repo = repo()?;
@@ -314,6 +374,7 @@ fn main() -> Result<()> {
                 &branch,
                 from.as_deref(),
                 prewarm,
+                track_reads,
                 with_changes,
             ));
         }
@@ -322,6 +383,30 @@ fn main() -> Result<()> {
             let repo = repo()?;
             let branch = cli::branch_or_current(branch, &repo)?;
             cli::manage::changes(&repo, &branch, nul)?
+        }
+        Command::Overlaps {
+            branch,
+            against,
+            against_workspaces,
+            reads,
+            writes,
+            nul,
+        } => {
+            let kinds = match (reads, writes) {
+                (true, _) => cli::overlaps::Kinds::Reads,
+                (_, true) => cli::overlaps::Kinds::Writes,
+                _ => cli::overlaps::Kinds::Both,
+            };
+            let found = (|| {
+                let repo = repo()?;
+                let branch = cli::branch_or_current(branch, &repo)?;
+                cli::overlaps::overlaps(&repo, &branch, &against, against_workspaces, kinds, nul)
+            })();
+            match found {
+                Ok(true) => std::process::exit(cli::overlaps::FOUND),
+                Ok(false) => {}
+                Err(e) => or_exit(Err(e)),
+            }
         }
         Command::Remove {
             name,
@@ -334,6 +419,7 @@ fn main() -> Result<()> {
         }
         Command::Prune => cli::manage::prune(&repo()?)?,
         Command::Prewarm { branch, mode } => cli::manage::prewarm(&repo()?, &branch, mode)?,
+        Command::TrackReads { branch, on } => cli::manage::track_reads(&repo()?, &branch, on)?,
         Command::PrewarmWalk {
             root,
             mode,

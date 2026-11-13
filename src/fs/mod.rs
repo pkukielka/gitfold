@@ -72,6 +72,9 @@ pub struct Options {
     pub no_open: bool,
     pub prewarm: Prewarm,
     pub prewarm_threads: usize,
+    /// Record the files read in workspaces, unless a branch says otherwise
+    /// (`workspace::reads`).
+    pub track_reads: bool,
 }
 
 pub struct GitFold {
@@ -115,6 +118,7 @@ impl GitFold {
                 stat,
                 opts.prewarm,
                 opts.prewarm_threads,
+                opts.track_reads,
             )),
             content: ContentCache::new(),
             names,

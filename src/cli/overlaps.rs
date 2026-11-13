@@ -1,0 +1,270 @@
+//! `gitfold overlaps`: what a workspace touched that changed elsewhere since.
+//!
+//! A workspace's writes are its changes against a target: commits on its
+//! branch since the two diverged, and its uncommitted changes. Its reads are
+//! the files recorded while tracked (`workspace::reads`). Either overlaps a target where
+//! the target changed the same path, or a directory above it, or (for a
+//! directory replaced by a file) a path below it. A target is a revision, its
+//! changes being its commits since it diverged from the workspace's base; a
+//! branch with a workspace adds that workspace's uncommitted changes, so a
+//! target workspace gives the paths two workspaces both changed.
+//!
+//! Everything is read from stored state and git, mounted or not.
+
+use std::collections::{BTreeSet, HashSet};
+use std::io::Write;
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::{Result, bail};
+use gix::ObjectId;
+
+use super::manage::{quote, workspaces};
+use crate::fs::workspace::retire::{base_note, check_name};
+use crate::fs::workspace::{read_base, reads, status};
+use crate::git;
+use crate::git::worktree::{self, workspace_id};
+use crate::refusal::Refusal;
+use crate::store::Store;
+
+/// Which lines to print.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kinds {
+    /// Reads if recorded, and writes.
+    Both,
+    Reads,
+    Writes,
+}
+
+/// The exit code when there are overlaps.
+pub const FOUND: i32 = 6;
+
+/// One target and the paths it changed.
+struct Target {
+    name: String,
+    changed: HashSet<Vec<u8>>,
+    /// Every directory above a changed path.
+    dirs: HashSet<Vec<u8>>,
+}
+
+impl Target {
+    fn new(name: String, paths: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        let changed: HashSet<Vec<u8>> = paths.into_iter().collect();
+        let dirs = changed
+            .iter()
+            .flat_map(|p| parents(p))
+            .map(<[u8]>::to_vec)
+            .collect();
+        Target {
+            name,
+            changed,
+            dirs,
+        }
+    }
+
+    /// Whether this target changed `path`, a directory above it, or (`path`
+    /// being a directory then) a path below it.
+    fn touches(&self, path: &[u8]) -> bool {
+        self.changed.contains(path)
+            || self.dirs.contains(path)
+            || parents(path).any(|d| self.changed.contains(d))
+    }
+}
+
+/// Whether git itself reads `path` in every directory it walks (`git status`
+/// reads each `.gitignore`): recorded, but not what the agent built on.
+fn git_reads(path: &[u8]) -> bool {
+    let name = path.rsplit(|b| *b == b'/').next().unwrap_or(path);
+    name == b".gitignore" || name == b".gitattributes"
+}
+
+/// The directories above `path`, nearest last.
+fn parents(path: &[u8]) -> impl Iterator<Item = &[u8]> {
+    path.iter()
+        .enumerate()
+        .filter(|(_, b)| **b == b'/')
+        .map(|(i, _)| &path[..i])
+}
+
+/// `gitfold overlaps`: prints, for workspace `branch`, `R` (read) and `W`
+/// (written) lines naming each target that changed the path since; returns
+/// whether there were any.
+pub fn overlaps(
+    repo: &Path,
+    branch: &str,
+    against: &[String],
+    against_workspaces: bool,
+    kinds: Kinds,
+    nul: bool,
+) -> Result<bool> {
+    check_name(branch)?;
+    if branch.starts_with('@') {
+        bail!("{branch} is a snapshot: it reads nothing and changes nothing");
+    }
+    let common_dir = git::init(repo)?;
+    if !git::branch_exists(branch) {
+        return Err(Refusal::NotFound.error(format!("no branch {branch}")));
+    }
+    let state_dir = worktree::state_root(&common_dir).join(workspace_id(branch));
+    let opened = state_dir.join("base").exists();
+    let base = match opened {
+        true => read_base(&state_dir)?.id,
+        false => git::resolve(&format!("refs/heads/{branch}"))?.id,
+    };
+    let note = base_note(branch, &base);
+    if opened && !note.is_empty() {
+        eprintln!("note: {branch}: {note}; its changes are against the stored base");
+    }
+    let store = Store::default();
+    let uncommitted = match opened {
+        true => {
+            let s = status::status(&store, &common_dir, &state_dir)?;
+            s.changed.into_iter().chain(s.deleted).collect()
+        }
+        false => Vec::new(),
+    };
+    let read = match opened {
+        true => reads::recorded(&state_dir)?,
+        false => None,
+    };
+    match (&read, kinds) {
+        (None, Kinds::Reads) => {
+            let message = format!(
+                "no reads recorded for {branch}: `gitfold track-reads {branch} on`, or mount \
+                 with --track-reads"
+            );
+            return Err(Refusal::NotFound.error(message));
+        }
+        (None, Kinds::Both) => eprintln!(
+            "note: reads aren't tracked in {branch} (`gitfold track-reads {branch} on`): \
+             writes only"
+        ),
+        _ => {}
+    }
+
+    let mut targets = Vec::new();
+    let mut revs: Vec<String> = against.to_vec();
+    if revs.is_empty() && !against_workspaces {
+        revs.push(default_target(&common_dir)?);
+    }
+    for rev in revs {
+        anyhow::ensure!(rev != branch, "{branch} can't be compared with itself");
+        targets.push(rev_target(&common_dir, &store, &base, rev)?);
+    }
+    if against_workspaces {
+        for w in workspaces(&common_dir)? {
+            if w.branch == branch || !git::branch_exists(&w.branch) {
+                continue;
+            }
+            if targets.iter().any(|t| t.name == w.branch) {
+                continue;
+            }
+            match rev_target(&common_dir, &store, &base, w.branch.clone()) {
+                Ok(t) => targets.push(t),
+                Err(e) => eprintln!("skipping workspace {}: {e:#}", w.branch),
+            }
+        }
+    }
+
+    let mut lines = BTreeSet::new();
+    for t in &targets {
+        if kinds != Kinds::Reads {
+            // The branch's own commits since it diverged from this target.
+            let committed = diff(&common_dir, &t.name, &base.to_string())?;
+            for path in committed.into_iter().chain(uncommitted.iter().cloned()) {
+                if t.touches(&path) {
+                    lines.insert((path, 'W', t.name.clone()));
+                }
+            }
+        }
+        if kinds != Kinds::Writes {
+            for path in read.iter().flatten() {
+                // A path also written says more (git's own reads of a file the
+                // agent wrote, for one).
+                let written = || lines.contains(&(path.clone(), 'W', t.name.clone()));
+                if t.touches(path) && !git_reads(path) && !(kinds == Kinds::Both && written()) {
+                    lines.insert((path.clone(), 'R', t.name.clone()));
+                }
+            }
+        }
+    }
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (path, kind, target) in &lines {
+        write!(out, "{kind}\t{target}\t")?;
+        match nul {
+            true => {
+                out.write_all(path)?;
+                out.write_all(b"\0")?;
+            }
+            false => {
+                out.write_all(&quote(path))?;
+                out.write_all(b"\n")?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(!lines.is_empty())
+}
+
+/// The remote's default branch (`origin/HEAD`, normally `origin/main`), else
+/// `main`. Not the branch's upstream: after `git push -u` that is its own
+/// remote branch, which its work is ahead of.
+fn default_target(common_dir: &Path) -> Result<String> {
+    let out = git_cmd(common_dir)
+        .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .output()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !name.is_empty() && name != "origin/HEAD" {
+        return Ok(name);
+    }
+    match git::resolve("refs/heads/main") {
+        Ok(_) => Ok("main".to_string()),
+        Err(_) => bail!("no origin/HEAD and no branch main: name a target with --against"),
+    }
+}
+
+/// Target `rev`: what it changed since it diverged from `base`, and, for a
+/// branch with a workspace, that workspace's uncommitted changes.
+fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) -> Result<Target> {
+    // A branch, not a tag of the same name (git prefers the tag).
+    let branch = git::branch_exists(&rev);
+    let spec = match branch {
+        true => format!("refs/heads/{rev}"),
+        false => rev.clone(),
+    };
+    let mut changed = diff(common_dir, &base.to_string(), &spec)?;
+    let state_dir = worktree::state_root(common_dir).join(workspace_id(&rev));
+    if branch && state_dir.join("base").exists() {
+        let s = status::status(store, common_dir, &state_dir)?;
+        changed.extend(s.changed.into_iter().chain(s.deleted));
+    }
+    Ok(Target::new(rev, changed))
+}
+
+/// The paths `to` changed since it diverged from `from` (`git diff
+/// from...to`), both sides of a rename.
+fn diff(common_dir: &Path, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
+    let out = git_cmd(common_dir)
+        .args(["diff", "--name-only", "-z", "--no-renames"])
+        .arg(format!("{from}...{to}"))
+        .arg("--")
+        .output()?;
+    if !out.status.success() {
+        bail!(
+            "git diff {from}...{to} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect())
+}
+
+fn git_cmd(common_dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command.arg("--git-dir").arg(common_dir);
+    command
+}
