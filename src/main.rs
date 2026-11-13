@@ -6,6 +6,7 @@ mod git;
 mod inode;
 mod refusal;
 mod settings;
+mod state;
 mod store;
 
 use std::path::PathBuf;

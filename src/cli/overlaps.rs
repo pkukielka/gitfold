@@ -20,10 +20,10 @@ use gix::ObjectId;
 
 use super::manage::{quote, workspaces};
 use crate::fs::workspace::retire::{base_note, check_name};
-use crate::fs::workspace::{read_base, reads, status};
+use crate::fs::workspace::{reads, status};
 use crate::git;
-use crate::git::worktree::{self, workspace_id};
 use crate::refusal::Refusal;
+use crate::state::StateDir;
 use crate::store::Store;
 
 /// Which lines to print.
@@ -102,10 +102,11 @@ pub fn overlaps(
     }
     let common_dir = git::init(repo)?;
     git::require_branch(branch)?;
-    let state_dir = worktree::state_root(&common_dir).join(workspace_id(branch));
-    let opened = state_dir.join("base").exists();
+    let state = StateDir::of(&common_dir, branch);
+    let state_dir = &state.dir;
+    let opened = state.opened();
     let base = match opened {
-        true => read_base(&state_dir)?.id,
+        true => state.read_base()?.id,
         false => git::resolve(&format!("refs/heads/{branch}"))?.id,
     };
     let note = base_note(branch, &base);
@@ -115,13 +116,13 @@ pub fn overlaps(
     let store = Store::default();
     let uncommitted = match opened {
         true => {
-            let s = status::status(&store, &common_dir, &state_dir)?;
+            let s = status::status(&store, &common_dir, &state)?;
             s.changed.into_iter().chain(s.deleted).collect()
         }
         false => Vec::new(),
     };
     let read = match opened {
-        true => reads::recorded(&state_dir)?,
+        true => reads::recorded(state_dir)?,
         false => None,
     };
     match (&read, kinds) {
@@ -230,9 +231,9 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
         false => rev.clone(),
     };
     let mut changed = diff(common_dir, &base.to_string(), &spec)?;
-    let state_dir = worktree::state_root(common_dir).join(workspace_id(&rev));
-    if branch && state_dir.join("base").exists() {
-        let s = status::status(store, common_dir, &state_dir)?;
+    let state = StateDir::of(common_dir, &rev);
+    if branch && state.opened() {
+        let s = status::status(store, common_dir, &state)?;
         changed.extend(s.changed.into_iter().chain(s.deleted));
     }
     Ok(Target::new(rev, changed))

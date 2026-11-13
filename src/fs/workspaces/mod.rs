@@ -37,6 +37,7 @@ use crate::git::promisor;
 use crate::git::worktree::{self, workspace_id};
 use crate::inode;
 use crate::refusal::Refusal;
+use crate::state::StateDir;
 use crate::store::Store;
 
 pub enum Entry {
@@ -484,7 +485,7 @@ impl Workspaces {
     /// lock: a partial clone fetches what is missing, which can take long.
     /// Failing here leaves no state behind.
     fn preload(&self, store: &Store, branch: &str) -> Result<(), Errno> {
-        let state_dir = worktree::state_root(&self.common_dir).join(workspace_id(branch));
+        let state_dir = StateDir::of(&self.common_dir, branch).dir;
         let load = |commit: &git::Commit| {
             store
                 .load_tree(commit.tree)
@@ -563,8 +564,8 @@ impl Workspaces {
         let fail = |what: &str, e: anyhow::Error| {
             load_failed(&format!("{what} for workspace {branch}"), e)
         };
-        let state_dir = worktree::state_root(&self.common_dir).join(&id);
-        let new_base = if state_dir.join("base").exists() {
+        let state = StateDir::of_id(&self.common_dir, &id);
+        let new_base = if state.opened() {
             None
         } else {
             Some(git::resolve(&format!("refs/heads/{branch}")).map_err(|e| fail("resolving", e))?)
@@ -577,7 +578,7 @@ impl Workspaces {
         let ws = Workspace::open(
             store,
             self.common_dir.clone(),
-            state_dir,
+            state.dir,
             admin.clone(),
             branch,
             new_base,

@@ -19,9 +19,10 @@ use crate::fs::workspace::retire::{
 use crate::fs::workspace::task::TaskDir;
 use crate::fs::workspace::{fork, status};
 use crate::git;
-use crate::git::worktree::{self, workspace_branch, workspace_id};
+use crate::git::worktree::{self, workspace_branch};
 use crate::refusal::Refusal;
 use crate::settings;
+use crate::state::StateDir;
 use crate::store::Store;
 
 /// Takes the repository's daemon lock exclusively, failing if a gitfold daemon
@@ -54,9 +55,8 @@ pub fn branch(
     );
     // A workspace left from a deleted branch of that name would be resumed.
     let common_dir = git::init(repo)?;
-    let state_dir = worktree::state_root(&common_dir).join(workspace_id(name));
     ensure!(
-        git::branch_exists(name) || !state_dir.exists(),
+        git::branch_exists(name) || !StateDir::of(&common_dir, name).dir.exists(),
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
     if with_changes {
@@ -175,13 +175,14 @@ fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
 pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
     check_name(name)?;
     let common_dir = git::init(repo)?;
-    let state_dir = worktree::state_root(&common_dir).join(workspace_id(name));
-    if !state_dir.join("base").exists() {
+    let state = StateDir::of(&common_dir, name);
+    if !state.opened() {
         git::require_branch(name)?;
         return Ok(());
     }
+    let state_dir = &state.dir;
     let store = Store::default();
-    let s = status::status(&store, &common_dir, &state_dir)?;
+    let s = status::status(&store, &common_dir, &state)?;
     let note = base_note(name, &s.base);
     if !note.is_empty() {
         eprintln!("note: {name}: {note}; changes are against the stored base");
@@ -192,7 +193,7 @@ pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
     for &(change, path) in &changes {
         write!(out, "{}\t", change.letter())?;
         if stat {
-            match s.line_counts(&store, &state_dir, change, path)? {
+            match s.line_counts(&store, state_dir, change, path)? {
                 Some((added, removed)) => {
                     write!(out, "{added}\t{removed}\t")?;
                     total = (total.0 + added, total.1 + removed);
@@ -291,9 +292,8 @@ pub(super) fn quote(path: &[u8]) -> Vec<u8> {
 }
 
 pub(super) struct Listed {
-    id: String,
     pub(super) branch: String,
-    state_dir: PathBuf,
+    state: StateDir,
 }
 
 pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
@@ -316,9 +316,8 @@ pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
             .map(|b| b.trim_end_matches('\n').to_string())
             .unwrap_or_else(|_| workspace_branch(&id));
         list.push(Listed {
-            id,
             branch,
-            state_dir: entry.path(),
+            state: StateDir::of_id(common_dir, &id),
         });
     }
     list.sort_by(|a, b| a.branch.cmp(&b.branch));
@@ -343,10 +342,10 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
         "branch", "changed", "deleted", "ignored", "base", "last"
     );
     for w in list {
-        let s = match status::status(&store, &common_dir, &w.state_dir) {
+        let s = match status::status(&store, &common_dir, &w.state) {
             Ok(s) => s,
             Err(e) => {
-                println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.id);
+                println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.state.id);
                 continue;
             }
         };
@@ -354,7 +353,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
             true => {
                 let (mut added, mut removed) = (0, 0);
                 for (change, path) in s.changes(&store) {
-                    if let Some((a, r)) = s.line_counts(&store, &w.state_dir, change, path)? {
+                    if let Some((a, r)) = s.line_counts(&store, &w.state.dir, change, path)? {
                         (added, removed) = (added + a, removed + r);
                     }
                 }
@@ -364,7 +363,7 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
         };
         let task = TaskDir::of(&common_dir, &w.branch);
         let last = [
-            last_change(&common_dir, &w.branch, &w.state_dir, &s),
+            last_change(&common_dir, &w.branch, &w.state.dir, &s),
             task.newest(),
         ]
         .into_iter()

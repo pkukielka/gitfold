@@ -72,7 +72,7 @@ pub fn fork(
     worktree::refuse_if_busy(common_dir, from, "branch from it once that is done")?;
     let tip_ref = format!("refs/heads/{from}");
     let before = git::resolve(&tip_ref)?.id;
-    let copied = root.join(&from_id).join("base").exists();
+    let copied = crate::state::StateDir::of(common_dir, from).opened();
     if copied {
         let tmp = root.join(format!(".fork-{to_id}"));
         // Left by an interrupted fork.
@@ -323,6 +323,6 @@ impl Workspace {
 
 /// `copy_state_dir` for the stored (closed) workspace of `branch`.
 pub fn copy_stored(common_dir: &Path, branch: &str, dst: &Path) -> Result<()> {
-    let src = worktree::state_root(common_dir).join(workspace_id(branch));
+    let src = crate::state::StateDir::of(common_dir, branch).dir;
     copy_state_dir(common_dir, branch, &src, dst)
 }

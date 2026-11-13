@@ -73,12 +73,7 @@ pub fn is_virtual_local(local: u64) -> bool {
 }
 
 /// The base commit recorded in workspace state directory `state_dir`.
-pub(crate) fn read_base(state_dir: &Path) -> Result<git::Commit> {
-    let base_file = state_dir.join("base");
-    let hex = fs::read_to_string(&base_file)
-        .with_context(|| format!("reading {}", base_file.display()))?;
-    git::resolve(hex.trim())
-}
+pub(crate) use crate::state::read_base;
 
 /// What a path is in the merged view.
 pub enum Obj {

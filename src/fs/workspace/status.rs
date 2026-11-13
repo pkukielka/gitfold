@@ -26,8 +26,9 @@ use gix::objs::tree::EntryKind;
 
 use super::markers::{Markers, PathSet};
 use super::rebase::{ModeCheck, matches_stored};
-use super::{Lower, Workspace, ancestors, hidden, join, not_found, read_base};
+use super::{Lower, Workspace, ancestors, hidden, join, not_found};
 use crate::git;
+use crate::state::StateDir;
 use crate::store::{Store, TreeTable};
 
 pub struct Status {
@@ -133,20 +134,16 @@ impl Status {
 }
 
 /// The changes of the workspace stored in `state_dir`, in repository `common_dir`.
-pub fn status(store: &Store, common_dir: &Path, state_dir: &Path) -> Result<Status> {
-    let base = read_base(state_dir)?;
+pub fn status(store: &Store, common_dir: &Path, state: &StateDir) -> Result<Status> {
+    let state_dir = &state.dir;
+    let base = state.read_base()?;
     let tree = store.load_tree(base.tree)?;
     let (whiteouts, opaque) = Markers::read(&state_dir.join("markers"))?;
     let upper = state_dir.join("upper");
     let mut buf = Vec::new();
     // The worktree's own view of the config (worktree config, `includeIf`).
-    let id = state_dir
-        .file_name()
-        .context("state dir")?
-        .to_string_lossy();
-    let admin = crate::git::worktree::ws_admin_dir(common_dir, &id);
-    let config_dir = if admin.exists() {
-        admin
+    let config_dir = if state.admin.exists() {
+        state.admin.clone()
     } else {
         common_dir.to_path_buf()
     };
