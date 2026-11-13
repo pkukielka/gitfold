@@ -53,12 +53,14 @@ Non-goals for now: macOS and Windows; applying checkout filters
    fs/workspace/         |                   |                 |
    lower + upper view    |                   |                 |
       |                  |                   |                 |
-   worktree.rs  <--------+              git.rs (gitoxide object database)
+   git/worktree.rs  <----+           git/mod.rs (gitoxide object database)
                                   (lines are calls)
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, branch, markers, times, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, upper/, tmp/
+           .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
+           .git/gitfold/.control             the daemon's control socket
            refs/gitfold/<id>                 keeps the workspace base from git gc
 ```
 
@@ -114,25 +116,27 @@ Then, per request (`fs/workspace/`):
 | `src/fs/mod.rs` | FUSE adapter: translates requests and owns kernel-facing policy (TTLs, init flags, `ENOSYS` replies) |
 | `src/fs/view.rs` | what an inode is: attributes, lookups, directory listings, content |
 | `src/fs/snapshots.rs` | `@<rev>` registry: creating snapshots, listing them per namespace |
-| `src/fs/workspaces/mod.rs` | name resolution below the root; workspace and namespace registry; opening workspaces |
-| `src/fs/workspaces/requests.rs` | the daemon's side of `branch --with-changes`: busy marks, the request lock |
+| `src/fs/workspaces/mod.rs` | name resolution below the root; workspace and namespace registry; opening workspaces; busy marks; the sync thread; applying prewarm and read-tracking settings to open workspaces |
+| `src/fs/workspaces/requests.rs` | the daemon's side of `branch --with-changes`: marking branches busy, the request lock |
 | `src/fs/workspace/mod.rs` | one workspace: merged lower/upper view, lookups, cached listings, reads |
 | `src/fs/workspace/write.rs` | copy-up and mutations |
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/reads.rs` | read tracking: the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/workspace/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes` and `remove`) |
+| `src/fs/workspace/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`) |
+| `src/fs/workspace/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/fs/workspace/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/fs/workspace/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
+| `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
-| `src/refusal.rs` | why `remove` refused (typed, with its own exit code), carried over the control socket |
-| `src/main.rs` | CLI (clap), mount options, `M_MMAP_THRESHOLD` |
+| `src/refusal.rs` | why a command refused (typed, with its own exit code), carried over the control socket; every command's exit codes |
+| `src/main.rs` | CLI (clap) and dispatch, the foreground mount and its control handler, `M_MMAP_THRESHOLD` |
 | `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check, workspace ids |
@@ -140,23 +144,23 @@ Then, per request (`fs/workspace/`):
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
-| `src/daemon/control.rs` | the daemon's control socket (`remove` and `branch --with-changes` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm` and `track-reads` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
+| `src/cli/mod.rs` | what commands share: the workspace the current directory is in (`branch_or_current`), the repository lock or a daemon request (`local_or_daemon`) |
 | `src/cli/inbox.rs` | `watch`, `inbox` and `send`: messages and inotify watches on task folders, and the Claude Code hook outputs |
 | `src/cli/manage.rs` | `branch`, `list`, `changes`, `remove`, `prune`, `prewarm` and `track-reads` commands |
 | `src/cli/overlaps.rs` | `gitfold overlaps`: what a workspace read or changed that changed elsewhere since |
 | `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
-| `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
-| `src/fs/workspace/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/bench/` | hidden `bench-read` and `bench-attrs` commands |
 | `build.rs` | the build's version (crate version and a hash of its sources; the git commit for `--version`), for `gitfold version` |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
 | `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |
-| `tests/cli.sh` | end-to-end test of `branch`, `list`, `remove` and `prune` |
+| `tests/cli.sh` | end-to-end test of the commands (branch and fork, list, changes, overlaps, the task folder, messages, remove, prune, prewarm), mount and unmount, and kernel-facing details, in isolated sections |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
 | `tests/race-modes.pl` | helper of `tests/workspace.sh`: lifted modes must stay invisible |
-| `tests/lib.sh` | helpers shared by the tests |
+| `tests/cache-tree.pl` | helper of `tests/cli.sh`: prints an index's cache tree, to compare with git's |
+| `tests/lib.sh` | what the suites share: a directory per run, timeouts, sections, cleanup |
 
 ## Glossary
 
@@ -275,8 +279,10 @@ decision that creates them.
   re-hash of that file.
   ([workspaces](#writable-workspaces-copy-on-write-inside-gitfold))
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
-  the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers` and `times`
-  record formats, `upper/`), the base-pinning ref `refs/gitfold/<id>`, the
+  the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times` and
+  `reads` record formats, `upper/`), task folders in `.git/gitfold/.tasks/<id>/`
+  and the message format of their inboxes (README, "Messages"), the
+  base-pinning ref `refs/gitfold/<id>`, the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an

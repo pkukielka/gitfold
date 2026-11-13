@@ -226,3 +226,19 @@ pub fn refuse_if_busy(common_dir: &Path, branch: &str, then: &str) -> Result<()>
         None => Ok(()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ids name directories: no `/`, and the branch reads back from its id.
+    #[test]
+    fn workspace_ids_round_trip() {
+        for branch in ["main", "agent/task-17", "a%2Fb", "100%", "x/%25/y"] {
+            let id = workspace_id(branch);
+            assert!(!id.contains('/'), "{id}");
+            assert_eq!(workspace_branch(&id), branch);
+        }
+        assert_eq!(workspace_id("agent/task-17"), "agent%2Ftask-17");
+    }
+}

@@ -1,5 +1,6 @@
-//! Commands that manage a repository's workspaces and registrations without
-//! mounting it: `branch`, `list`, `remove`, `prune`.
+//! Commands that manage a repository's workspaces and registrations, mounted
+//! or not: `branch`, `list`, `changes`, `remove`, `prune`, `prewarm`,
+//! `track-reads`.
 
 use std::fs;
 use std::io::Write;
@@ -107,7 +108,7 @@ pub fn branch(
 /// --prewarm`) and, while mounted, has the daemon apply it at once.
 pub fn prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
     let common_dir = git::init(repo)?;
-    ensure!(git::branch_exists(name), "no branch {name}");
+    git::require_branch(name)?;
     set_prewarm(repo, name, mode)?;
     let request = control::Request::Prewarm {
         branch: name.to_string(),
@@ -144,7 +145,7 @@ fn set_branch_settings(
 /// reads, and applies it at once if mounted.
 pub fn track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
     let common_dir = git::init(repo)?;
-    ensure!(git::branch_exists(name), "no branch {name}");
+    git::require_branch(name)?;
     set_track_reads(repo, name, on)?;
     let request = control::Request::TrackReads {
         branch: name.to_string(),
@@ -187,7 +188,7 @@ pub fn changes(repo: &Path, name: &str, nul: bool, stat: bool) -> Result<()> {
     let common_dir = git::init(repo)?;
     let state_dir = worktree::state_root(&common_dir).join(workspace_id(name));
     if !state_dir.join("base").exists() {
-        ensure!(git::branch_exists(name), "no workspace or branch {name}");
+        git::require_branch(name)?;
         return Ok(());
     }
     let store = Store::default();
@@ -431,39 +432,29 @@ pub fn remove(repo: &Path, name: &str, force: bool, check: bool, wait: Duration)
     Ok(())
 }
 
+/// One attempt at `remove`: under the repository lock, or by the daemon while
+/// mounted; the lock held otherwise (another `remove` or `prune`) is in use, so
+/// `--wait` retries.
 fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Result<String> {
-    let lock = crate::git::lock::lock(common_dir)?;
-    Ok(match (lock, name.strip_prefix('@')) {
-        (None, _) => {
-            let request = control::Request::Remove {
-                name: name.to_string(),
-                force,
-                check,
-            };
-            control::request(common_dir, &request, None)?.with_context(|| {
-                format!(
-                    "{} is locked by a gitfold daemon that doesn't take removal requests (one \
-                     starting or exiting, or an older gitfold), or by a `gitfold remove` or \
-                     `prune` running; retry, or unmount it first",
-                    common_dir.display()
-                )
-            })?
-        }
-        (Some(_), Some(rev)) => {
+    let request = control::Request::Remove {
+        name: name.to_string(),
+        force,
+        check,
+    };
+    super::local_or_daemon(common_dir, &request, "removal", || {
+        if let Some(rev) = name.strip_prefix('@') {
             let commit = git::resolve(rev)
                 .map_err(|e| Refusal::NotFound.error(format!("no snapshot @{rev}: {e:#}")))?;
-            remove_snapshot_registration(common_dir, rev, &commit.id, false, check)?
+            return remove_snapshot_registration(common_dir, rev, &commit.id, false, check);
         }
-        (Some(_), None) => {
-            let store = Store::default();
-            match check {
-                true => {
-                    let ignored = check_workspace(&store, common_dir, name, force, None)?;
-                    removable_workspace(name, ignored)
-                }
-                false => remove_workspace(&store, common_dir, name, force)?,
-            }
-        }
+        let store = Store::default();
+        Ok(match check {
+            true => removable_workspace(
+                name,
+                check_workspace(&store, common_dir, name, force, None)?,
+            ),
+            false => remove_workspace(&store, common_dir, name, force)?,
+        })
     })
 }
 

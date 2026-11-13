@@ -21,9 +21,11 @@
 //! - `times`: timestamps of files dropped from upper.
 //! - `rebase`: moving the base to the branch tip.
 //! - `reads`: the files read in it (`gitfold overlaps`).
-//! - `task`: the task folder (`.task/`), kept apart from the changes.
+//! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //! - `status`: a workspace's changes, read from its state directory (for
-//!   `list` and `remove`).
+//!   `list`, `changes`, `overlaps` and `remove`).
+//! - `retire`: the rules for removing a workspace or a snapshot's
+//!   registration.
 //! - `write`: mutations and copy-up.
 
 pub mod fork;

@@ -1,5 +1,5 @@
 //! The requests the daemon serves on workspaces for `gitfold branch
-//! --with-changes` while mounted (see ARCHITECTURE.md, "Commands on a
+//! --with-changes` while mounted (see ARCHITECTURE.md, "Forks: commands on a
 //! workspace's stored state"), and the busy marks and request lock they take.
 
 use std::sync::Arc;

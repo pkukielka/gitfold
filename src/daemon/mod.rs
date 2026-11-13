@@ -276,3 +276,30 @@ pub fn common_dir_of_source(source: &str) -> PathBuf {
     }
     PathBuf::from(std::ffi::OsString::from_vec(bytes))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mount's source names its repository exactly, whatever the path holds.
+    #[test]
+    fn fs_names_read_back() {
+        for path in [
+            "/plain/.git",
+            "/a b/100%/x,y\\z/.git",
+            "/zażółć/.git",
+            "/t\tn\n/.git",
+        ] {
+            let name = fs_name(Path::new(path));
+            assert!(!name.contains(',') && !name.contains('\\'), "{name}");
+            assert_eq!(common_dir_of_source(&name), PathBuf::from(path));
+        }
+    }
+
+    /// The kernel's mount-table escapes, the backslash last.
+    #[test]
+    fn mount_table_unescaped() {
+        assert_eq!(unescape(r"/a\040b\011c\012d\134e"), "/a b\tc\nd\\e");
+        assert_eq!(unescape(r"\134040"), r"\040");
+    }
+}

@@ -123,10 +123,11 @@ gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>] [--track-reads on
                                               # (-w: with a workspace's changes)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
-gitfold send <BRANCH> [-s <SUBJECT>] <TEXT>   # a message to a task's inbox
-gitfold inbox [<BRANCH>] [--wait [--timeout <SECS>]] [--peek]
+gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
+                                              # a message to a task's inbox
+gitfold inbox [<BRANCH>] [--wait [--timeout <SECS>]] [--peek] [--json] [--claude-hook <EVENT>]
                                               # take the messages in it
-gitfold watch [<BRANCH>:]<DIR> [--timeout <SECS>]
+gitfold watch [<BRANCH>:]<DIR> [--timeout <SECS>] [--json]
                                               # wait for a change in a task folder
 gitfold overlaps [<BRANCH>] [--against <REV>]... [--against-workspaces] [--reads|--writes] [-z]
                                               # what it read or changed that
@@ -147,6 +148,13 @@ empty one, since its contents are hidden while mounted. A repository can be
 mounted only once at a time (a second `gitfold mount` of it fails): two mounts
 would share, and corrupt, the stored workspace changes. The mount is read-write
 (for workspaces); snapshots are read-only (see [Snapshots](#snapshots)).
+
+Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
+error, 3 not found (no such branch, workspace or snapshot, or not a valid
+name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
+Three commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
+daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
+`inbox --claude-hook rewake` (2, to wake the session).
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise.
 
 Names below the mount point:

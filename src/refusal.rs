@@ -1,8 +1,15 @@
-//! Why `gitfold remove` refused, as a typed error: each kind has its own exit
-//! code, and survives the control socket (see `daemon::control`).
+//! Why a command refused, as a typed error: each kind has its own exit code,
+//! and survives the control socket (see `daemon::control`).
+//!
+//! Exit codes, for every command: 0 success, 1 any other error, 2 a usage
+//! error, 3 not found (`NotFound`), 4 changes or git busy (`Changes`), 5 in
+//! use or busy (`InUse`). Three commands give codes of their own:
+//! `version <MOUNTPOINT>` 3 another build, 4 a daemon too old to tell, 5 no
+//! answer; `overlaps` 6 something overlaps; `inbox --claude-hook rewake` 2
+//! to wake the session (what Claude Code asks for).
 
-/// Why `remove` refused. Each has its own exit code, so scripts can tell them
-/// apart (1 is any other error, 2 a usage error).
+/// Why a command refused. Each has its own exit code, so scripts can tell them
+/// apart (see the module doc).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Refusal {
     /// No such workspace or snapshot (or not a valid name).

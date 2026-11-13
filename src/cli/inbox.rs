@@ -25,7 +25,6 @@ use anyhow::{Context, Result, bail};
 use crate::fs::workspace::task::{TaskDir, inbox_name};
 use crate::git;
 use crate::git::worktree::workspace_id;
-use crate::refusal::Refusal;
 
 /// How long a watch keeps collecting events after the first, so one burst
 /// (a file written then renamed, several messages) comes out together.
@@ -42,9 +41,7 @@ const WATCH_LOST: u32 =
 
 /// The task folder directory of `branch`, which must exist as a branch.
 fn task_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
-    if !git::branch_exists(branch) {
-        return Err(Refusal::NotFound.error(format!("no branch {branch}")));
-    }
+    git::require_branch(branch)?;
     Ok(TaskDir::of(common_dir, branch).dir)
 }
 

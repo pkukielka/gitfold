@@ -1,7 +1,8 @@
 //! The commands run from the shell, not by the daemon.
 //!
 //! - `inbox`: `watch`, `inbox`, `send`: messages and watching on task folders.
-//! - `manage`: `branch`, `list`, `changes`, `remove`, `prune`, `prewarm`.
+//! - `manage`: `branch`, `list`, `changes`, `remove`, `prune`, `prewarm`,
+//!   `track-reads`.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
 
@@ -33,8 +34,8 @@ pub fn branch_or_current(branch: Option<String>, repo: &Path) -> Result<String> 
 
 /// Runs `local` under the repository lock if no daemon holds it (unmounted),
 /// else sends `request` (named `what` in errors) to the daemon, which does the
-/// same while mounted. See ARCHITECTURE.md, "Commands on a workspace's stored
-/// state".
+/// same while mounted. See ARCHITECTURE.md, "Forks: commands on a workspace's
+/// stored state".
 pub fn local_or_daemon(
     common_dir: &Path,
     request: &crate::daemon::control::Request,

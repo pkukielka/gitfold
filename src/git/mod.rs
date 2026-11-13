@@ -185,6 +185,14 @@ pub fn read_blob(oid: ObjectId) -> Result<Vec<u8>> {
 }
 
 /// Whether `refs/heads/<name>` exists.
+/// Refuses (not found: exit 3) unless `name` is a local branch.
+pub fn require_branch(name: &str) -> Result<()> {
+    match branch_exists(name) {
+        true => Ok(()),
+        false => Err(crate::refusal::Refusal::NotFound.error(format!("no branch {name}"))),
+    }
+}
+
 pub fn branch_exists(name: &str) -> bool {
     with_repo(|repo| {
         repo.try_find_reference(format!("refs/heads/{name}").as_str())
