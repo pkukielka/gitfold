@@ -39,7 +39,7 @@ use crate::store::FileRec;
 /// The file naming a workspace's base commit.
 pub const BASE: &str = "base";
 /// The file naming its branch (for people: the id is escaped).
-pub const BRANCH: &str = "branch";
+const BRANCH: &str = "branch";
 /// The directory of the files that differ from the base.
 pub const UPPER: &str = "upper";
 /// The log of deleted paths (whiteouts, opaque directories).
@@ -199,7 +199,7 @@ pub fn list(common_dir: &Path) -> Result<Vec<Stored>> {
 }
 
 /// The base commit of the workspace stored in `dir`.
-pub fn read_base(dir: &Path) -> Result<git::Commit> {
+fn read_base(dir: &Path) -> Result<git::Commit> {
     let base_file = dir.join(BASE);
     let hex = fs::read_to_string(&base_file)
         .with_context(|| format!("reading {}", base_file.display()))?;
@@ -217,7 +217,7 @@ pub fn write_branch(dir: &Path, branch: &str) -> io::Result<()> {
 }
 
 /// The branch recorded for the workspace stored in `dir`, if readable.
-pub fn read_branch(dir: &Path) -> Option<String> {
+fn read_branch(dir: &Path) -> Option<String> {
     let text = fs::read_to_string(dir.join(BRANCH)).ok()?;
     Some(text.trim_end_matches('\n').to_string())
 }

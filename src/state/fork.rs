@@ -1,6 +1,6 @@
 //! `gitfold branch --with-changes`: a new branch at the source branch's tip
-//! whose workspace starts as a copy of the source's (a fork): its base, upper files, deletion markers,
-//! timestamps and git index. The fork shows the same files and the same `git
+//! whose workspace starts as a copy of the source's (a fork): its base, upper
+//! files, deletion markers, timestamps and git index. The fork shows the same files and the same `git
 //! status` (staged changes too), and costs what the changes weigh, not the
 //! tree (on btrfs or XFS, `fs::copy` shares the data blocks).
 //!
@@ -19,11 +19,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
+use super::task::{TaskDir, inbox_name};
 use crate::fsutil::{self, Unreadable};
 use crate::git;
 use crate::git::worktree;
 use crate::settings;
 use crate::state::{self, StateDir};
+
+/// What a source with a git operation in progress is told.
+const AFTER_GIT: &str = "branch from it once that is done";
 
 /// Files of a state directory a fork copies (`upper` is copied as a tree;
 /// `branch` is written for the fork; `tmp` holds only interrupted copy-ups).
@@ -67,14 +71,8 @@ pub fn fork(
         "the base pin {to_pin} of an earlier branch {to} is left; delete it with `git \
          update-ref -d {to_pin}`"
     );
-    worktree::refuse_if_busy(
-        common_dir,
-        &source.admin,
-        from,
-        "branch from it once that is done",
-    )?;
-    let tip_ref = format!("refs/heads/{from}");
-    let before = git::resolve(&tip_ref)?.id;
+    worktree::refuse_if_busy(common_dir, &source.admin, from, AFTER_GIT)?;
+    let before = git::branch_tip(from)?.id;
     let copied = source.opened();
     if copied {
         let tmp = state::state_root(common_dir).join(format!(".fork-{}", target.id));
@@ -94,10 +92,10 @@ pub fn fork(
     }
     // What the task gathered (spec, notes) goes with its changes, copied before
     // the branch exists: once it does, opening it makes an empty folder.
-    let to_task = super::task::TaskDir::of(common_dir, to);
+    let to_task = TaskDir::of(common_dir, to);
     let kept_task = to_task.dir.exists();
-    let inbox = super::task::inbox_name(common_dir);
-    let task_copied = match to_task.copy_from(&super::task::TaskDir::of(common_dir, from), &inbox) {
+    let inbox = inbox_name(common_dir);
+    let task_copied = match to_task.copy_from(&TaskDir::of(common_dir, from), &inbox) {
         Ok(copied) => copied,
         Err(e) => {
             log::warn!("copying the task folder of {from} into {to}: {e:#}");
@@ -107,7 +105,7 @@ pub fn fork(
     let finish = || -> Result<()> {
         // git writes the index itself, not through the mount: a commit during
         // the copy would pair an older index with a newer tip.
-        let tip = git::resolve(&tip_ref)?.id;
+        let tip = git::branch_tip(from)?.id;
         ensure!(tip == before, "{from} moved while it was copied; retry");
         if copied {
             // Keeps the fork's base from `git gc` even if the source is removed
@@ -167,8 +165,7 @@ pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &StateDir, dst: &Pat
     // Checked again here, where nothing writes through the mount: a git command
     // started since (a stash, a commit) holds `index.lock` while it rewrites
     // files, and would be copied half-done.
-    let then = "branch from it once that is done";
-    worktree::refuse_if_busy(common_dir, &src.admin, branch, then)?;
+    worktree::refuse_if_busy(common_dir, &src.admin, branch, AFTER_GIT)?;
     fs::create_dir_all(dst)?;
     for name in COPIED {
         match fs::copy(src.dir.join(name), dst.join(name)) {

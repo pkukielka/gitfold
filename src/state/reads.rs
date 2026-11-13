@@ -15,7 +15,7 @@ use super::StateDir;
 /// were never tracked there.
 pub fn recorded(state: &StateDir) -> Result<Option<HashSet<Vec<u8>>>> {
     match fs::read(state.reads()) {
-        Ok(data) => Ok(Some(paths(whole(&data)))),
+        Ok(data) => Ok(Some(paths(&data))),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -28,9 +28,12 @@ pub fn whole(data: &[u8]) -> &[u8] {
     &data[..end]
 }
 
+/// The whole NUL-terminated records in `data` (see `whole`); the read log's
+/// and the markers log's format.
+pub fn records(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+    whole(data).split(|b| *b == 0).filter(|r| !r.is_empty())
+}
+
 pub fn paths(data: &[u8]) -> HashSet<Vec<u8>> {
-    data.split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect()
+    records(data).map(<[u8]>::to_vec).collect()
 }

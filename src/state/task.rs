@@ -30,6 +30,9 @@ use crate::state::{state_root, workspace_id};
 /// The folder's name unless `gitfold.taskDir` says otherwise.
 const DEFAULT_NAME: &str = ".task";
 
+/// The inbox's name unless `gitfold.inbox` says otherwise.
+const DEFAULT_INBOX: &str = "inbox";
+
 /// The file whose first line `gitfold list` shows.
 const STATUS: &str = "status";
 
@@ -46,9 +49,8 @@ impl TaskDir {
     /// a setting that can't be used is warned about and the default used.
     pub fn of(common_dir: &Path, branch: &str) -> TaskDir {
         let local = settings::Local::read(common_dir);
-        let get = |key: &str| local.repository(key);
         // One name in the workspace root, not one of its special names.
-        let name = match get(settings::TASK_DIR) {
+        let name = match local.repository(settings::TASK_DIR) {
             Some(name) if !name.contains('/') && ![".", "..", ".git"].contains(&name.as_str()) => {
                 name
             }
@@ -60,7 +62,10 @@ impl TaskDir {
         };
         let default = || state_root(common_dir).join(".tasks");
         // Relative paths would depend on each process's current directory.
-        let root = match get(settings::TASKS_DIR).map(|d| expand_home(&d)) {
+        let root = match local
+            .repository(settings::TASKS_DIR)
+            .map(|d| expand_home(&d))
+        {
             Some(dir) if dir.is_absolute() => dir,
             Some(dir) => {
                 warn!(
@@ -117,11 +122,10 @@ impl TaskDir {
     }
 
     /// Copies the folder of another branch into this one's (`branch -w`), unless
-    /// this one has a folder already (a branch of the same name had one).
-    /// Returns whether it copied.
-    /// Its inbox (`inbox`, not copied: messages are for the source's agent)
-    /// and names starting with a dot (files being written or taken) stay
-    /// behind.
+    /// this one has a folder already (a branch of the same name had one);
+    /// returns whether it copied. Its inbox (`inbox`: messages are for the
+    /// source's agent) and names starting with a dot (files being written or
+    /// taken) stay behind.
     pub fn copy_from(&self, from: &TaskDir, inbox: &str) -> Result<bool> {
         if self.dir.exists() || !from.dir.exists() {
             return Ok(false);
@@ -133,7 +137,6 @@ impl TaskDir {
             self.dir.file_name().unwrap_or_default().to_string_lossy()
         ));
         let _ = fs::remove_dir_all(&tmp);
-        // Dot names: files being written or taken; the inbox stays with `from`.
         let skip = |rel: &Path| {
             rel.file_name()
                 .is_some_and(|n| n.as_bytes().starts_with(b"."))
@@ -162,9 +165,6 @@ pub fn inbox_name(common_dir: &Path) -> String {
         None => DEFAULT_INBOX.to_string(),
     }
 }
-
-/// The inbox's name unless `gitfold.inbox` says otherwise.
-const DEFAULT_INBOX: &str = "inbox";
 
 fn expand_home(dir: &str) -> PathBuf {
     let home = || std::env::home_dir().unwrap_or_default();

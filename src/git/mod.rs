@@ -195,6 +195,11 @@ pub fn require_branch(name: &str) -> Result<()> {
     }
 }
 
+/// The commit branch `name` points at.
+pub fn branch_tip(name: &str) -> Result<Commit> {
+    resolve(&format!("refs/heads/{name}"))
+}
+
 pub fn branch_exists(name: &str) -> bool {
     with_repo(|repo| {
         repo.try_find_reference(format!("refs/heads/{name}").as_str())

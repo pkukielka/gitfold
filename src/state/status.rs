@@ -224,18 +224,21 @@ impl Walk<'_> {
     fn changed_below(&mut self, dir: &[u8], tree: Option<u32>, ignoring: Ignoring) -> Result<()> {
         let dir_path = upper_path(self.upper, dir);
         let entries = match fs::read_dir(&dir_path) {
-            Ok(entries) => entries,
+            Ok(entries) => entries.collect::<std::io::Result<Vec<_>>>()?,
             Err(e) if not_found(&e) => return Ok(()),
             Err(e) => return Err(e).with_context(|| format!("listing {}", dir_path.display())),
         };
-        self.saw(&fs::metadata(&dir_path)?);
+        // Directories below were seen as entries of their parent.
+        if dir.is_empty() {
+            self.saw(&fs::metadata(&dir_path)?);
+        }
         let table = tree.map(|t| self.store.tree(t));
         let lists = self.ignore.patterns.len();
         if ignoring == Ignoring::Match {
-            self.add_gitignore(dir, table.as_deref())?;
+            let in_upper = entries.iter().any(|e| e.file_name() == ".gitignore");
+            self.add_gitignore(dir, table.as_deref(), in_upper)?;
         }
         for entry in entries {
-            let entry = entry?;
             let name = entry.file_name();
             let path = join(dir, name.as_bytes());
             let lower = table
@@ -254,9 +257,7 @@ impl Walk<'_> {
                 if !matches!(lower, Some(Lower::Tree(_) | Lower::Gitlink))
                     && fs::symlink_metadata(entry.path().join(".git")).is_ok()
                 {
-                    let ignored = ignoring == Ignoring::All
-                        || (ignoring == Ignoring::Match && self.is_ignored(&path, true));
-                    if ignored {
+                    if self.counts_ignored(ignoring, &path, true) {
                         self.ignored += 1;
                     } else {
                         self.changed.push(path);
@@ -284,9 +285,7 @@ impl Walk<'_> {
                     false
                 }
                 // Untracked: ignored output, or a new file.
-                None if ignoring == Ignoring::All
-                    || (ignoring == Ignoring::Match && self.is_ignored(&path, false)) =>
-                {
+                None if self.counts_ignored(ignoring, &path, false) => {
                     self.ignored += 1;
                     continue;
                 }
@@ -302,15 +301,29 @@ impl Walk<'_> {
 
     /// Adds the patterns of `dir/.gitignore` as the workspace shows it: the
     /// upper entry if there is one, else the base's unless deleted (`table`: the
-    /// base tree of `dir`). As for git, only a regular file counts: a symlink
-    /// (git doesn't follow it), a directory or anything else gives no patterns.
-    fn add_gitignore(&mut self, dir: &[u8], table: Option<&TreeTable>) -> Result<()> {
+    /// base tree of `dir`; `in_upper`: whether upper's listing of `dir` has
+    /// one). As for git, only a regular file counts: a symlink (git doesn't
+    /// follow it), a directory or anything else gives no patterns.
+    fn add_gitignore(
+        &mut self,
+        dir: &[u8],
+        table: Option<&TreeTable>,
+        in_upper: bool,
+    ) -> Result<()> {
         let path = join(dir, b".gitignore");
         let upper = upper_path(self.upper, &path);
-        let bytes = match fs::symlink_metadata(&upper) {
-            Ok(meta) if meta.is_file() => Some(fs::read(&upper)?),
-            Ok(_) => None,
-            Err(e) if not_found(&e) => match table.and_then(|t| t.find(b".gitignore")) {
+        let meta = match in_upper {
+            true => match fs::symlink_metadata(&upper) {
+                Ok(meta) => Some(meta),
+                Err(e) if not_found(&e) => None,
+                Err(e) => return Err(e.into()),
+            },
+            false => None,
+        };
+        let bytes = match meta {
+            Some(meta) if meta.is_file() => Some(fs::read(&upper)?),
+            Some(_) => None,
+            None => match table.and_then(|t| t.find(b".gitignore")) {
                 Some(e)
                     if matches!(e.kind, EntryKind::Blob | EntryKind::BlobExecutable)
                         && !hidden(self.whiteouts, self.opaque, &path) =>
@@ -320,7 +333,6 @@ impl Walk<'_> {
                 }
                 _ => None,
             },
-            Err(e) => return Err(e.into()),
         };
         if let Some(bytes) = bytes {
             let source = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path));
@@ -339,6 +351,12 @@ impl Walk<'_> {
         if let Ok(t) = meta.modified() {
             self.newest = self.newest.max(Some(t));
         }
+    }
+
+    /// Whether untracked `path` counts as ignored, below a directory where
+    /// `ignoring` holds.
+    fn counts_ignored(&self, ignoring: Ignoring, path: &[u8], is_dir: bool) -> bool {
+        ignoring == Ignoring::All || (ignoring == Ignoring::Match && self.is_ignored(path, is_dir))
     }
 
     /// Whether git ignores untracked `path`.
@@ -363,6 +381,10 @@ fn deleted_below(
 ) -> Result<()> {
     let in_upper = fs::symlink_metadata(upper_path(upper, path));
     match lower {
+        // Without a directory there, upper has nothing below: all of it is gone.
+        Lower::Tree(_) if !in_upper.as_ref().is_ok_and(|m| m.is_dir()) => {
+            all_below(store, path, lower, out)
+        }
         Lower::Tree(tree) => {
             let table = store.tree(tree);
             for e in table.entries() {
@@ -384,4 +406,19 @@ fn deleted_below(
         }
     }
     Ok(())
+}
+
+/// Every base file and submodule at or below `path` (lower entry `lower`).
+fn all_below(store: &Store, path: &[u8], lower: Lower, out: &mut BTreeSet<Vec<u8>>) {
+    match lower {
+        Lower::Tree(tree) => {
+            let table = store.tree(tree);
+            for e in table.entries() {
+                all_below(store, &join(path, table.name(e)), Lower::of(e), out);
+            }
+        }
+        Lower::Gitlink | Lower::File(_) => {
+            out.insert(path.to_vec());
+        }
+    }
 }

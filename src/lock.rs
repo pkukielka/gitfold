@@ -1,5 +1,6 @@
 //! The repository lock: an `flock` on the git common directory, held by a
-//! mounted daemon for its life and by `remove`/`prune` while they work.
+//! mounted daemon for its life and by commands changing stored state unmounted
+//! (`remove`, `prune`, a fork) while they work.
 
 use std::fs;
 use std::path::Path;

@@ -101,7 +101,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     let opened = state.opened();
     let base = match opened {
         true => state.read_base()?.id,
-        false => git::resolve(&format!("refs/heads/{branch}"))?.id,
+        false => git::branch_tip(branch)?.id,
     };
     let note = base_note(branch, &base);
     if opened && !note.is_empty() {

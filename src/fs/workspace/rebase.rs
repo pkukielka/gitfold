@@ -144,7 +144,7 @@ impl Workspace {
             self.limit_touched();
             return Ok(());
         }
-        let tip = git::resolve(&format!("refs/heads/{}", self.branch))?;
+        let tip = git::branch_tip(&self.branch)?;
         let rebased = if tip.id != self.layers.read().base {
             let rebased = self.rebase(store, &tip, fetch);
             self.rebase_failed
@@ -271,7 +271,7 @@ impl Workspace {
         };
         // The load may have fetched (a partial clone) for long: if git started
         // or the branch moved meanwhile, the next sync sees to it.
-        let tip = git::resolve(&format!("refs/heads/{}", self.branch))?;
+        let tip = git::branch_tip(&self.branch)?;
         if !self.git_idle() || tip.id != new.id {
             return Ok(());
         }
