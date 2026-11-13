@@ -87,7 +87,9 @@ impl Obj {
 
 pub struct Workspace {
     upper: PathBuf,
-    /// The task folder, unless the base tracks a path of its name (`task`).
+    /// The task folder, if it has one: not when opened only to catch up, nor
+    /// when its base tracks a path of the folder's name or upper has one, nor
+    /// if the folder couldn't be made (`state::task`).
     task: Option<TaskDir>,
     common_dir: PathBuf,
     /// Where its state and its worktree registration are.
@@ -231,29 +233,9 @@ impl Workspace {
         let base_tree = store.load_tree(base.tree)?;
         let upper = state.upper();
         fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
-        let task = TaskDir::of(&common_dir, branch);
-        let shown = String::from_utf8_lossy(&task.name).into_owned();
-        let in_upper = upper.join(std::ffi::OsStr::from_bytes(&task.name));
-        let task = if purpose == Purpose::CatchUp {
-            None
-        } else if store.tree(base_tree).find(&task.name).is_some() {
-            log::warn!(
-                "workspace {branch}: no task folder: its base tracks {shown} (set gitfold.taskDir)"
-            );
-            None
-        } else if fs::symlink_metadata(&in_upper).is_ok() {
-            log::warn!(
-                "workspace {branch}: no task folder: it has a file {shown} (set gitfold.taskDir)"
-            );
-            None
-        } else {
-            match task.prepare(&common_dir) {
-                Ok(()) => Some(task),
-                Err(e) => {
-                    log::warn!("workspace {branch}: no task folder: {e:#}");
-                    None
-                }
-            }
+        let task = match purpose {
+            Purpose::Serve => task_folder(store, base_tree, &upper, &common_dir, branch),
+            Purpose::CatchUp => None,
         };
         if created {
             state::write_branch(&state.dir, branch)?;
@@ -545,6 +527,38 @@ impl Workspace {
         layers.times.save()?;
         layers.markers.sync()?;
         state::fork::copy_state_dir(&self.common_dir, &self.branch, &self.state, dst)
+    }
+}
+
+/// The task folder a workspace served under the mount links to (see
+/// `state::task`), set up; none, with a warning, where it can't have one.
+fn task_folder(
+    store: &Store,
+    base_tree: u32,
+    upper: &Path,
+    common_dir: &Path,
+    branch: &str,
+) -> Option<TaskDir> {
+    let task = TaskDir::of(common_dir, branch);
+    let shown = String::from_utf8_lossy(&task.name).into_owned();
+    if store.tree(base_tree).find(&task.name).is_some() {
+        log::warn!(
+            "workspace {branch}: no task folder: its base tracks {shown} (set gitfold.taskDir)"
+        );
+        return None;
+    }
+    if fs::symlink_metadata(upper.join(std::ffi::OsStr::from_bytes(&task.name))).is_ok() {
+        log::warn!(
+            "workspace {branch}: no task folder: it has a file {shown} (set gitfold.taskDir)"
+        );
+        return None;
+    }
+    match task.prepare(common_dir) {
+        Ok(()) => Some(task),
+        Err(e) => {
+            log::warn!("workspace {branch}: no task folder: {e:#}");
+            None
+        }
     }
 }
 

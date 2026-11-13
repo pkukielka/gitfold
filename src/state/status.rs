@@ -24,15 +24,12 @@ use anyhow::{Context, Result};
 use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 
-use super::markers::hidden;
-use super::markers::{Markers, PathSet};
+use super::markers::{Markers, PathSet, hidden};
+use super::{ModeCheck, StateDir, matches_stored};
 use super::{ancestors, join, upper_path};
 use crate::fsutil::not_found;
 use crate::git;
-use crate::state::StateDir;
-use crate::state::{ModeCheck, matches_stored};
-use crate::store::Lower;
-use crate::store::{Store, TreeTable};
+use crate::store::{Lower, Store, TreeTable};
 
 pub struct Status {
     pub base: ObjectId,

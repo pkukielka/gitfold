@@ -42,7 +42,7 @@ pub fn snapshot_admin_dir(common_dir: &Path, commit: &ObjectId) -> PathBuf {
 }
 
 /// Registers a workspace on `branch` with admin directory `dir` (see
-/// `ws_admin_dir`). HEAD and the index belong to git once the worktree exists,
+/// `StateDir::admin`). HEAD and the index belong to git once the worktree exists,
 /// so they are only written when it is new or incomplete (`index` is called
 /// then); otherwise this just points `gitdir` at the current mount path.
 pub fn register_branch(

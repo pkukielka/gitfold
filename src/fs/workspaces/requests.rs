@@ -80,6 +80,7 @@ impl Workspaces {
             false => format!("stopped recording reads in {branch}"),
         })
     }
+
     /// `gitfold prewarm`: walks the workspace of `branch` in its mode (just set)
     /// if it is open, from the start (a walk in another mode may be running),
     /// or stops walking it for `none`. Says what it did.

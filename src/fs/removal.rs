@@ -113,11 +113,13 @@ impl Removal {
     ) -> Result<(String, bool)> {
         let (store, common_dir) = (&*self.store, &self.common_dir);
         // Open: the daemon keeps its base at the tip; closed: it catches up.
-        let check = |ws: Option<&Workspace>| match ws {
-            Some(ws) => {
-                retire::check_workspace(store, common_dir, branch, force, &|s, _, _| ws.sync(s))
-            }
-            None => retire::check_workspace(store, common_dir, branch, force, &workspace::catch_up),
+        let check = |ws: Option<&Workspace>| {
+            let sync = |s: &Store, _: &Path, _: &str| ws.map_or(Ok(()), |ws| ws.sync(s));
+            let catch_up: &retire::CatchUp = match ws {
+                Some(_) => &sync,
+                None => &workspace::catch_up,
+            };
+            retire::check_workspace(store, common_dir, branch, force, catch_up)
         };
         if let Some(open) = self.workspaces.get_open(branch) {
             // Changes first, as `check` reports them.

@@ -35,7 +35,7 @@ fn decode(b: &[u8]) -> SystemTime {
     UNIX_EPOCH + Duration::new(secs, nanos)
 }
 
-pub struct Times {
+pub(super) struct Times {
     map: BTreeMap<Vec<u8>, Stamp>,
     path: PathBuf,
     /// Changed since the last `save`.
@@ -43,7 +43,7 @@ pub struct Times {
 }
 
 impl Times {
-    pub fn open(path: &Path) -> io::Result<Times> {
+    pub(super) fn open(path: &Path) -> io::Result<Times> {
         let data = match fs::read(path) {
             Ok(data) => data,
             Err(e) if e.kind() == ErrorKind::NotFound => Vec::new(),
@@ -69,15 +69,15 @@ impl Times {
         })
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
-    pub fn get(&self, path: &[u8]) -> Option<Stamp> {
+    pub(super) fn get(&self, path: &[u8]) -> Option<Stamp> {
         self.map.get(path).copied()
     }
 
-    pub fn set(&mut self, path: &[u8], stamp: Option<Stamp>) {
+    pub(super) fn set(&mut self, path: &[u8], stamp: Option<Stamp>) {
         let old = match stamp {
             Some(stamp) => self.map.insert(path.to_vec(), stamp),
             None => self.map.remove(path),
@@ -86,7 +86,7 @@ impl Times {
     }
 
     /// Writes the stamps out if they changed.
-    pub fn save(&mut self) -> io::Result<()> {
+    pub(super) fn save(&mut self) -> io::Result<()> {
         if !self.dirty {
             return Ok(());
         }
@@ -105,6 +105,6 @@ impl Times {
 
 /// The mtime a lower file with stamp `stamp` shows: the stamp's, else the
 /// constant of unchanged files.
-pub fn shown_mtime(stamp: Option<Stamp>) -> SystemTime {
+pub(super) fn shown_mtime(stamp: Option<Stamp>) -> SystemTime {
     stamp.map_or(crate::inode::file_time(), |s| s.mtime)
 }

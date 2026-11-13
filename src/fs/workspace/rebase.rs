@@ -49,12 +49,9 @@ use crate::fsutil::not_found;
 use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
-use crate::state;
 use crate::state::markers::Kind;
-use crate::state::{ModeCheck, matches_stored};
-use crate::state::{ancestors, join};
-use crate::store::Lower;
-use crate::store::{EMPTY_TREE, Store, TEntry};
+use crate::state::{self, ModeCheck, ancestors, join, matches_stored};
+use crate::store::{EMPTY_TREE, Lower, Store, TEntry};
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
 /// build writing while a rebase waits for conflict resolution, say) they are

@@ -95,6 +95,7 @@ impl Workspaces {
         };
         check().map(Some)
     }
+
     /// Waits (lock-free, until `OPEN_WAIT` after `started`) while requests read
     /// `branch` (a copy of the closed workspace), so an agent's open
     /// doesn't fail because a supervisor read it; EBUSY while it is marked
@@ -112,6 +113,7 @@ impl Workspaces {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+
     /// Marks `branch` busy (see `busy`) until the returned guard drops, and
     /// returns its workspace if open. `creating` is held only for this, so
     /// other workspaces open as usual while the request works. A branch busy
@@ -132,6 +134,7 @@ impl Workspaces {
         };
         Ok((self.get_open(branch), busy))
     }
+
     /// Marks `branch` busy as `mark` says, if that agrees with its marks: any
     /// number of readers, or one exclusive mark.
     pub(super) fn try_mark(&self, branch: &str, mark: Mark) -> bool {

@@ -20,13 +20,11 @@ use gix::objs::tree::EntryKind;
 
 use super::times::shown_mtime;
 use super::{Layers, ListEntry, Obj, Workspace};
-use crate::fsutil;
-use crate::fsutil::not_found;
+use crate::fsutil::{self, not_found};
 use crate::git;
 use crate::state::join;
 use crate::state::markers::Kind;
-use crate::store::Lower;
-use crate::store::Store;
+use crate::store::{Lower, Store};
 
 /// Mode of directories created in upper to hold changed files: what the
 /// directory showed as before (lower directories are 0755), independent of the
