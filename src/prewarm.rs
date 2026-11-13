@@ -74,8 +74,8 @@ impl Walker {
                 )
             } == 0;
             // Gone already: its pid may name another process now.
-            let gone = || std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-            if sent || gone() {
+            let esrch = std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if sent || esrch || self.gone() {
                 return;
             }
         }
@@ -256,10 +256,11 @@ impl Walks {
 }
 
 /// Takes the queued walks that may start (fewer than `MAX_WALKS` running or
-/// starting), marked as starting, with their `Starting::id`.
+/// starting; none while stopped), marked as starting, with their `Starting::id`.
 fn next_walks(walks: &mut Walks) -> Vec<(u64, Walk)> {
     let mut next = Vec::new();
-    while walks.running.len() + walks.starting.len() < MAX_WALKS.load(Ordering::Relaxed)
+    while !walks.stopped
+        && walks.running.len() + walks.starting.len() < MAX_WALKS.load(Ordering::Relaxed)
         && let Some(walk) = walks.queued.pop_front()
     {
         walks.starts += 1;
@@ -282,6 +283,19 @@ fn launch(walks: Vec<(u64, Walk)>) {
     // keep failing (process limits) go through a long queue one by one.
     let mut pending = VecDeque::from(walks);
     while let Some((id, walk)) = pending.pop_front() {
+        let wanted = |state: &Walks| {
+            let at = state.starting.iter().position(|s| s.id == id);
+            at.is_some_and(|at| !state.starting[at].cancelled) && !state.stopped
+        };
+        {
+            // Stopped before its process is made: none is.
+            let mut state = WALKS.lock();
+            if !wanted(&state) {
+                state.starting.retain(|s| s.id != id);
+                pending.extend(next_walks(&mut state));
+                continue;
+            }
+        }
         // This very binary, even if the file was replaced since (a rebuild
         // while mounted), under the name `stop_below` looks for.
         let mut command = Command::new("/proc/self/exe");
@@ -294,10 +308,8 @@ fn launch(walks: Vec<(u64, Walk)>) {
             .stdin(Stdio::null());
         let spawned = command.spawn();
         let mut state = WALKS.lock();
-        let at = state.starting.iter().position(|s| s.id == id);
-        let wanted = at.is_some_and(|at| !state.starting[at].cancelled) && !state.stopped;
         let child = match spawned {
-            Ok(child) if wanted => Some(child),
+            Ok(child) if wanted(&state) => Some(child),
             Ok(mut child) => {
                 // Stopped meanwhile: stop it now, unlocked.
                 drop(state);
@@ -324,9 +336,10 @@ fn launch(walks: Vec<(u64, Walk)>) {
         let pid = child.id();
         info!("prewarm of {}: started", walk.root.display());
         let walker = Walker::of(pid);
+        static WARNED: std::sync::Once = std::sync::Once::new();
         if walker.pidfd.is_none() {
             let e = std::io::Error::last_os_error();
-            warn!("prewarm walker {pid}: no pidfd ({e}); stopped by pid");
+            WARNED.call_once(|| warn!("prewarm walkers: no pidfd ({e}); stopped by pid"));
         }
         state.running.push((id, walker, walk));
         drop(state);
@@ -349,11 +362,13 @@ fn launch(walks: Vec<(u64, Walk)>) {
             // queued ones nor those taken to start here are started.
             let mut walks = WALKS.lock();
             walks.running.retain(|(i, _, _)| *i != id);
+            let taken = pending.len();
             for (taken, _) in pending.drain(..) {
                 walks.starting.retain(|s| s.id != taken);
             }
-            if !walks.queued.is_empty() {
-                warn!("prewarm: {} queued walks dropped", walks.queued.len());
+            let dropped = taken + walks.queued.len();
+            if dropped > 0 {
+                warn!("prewarm: {dropped} walks dropped");
                 walks.queued.clear();
             }
         }
@@ -383,10 +398,7 @@ fn reap(mut child: std::process::Child, id: u64) {
                 s.cancelled = true;
             }
         }
-        match walks.stopped {
-            true => Vec::new(),
-            false => next_walks(&mut walks),
-        }
+        next_walks(&mut walks)
     };
     launch(next);
 }
