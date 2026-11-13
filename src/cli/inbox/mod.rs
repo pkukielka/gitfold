@@ -243,31 +243,25 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
         [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())?,
         words => words.join(" "),
     };
-    let (to, from, subject, body) = (
-        to.as_str(),
-        from.as_str(),
-        subject.as_deref(),
-        body.as_str(),
-    );
     let common_dir = git::init(repo)?;
-    let dir = task_dir(&common_dir, to)?.join(inbox_name(&common_dir));
+    let dir = task_dir(&common_dir, &to)?.join(inbox_name(&common_dir));
     fs::create_dir_all(&dir)?;
     let one_line = |s: &str| s.replace(['\r', '\n'], " ");
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let mut text = format!(
         "from: {}\ntime: {}\n",
-        one_line(from),
+        one_line(&from),
         rfc3339(now.as_secs())
     );
-    if let Some(subject) = subject {
+    if let Some(subject) = &subject {
         text += &format!("subject: {}\n", one_line(subject));
     }
     text.push('\n');
-    text += body;
+    text += &body;
     if !body.ends_with('\n') {
         text.push('\n');
     }
-    let name = format!("{:020}-{}", now.as_nanos(), workspace_id(from));
+    let name = format!("{:020}-{}", now.as_nanos(), workspace_id(&from));
     let tmp = dir.join(format!(".new-{}-{name}", std::process::id()));
     {
         use std::io::Write;

@@ -187,22 +187,22 @@ fn run() -> Result<i32> {
         std::env::set_current_dir(dir)
             .with_context(|| format!("-C {}: can't change to it", dir.display()))?;
     }
-    let repo = cli::repo;
     match cli.command {
         Command::Mount(args) => cli::mount::mount(args)?,
         Command::Unmount { mountpoint } => cli::mount::unmount(&mountpoint)?,
         Command::Version { mountpoint } => return cli::mount::version(mountpoint.as_deref()),
-        Command::Branch(args) => cli::branch::branch(&repo()?, args)?,
-        Command::List(args) => cli::list::list(&repo()?, args)?,
-        Command::Changes(args) => cli::list::changes(&repo()?, args)?,
-        Command::Overlaps(args) => return cli::overlaps::overlaps(&repo()?, args),
-        Command::Watch(args) => cli::inbox::watch(&repo()?, args)?,
+        Command::Branch(args) => cli::branch::branch(&cli::repo()?, args)?,
+        Command::List(args) => cli::list::list(&cli::repo()?, args)?,
+        Command::Changes(args) => cli::list::changes(&cli::repo()?, args)?,
+        Command::Overlaps(args) => return cli::overlaps::overlaps(&cli::repo()?, args),
+        Command::Watch(args) => cli::inbox::watch(&cli::repo()?, args)?,
+        // Finds the repository itself: as a hook, none is no error.
         Command::Inbox(args) => return cli::inbox::inbox(args),
-        Command::Send(args) => cli::inbox::send(&repo()?, args)?,
-        Command::Remove(args) => cli::remove::remove(&repo()?, args)?,
-        Command::Prune => cli::remove::prune(&repo()?)?,
-        Command::Prewarm(args) => cli::branch::prewarm(&repo()?, args)?,
-        Command::TrackReads(args) => cli::branch::track_reads(&repo()?, args)?,
+        Command::Send(args) => cli::inbox::send(&cli::repo()?, args)?,
+        Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
+        Command::Prune => cli::remove::prune(&cli::repo()?)?,
+        Command::Prewarm(args) => cli::branch::prewarm(&cli::repo()?, args)?,
+        Command::TrackReads(args) => cli::branch::track_reads(&cli::repo()?, args)?,
         Command::PrewarmWalk {
             root,
             mode,
