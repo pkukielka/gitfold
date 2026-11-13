@@ -268,3 +268,41 @@ fn git_cmd(common_dir: &Path) -> Command {
     command.arg("--git-dir").arg(common_dir);
     command
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(paths: &[&str]) -> Target {
+        Target::new("t".into(), paths.iter().map(|p| p.as_bytes().to_vec()))
+    }
+
+    #[test]
+    fn touches_paths_and_directories_both_ways() {
+        let t = target(&["a/b/c.txt", "d"]);
+        assert!(t.touches(b"a/b/c.txt"), "the same path");
+        assert!(
+            t.touches(b"a/b"),
+            "a directory above a changed path (replaced by a file)"
+        );
+        assert!(
+            t.touches(b"d/x"),
+            "below a path changed (a directory replaced by a file)"
+        );
+        assert!(!t.touches(b"a/bc"), "a sibling with a common prefix");
+        assert!(!t.touches(b"dx"));
+    }
+
+    #[test]
+    fn parents_nearest_last() {
+        let got: Vec<&[u8]> = parents(b"a/b/c").collect();
+        assert_eq!(got, [&b"a"[..], b"a/b"]);
+        assert_eq!(parents(b"top").count(), 0);
+    }
+
+    #[test]
+    fn git_reads_are_ignore_and_attribute_files() {
+        assert!(git_reads(b".gitignore") && git_reads(b"x/y/.gitattributes"));
+        assert!(!git_reads(b"x/.gitignore.bak") && !git_reads(b"gitignore"));
+    }
+}

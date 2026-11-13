@@ -1,9 +1,35 @@
-# Helpers shared by the end-to-end tests; expects T (scratch dir), REPO, MNT,
-# LOG and BIN to be set by the sourcing script.
+# Helpers shared by the end-to-end tests. The sourcing script sets BIN (the
+# gitfold binary) and NAME (a short name for its scratch directory) first.
+#
+# - Each run gets its own directory, `/tmp/gf-<NAME>.XXXXXX` (T), so runs and
+#   suites can run at once; it is removed at the end unless KEEP=1, and
+#   whatever is still mounted below it is unmounted, however the run ends.
+# - stdin is /dev/null: a command reading it ends instead of waiting on the
+#   terminal or the runner (pipes in a test still feed what they pipe).
+# - BIN becomes a wrapper giving every gitfold command GF_TIMEOUT seconds
+#   (default 120), so one stuck command fails its check instead of holding
+#   up the run; long-lived daemons (`mount_fs`) run REAL_BIN.
+# - REPO, MNT and LOG are below T; `R` runs git in REPO.
+# - `section NAME FUNCTION` runs a section in a subshell of its own (see
+#   there); SECTION=<text> runs only the sections whose name contains it,
+#   and PARALLEL=1 runs them all at once (the output kept in order).
 
-FAILS=0
+exec </dev/null
+ROOT=$(mktemp -d "/tmp/gf-$NAME.XXXXXX")
+T=$ROOT
+REPO=$T/repo MNT=$T/mnt LOG=$T/gitfold.log
+REAL_BIN=$BIN
+BIN=$ROOT/gitfold
+# --kill-after: gitfold handles SIGTERM (it unmounts), which can hang too;
+# --foreground: Ctrl-C reaches the command, not just the script.
+printf '#!/bin/sh\nexec timeout --foreground --kill-after 10 %s "%s" "$@"\n' \
+    "${GF_TIMEOUT:-120}" "$REAL_BIN" >"$BIN"
+chmod +x "$BIN"
+
 pass() { echo "ok   $*"; }
-fail() { echo "FAIL $*"; FAILS=$((FAILS + 1)); }
+fail() { echo "FAIL $*"; echo "$*" >>"$ROOT/.fails"; }
+fails() { ! "$@"; }
+R() { git -C "$REPO" -c user.name=t -c user.email=t@t "$@"; }
 check() { # description, command...
     local desc=$1; shift
     if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
@@ -13,7 +39,7 @@ eq() { # description, expected, actual
 }
 
 mount_fs() {
-    "$BIN" mount --foreground "$@" "$REPO" "$MNT" >>"$LOG" 2>&1 &
+    "$REAL_BIN" mount --foreground "$@" "$REPO" "$MNT" >>"$LOG" 2>&1 &
     PID=$!
     for _ in $(seq 100); do mountpoint -q "$MNT" && return; sleep 0.05; done
     echo "mount failed"; cat "$LOG"; exit 1
@@ -23,3 +49,71 @@ unmount_fs() { # retries: a background prewarm walk keeps the mount busy briefly
     for _ in $(seq 20); do fusermount3 -u "$MNT" 2>/dev/null && break; sleep 0.5; done
     wait "$PID" 2>/dev/null
 }
+
+# Stops this shell's background jobs (daemons from mount_fs, sections run
+# with PARALLEL=1) and waits for them.
+stop_jobs() {
+    local jobs
+    jobs=$(jobs -p)
+    [ -z "$jobs" ] || { kill $jobs 2>/dev/null; wait $jobs 2>/dev/null; }
+}
+
+# Unmounts (lazily) every FUSE mount below directory $1.
+unmount_below() {
+    cd /
+    awk -v d="$1/" 'index($2, d) == 1 { print $2 }' /proc/mounts | sort -r |
+        while read -r m; do fusermount3 -u -z "$m" 2>/dev/null; done
+}
+
+# Runs function $2 as section $1, unless SECTION is set and $1 doesn't contain
+# it: in a subshell, with T, REPO, MNT and LOG of its own and the suite's
+# `fixture` run first, and whatever it mounted unmounted after, so sections
+# share no state. Failures are counted through a file, across subshells; a
+# section that ends early (`set -u`, a failed mount) counts as one. With
+# PARALLEL=1, sections run at once; `finish` prints their output in order.
+SECTION_N=0
+SECTIONS_RUN=0
+section() {
+    SECTION_N=$((SECTION_N + 1))
+    if [ -n "${SECTION:-}" ] && [[ "$1" != *"$SECTION"* ]]; then
+        return
+    fi
+    SECTIONS_RUN=$((SECTIONS_RUN + 1))
+    if [ -n "${PARALLEL:-}" ]; then
+        run_section "$@" >"$ROOT/$SECTION_N.out" 2>&1 &
+    else
+        run_section "$@"
+    fi
+}
+run_section() {
+    (
+        T=$ROOT/$SECTION_N
+        REPO=$T/repo MNT=$T/mnt LOG=$T/gitfold.log
+        mkdir -p "$MNT" "$REPO"
+        trap 'unmount_below "$T"; stop_jobs' EXIT
+        echo "== $1"
+        # Passing means reaching the end: a section's last command may well
+        # be a `wait` for a daemon that exits non-zero.
+        ( fixture || { echo "the fixture failed"; exit 1; }; "$2"; exit 0 ) ||
+            fail "$1: the section ended early (exit $?)"
+    )
+}
+
+# Ends the run: the summary, the exit code; removes T unless KEEP=1.
+finish() {
+    if [ -n "${PARALLEL:-}" ]; then
+        wait
+        for i in $(seq "$SECTION_N"); do [ ! -f "$ROOT/$i.out" ] || cat "$ROOT/$i.out"; done
+    fi
+    if [ -n "${SECTION:-}" ] && [ "$SECTION_N" -gt 0 ] && [ "$SECTIONS_RUN" = 0 ]; then
+        fail "SECTION=$SECTION matches no section"
+    fi
+    local n=0
+    [ -f "$ROOT/.fails" ] && n=$(wc -l <"$ROOT/.fails")
+    echo "== $n failure(s)"
+    [ -n "${KEEP:-}" ] && echo "kept $ROOT"
+    exit $((n > 0))
+}
+# Sections still running (PARALLEL=1, an interrupted run) and daemons are
+# stopped before anything is removed.
+trap 'stop_jobs; unmount_below "$ROOT"; [ -n "${KEEP:-}" ] || rm -rf "$ROOT"' EXIT

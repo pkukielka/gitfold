@@ -696,13 +696,25 @@ is 715 MB in 1,677 files:
 
 Benchmark scripts are in `bench/`: `bench.sh` compares native and mounted runs of
 the commands an agent issues, `probe.sh` isolates content reads, `writes.sh`
-measures write workloads. Tests: `tests/workspace.sh <repo>` (workspaces, on a
-scratch clone), `tests/rebase.sh` (git operations moving the branch),
-`tests/cli.sh` (`branch`, `list`, `remove`, `prune`) and `tests/promisor.sh`
-(partial clones). Build with `--release`
-first; the tests use scratch directories under `/tmp` (kept with `KEEP=1`);
-`bench.sh` must run inside Claude Code (it uses Claude Code's grep and needs
+measures write workloads. `bench.sh` must run inside Claude Code (it uses Claude Code's grep and needs
 `CLAUDE_CODE_EXECPATH`).
+
+Tests: `cargo test` runs the unit tests (logic without a mount or git:
+parsing, formats, settings, a few scratch files); the end-to-end suites drive the release binary, a real
+mount and real git (build with `--release` first):
+
+- `tests/cli.sh`: the commands, one section at a time, each on a fresh
+  repository; `SECTION=inbox tests/cli.sh` runs the sections whose name
+  contains `inbox`, and `PARALLEL=1` runs them all at once (about 10 s
+  instead of 50; a few timing checks may then be flaky on a loaded machine).
+  A section that ends early counts as a failure.
+- `tests/rebase.sh`: git operations moving a workspace's branch.
+- `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
+- `tests/promisor.sh`: partial clones.
+
+Each run works in a directory of its own under `/tmp` (`gf-<suite>.XXXXXX`,
+kept with `KEEP=1`), so runs can overlap; every gitfold command it runs gets
+`GF_TIMEOUT` seconds (default 120), and stdin is `/dev/null`.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for how it works and why, including the
 code map.

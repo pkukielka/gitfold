@@ -2,35 +2,43 @@
 # End-to-end test of the workspace management commands: branch, list, changes,
 # remove, prune.
 # usage: tests/cli.sh
-# Creates /tmp/gf-cli-test/{repo,mnt}; removes them at the end unless KEEP=1.
+# Each section runs on a fresh repository below /tmp/gf-cli.XXXXXX (see
+# tests/lib.sh); SECTION=<text> runs only the sections whose name contains it.
 set -uo pipefail
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
 CACHE_TREE=$(realpath "$(dirname "$0")/cache-tree.pl")
-T=/tmp/gf-cli-test
-REPO=$T/repo
-MNT=$T/mnt
-LOG=$T/gitfold.log
+NAME=cli
 . "$(dirname "$0")/lib.sh"
 
 G() { git -C "$1" -c user.name=t -c user.email=t@t "${@:2}"; }
-R() { git -C "$REPO" -c user.name=t -c user.email=t@t "$@"; }
-fails() { ! "$@"; }
-COMMON=$REPO/.git
-export HOME=$T/home XDG_CONFIG_HOME=$T/xdg   # no global git config or ignore file from the test machine
+# A submodule entry (gitlink) at sm, committed.
+add_submodule() { R update-index --add --cacheinfo "160000,$(R rev-parse HEAD),sm"; R commit -qm submodule; }
 
-rm -rf "$T"; mkdir -p "$MNT" "$REPO"
-R init -q -b main
-(cd "$REPO" && mkdir d && echo a >a.txt && echo b >d/b.txt && echo c >d/c.txt)
-R add -A; R commit -qm init
+# Every section starts from this: a repository with a.txt, d/b.txt, d/c.txt.
+fixture() {
+    COMMON=$REPO/.git
+    export HOME=$T/home XDG_CONFIG_HOME=$T/xdg   # no global git config or ignore file from the test machine
+    R init -q -b main
+    (cd "$REPO" && mkdir d && echo a >a.txt && echo b >d/b.txt && echo c >d/c.txt)
+    R add -A; R commit -qm init
+}
 
-echo "== branch"
+
+# Steps that share a repository, workspaces and a mount run as one section.
+# Branches made, listed, used from anywhere, then removed and pruned:
+story() { branch; list; the_repository_from_the_current_director; remove; prune; }
+# A 5000-file repository walked, given modes, then unmounted half-way:
+prewarm_story() { prewarm_walks_at_once_per_workspace_opt; gitfold_prewarm_a_mode_applied_to_an_ope; an_interrupted_unmount_prewarm_resumes_s; }
+
+branch() {
 check "branch from HEAD" "$BIN" -C "$REPO" branch agent/one
 check "branch --from" "$BIN" -C "$REPO" branch two --from main
 check "names starting with @ refused" fails "$BIN" -C "$REPO" branch @x
 check "existing branch refused" fails "$BIN" -C "$REPO" branch two
+}
 
-echo "== list"
+list() {
 eq "nothing yet" "no workspaces" "$("$BIN" -C "$REPO" list 2>/dev/null)"
 mount_fs
 W1=$MNT/agent/one; W2=$MNT/two
@@ -38,7 +46,9 @@ echo changed >>"$W1/a.txt"; rm "$W1/d/b.txt"; echo new >"$W1/new.txt"
 echo x >>"$W2/a.txt"; G "$W2" commit -qam x
 for _ in $(seq 50); do [ "$(cat "$COMMON/gitfold/two/base")" = "$(R rev-parse two)" ] && break; sleep 0.1; done
 ls "$MNT/@HEAD" >/dev/null                     # a snapshot registration
-echo "== the repository from the current directory"
+}
+
+the_repository_from_the_current_director() {
 L=$("$BIN" -C "$REPO" list 2>&1)
 eq "from its work tree" "$L" "$(cd "$REPO" && "$BIN" list 2>&1)"
 eq "from a subdirectory" "$L" "$(cd "$REPO/d" && "$BIN" list 2>&1)"
@@ -72,8 +82,9 @@ out=$("$BIN" -C "$REPO" list 2>/dev/null)
 eq "workspace with changes" "2 1" "$(echo "$out" | awk '$1 == "agent/one" { print $2, $3 }')"
 eq "committed workspace is clean" "0 0" "$(echo "$out" | awk '$1 == "two" { print $2, $3 }')"
 eq "changes unmounted: the same" "$EXPECT" "$("$BIN" -C "$REPO" changes agent/one 2>&1)"
+}
 
-echo "== changes: edge cases"
+changes_edge_cases() {
 R branch ch; R branch fresh
 mount_fs
 WC=$MNT/ch
@@ -101,9 +112,9 @@ find "$COMMON/gitfold/ch" -exec touch -h -d '3 days ago' {} +; touch -d '3 days 
 eq "list: nothing changed for 3 days" 3d "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print $6 }')"
 R update-ref -m commit refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m again)"
 eq "a commit alone (the branch's reflog) counts" yes "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print ($6 ~ /^[0-9]+s$/ ? "yes" : $6) }')"
-"$BIN" -C "$REPO" remove --force ch >/dev/null; R branch -q -D ch fresh
+}
 
-echo "== branch --with-changes (a fork)"
+branch_with_changes_a_fork() {
 R branch fk; R branch nv; R branch sl/x
 mount_fs
 WF=$MNT/fk
@@ -169,8 +180,6 @@ mount_fs
 eq "and once mounted, the same git status" "$(git -C "$WF" status --porcelain)" "$(git -C "$MNT/fk3" status --porcelain 2>&1)"
 eq "sl/z too (its registration found the mount from sl/x's)" "$(git -C "$MNT/sl/x" status --porcelain)" "$(git -C "$MNT/sl/z" status --porcelain 2>&1)"
 unmount_fs
-for b in fk fk2 fk3 fk4 fk5 sl/x sl/y sl/z; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null; done
-R branch -q -D fk fk2 fk3 fk4 fk5 nv nv2 sl/x sl/y sl/z
 R branch cw
 mount_fs
 echo here >"$MNT/cw/here.txt"
@@ -178,10 +187,9 @@ eq "in a workspace, -w alone copies that one" "created branch cw2 at cw, with it
 eq "with its changes" "A	here.txt" "$("$BIN" -C "$REPO" changes cw2 2>&1)"
 check "-w with --from a revision, not a branch, refused" fails "$BIN" -C "$REPO" branch -w --from HEAD cw3
 unmount_fs
-for b in cw cw2; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null; done
-R branch -q -D cw cw2
+}
 
-echo "== overlaps: reads and writes changed elsewhere"
+overlaps_reads_and_writes_changed_elsewh() {
 R branch st1; R branch st2; R branch st3
 check "track-reads needs a branch" fails "$BIN" -C "$REPO" track-reads nope on
 mount_fs
@@ -217,10 +225,11 @@ check "--reads with --writes is a usage error" fails "$BIN" -C "$REPO" overlaps 
 eq "against another workspace: its uncommitted changes, a file over its directory (a tag st2 ignored)" "W	st2	nd
 W	st2	x.txt" "$("$BIN" -C "$REPO" overlaps st1 --against st2 2>&1)"
 R tag -d st2 >/dev/null
+R branch other st2; echo o >>"$MNT/other/a.txt"
 out=$("$BIN" -C "$REPO" overlaps st1 --against-workspaces 2>&1)
 eq "--against-workspaces: every other one" "W	st2	nd
 W	st2	x.txt" "$(grep st2 <<<"$out")"
-eq "earlier tests' too (agent/one changed a.txt, which st1 read), not main" "yes no" "$(grep -q 'R	agent/one	a.txt' <<<"$out" && echo yes) $(grep -q main <<<"$out" && echo yes || echo no)"
+eq "another workspace changed a file st1 read; not main" "yes no" "$(grep -q 'R	other	a.txt' <<<"$out" && echo yes) $(grep -q main <<<"$out" && echo yes || echo no)"
 eq "both: one line per target" "4" "$("$BIN" -C "$REPO" overlaps st1 --against main --against-workspaces --writes 2>&1 | wc -l)"
 out=$("$BIN" -C "$REPO" overlaps st2 --against main 2>"$T/st.err"); rc=$?
 eq "untracked: writes only, saying so; no overlaps (exit 0)" "0  yes" "$rc $out $(grep -q "reads aren't tracked in st2" "$T/st.err" && echo yes)"
@@ -247,11 +256,9 @@ eq "a branch's off wins" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/
 for _ in $(seq 50); do grep -q 'st2: prewarm content walks as meta' "$LOG" && break; sleep 0.1; done
 check "a tracked workspace's content prewarm walks as meta" grep -q 'st2: prewarm content walks as meta' "$LOG"
 unmount_fs
-for b in st1 st1f st2; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null; done
-R branch -q -D st1 st1f st2 st3
-R reset -q --hard HEAD~1
+}
 
-echo "== the task folder"
+the_task_folder() {
 R branch tk; R branch tk3; R branch old
 R switch -q -c tracked main; echo t >"$REPO/.task"; R add -f .task; R commit -qm tracked-task; R switch -q main
 mount_fs
@@ -299,12 +306,9 @@ R config gitfold.taskDir .task; R config gitfold.tasksDir "$T/tasks"
 mount_fs
 eq "gitfold.tasksDir: elsewhere" "$T/tasks/tk3" "$(readlink "$MNT/tk3/.task")"
 unmount_fs
-R config --unset gitfold.taskDir; R config --unset gitfold.tasksDir
-for b in tk tk2 tk3 fk-old old tracked; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null 2>&1; done
-R branch -q -D tk tk2 tk3 fk-old old tracked
-rm -rf "$TASKS" "$T/tasks"
+}
 
-echo "== inbox, send, watch"
+inbox_send_watch() {
 R branch ib; R branch ib2
 IB=$COMMON/gitfold/.tasks/ib
 out=$("$BIN" -C "$REPO" send nope hi 2>&1); rc=$?
@@ -375,16 +379,16 @@ C	handoff.md" "$(cat "$T/watched")"
 check "watch refuses a file" fails "$BIN" -C "$REPO" watch ib:notes/handoff.md --timeout 1
 eq "watch --timeout: nothing" "" "$("$BIN" -C "$REPO" watch ib:notes --timeout 1 2>&1)"
 check "watch refuses .." fails "$BIN" -C "$REPO" watch ib:../x --timeout 1
-eq "--claude-hook outside a workspace: silent, exit 0" "0" "$(cd / && "$BIN" inbox --claude-hook post-tool-use </dev/null 2>&1; echo $?)"
-eq "--claude-hook, nothing new: silent" "" "$("$BIN" -C "$REPO" inbox ib --claude-hook user-prompt-submit </dev/null 2>&1; "$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use </dev/null 2>&1)"
+eq "--claude-hook outside a workspace: silent, exit 0" "0" "$(cd / && "$BIN" inbox --claude-hook post-tool-use 2>&1; echo $?)"
+eq "--claude-hook, nothing new: silent" "" "$("$BIN" -C "$REPO" inbox ib --claude-hook user-prompt-submit 2>&1; "$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use 2>&1)"
 "$BIN" -C "$REPO" send ib -s s1 one >/dev/null
-eq "--claude-hook user-prompt-submit: the messages, introduced" "yes yes" "$("$BIN" -C "$REPO" inbox ib --claude-hook user-prompt-submit </dev/null | grep -c -e '^New messages in your gitfold inbox' -e '^one$' | sed 's/^2$/yes yes/')"
+eq "--claude-hook user-prompt-submit: the messages, introduced" "yes yes" "$("$BIN" -C "$REPO" inbox ib --claude-hook user-prompt-submit | grep -c -e '^New messages in your gitfold inbox' -e '^one$' | sed 's/^2$/yes yes/')"
 "$BIN" -C "$REPO" send ib 'two "quoted"' >/dev/null
-eq "--claude-hook post-tool-use: additionalContext JSON" yes "$("$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use </dev/null | grep -q '^{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"New messages.*two \\"quoted\\"\\n"}}$' && echo yes)"
-"$BIN" -C "$REPO" inbox ib --claude-hook rewake </dev/null >"$T/rw.out" 2>"$T/rw.err" & WP=$!
+eq "--claude-hook post-tool-use: additionalContext JSON" yes "$("$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use | grep -q '^{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"New messages.*two \\"quoted\\"\\n"}}$' && echo yes)"
+"$BIN" -C "$REPO" inbox ib --claude-hook rewake >"$T/rw.out" 2>"$T/rw.err" & WP=$!
 sleep 0.3
 start=$(date +%s%N)
-eq "a second rewake waiter exits at once (one per inbox)" "0" "$("$BIN" -C "$REPO" inbox ib --claude-hook rewake </dev/null >/dev/null 2>&1; echo $?)"
+eq "a second rewake waiter exits at once (one per inbox)" "0" "$("$BIN" -C "$REPO" inbox ib --claude-hook rewake >/dev/null 2>&1; echo $?)"
 eq "  (at once)" yes "$( (( ($(date +%s%N) - start) / 1000000 < 1000 )) && echo yes || echo no)"
 "$BIN" -C "$REPO" send ib wake >/dev/null; wait $WP; rc=$?
 eq "--claude-hook rewake: exit 2, the message on stderr" "2 yes" "$rc $(grep -qx wake "$T/rw.err" && echo yes)"
@@ -397,11 +401,9 @@ unmount_fs
 R config gitfold.inbox mail
 "$BIN" -C "$REPO" send ib configured >/dev/null
 check "gitfold.inbox names it" test -n "$(ls "$IB/mail")"
-R config --unset gitfold.inbox
-for b in ib ib2 ibf; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null 2>&1; done
-R branch -q -D ib ib2 ibf; rm -rf "$COMMON/gitfold/.tasks"
+}
 
-echo "== remove"
+remove() {
 check "uncommitted changes refused" fails "$BIN" -C "$REPO" remove agent/one
 out=$("$BIN" -C "$REPO" remove agent/one 2>&1); eq "refusal lists the paths" yes "$(grep -q new.txt <<<"$out" && echo yes)"
 check "clean workspace removed" "$BIN" -C "$REPO" remove two
@@ -413,8 +415,9 @@ check "--force discards changes" "$BIN" -C "$REPO" remove agent/one --force
 check "state gone" test ! -e "$COMMON/gitfold/agent%2Fone"
 check "unknown workspace refused" fails "$BIN" -C "$REPO" remove nope
 eq "list empty again" "no workspaces" "$("$BIN" -C "$REPO" list 2>/dev/null)"
+}
 
-echo "== prune"
+prune() {
 check "snapshot registration exists" sh -c "ls '$COMMON/worktrees' | grep -q '^gitfold-[0-9a-f]\{12\}$'"
 check "prune" "$BIN" -C "$REPO" prune
 check "snapshot registrations gone" sh -c "! ls '$COMMON/worktrees' 2>/dev/null | grep -q '^gitfold-'"
@@ -423,10 +426,10 @@ mount_fs
 check "snapshot reopens after prune" test -f "$MNT/@HEAD/a.txt"
 check "workspace reopens after remove" test -f "$MNT/agent/one/d/b.txt"
 unmount_fs
+}
 
-echo "== deletions the status must see"
-sm=$(R rev-parse HEAD)
-R update-index --add --cacheinfo "160000,$sm,sm"; R commit -qm submodule
+deletions_the_status_must_see() {
+add_submodule
 check "branch three" "$BIN" -C "$REPO" branch three
 mount_fs
 W3=$MNT/three
@@ -439,8 +442,9 @@ eq "counted (d changed; a.txt, sm, d/b.txt, d/c.txt deleted)" "1 4" \
     "$(echo "$out" | awk '$1 == "three" { print $2, $3 }')"
 check "remove refused" fails "$BIN" -C "$REPO" remove three
 check "remove --force" "$BIN" -C "$REPO" remove three --force
+}
 
-echo "== git operation stopped half-way"
+git_operation_stopped_half_way() {
 R branch other main; R checkout -q other; echo theirs >"$REPO/a.txt"; R commit -qam theirs; R checkout -q main
 check "branch four" "$BIN" -C "$REPO" branch four
 mount_fs
@@ -452,16 +456,18 @@ unmount_fs
 out=$("$BIN" -C "$REPO" remove four 2>&1)
 eq "remove refused mid-merge" yes "$(grep -q 'in progress (MERGE_HEAD)' <<<"$out" && echo yes)"
 check "remove --force" "$BIN" -C "$REPO" remove four --force
+}
 
-echo "== leftover state of a deleted branch"
+leftover_state_of_a_deleted_branch() {
 check "branch five" "$BIN" -C "$REPO" branch five
 mount_fs; ls "$MNT/five" >/dev/null; unmount_fs
 R update-ref -d refs/heads/five            # deleted behind gitfold's back
 check "recreating it refused" fails "$BIN" -C "$REPO" branch five
 check "remove the leftover" "$BIN" -C "$REPO" remove five --force
 check "recreating it works then" "$BIN" -C "$REPO" branch five
+}
 
-echo "== staged-only changes, and the base after a commit"
+staged_only_changes_and_the_base_after_a() {
 check "branch six" "$BIN" -C "$REPO" branch six
 mount_fs
 W6=$MNT/six
@@ -476,8 +482,9 @@ eq "the base caught up at unmount" "$(R rev-parse six)" "$(cat "$COMMON/gitfold/
 c2=$(R commit-tree "six^{tree}" -p six -m 'moved while unmounted')
 R update-ref refs/heads/six "$c2"                                  # base now behind the tip
 check "remove catches up offline and removes" "$BIN" -C "$REPO" remove six
+}
 
-echo "== ignored files"
+ignored_files() {
 printf 'target/\n*.log\n!keep.log\n' >"$REPO/.gitignore"; echo t >"$REPO/tracked.log"
 R add .gitignore; R add -f tracked.log; R commit -qm ignores
 check "branch seven" "$BIN" -C "$REPO" branch seven
@@ -512,8 +519,9 @@ unmount_fs
 eq "without .gitignore: x.log changed, .gitignore deleted" "1 1 0" \
     "$("$BIN" -C "$REPO" list 2>/dev/null | awk '$1 == "eight" { print $2, $3, $4 }')"
 check "remove eight" "$BIN" -C "$REPO" remove eight --force
+}
 
-echo "== modes"
+modes() {
 check "branch nine" "$BIN" -C "$REPO" branch nine
 mount_fs; chmod 664 "$MNT/nine/a.txt"; unmount_fs
 eq "group-write bit alone: no change (as for git)" "0" \
@@ -522,8 +530,9 @@ mount_fs; chmod +x "$MNT/nine/a.txt"; unmount_fs
 eq "executable bit: a change" "1" \
     "$("$BIN" -C "$REPO" list 2>/dev/null | awk '$1 == "nine" { print $2 }')"
 check "remove nine" "$BIN" -C "$REPO" remove nine --force
+}
 
-echo "== .gitignore files git doesn't read"
+gitignore_files_git_doesn_t_read() {
 mkdir -p "$REPO/s"; ln -s '*.tmp' "$REPO/s/.gitignore"; R add s 2>/dev/null; R commit -qm 'symlinked gitignore'
 check "branch ten" "$BIN" -C "$REPO" branch ten
 mount_fs
@@ -544,8 +553,10 @@ mkdir -p "$T/cwd/git"; echo '*' >"$T/cwd/git/ignore"
 eq "empty XDG_CONFIG_HOME is unset, not the current directory" "8 0" \
     "$(cd "$T/cwd" && XDG_CONFIG_HOME= "$BIN" -C "$REPO" list 2>/dev/null | awk '$1 == "ten" { print $2, $4 }')"
 check "remove ten" "$BIN" -C "$REPO" remove ten --force
+}
 
-echo "== global ignore file as git reads it"
+global_ignore_file_as_git_reads_it() {
+add_submodule
 mkdir -p "$XDG_CONFIG_HOME/git"; echo '*.xdg' >"$XDG_CONFIG_HOME/git/ignore"
 check "branch eleven" "$BIN" -C "$REPO" branch eleven
 mount_fs
@@ -563,9 +574,10 @@ git --git-dir "$COMMON/worktrees/gitfold-ws-eleven" config --worktree core.exclu
 eq "worktree config is honoured" "3 0" "$(cnt)"
 R config --unset extensions.worktreeConfig
 check "remove eleven" "$BIN" -C "$REPO" remove eleven --force
-rm "$XDG_CONFIG_HOME/git/ignore"
+}
 
-echo "== nested repositories and a relative excludes file"
+nested_repositories_and_a_relative_exclu() {
+echo 'target/' >"$REPO/.gitignore"; R add .gitignore; R commit -qm ignores
 check "branch twelve" "$BIN" -C "$REPO" branch twelve
 mount_fs
 W12=$MNT/twelve
@@ -580,8 +592,9 @@ R config core.excludesFile relign
 eq "relative core.excludesFile: status refused" yes "$("$BIN" -C "$REPO" list 2>/dev/null | grep "^twelve" | grep -q "relative path" && echo yes)"
 R config --unset core.excludesFile
 check "remove twelve" "$BIN" -C "$REPO" remove twelve --force
+}
 
-echo "== the lock leaves nothing behind"
+the_lock_leaves_nothing_behind() {
 git init -q "$T/plain"; git -C "$T/plain" -c user.name=t -c user.email=t@t commit -q --allow-empty -m e
 check "prune of a repository without gitfold state" "$BIN" -C "$T/plain" prune
 check "creates nothing in it" test ! -e "$T/plain/.git/gitfold"
@@ -592,8 +605,9 @@ sleep 0.3
 check "an earlier build's lock file is honoured" fails "$BIN" -C "$T/plain" prune
 wait $OLD
 check "free again" "$BIN" -C "$T/plain" prune
+}
 
-echo "== background mount and unmount"
+background_mount_and_unmount() {
 check "branch bg" "$BIN" -C "$REPO" branch bg
 out=$("$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" 2>&1)
 eq "mount returns once mounted" yes "$(mountpoint -q "$MNT" && echo yes)"
@@ -616,7 +630,7 @@ check "remove right after a busy unmount" "$BIN" -C "$REPO" remove bg3
 wait
 check "branch bg4" "$BIN" -C "$REPO" branch bg4
 "$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
-cp "$BIN" "$MNT/bg4/gitfold-copy"
+cp "$REAL_BIN" "$MNT/bg4/gitfold-copy"
 out=$(timeout 20 "$MNT/bg4/gitfold-copy" unmount "$MNT" 2>&1)
 eq "unmount run from inside the mount doesn't wait for itself" yes "$(grep -q 'in use by this command' <<<"$out" && echo yes)"
 for _ in $(seq 100); do flock -n "$COMMON" true 2>/dev/null && break; sleep 0.1; done
@@ -629,16 +643,16 @@ eq "unmount with a shell inside detaches" yes "$(grep -q 'detached it' "$T/busy.
 for _ in $(seq 100); do flock -n "$COMMON" true 2>/dev/null && break; sleep 0.1; done
 check "the daemon exits once the shell leaves" flock -n "$COMMON" true
 check "a failed background mount reports the error" sh -c "! '$BIN' mount '$T/nonexistent' '$MNT' 2>&1 | grep -q mounted"
-"$BIN" mount --foreground "$REPO" "$MNT" >>"$LOG" 2>&1 & FG=$!
-for _ in $(seq 100); do mountpoint -q "$MNT" && break; sleep 0.05; done
+mount_fs; FG=$PID
 kill -HUP $FG; wait $FG
 check "SIGHUP unmounts a foreground daemon cleanly" sh -c "! mountpoint -q '$MNT'"
 check "remove bg2" "$BIN" -C "$REPO" remove bg2 --force
+}
 
-echo "== unmount: paths, odd repository names, the daemon's directory"
+unmount_paths_odd_repository_names_the_d() {
 "$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
 eq "the daemon doesn't keep the caller's directory" "/" \
-    "$(for p in $(pgrep -x gitfold); do grep -qa "$T" /proc/$p/cmdline 2>/dev/null && readlink /proc/$p/cwd; done | sort -u)"
+    "$(for p in $(pgrep -x gitfold); do grep -qa "$T/" /proc/$p/cmdline 2>/dev/null && readlink /proc/$p/cwd; done | sort -u)"
 check "unmount with a trailing slash" "$BIN" unmount "$MNT/"
 ln -s "$MNT" "$T/mntlink"
 "$BIN" mount --log "$T/bg.log" "$REPO" "$T/mntlink" >/dev/null 2>&1
@@ -654,8 +668,9 @@ check "a relative repository path works" test -f "$MNT/@HEAD/a.txt"
 check "unmount" "$BIN" unmount "$MNT"
 check "arguments after -- work" "$BIN" mount --log "$T/bg.log" -- "$REPO" "$MNT"
 check "unmount" "$BIN" unmount "$MNT"
+}
 
-echo "== names that appear later, and negative entries"
+names_that_appear_later_and_negative_ent() {
 mount_fs
 R branch ns/a
 ls "$MNT" >/dev/null; ls "$MNT/ns" >/dev/null
@@ -675,8 +690,9 @@ check "missing file in a snapshot stays missing" test ! -e "$MNT/@later-tag/.ign
 unmount_fs
 check "remove later" "$BIN" -C "$REPO" remove later --force
 check "remove ns/b" "$BIN" -C "$REPO" remove ns/b --force
+}
 
-echo "== the index's cache tree (TREE extension)"
+the_index_s_cache_tree_tree_extension() {
 # A submodule, a symlink, an executable and an empty directory; git's own
 # `read-tree` writes the cache tree to compare with.
 (cd "$REPO" && mkdir -p t/u/v && echo v >t/u/v/f && ln -s a.txt t/link && echo x >t/x && chmod +x t/x)
@@ -690,7 +706,7 @@ for v in @cachetree cachetree; do
     eq "$v: cache tree as git writes it" "$(perl "$CACHE_TREE" "$T/git.idx")" \
         "$(perl "$CACHE_TREE" "$(G "$MNT/$v" rev-parse --path-format=absolute --git-path index)")"
 done
-eq "it has every directory" 7 "$(perl "$CACHE_TREE" "$T/git.idx" | wc -l)"
+eq "it has every directory (the root, d, t, t/u, t/u/v, empty)" 6 "$(perl "$CACHE_TREE" "$T/git.idx" | wc -l)"
 (cd "$MNT/cachetree" && echo w >t/u/w && echo d >>d/b.txt && G . add -A && G . commit -qm w)
 R worktree add -q "$T/plain-ct" cachetree~1
 (cd "$T/plain-ct" && echo w >t/u/w && echo d >>d/b.txt && G . add -A && G . commit -qm w)
@@ -705,10 +721,10 @@ eq "its cache tree node is left to git" "/uns -1 0 " \
     "$(perl "$CACHE_TREE" "$(G "$MNT/@unsorted" rev-parse --path-format=absolute --git-path index)" | grep "^/uns ")"
 eq "git status is clean there" "" "$(G "$MNT/@unsorted" status --porcelain)"
 unmount_fs
-R worktree remove --force "$T/plain-ct"
 check "remove cachetree" "$BIN" -C "$REPO" remove cachetree --force
+}
 
-echo "== remove while mounted"
+remove_while_mounted() {
 R branch live1; R branch live2; R branch nsx/live3; R branch live4; R branch live5
 # Many files, for removals racing lookups below.
 git init -q "$T/many"; mkdir "$T/many/d"
@@ -780,9 +796,9 @@ unmount_fs
 check "a snapshot registration removed unmounted" sh -c "'$BIN' -C '$REPO' remove @main && test ! -e '$SNAPREG'"
 check "'..' refused unmounted" fails "$BIN" -C "$REPO" remove ..
 check "remove live1" "$BIN" -C "$REPO" remove live1
-R branch -q -D live1 live2 nsx/live3 live4 live5 many
+}
 
-echo "== many packs added while mounted"
+many_packs_added_while_mounted() {
 # The object database's pack index table was sized at open and never grew.
 mount_fs
 test -f "$MNT/@main/a.txt"
@@ -797,10 +813,9 @@ done
 R branch packs "$prev"
 eq "a commit in the 100th new pack opens" 100 "$(cat "$MNT/@packs/n.txt" 2>&1)"
 unmount_fs
-R branch -q -D packs
-R repack -qad
+}
 
-echo "== prewarm: walks at once, per-workspace opt-out"
+prewarm_walks_at_once_per_workspace_opt() {
 PW=$T/pwrepo
 git init -q "$PW"; mkdir "$PW/d"
 for i in $(seq 5000); do echo $i >"$PW/d/f$i"; done
@@ -847,7 +862,9 @@ G "$PW" config branch.pw1.gitfoldPrewarm content
 cat "$MNT/pw1/d/f1" >/dev/null; sleep 0.5
 check "--prewarm none for the mount wins over a branch's mode" sh -c "! grep -q 'prewarm of' '$T/pw4.log'"
 check "unmount" "$BIN" unmount "$MNT"
-echo "== gitfold prewarm: a mode applied to an open workspace"
+}
+
+gitfold_prewarm_a_mode_applied_to_an_ope() {
 "$BIN" mount --log "$T/pw5.log" "$PW" "$MNT" >/dev/null 2>&1
 cat "$MNT/pw4/d/f1" >/dev/null; sleep 0.5
 check "pw4 (none) opened unwalked" sh -c "! grep -q 'prewarm of $MNT/pw4' '$T/pw5.log'"
@@ -860,9 +877,9 @@ check "an unknown branch refused" fails "$BIN" -C "$PW" prewarm nope meta
 check "unmount" "$BIN" unmount "$MNT"
 eq "unmounted: only set" "set; pw4 isn't walked" "$("$BIN" -C "$PW" prewarm pw4 none 2>&1)"
 eq "set" none "$(G "$PW" config --get branch.pw4.gitfoldPrewarm)"
-G "$PW" config --unset branch.pw3.gitfoldPrewarm
+}
 
-echo "== an interrupted unmount: prewarm resumes, stopped walks too"
+an_interrupted_unmount_prewarm_resumes_s() {
 mkdir -p "$T/fakebin"; printf '#!/bin/sh\nexec sleep 30\n' >"$T/fakebin/fusermount3"; chmod +x "$T/fakebin/fusermount3"
 GITFOLD_PREWARM_RESUME_SECS=2 "$BIN" mount --prewarm content --prewarm-threads 1 --prewarm-walks 1 \
     --log "$T/pw6.log" "$PW" "$MNT" >/dev/null 2>&1
@@ -881,15 +898,17 @@ check "unmount" "$BIN" unmount "$MNT"
 for b in pw1 pw2 pw3 pw4; do "$BIN" -C "$PW" remove "$b" >/dev/null; done
 G "$PW" branch -q -D pw4
 check "the opt-out goes with the branch" fails G "$PW" config --get branch.pw4.gitfoldPrewarm
+}
 
-echo "== unmount of a stopped daemon"
+unmount_of_a_stopped_daemon() {
 mount_fs
 kill -STOP $PID
 timeout 10 "$BIN" unmount "$MNT" >/dev/null 2>&1
 check "unmounts without the daemon's answer" sh -c "! mountpoint -q '$MNT'"
 kill -CONT $PID; wait $PID 2>/dev/null
+}
 
-echo "== remove: exit codes, --check, --wait"
+remove_exit_codes_check_wait() {
 R branch ec1; R branch ec2
 code() { "$@" >/dev/null 2>&1; echo $?; }
 eq "not found: exit code 3" 3 "$(code "$BIN" -C "$REPO" remove nope)"
@@ -930,9 +949,9 @@ check "and it is gone" test ! -e "$COMMON/gitfold/ec1"
 unmount_fs
 eq "unmounted, changes: 4" 4 "$(code "$BIN" -C "$REPO" remove ec2)"
 check "remove ec2 --force" "$BIN" -C "$REPO" remove ec2 --force
-R branch -q -D ec1 ec2
+}
 
-echo "== version"
+version() {
 eq "--version names the build" yes "$("$BIN" --version | grep -qE '^gitfold [0-9]+\.[0-9]+\.[0-9]+' && echo yes)"
 mount_fs
 out=$("$BIN" version "$MNT" 2>&1)
@@ -945,8 +964,9 @@ rc=$("$BIN" version "$MNT" >/dev/null 2>&1; echo $?)
 kill -CONT $PID
 eq "a daemon that doesn't answer: exit code 5 (not a mismatch)" 5 "$rc"
 unmount_fs
+}
 
-echo "== an unmount that fails lets prewarm resume"
+an_unmount_that_fails_lets_prewarm_resum() {
 R branch rs1; R branch rs2
 mkdir -p "$T/fakebin"
 printf '#!/bin/sh\necho "fusermount3: simulated failure" >&2\nexit 1\n' >"$T/fakebin/fusermount3"
@@ -960,15 +980,41 @@ for _ in $(seq 100); do grep -q "prewarm done for $MNT/rs2" "$T/resume.log" && b
 check "prewarm resumed" grep -q "prewarm resumed" "$T/resume.log"
 check "a workspace opened afterwards is walked" grep -q "prewarm done for $MNT/rs2" "$T/resume.log"
 check "unmount" "$BIN" unmount "$MNT"
-for b in rs1 rs2; do "$BIN" -C "$REPO" remove "$b" >/dev/null; done
-R branch -q -D rs1 rs2
+}
 
-echo "== -C for mount: relative paths from there"
+c_for_mount_relative_paths_from_there() {
 (cd "$T" && "$BIN" -C repo mount . ../mnt >/dev/null 2>&1)
 check "mounted in the background through -C" mountpoint -q "$MNT"
 check "and serves the repository" test -d "$MNT/@HEAD"
 check "unmount" "$BIN" unmount "$MNT"
+}
 
-echo "== $FAILS failure(s)"
-[ -n "${KEEP:-}" ] || rm -rf "$T"
-exit $((FAILS > 0))
+section "branch, list, the current directory, remove, prune" story
+section "changes: edge cases" changes_edge_cases
+section "branch --with-changes (a fork)" branch_with_changes_a_fork
+section "overlaps: reads and writes changed elsewhere" overlaps_reads_and_writes_changed_elsewh
+section "the task folder" the_task_folder
+section "inbox, send, watch" inbox_send_watch
+section "deletions the status must see" deletions_the_status_must_see
+section "git operation stopped half-way" git_operation_stopped_half_way
+section "leftover state of a deleted branch" leftover_state_of_a_deleted_branch
+section "staged-only changes, and the base after a commit" staged_only_changes_and_the_base_after_a
+section "ignored files" ignored_files
+section "modes" modes
+section ".gitignore files git doesn't read" gitignore_files_git_doesn_t_read
+section "global ignore file as git reads it" global_ignore_file_as_git_reads_it
+section "nested repositories and a relative excludes file" nested_repositories_and_a_relative_exclu
+section "the lock leaves nothing behind" the_lock_leaves_nothing_behind
+section "background mount and unmount" background_mount_and_unmount
+section "unmount: paths, odd repository names, the daemon's directory" unmount_paths_odd_repository_names_the_d
+section "names that appear later, and negative entries" names_that_appear_later_and_negative_ent
+section "the index's cache tree (TREE extension)" the_index_s_cache_tree_tree_extension
+section "remove while mounted" remove_while_mounted
+section "many packs added while mounted" many_packs_added_while_mounted
+section "prewarm: walks, per-workspace modes, an interrupted unmount" prewarm_story
+section "unmount of a stopped daemon" unmount_of_a_stopped_daemon
+section "remove: exit codes, --check, --wait" remove_exit_codes_check_wait
+section "version" version
+section "an unmount that fails lets prewarm resume" an_unmount_that_fails_lets_prewarm_resum
+section "-C for mount: relative paths from there" c_for_mount_relative_paths_from_there
+finish

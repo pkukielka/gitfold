@@ -612,3 +612,87 @@ impl Inotify {
         Ok(events)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> Message {
+        Message::parse(Path::new("/inbox/1-x"), text)
+    }
+
+    #[test]
+    fn headers_then_body() {
+        let m = parse("from: a/b\nsubject: x: y\n\nline 1\n\nline 2: not a header\n");
+        assert_eq!(m.header("from"), "a/b");
+        assert_eq!(m.header("subject"), "x: y");
+        assert_eq!(m.body, "line 1\n\nline 2: not a header\n");
+        assert_eq!(m.file, "1-x");
+    }
+
+    #[test]
+    fn crlf_is_lf() {
+        let m = parse("from: x\r\nsubject: s\r\n\r\nbody\r\n");
+        assert_eq!((m.header("from"), m.header("subject")), ("x", "s"));
+        assert_eq!(m.body, "body\n");
+    }
+
+    #[test]
+    fn without_headers_all_body() {
+        for text in [
+            "Hello\n\nworld\n",
+            "just one line",
+            "a: b\nno colon here\n\nbody",
+        ] {
+            let m = parse(text);
+            assert!(m.headers.is_empty(), "{text:?}");
+            assert_eq!(m.body, text);
+        }
+    }
+
+    #[test]
+    fn text_round_trips() {
+        let sent = "from: a\ntime: 2026-01-01T00:00:00Z\n\nhi\n";
+        assert_eq!(parse(sent).text(), sent);
+        assert_eq!(parse("no headers").text(), "no headers\n");
+    }
+
+    #[test]
+    fn json_escapes() {
+        assert_eq!(json_str("a\"b\\c\nd\te\u{1}é"), r#""a\"b\\c\nd\te\u0001é""#);
+        let m = parse("from: q\"\n\nx");
+        assert_eq!(
+            m.json(),
+            r#"{"file":"1-x","headers":{"from":"q\""},"body":"x"}"#
+        );
+    }
+
+    #[test]
+    fn rfc3339_dates() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339(946_684_799), "1999-12-31T23:59:59Z");
+        assert_eq!(rfc3339(1_709_210_096), "2024-02-29T12:34:56Z");
+        assert_eq!(rfc3339(4_102_444_800), "2100-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn messages_and_abandoned_takes() {
+        assert!(is_message(b"0001-a"));
+        assert!(!is_message(b".new-1-x") && !is_message(b".taken-1-x") && !is_message(b""));
+        // Our own pid is alive: not abandoned; a malformed name never is.
+        let mine = format!(".taken-{}-0001-a", std::process::id());
+        assert_eq!(abandoned(&mine), None);
+        assert_eq!(abandoned(".taken-notapid-0001-a"), None);
+        assert_eq!(abandoned(".new-123-0001-a"), None);
+        // A pid above the kernel's maximum never exists.
+        assert_eq!(abandoned(".taken-2147483646-0001-a"), Some("0001-a"));
+    }
+
+    #[test]
+    fn deadlines_saturate() {
+        assert!(deadline(None).is_none());
+        assert!(deadline(Some(u64::MAX)).is_none(), "overflow: no deadline");
+        assert!(deadline(Some(5)).is_some());
+    }
+}

@@ -231,3 +231,129 @@ fn copy_tree(src: &Path, dst: &Path, skip: Option<&str>) -> Result<()> {
     fs::set_permissions(dst, fs::metadata(src)?.permissions())?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty scratch directory for test `name`, removed when dropped
+    /// (also when an assertion fails).
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("gitfold-task-{}-{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A scratch git directory holding `config` (a git config file's text).
+    fn git_dir(name: &str, config: &str) -> Scratch {
+        let dir = Scratch::new(name);
+        fs::write(dir.0.join("config"), config).unwrap();
+        dir
+    }
+
+    #[test]
+    fn defaults() {
+        let scratch = git_dir("defaults", "");
+        let dir = &scratch.0;
+        let t = TaskDir::of(dir, "agent/x");
+        assert_eq!(t.name, b".task");
+        assert_eq!(t.dir, dir.join("gitfold/.tasks/agent%2Fx"));
+        assert_eq!(inbox_name(dir), "inbox");
+    }
+
+    #[test]
+    fn settings() {
+        let dir = git_dir(
+            "settings",
+            "[gitfold]\n\ttaskDir = .notes\n\ttasksDir = /srv/tasks\n\tinbox = mail\n",
+        );
+        let t = TaskDir::of(&dir.0, "b");
+        assert_eq!(
+            (t.name.as_slice(), t.dir.as_path()),
+            (&b".notes"[..], Path::new("/srv/tasks/b"))
+        );
+        assert_eq!(inbox_name(&dir.0), "mail");
+    }
+
+    #[test]
+    fn bad_settings_fall_back() {
+        // A task folder name, a tasks directory and an inbox name, each unusable.
+        for (name, task_dir, tasks_dir, inbox) in [
+            ("slash", "a/b", "rel/dir", "a/b"),
+            ("dot", ".", "dir", ".hidden"),
+            ("dotdot", "..", "./dir", "."),
+            ("git", ".git", "../up", "inbox/x"),
+        ] {
+            let scratch = git_dir(
+                name,
+                &format!(
+                    "[gitfold]\n\ttaskDir = {task_dir}\n\ttasksDir = {tasks_dir}\n\tinbox = {inbox}\n"
+                ),
+            );
+            let dir = &scratch.0;
+            let t = TaskDir::of(dir, "b");
+            assert_eq!(t.name, b".task", "taskDir {task_dir}");
+            assert_eq!(t.dir, dir.join("gitfold/.tasks/b"), "tasksDir {tasks_dir}");
+            assert_eq!(inbox_name(dir), "inbox", "inbox {inbox}");
+        }
+    }
+
+    #[test]
+    fn copy_leaves_inbox_and_dot_files() {
+        let scratch = Scratch::new("copy");
+        let root = &scratch.0;
+        let (from, to) = (root.join("from"), root.join("to"));
+        for p in ["notes", "inbox"] {
+            fs::create_dir_all(from.join(p)).unwrap();
+        }
+        for (p, text) in [
+            ("spec.md", "s"),
+            ("notes/a", "n"),
+            ("inbox/1-x", "m"),
+            (".waiting", ""),
+            ("notes/.new-1", ""),
+        ] {
+            fs::write(from.join(p), text).unwrap();
+        }
+        let src = TaskDir {
+            name: b".task".to_vec(),
+            dir: from,
+        };
+        let dst = TaskDir {
+            name: b".task".to_vec(),
+            dir: to.clone(),
+        };
+        assert!(dst.copy_from(&src, "inbox").unwrap());
+        let mut got: Vec<_> = walk(&to);
+        got.sort();
+        assert_eq!(got, ["notes", "notes/a", "spec.md"]);
+        assert!(
+            !dst.copy_from(&src, "inbox").unwrap(),
+            "an existing folder is kept"
+        );
+
+        fn walk(dir: &Path) -> Vec<String> {
+            let mut out = Vec::new();
+            for e in fs::read_dir(dir).unwrap().flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if e.file_type().unwrap().is_dir() {
+                    out.extend(walk(&e.path()).into_iter().map(|p| format!("{name}/{p}")));
+                }
+                out.push(name);
+            }
+            out
+        }
+    }
+}
