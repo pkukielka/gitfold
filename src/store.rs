@@ -64,6 +64,8 @@ pub struct TreeTable {
     /// Sorted in git tree order (directories compare as `name/`), which makes a
     /// depth-first walk produce paths in index order.
     entries: Box<[TEntry]>,
+    /// The entries' names, in the tree object's order (not `entries`'): only
+    /// reached through each entry's offset and length.
     names: Box<[u8]>,
     /// Index entries below this tree (files, symlinks and submodules).
     index_entries: u32,
