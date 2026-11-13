@@ -142,6 +142,7 @@ Then, per request (`fs/workspace/`):
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
 | `src/daemon/control.rs` | the daemon's control socket (`remove` and `branch --with-changes` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
+| `src/cli/inbox.rs` | `watch`, `inbox` and `send`: messages and inotify watches on task folders, and the Claude Code hook outputs |
 | `src/cli/manage.rs` | `branch`, `list`, `changes`, `remove`, `prune`, `prewarm` and `track-reads` commands |
 | `src/cli/overlaps.rs` | `gitfold overlaps`: what a workspace read or changed that changed elsewhere since |
 | `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
@@ -1102,6 +1103,42 @@ outside the mount, emptied by `git clean -fdx`, and entangled with rebases
 and copy-up; a sandbox allowing writes only below the working directory was
 its argument, but committing already needs writes to `.git`, where the folder
 is by default. Keeping the folder in the state directory (lost with `remove`).
+
+### Messages: files in the task folder, delivered by hooks
+
+**What:** an inbox is a directory of the task folder; a message is one file
+(headers, an empty line, a body), renamed into place by its sender and taken
+by renaming it to a dot name, so each goes to one reader. `gitfold watch` is
+the general primitive (inotify on a task folder's directory); `inbox` is the
+convention built on it. Nothing goes through the daemon: it all works
+unmounted, and anything can read or write the files.
+
+**Why:**
+
+- **Files, not a service:** orchestrators that already have mail (Gas Town's
+  is in a SQL database) can ignore it, or write and read the same files
+  without gitfold. The format is documented in the README as an interface.
+- **Delivery by hooks, not polling:** an agent told to check its inbox spends
+  tokens on every empty check. Claude Code hooks inject messages when a
+  prompt is sent and after each tool call (as Gas Town does on
+  `UserPromptSubmit`), and an `asyncRewake` hook on `Stop`, waiting on the
+  inbox, wakes an idle session when one arrives; a lock (`.waiting`) keeps
+  one such waiter per inbox, since every `Stop` starts one, and the waiter
+  ends when its session (its parent) does. The `PostToolUse` hook ignores a
+  subagent's tool calls: what it injects there wouldn't reach the session.
+  Harnesses without hooks get `inbox --wait`, a blocking command.
+- **Taken, then deleted once printed:** a reader that dies between leaves
+  `.taken-<pid>-<name>`, which the next reader puts back; a watch whose
+  directory is deleted or moved, or whose events overflowed, is made again
+  and everything listed.
+- **A generic watch:** directories other than the inbox (`reviews/`, a task
+  folder where a handoff appears) serve uses we don't foresee; the inbox is a default with a
+  name (`gitfold.inbox`), not a special case in the folder.
+
+**Rejected:** typing messages into the agent's terminal (Gas Town's `gt
+nudge` drives tmux): tied to tmux and to how each harness reads input;
+`asyncRewake` does it inside the harness. Messages through the daemon's socket
+(would need it mounted, and a protocol instead of files).
 
 ## Rejected ideas (index)
 

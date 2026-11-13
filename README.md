@@ -123,6 +123,11 @@ gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>] [--track-reads on
                                               # (-w: with a workspace's changes)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
+gitfold send <BRANCH> [-s <SUBJECT>] <TEXT>   # a message to a task's inbox
+gitfold inbox [<BRANCH>] [--wait [--timeout <SECS>]] [--peek]
+                                              # take the messages in it
+gitfold watch [<BRANCH>:]<DIR> [--timeout <SECS>]
+                                              # wait for a change in a task folder
 gitfold overlaps [<BRANCH>] [--against <REV>]... [--against-workspaces] [--reads|--writes] [-z]
                                               # what it read or changed that
                                               # changed elsewhere since
@@ -322,6 +327,35 @@ path or `~/...` (say in your notes; then `<dir>/<id>/`). A workspace whose base
 tracks a path of the link's name, or that has one among its changes, has no
 task folder (the daemon logs why). Sandboxed agents need write access to the
 folder's directory: by default inside `.git`, which committing needs anyway.
+
+**Messages.** `gitfold send <BRANCH> <TEXT>` leaves a message in a task's
+inbox, `inbox/` in its task folder (`gitfold.inbox` names it); the branch
+needs no workspace yet. `gitfold inbox` takes the messages in the inbox of the
+workspace you are in (or of `<BRANCH>`) and prints them: each is taken once,
+however many read at a time. `--wait` waits for one if there are none (up to
+`--timeout <SECS>`); `--peek` lists them without taking; `--json` for
+programs. A fork (`branch -w`) leaves the inbox behind: its messages were for
+the source's agent.
+`--claude-hook` hands them to Claude Code's hooks: injected into the
+conversation when a prompt is sent and after each tool call (not a
+subagent's: its context isn't the session's), and waking an idle session when
+one arrives (the skill has the configuration). `gitfold watch
+[<BRANCH>:]<DIR>` is the general form: it waits until a file in a directory of
+a task folder changes, prints which (`C` or `D` and the name, each name's
+last change), and exits (`D .` if the directory itself goes); a supervisor
+can wait on another task's folder (`agent/b:.`) for its handoff, an agent on
+`reviews/` for work.
+
+The format is plain files, for anything to read and write without gitfold:
+one file per message in the inbox directory, named `<nanoseconds since the
+epoch>-<sender>` (so names sort by arrival), holding header lines (`from:`,
+`time:` in UTC, `subject:` if any), an empty line, and the body. A sender
+writes a file whose name starts with a dot and renames it into place; a
+reader takes a message by renaming it to `.taken-<pid>-<name>` before reading
+it, so that it goes to one reader, and deletes it once printed (a message a
+dead reader left is put back). Names starting with a dot are never messages.
+A file without headers is all body; CRLF line ends are read as LF.
+Watchers use inotify on the folder's directory, mounted or not.
 
 **Finish.** Push or merge the branch from anywhere, then remove the workspace
 with `gitfold remove <BRANCH>`, mounted or not (see

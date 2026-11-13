@@ -17,6 +17,7 @@
 
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -120,7 +121,10 @@ impl TaskDir {
     /// Copies the folder of another branch into this one's (`branch -w`), unless
     /// this one has a folder already (a branch of the same name had one).
     /// Returns whether it copied.
-    pub fn copy_from(&self, from: &TaskDir) -> Result<bool> {
+    /// Its inbox (`inbox`, not copied: messages are for the source's agent)
+    /// and names starting with a dot (files being written or taken) stay
+    /// behind.
+    pub fn copy_from(&self, from: &TaskDir, inbox: &str) -> Result<bool> {
         if self.dir.exists() || !from.dir.exists() {
             return Ok(false);
         }
@@ -131,13 +135,33 @@ impl TaskDir {
             self.dir.file_name().unwrap_or_default().to_string_lossy()
         ));
         let _ = fs::remove_dir_all(&tmp);
-        let copied = copy_tree(&from.dir, &tmp).and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
+        let copied =
+            copy_tree(&from.dir, &tmp, Some(inbox)).and_then(|()| Ok(fs::rename(&tmp, &self.dir)?));
         if copied.is_err() {
             let _ = fs::remove_dir_all(&tmp);
         }
         copied.map(|()| true)
     }
 }
+
+/// The name of a task folder's inbox: `gitfold.inbox` if it is one plain name
+/// (not starting with a dot), else `inbox`.
+pub fn inbox_name(common_dir: &Path) -> String {
+    let name = config(common_dir)
+        .and_then(|c| c.string_by("gitfold", None, "inbox").map(|v| v.to_string()))
+        .map(|v| v.trim().to_string());
+    match name {
+        Some(name) if !name.is_empty() && !name.contains('/') && !name.starts_with('.') => name,
+        Some(name) => {
+            warn!("gitfold.inbox {name:?} isn't a plain name: using {DEFAULT_INBOX}");
+            DEFAULT_INBOX.to_string()
+        }
+        None => DEFAULT_INBOX.to_string(),
+    }
+}
+
+/// The inbox's name unless `gitfold.inbox` says otherwise.
+const DEFAULT_INBOX: &str = "inbox";
 
 /// The repository's own config file (where `git config` writes), read now.
 fn config(common_dir: &Path) -> Option<gix::config::File> {
@@ -185,14 +209,19 @@ fn exclude(common_dir: &Path, name: &[u8]) -> Result<()> {
 
 /// Copies directory `src` to new directory `dst`, files, symlinks and
 /// directories, with their modes.
-fn copy_tree(src: &Path, dst: &Path) -> Result<()> {
+/// Leaves out names starting with a dot, and `skip` in `src` itself.
+fn copy_tree(src: &Path, dst: &Path, skip: Option<&str>) -> Result<()> {
     fs::create_dir(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let (from, to) = (entry.path(), dst.join(entry.file_name()));
+        let name = entry.file_name();
+        if name.as_bytes().starts_with(b".") || skip.is_some_and(|s| name == s) {
+            continue;
+        }
+        let (from, to) = (entry.path(), dst.join(&name));
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            copy_tree(&from, &to)?;
+            copy_tree(&from, &to, None)?;
         } else if kind.is_symlink() {
             std::os::unix::fs::symlink(fs::read_link(&from)?, &to)?;
         } else {
