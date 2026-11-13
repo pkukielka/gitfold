@@ -137,3 +137,27 @@ fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
 fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
     settings::set_branch(repo, name, settings::PREWARM, &mode.to_string())
 }
+
+/// The arguments of `gitfold branch` (see `main`).
+#[derive(clap::Args)]
+pub struct BranchArgs {
+    pub branch: String,
+    /// Copy the uncommitted changes of the workspace --from names, or of the
+    /// one you are in.
+    #[arg(short = 'w', long)]
+    pub with_changes: bool,
+    /// Start point (default: HEAD of the worktree you are in, as for `git
+    /// branch`).
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Prewarm mode for this workspace, kept across remounts (in git
+    /// config, branch.<BRANCH>.gitfoldPrewarm); a mount's `--prewarm none`
+    /// still wins.
+    #[arg(long, value_enum)]
+    pub prewarm: Option<crate::daemon::prewarm::Prewarm>,
+    /// Record the files read in this workspace, for `gitfold overlaps`, or
+    /// not, whatever the mount's --track-reads says (in git config,
+    /// branch.<BRANCH>.gitfoldTrackReads).
+    #[arg(long, value_name = "on|off", value_parser = clap::builder::BoolishValueParser::new())]
+    pub track_reads: Option<bool>,
+}

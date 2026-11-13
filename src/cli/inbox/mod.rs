@@ -14,7 +14,7 @@
 mod message;
 mod watch;
 
-pub use watch::watch;
+pub use watch::{WatchArgs, watch};
 
 use std::fs;
 use std::io::{ErrorKind, IsTerminal, Read};
@@ -65,7 +65,7 @@ pub enum Hook {
 }
 
 /// What `gitfold inbox` was asked to do.
-pub struct InboxArgs {
+pub struct Options {
     pub wait: bool,
     pub timeout: Option<u64>,
     pub peek: bool,
@@ -79,7 +79,7 @@ pub struct InboxArgs {
 /// With `peek`, only lists them, taking nothing: `from` and `subject` (or the
 /// body's first line), one per line; nothing when empty. With `hook`, hands
 /// them to a Claude Code hook instead. Returns the exit code.
-pub fn inbox(repo: &Path, branch: &str, args: InboxArgs) -> Result<i32> {
+pub fn inbox(repo: &Path, branch: &str, args: Options) -> Result<i32> {
     let common_dir = git::init(repo)?;
     let dir = task_dir(&common_dir, branch)?.join(inbox_name(&common_dir));
     if args.peek {
@@ -258,6 +258,47 @@ pub fn send(repo: &Path, to: &str, from: &str, subject: Option<&str>, body: &str
     delivered.with_context(|| format!("delivering to {to}"))?;
     println!("sent to {to}");
     Ok(())
+}
+
+/// The arguments of `gitfold inbox` (see `main`).
+#[derive(clap::Args)]
+pub struct InboxArgs {
+    /// The workspace's branch (default: the workspace you are in).
+    pub branch: Option<String>,
+    /// If there are none, wait for one.
+    #[arg(long)]
+    pub wait: bool,
+    /// With --wait: give up after this many seconds.
+    #[arg(long, value_name = "SECS", requires = "wait")]
+    pub timeout: Option<u64>,
+    /// Only list them, taking nothing: sender and subject (or first line),
+    /// one per line; nothing if there are none.
+    #[arg(long, conflicts_with = "wait")]
+    pub peek: bool,
+    /// One JSON object per message: {"file", "headers", "body"}.
+    #[arg(long)]
+    pub json: bool,
+    /// Hand them to a Claude Code hook: `user-prompt-submit` (as context),
+    /// `post-tool-use` (as `additionalContext`), or `rewake` (an async
+    /// `Stop` hook with `asyncRewake`: waits for one, then wakes the idle
+    /// session). See skills/gitfold/SKILL.md.
+    #[arg(long, value_enum, value_name = "EVENT", conflicts_with = "peek")]
+    pub claude_hook: Option<crate::cli::inbox::Hook>,
+}
+
+/// The arguments of `gitfold send` (see `main`).
+#[derive(clap::Args)]
+pub struct SendArgs {
+    /// The recipient's branch.
+    pub to: String,
+    /// The message (`-`: read it from stdin).
+    #[arg(required = true)]
+    pub text: Vec<String>,
+    /// Who it is from (default: the workspace you are in, else `user`).
+    #[arg(long)]
+    pub from: Option<String>,
+    #[arg(short, long)]
+    pub subject: Option<String>,
 }
 
 #[cfg(test)]

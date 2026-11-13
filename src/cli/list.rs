@@ -172,6 +172,29 @@ pub fn list(repo: &Path, stat: bool) -> Result<()> {
     Ok(())
 }
 
+/// The arguments of `gitfold list` (see `main`).
+#[derive(clap::Args)]
+pub struct ListArgs {
+    /// Also the lines added and removed, in total (reads every changed
+    /// file and its base version).
+    #[arg(long)]
+    pub stat: bool,
+}
+
+/// The arguments of `gitfold changes` (see `main`).
+#[derive(clap::Args)]
+pub struct ChangesArgs {
+    /// The workspace's branch (default: the workspace you are in).
+    pub branch: Option<String>,
+    /// End each line with NUL instead of a newline, paths unquoted.
+    #[arg(short = 'z')]
+    pub nul: bool,
+    /// Also the lines added and removed per path (`-` for binary files),
+    /// as `git diff --numstat`, and a summary line (not with -z).
+    #[arg(long)]
+    pub stat: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,6 +8,7 @@
 pub mod control;
 pub mod prewarm;
 pub mod procs;
+pub mod serve;
 
 use std::fs;
 use std::io::ErrorKind;

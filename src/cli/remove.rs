@@ -102,3 +102,20 @@ pub fn prune(repo: &Path) -> Result<()> {
     println!("removed {removed} snapshot registrations");
     Ok(())
 }
+
+/// The arguments of `gitfold remove` (see `main`).
+#[derive(clap::Args)]
+pub struct RemoveArgs {
+    /// A workspace's branch, or @<rev> for a snapshot.
+    #[arg(value_name = "BRANCH|@REV")]
+    pub name: String,
+    /// Discard uncommitted changes.
+    #[arg(long)]
+    pub force: bool,
+    /// Only check whether it would be removed; remove nothing.
+    #[arg(long)]
+    pub check: bool,
+    /// While in use, retry for up to this many seconds.
+    #[arg(long, value_name = "SECS", default_value_t = 0)]
+    pub wait: u64,
+}

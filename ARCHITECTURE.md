@@ -141,7 +141,8 @@ Then, per request (`fs/workspace/`):
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
 | `src/refusal.rs` | why a command refused (typed, with its own exit code), carried over the control socket; every command's exit codes |
-| `src/main.rs` | CLI (clap) and dispatch, the foreground mount and its control handler, `M_MMAP_THRESHOLD` |
+| `src/main.rs` | the commands (clap) and their dispatch, exit codes, `M_MMAP_THRESHOLD`; each command's arguments are a struct next to its code |
+| `src/inotify.rs` | an inotify watch on one directory (`watch`, `inbox --wait`) |
 | `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access |
 | `src/git/cmd.rs` | running git itself (`command`, `run`, `output`) |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
@@ -151,12 +152,17 @@ Then, per request (`fs/workspace/`):
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |
 | `src/daemon/procs.rs` | processes using a mount (from `/proc`) |
 | `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm` and `track-reads` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/daemon/serve.rs` | the daemon in the foreground: mounting with FUSE, the control requests it answers, until unmounted |
 | `src/daemon/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process |
-| `src/cli/mod.rs` | what commands share: the workspace the current directory is in (`branch_or_current`), the repository lock or a daemon request (`local_or_daemon`) |
-| `src/cli/inbox.rs` | `watch`, `inbox` and `send`: messages and inotify watches on task folders, and the Claude Code hook outputs |
-| `src/cli/manage.rs` | `branch`, `list`, `changes`, `remove`, `prune`, `prewarm` and `track-reads` commands |
+| `src/cli/mod.rs` | what commands share: the workspace the current directory is in (`branch_or_current`), printing paths as git quotes them (`quote`, `write_path`), the repository lock or a daemon request (`local_or_daemon`) |
+| `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
+| `src/cli/list.rs` | `list` and `changes` |
+| `src/cli/remove.rs` | `remove` and `prune` |
+| `src/cli/inbox/mod.rs` | `inbox` (and its Claude Code hook outputs) and `send` |
+| `src/cli/inbox/message.rs` | the message format: listing, taking and parsing message files |
+| `src/cli/inbox/watch.rs` | `watch`: waiting for a change in a task folder |
 | `src/cli/overlaps.rs` | `gitfold overlaps`: what a workspace read or changed that changed elsewhere since |
-| `src/cli/mount.rs` | `mount` in the background (detached, log file), `unmount`, `version` |
+| `src/cli/mount.rs` | `mount` in the background (detached, log file; the daemon is `daemon::serve`), `unmount`, `version` |
 | `src/bench/` | hidden `bench-read` and `bench-attrs` commands |
 | `build.rs` | the build's version (crate version and a hash of its sources; the git commit for `--version`), for `gitfold version` |
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |

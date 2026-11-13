@@ -34,6 +34,24 @@ pub fn default_log(mountpoint: &Path) -> Result<PathBuf> {
     Ok(state.join("gitfold").join(format!("{name}.log")))
 }
 
+/// `gitfold mount` without `--foreground`: starts the daemon in the
+/// background, logging to `log` (or the default log of `mountpoint`), and says
+/// where.
+pub fn background(mountpoint: &Path, log: Option<PathBuf>) -> Result<()> {
+    let log = match log {
+        Some(log) => std::path::absolute(log)?,
+        None => default_log(mountpoint)?,
+    };
+    start(mountpoint, &log)?;
+    println!(
+        "mounted at {} (log: {})",
+        mountpoint.display(),
+        log.display()
+    );
+    println!("unmount with: gitfold unmount {}", mountpoint.display());
+    Ok(())
+}
+
 /// Runs this command again with `--foreground`, detached and logging to `log`,
 /// and waits until `mountpoint` is mounted. The daemon resolves its arguments
 /// in this process's working directory, then moves to `/`.

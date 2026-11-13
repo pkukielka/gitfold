@@ -234,6 +234,30 @@ fn diff(common_dir: &Path, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
         .collect())
 }
 
+/// The arguments of `gitfold overlaps` (see `main`).
+#[derive(clap::Args)]
+pub struct OverlapsArgs {
+    /// The workspace's branch (default: the workspace you are in).
+    pub branch: Option<String>,
+    /// What to compare with (repeatable; default: origin/HEAD, the remote's
+    /// default branch, else main).
+    #[arg(long, value_name = "REV")]
+    pub against: Vec<String>,
+    /// Compare with every other workspace (instead of the default target;
+    /// with --against, as well).
+    #[arg(long)]
+    pub against_workspaces: bool,
+    /// Only files read.
+    #[arg(long, conflicts_with = "writes")]
+    pub reads: bool,
+    /// Only paths changed.
+    #[arg(long)]
+    pub writes: bool,
+    /// End each line with NUL instead of a newline, paths unquoted.
+    #[arg(short = 'z')]
+    pub nul: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -102,3 +102,15 @@ pub fn watch(
     }
     Ok(())
 }
+
+/// The arguments of `gitfold watch` (see `main`).
+#[derive(clap::Args)]
+pub struct WatchArgs {
+    pub target: String,
+    /// Give up after this many seconds, printing nothing.
+    #[arg(long, value_name = "SECS")]
+    pub timeout: Option<u64>,
+    /// One JSON object per line: {"event": "changed"|"deleted", "path"}.
+    #[arg(long)]
+    pub json: bool,
+}
