@@ -25,9 +25,9 @@ pub fn branch_or_current(branch: Option<String>, repo: &Path) -> Result<String> 
     let in_worktrees = repo.parent().and_then(Path::file_name) == Some("worktrees".as_ref());
     let id = repo
         .file_name()
-        .and_then(|n| n.to_str()?.strip_prefix("gitfold-ws-"));
+        .and_then(|n| n.to_str()?.strip_prefix(crate::state::ADMIN_PREFIX));
     match id {
-        Some(id) if in_worktrees => Ok(crate::git::worktree::workspace_branch(id)),
+        Some(id) if in_worktrees => Ok(crate::state::workspace_branch(id)),
         _ => bail!("not in a gitfold workspace: name the branch"),
     }
 }
@@ -42,7 +42,7 @@ pub fn local_or_daemon(
     what: &str,
     local: impl FnOnce() -> Result<String>,
 ) -> Result<String> {
-    match crate::git::lock::lock(common_dir)? {
+    match crate::lock::lock(common_dir)? {
         Some(_lock) => local(),
         None => match crate::daemon::control::request(common_dir, request, None)? {
             Some(done) => Ok(done),

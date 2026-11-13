@@ -14,7 +14,6 @@ use anyhow::{Context, Result, bail};
 
 use crate::daemon::control;
 use crate::daemon::{self, procs};
-use crate::git::worktree;
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
@@ -31,7 +30,7 @@ pub fn default_log(mountpoint: &Path) -> Result<PathBuf> {
             Some(PathBuf::from(home).join(".local/state"))
         })
         .context("neither XDG_STATE_HOME nor HOME is set; pass --log")?;
-    let name = worktree::workspace_id(&mountpoint.display().to_string());
+    let name = crate::state::workspace_id(&mountpoint.display().to_string());
     Ok(state.join("gitfold").join(format!("{name}.log")))
 }
 
@@ -216,7 +215,7 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     let started = Instant::now();
     // After detaching, the wait is for the processes listed.
     let mut told = if detached { 2 } else { 0 };
-    while crate::git::lock::lock(&common_dir)?.is_none() {
+    while crate::lock::lock(&common_dir)?.is_none() {
         let waited = started.elapsed();
         if told == 0 && waited > Duration::from_secs(2) {
             println!("waiting for gitfold to exit (bringing workspace bases up to date)...");

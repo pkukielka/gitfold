@@ -1,4 +1,4 @@
-//! Messages and watching, on the task folders (`workspace::task`):
+//! Messages and watching, on the task folders (`state::task`):
 //! `gitfold watch`, `gitfold inbox` and `gitfold send`.
 //!
 //! An inbox is a directory of a task folder (`task::inbox_name`) holding one
@@ -22,9 +22,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
-use crate::fs::workspace::task::{TaskDir, inbox_name};
 use crate::git;
-use crate::git::worktree::workspace_id;
+use crate::state::task::{TaskDir, inbox_name};
+use crate::state::workspace_id;
 
 /// How long a watch keeps collecting events after the first, so one burst
 /// (a file written then renamed, several messages) comes out together.

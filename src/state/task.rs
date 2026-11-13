@@ -24,14 +24,14 @@ use anyhow::{Context, Result};
 use log::warn;
 
 use crate::fsutil;
-use crate::git::worktree::{self, workspace_id};
 use crate::settings;
+use crate::state::{state_root, workspace_id};
 
 /// The folder's name unless `gitfold.taskDir` says otherwise.
-pub const DEFAULT_NAME: &str = ".task";
+const DEFAULT_NAME: &str = ".task";
 
 /// The file whose first line `gitfold list` shows.
-pub const STATUS: &str = "status";
+const STATUS: &str = "status";
 
 /// Where a workspace's task folder is: its name in the workspace root, and the
 /// directory holding its files.
@@ -58,7 +58,7 @@ impl TaskDir {
             }
             None => DEFAULT_NAME.to_string(),
         };
-        let default = || worktree::state_root(common_dir).join(".tasks");
+        let default = || state_root(common_dir).join(".tasks");
         // Relative paths would depend on each process's current directory.
         let root = match get(settings::TASKS_DIR).map(|d| expand_home(&d)) {
             Some(dir) if dir.is_absolute() => dir,

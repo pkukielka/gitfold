@@ -10,8 +10,10 @@
 //! namespace reading wins over git's shorthand (`origin` for `origin/HEAD`), or
 //! `origin/main` would be unreachable; `origin/HEAD` is then `@origin/HEAD`.
 //!
-//! - `requests`: the requests for `gitfold branch --with-changes` while
-//!   mounted, and their busy marks.
+//! - `busy`: busy marks, keeping a branch from being opened, removed or
+//!   worked on while a request works on it.
+//! - `requests`: the control requests served on workspaces (forks, applying
+//!   prewarm and read-tracking settings).
 
 use std::collections::HashMap;
 use std::fs;
@@ -21,6 +23,7 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+mod busy;
 mod requests;
 
 use fuser::Errno;
@@ -29,16 +32,18 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::workspace::{Workspace, reads};
-use crate::daemon::prewarm::{self, Prewarm, Spawned};
+use super::workspace::{Purpose, Workspace};
+use crate::daemon::prewarm::{self, Prewarm};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
 use crate::git::worktree;
 use crate::inode;
 use crate::refusal::Refusal;
+use crate::settings;
 use crate::state::StateDir;
 use crate::store::Store;
+use busy::{Mark, Marks, busy_error, unmark};
 
 /// What a slot holds, for the inodes in it (`Workspaces::get`).
 pub enum Slot {
@@ -231,93 +236,8 @@ impl Workspaces {
     }
 
     fn tracks_reads(&self, branch: &str) -> bool {
-        reads::tracked(&self.common_dir, branch, self.track_reads)
-    }
-
-    /// `gitfold track-reads`: starts or stops recording reads in the workspace
-    /// of `branch` as its setting (just set) says, if it is open. Says what it
-    /// did.
-    pub fn track_reads_now(&self, branch: &str) -> anyhow::Result<String> {
-        let Some(ws) = self.get_open(branch) else {
-            return Ok(format!("{branch} isn't open: applied when it opens"));
-        };
-        let on = self.tracks_reads(branch);
-        ws.track_reads(on)?;
-        // A content walk running would be recorded as the agent's reads: walked
-        // again as meta (see `branch_mode`).
-        let path = self.mount_point.join(branch);
-        let content = prewarm::for_branch(&self.common_dir, branch).unwrap_or(self.prewarm)
-            == Prewarm::Content;
-        if on && content && self.prewarm != Prewarm::None && prewarm::stop_under(&path) {
-            prewarm::spawn(path, Prewarm::Meta, self.prewarm_threads);
-        }
-        Ok(match on {
-            // Files already read are cached by the kernel: their next reads
-            // aren't seen.
-            true => format!("recording reads in {branch} from now on"),
-            false => format!("stopped recording reads in {branch}"),
-        })
-    }
-
-    /// `gitfold prewarm`: walks the workspace of `branch` in its mode (just set)
-    /// if it is open, from the start (a walk in another mode may be running),
-    /// or stops walking it for `none`. Says what it did.
-    pub fn prewarm_now(&self, branch: &str) -> String {
-        let path = self.mount_point.join(branch);
-        if self.get_open(branch).is_none() {
-            return format!("{branch} isn't open: walked when it opens");
-        }
-        match self.branch_mode(branch) {
-            Prewarm::None => match prewarm::stop_under(&path) {
-                true => format!("stopped walking {}", path.display()),
-                false => format!("{} isn't being walked", path.display()),
-            },
-            _ if self.prewarm == Prewarm::None => {
-                "this mount walks nothing (--prewarm none): remount to walk".to_string()
-            }
-            mode => {
-                prewarm::stop_under(&path);
-                let spawned = prewarm::spawn(path.clone(), mode, self.prewarm_threads);
-                let path = path.display();
-                match spawned {
-                    Spawned::Now => format!("walking {path} ({mode})"),
-                    Spawned::Queued => format!("{path} queued for a walk ({mode})"),
-                    Spawned::Paused => {
-                        format!(
-                            "walks are stopped for an unmount: {path} is walked ({mode}) if it fails"
-                        )
-                    }
-                    // Started meanwhile, by another request.
-                    Spawned::Known => format!("{path} is being walked"),
-                }
-            }
-        }
-    }
-
-    /// Runs `check` for the workspace of `branch` unless something is open
-    /// under that name (then `None`), while it can't be opened: lookups of it
-    /// answer EBUSY.
-    pub fn check_closed<T>(
-        &self,
-        branch: &str,
-        check: impl FnOnce() -> anyhow::Result<T>,
-    ) -> anyhow::Result<Option<T>> {
-        {
-            let _creating = self.creating.lock();
-            if self.by_path.lock().contains_key(branch) {
-                return Ok(None);
-            }
-            if !self.try_mark(branch, Mark::Exclusive) {
-                return Err(busy_error(branch));
-            }
-        }
-        // Unmarked even if `check` panics.
-        let _busy = Busy {
-            set: &self.busy,
-            branch: branch.to_string(),
-            mark: Mark::Exclusive,
-        };
-        check().map(Some)
+        settings::branch_bool(&self.common_dir, branch, settings::TRACK_READS)
+            .unwrap_or(self.track_reads)
     }
 
     /// The open workspace of `branch`.
@@ -529,24 +449,6 @@ impl Workspaces {
         Ok(())
     }
 
-    /// Waits (lock-free, until `OPEN_WAIT` after `started`) while requests read
-    /// `branch` (a copy of the closed workspace), so an agent's open
-    /// doesn't fail because a supervisor read it; EBUSY while it is marked
-    /// exclusively (removed, checked, copied into).
-    fn wait_for_readers(&self, branch: &str, started: Instant) -> Result<(), Errno> {
-        loop {
-            match self.busy.lock().get(branch) {
-                Some(m) if m.exclusive => return Err(Errno::EBUSY),
-                Some(m) if m.readers > 0 => {}
-                _ => return Ok(()),
-            }
-            if started.elapsed() > OPEN_WAIT {
-                return Err(Errno::EBUSY);
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
     /// EBUSY if the workspace of `branch` can't be opened now: it is being
     /// removed, or the branch is checked out elsewhere (git allows one checkout
     /// per branch).
@@ -590,8 +492,15 @@ impl Workspaces {
         };
         let created = new_base.is_some();
         let path = self.mount_point.join(branch);
-        let ws = Workspace::open(store, self.common_dir.clone(), state, branch, new_base)
-            .map_err(|e| fail("opening", e))?;
+        let ws = Workspace::open(
+            store,
+            self.common_dir.clone(),
+            state,
+            branch,
+            new_base,
+            Purpose::Serve,
+        )
+        .map_err(|e| fail("opening", e))?;
         if let Err(e) = ws.track_reads(self.tracks_reads(branch)) {
             warn!("workspace {branch}: not recording reads: {e:#}");
         }
@@ -686,58 +595,4 @@ fn settle(
         return Err(Refusal::InUse.error(format!("workspace {branch} is busy; try again")));
     }
     refuse_if_used()
-}
-
-/// How long opening a workspace waits for requests reading it.
-const OPEN_WAIT: Duration = Duration::from_secs(30);
-
-/// How a request marks a branch busy.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mark {
-    /// Reading it (the source of a copy): any number at once.
-    Reader,
-    /// Removing, checking or writing it: alone.
-    Exclusive,
-}
-
-/// A branch's marks in `Workspaces::busy`.
-#[derive(Default, PartialEq)]
-struct Marks {
-    /// Requests reading it (the source of a copy).
-    readers: usize,
-    /// Being removed, checked while closed, or copied into.
-    exclusive: bool,
-}
-
-/// A branch marked busy by `Workspaces::mark_busy`, until dropped.
-struct Busy<'a> {
-    set: &'a Mutex<HashMap<String, Marks>>,
-    branch: String,
-    mark: Mark,
-}
-
-impl Drop for Busy<'_> {
-    fn drop(&mut self) {
-        unmark(self.set, &self.branch, self.mark);
-    }
-}
-
-/// Undoes a mark of `branch` (see `Workspaces::try_mark`).
-fn unmark(set: &Mutex<HashMap<String, Marks>>, branch: &str, mark: Mark) {
-    let mut busy = set.lock();
-    if let Some(marks) = busy.get_mut(branch) {
-        match mark {
-            Mark::Reader => marks.readers = marks.readers.saturating_sub(1),
-            Mark::Exclusive => marks.exclusive = false,
-        }
-        if *marks == Marks::default() {
-            busy.remove(branch);
-        }
-    }
-}
-
-/// The refusal of a branch busy with something else.
-fn busy_error(branch: &str) -> anyhow::Error {
-    let message = format!("{branch} is busy (being removed, checked or copied); retry");
-    Refusal::InUse.error(message)
 }

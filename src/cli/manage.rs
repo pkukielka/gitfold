@@ -11,25 +11,26 @@ use anyhow::{Context, Result, ensure};
 
 use crate::daemon::control;
 use crate::daemon::prewarm::Prewarm;
-use crate::fs::workspace::retire::{
-    base_note, check_name, check_workspace, removable_workspace, remove_dir,
-    remove_snapshot_registration, remove_workspace,
-};
-use crate::fs::workspace::task::TaskDir;
-use crate::fs::workspace::{fork, status};
+use crate::fs::workspace::catch_up;
 use crate::git;
-use crate::git::worktree::{self, workspace_branch};
+use crate::git::worktree;
 use crate::refusal::Refusal;
 use crate::settings;
+use crate::state::retire::{
+    base_note, check_name, check_workspace, delete_workspace, removable_workspace, remove_dir,
+    remove_snapshot_registration,
+};
+use crate::state::task::TaskDir;
 use crate::state::{self, StateDir};
+use crate::state::{fork, status};
 use crate::store::Store;
 
 /// Takes the repository's daemon lock exclusively, failing if a gitfold daemon
 /// holds it (mounted, or still exiting after an unmount): the daemon keeps
 /// workspace state in memory and owns the files below `.git/gitfold/`. Held
 /// until the returned file is dropped, so no mount starts meanwhile.
-fn exclusive(common_dir: &Path) -> Result<crate::git::lock::Lock> {
-    crate::git::lock::lock(common_dir)?.with_context(|| {
+fn exclusive(common_dir: &Path) -> Result<crate::lock::Lock> {
+    crate::lock::lock(common_dir)?.with_context(|| {
         format!(
             "{} is in use by a gitfold daemon; unmount it first",
             common_dir.display()
@@ -294,7 +295,7 @@ pub(super) struct Listed {
 }
 
 pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
-    let dir = worktree::state_root(common_dir);
+    let dir = state::state_root(common_dir);
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -309,7 +310,8 @@ pub(super) fn workspaces(common_dir: &Path) -> Result<Vec<Listed>> {
         if id.starts_with('.') {
             continue;
         }
-        let branch = state::read_branch(&entry.path()).unwrap_or_else(|| workspace_branch(&id));
+        let branch =
+            state::read_branch(&entry.path()).unwrap_or_else(|| state::workspace_branch(&id));
         list.push(Listed {
             branch,
             state: StateDir::of_id(common_dir, &id),
@@ -431,12 +433,10 @@ fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Resul
             return remove_snapshot_registration(common_dir, rev, &commit.id, false, check);
         }
         let store = Store::default();
+        let ignored = check_workspace(&store, common_dir, name, force, &catch_up)?;
         Ok(match check {
-            true => removable_workspace(
-                name,
-                check_workspace(&store, common_dir, name, force, None)?,
-            ),
-            false => remove_workspace(&store, common_dir, name, force)?,
+            true => removable_workspace(name, ignored),
+            false => delete_workspace(common_dir, name, ignored)?,
         })
     })
 }

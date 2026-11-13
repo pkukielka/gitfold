@@ -35,9 +35,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, ErrorKind};
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -45,14 +43,15 @@ use anyhow::{Result, anyhow};
 use gix::objs::tree::EntryKind;
 use log::info;
 
-use super::markers::Kind;
 use super::times::{Stamp, shown_mtime};
-use super::{Layers, Lower, Workspace, ancestors, join, not_found};
+use super::{Layers, Workspace};
+use crate::fsutil::not_found;
 use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
-use crate::state;
-use crate::store::{EMPTY_TREE, FileRec, Store, TEntry};
+use crate::state::markers::Kind;
+use crate::state::{self, ModeCheck, ancestors, join, matches_stored};
+use crate::store::{EMPTY_TREE, Lower, Store, TEntry};
 
 /// Paths remembered for `drop_unchanged` while git is busy; beyond this (a
 /// build writing while a rebase waits for conflict resolution, say) they are
@@ -261,7 +260,7 @@ impl Workspace {
     /// Whether the workspace's HEAD is on its branch and no git operation is
     /// running or stopped half-way in it.
     fn git_idle(&self) -> bool {
-        worktree::git_busy(&self.common_dir, &self.admin, &self.branch).is_none()
+        worktree::git_busy(&self.common_dir, &self.state.admin, &self.branch).is_none()
     }
 
     fn rebase(&self, store: &Store, new: &Commit, fetch: bool) -> Result<()> {
@@ -322,7 +321,7 @@ impl Workspace {
             }
         }
         layers.times.save()?;
-        state::write_base(&self.state_dir, &new.id)?;
+        state::write_base(&self.state.dir, &new.id)?;
         layers.base = new.id;
         layers.base_tree = new_tree;
         // Before anything below can fail: cached listings hold the old base's files.
@@ -482,7 +481,7 @@ impl Workspace {
                 plan.stale_opaque.push(path);
                 continue;
             }
-            let n = Self::lower_in(store, new_tree, &path);
+            let n = store.entry_at(new_tree, &path);
             let children = match n {
                 Some(Lower::Tree(tree)) => Some(tree),
                 Some(Lower::Gitlink) => Some(EMPTY_TREE),
@@ -551,43 +550,6 @@ impl Workspace {
         };
         Ok(matches_stored(&upper, &meta, &rec, ModeCheck::Exact)?.then(|| Seen::of(&meta)))
     }
-}
-
-/// How `matches_stored` compares modes.
-#[derive(Clone, Copy)]
-pub(super) enum ModeCheck {
-    /// All permission bits, as shown in the mount (an invisible rebase needs it).
-    Exact,
-    /// Only the executable bit, as git records it.
-    Git,
-}
-
-/// Whether the file at `path` (with metadata `meta`) has the content and mode
-/// of stored file `rec`.
-pub(super) fn matches_stored(
-    path: &Path,
-    meta: &fs::Metadata,
-    rec: &FileRec,
-    modes: ModeCheck,
-) -> io::Result<bool> {
-    let data = if rec.kind == EntryKind::Link {
-        if !meta.file_type().is_symlink() {
-            return Ok(false);
-        }
-        fs::read_link(path)?.as_os_str().as_bytes().to_vec()
-    } else {
-        let same_mode = match modes {
-            ModeCheck::Exact => meta.mode() & 0o7777 == rec.perm().into(),
-            ModeCheck::Git => (meta.mode() & 0o100 != 0) == (rec.kind == EntryKind::BlobExecutable),
-        };
-        if !meta.is_file() || meta.len() != rec.size || !same_mode {
-            return Ok(false);
-        }
-        fs::read(path)?
-    };
-    let oid = gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, &data)
-        .map_err(io::Error::other)?;
-    Ok(oid == rec.oid)
 }
 
 fn show(path: &[u8]) -> String {

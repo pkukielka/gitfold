@@ -23,6 +23,12 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
+/// Whether `e` means there is nothing at a path: not found, or a component of
+/// it isn't a directory.
+pub fn not_found(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
+}
+
 /// Sets `path`'s access and modification times (`None`: left as they are),
 /// not following a symlink.
 pub fn set_times(

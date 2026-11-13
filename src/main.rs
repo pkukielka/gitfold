@@ -5,6 +5,7 @@ mod fs;
 mod fsutil;
 mod git;
 mod inode;
+mod lock;
 mod refusal;
 mod settings;
 mod state;
@@ -373,8 +374,8 @@ fn run() -> Result<i32> {
             // Paths are resolved: don't keep the caller's directory busy (it may be
             // on another mount the user wants to unmount).
             std::env::set_current_dir("/")?;
-            // Held until the daemon exits (see `git::lock::mount_lock`).
-            let _lock = git::lock::mount_lock(&common_dir)?;
+            // Held until the daemon exits (see `lock::mount_lock`).
+            let _lock = lock::mount_lock(&common_dir)?;
             log::info!(
                 "gitfold {VERSION}: mounting {} at {}",
                 common_dir.display(),

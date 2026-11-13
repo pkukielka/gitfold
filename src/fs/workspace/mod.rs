@@ -16,26 +16,17 @@
 //! The base follows the branch tip (`rebase`), without visible effect.
 //!
 //! - `nodes`: local id ↔ (parent, name) table.
-//! - `fork`: copying a workspace into a new branch (`branch --with-changes`).
-//! - `markers`: persisted whiteouts and opaque markers.
-//! - `times`: timestamps of files dropped from upper.
 //! - `rebase`: moving the base to the branch tip.
-//! - `reads`: the files read in it (`gitfold overlaps`).
-//! - `task`: the task folder (the `.task` link), kept apart from the changes.
-//! - `status`: a workspace's changes, read from its state directory (for
-//!   `list`, `changes`, `overlaps` and `remove`).
-//! - `retire`: the rules for removing a workspace or a snapshot's
-//!   registration.
+//! - `reads`: recording the files read in it (`gitfold overlaps`).
+//! - `times`: timestamps of files dropped from upper (only the mount uses them).
 //! - `write`: mutations and copy-up.
+//!
+//! What a workspace stores, and what commands read from it without a mount
+//! (its changes, the removal rules, forks, the task folder), is `state`.
 
-pub mod fork;
-mod markers;
 mod nodes;
-pub mod reads;
+mod reads;
 mod rebase;
-pub mod retire;
-pub mod status;
-pub mod task;
 mod times;
 mod write;
 
@@ -51,15 +42,15 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use anyhow::{Context, Result};
 use fuser::Errno;
 use gix::ObjectId;
-use gix::objs::tree::EntryKind;
 use parking_lot::{Mutex, RwLock};
 
+use crate::fsutil::not_found;
 use crate::git;
-use crate::git::worktree;
 use crate::inode;
-use crate::state::{self, StateDir};
-use crate::store::{Store, TEntry};
-use markers::Markers;
+use crate::state::markers::{Markers, hidden};
+use crate::state::task::TaskDir;
+use crate::state::{self, StateDir, join};
+use crate::store::{Lower, Store};
 use nodes::Nodes;
 use times::{Stamp, Times};
 
@@ -94,31 +85,15 @@ impl Obj {
     }
 }
 
-enum Lower {
-    Tree(u32),
-    /// Submodule: an empty directory.
-    Gitlink,
-    File(u32),
-}
-
-impl Lower {
-    fn of(e: &TEntry) -> Lower {
-        match e.kind {
-            EntryKind::Tree => Lower::Tree(e.id),
-            EntryKind::Commit => Lower::Gitlink,
-            _ => Lower::File(e.id),
-        }
-    }
-}
-
 pub struct Workspace {
     upper: PathBuf,
-    /// The task folder, unless the base tracks a path of its name (`task`).
-    task: Option<task::TaskDir>,
+    /// The task folder, if it has one: not when opened only to catch up, nor
+    /// when its base tracks a path of the folder's name or upper has one, nor
+    /// if the folder couldn't be made (`state::task`).
+    task: Option<TaskDir>,
     common_dir: PathBuf,
-    state_dir: PathBuf,
-    /// The worktree's admin directory (`.git/worktrees/gitfold-ws-<id>`).
-    admin: PathBuf,
+    /// Where its state and its worktree registration are.
+    state: StateDir,
     branch: String,
     /// `refs/gitfold/<id>`, which keeps the base from `git gc`, and the commit it
     /// was last set to.
@@ -238,33 +213,6 @@ pub enum Read {
     Lower(u32),
 }
 
-fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
-    let mut path = dir.to_vec();
-    if !path.is_empty() {
-        path.push(b'/');
-    }
-    path.extend_from_slice(name);
-    path
-}
-
-/// The path prefixes of `path` at `/` boundaries, shortest first, excluding `path`.
-fn ancestors(path: &[u8]) -> impl Iterator<Item = &[u8]> {
-    path.iter()
-        .enumerate()
-        .filter(|(_, b)| **b == b'/')
-        .map(|(i, _)| &path[..i])
-}
-
-/// Whether the lower entry at `path` is hidden by a whiteout on it or an
-/// ancestor, or by an opaque ancestor.
-fn hidden(whiteouts: &markers::PathSet, opaque: &markers::PathSet, path: &[u8]) -> bool {
-    whiteouts.contains(path) || ancestors(path).any(|p| whiteouts.contains(p) || opaque.contains(p))
-}
-
-fn not_found(e: &io::Error) -> bool {
-    e.kind() == ErrorKind::NotFound || e.raw_os_error() == Some(libc::ENOTDIR)
-}
-
 impl Workspace {
     /// Opens the workspace of `branch` stored in `state`, creating it at
     /// `new_base` if new.
@@ -274,6 +222,7 @@ impl Workspace {
         state: StateDir,
         branch: &str,
         new_base: Option<git::Commit>,
+        purpose: Purpose,
     ) -> Result<Workspace> {
         let created = new_base.is_some();
         let base = match new_base {
@@ -284,27 +233,9 @@ impl Workspace {
         let base_tree = store.load_tree(base.tree)?;
         let upper = state.upper();
         fs::create_dir_all(&upper).with_context(|| format!("creating {}", upper.display()))?;
-        let task = task::TaskDir::of(&common_dir, branch);
-        let shown = String::from_utf8_lossy(&task.name).into_owned();
-        let in_upper = upper.join(std::ffi::OsStr::from_bytes(&task.name));
-        let task = if store.tree(base_tree).find(&task.name).is_some() {
-            log::warn!(
-                "workspace {branch}: no task folder: its base tracks {shown} (set gitfold.taskDir)"
-            );
-            None
-        } else if fs::symlink_metadata(&in_upper).is_ok() {
-            log::warn!(
-                "workspace {branch}: no task folder: it has a file {shown} (set gitfold.taskDir)"
-            );
-            None
-        } else {
-            match task.prepare(&common_dir) {
-                Ok(()) => Some(task),
-                Err(e) => {
-                    log::warn!("workspace {branch}: no task folder: {e:#}");
-                    None
-                }
-            }
+        let task = match purpose {
+            Purpose::Serve => task_folder(store, base_tree, &upper, &common_dir, branch),
+            Purpose::CatchUp => None,
         };
         if created {
             state::write_branch(&state.dir, branch)?;
@@ -321,7 +252,7 @@ impl Workspace {
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
-        let pin_ref = worktree::pin_ref(&state.id);
+        let pin_ref = state.pin_ref();
         // The registration's directory name is deterministic, so the `.git`
         // file can be written before the workspace exists.
         let gitfile = format!("gitdir: {}\n", state.admin.display()).into_bytes();
@@ -329,8 +260,7 @@ impl Workspace {
             upper,
             task,
             common_dir,
-            state_dir: state.dir,
-            admin: state.admin,
+            state,
             branch: branch.to_string(),
             pin_ref,
             pinned: Mutex::new(None),
@@ -372,11 +302,7 @@ impl Workspace {
     }
 
     fn upper_path(&self, path: &[u8]) -> PathBuf {
-        if path.is_empty() {
-            self.upper.clone()
-        } else {
-            self.upper.join(std::ffi::OsStr::from_bytes(path))
-        }
+        state::upper_path(&self.upper, path)
     }
 
     /// The path of node `local`. Callers that act on the result hold `layers`,
@@ -386,21 +312,7 @@ impl Workspace {
     }
 
     fn lower(store: &Store, layers: &Layers, path: &[u8]) -> Option<Lower> {
-        Self::lower_in(store, layers.base_tree, path)
-    }
-
-    /// The entry at `path` below tree `tree`.
-    fn lower_in(store: &Store, tree: u32, path: &[u8]) -> Option<Lower> {
-        let mut cur = Lower::Tree(tree);
-        if path.is_empty() {
-            return Some(cur);
-        }
-        for comp in path.split(|b| *b == b'/') {
-            let Lower::Tree(tree) = cur else { return None };
-            let table = store.tree(tree);
-            cur = Lower::of(table.find(comp)?);
-        }
-        Some(cur)
+        store.entry_at(layers.base_tree, path)
     }
 
     /// Whether the lower entry at `path` is hidden by a whiteout or an opaque
@@ -604,4 +516,73 @@ impl Workspace {
             Obj::LowerDir => Err(Errno::EINVAL),
         }
     }
+}
+
+impl Workspace {
+    /// Copies this open workspace's state into `dst` (see `copy_state_dir`),
+    /// with every write through the mount held off meanwhile.
+    pub fn copy_state(&self, dst: &Path) -> Result<()> {
+        let mut layers = self.layers.write();
+        // Copy-ups write under a shared `layers`; none is half-done now.
+        layers.times.save()?;
+        layers.markers.sync()?;
+        state::fork::copy_state_dir(&self.common_dir, &self.branch, &self.state, dst)
+    }
+}
+
+/// The task folder a workspace served under the mount links to (see
+/// `state::task`), set up; none, with a warning, where it can't have one.
+fn task_folder(
+    store: &Store,
+    base_tree: u32,
+    upper: &Path,
+    common_dir: &Path,
+    branch: &str,
+) -> Option<TaskDir> {
+    let task = TaskDir::of(common_dir, branch);
+    let shown = String::from_utf8_lossy(&task.name).into_owned();
+    if store.tree(base_tree).find(&task.name).is_some() {
+        log::warn!(
+            "workspace {branch}: no task folder: its base tracks {shown} (set gitfold.taskDir)"
+        );
+        return None;
+    }
+    if fs::symlink_metadata(upper.join(std::ffi::OsStr::from_bytes(&task.name))).is_ok() {
+        log::warn!(
+            "workspace {branch}: no task folder: it has a file {shown} (set gitfold.taskDir)"
+        );
+        return None;
+    }
+    match task.prepare(common_dir) {
+        Ok(()) => Some(task),
+        Err(e) => {
+            log::warn!("workspace {branch}: no task folder: {e:#}");
+            None
+        }
+    }
+}
+
+/// Brings the stored base of the closed workspace of `branch` up to its branch
+/// tip, as opening it does (`state::retire` checks it then).
+pub fn catch_up(store: &Store, common_dir: &Path, branch: &str) -> Result<()> {
+    let state = StateDir::of(common_dir, branch);
+    let ws = Workspace::open(
+        store,
+        common_dir.to_path_buf(),
+        state,
+        branch,
+        None,
+        Purpose::CatchUp,
+    )?;
+    ws.sync(store)
+}
+
+/// What a workspace is opened for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Shown under the mount: with its task folder.
+    Serve,
+    /// Only to bring its stored base up to the branch tip, closed (`catch_up`,
+    /// for `remove` and its `--check`): nothing set up that it doesn't need.
+    CatchUp,
 }

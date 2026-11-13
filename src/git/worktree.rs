@@ -41,16 +41,8 @@ pub fn snapshot_admin_dir(common_dir: &Path, commit: &ObjectId) -> PathBuf {
     ))
 }
 
-/// Admin directory of the workspace with directory name `id`:
-/// `<common>/worktrees/gitfold-ws-<id>`.
-pub fn ws_admin_dir(common_dir: &Path, id: &str) -> PathBuf {
-    common_dir
-        .join("worktrees")
-        .join(format!("gitfold-ws-{id}"))
-}
-
 /// Registers a workspace on `branch` with admin directory `dir` (see
-/// `ws_admin_dir`). HEAD and the index belong to git once the worktree exists,
+/// `StateDir::admin`). HEAD and the index belong to git once the worktree exists,
 /// so they are only written when it is new or incomplete (`index` is called
 /// then); otherwise this just points `gitdir` at the current mount path.
 pub fn register_branch(
@@ -175,22 +167,6 @@ impl std::fmt::Display for GitBusy {
     }
 }
 
-/// `<common>/gitfold`: the workspaces' state directories, by id.
-pub fn state_root(common_dir: &Path) -> PathBuf {
-    common_dir.join("gitfold")
-}
-
-/// A workspace's id, naming its state and registration directories: the branch
-/// with `%` and `/` escaped.
-pub fn workspace_id(branch: &str) -> String {
-    branch.replace('%', "%25").replace('/', "%2F")
-}
-
-/// The branch of workspace id `id` (inverse of `workspace_id`).
-pub fn workspace_branch(id: &str) -> String {
-    id.replace("%2F", "/").replace("%25", "%")
-}
-
 /// Whether `name` (in `<common>/worktrees/`) is a snapshot registration
 /// (`gitfold-<sha12>`, see `register`).
 pub fn is_snapshot_registration(name: &str) -> bool {
@@ -199,33 +175,17 @@ pub fn is_snapshot_registration(name: &str) -> bool {
 }
 
 /// Refuses (a git operation in progress, `Refusal::Changes`) if git is busy in
-/// the workspace of `branch`; `then` says what to do once it is done.
-pub fn refuse_if_busy(common_dir: &Path, branch: &str, then: &str) -> Result<()> {
-    let admin = ws_admin_dir(common_dir, &workspace_id(branch));
+/// the workspace of `branch`, with registration `admin`; `then` says what to
+/// do once it is done.
+pub fn refuse_if_busy(common_dir: &Path, admin: &Path, branch: &str, then: &str) -> Result<()> {
     match admin
         .exists()
-        .then(|| git_busy(common_dir, &admin, branch))
+        .then(|| git_busy(common_dir, admin, branch))
         .flatten()
     {
         Some(why) => {
             Err(crate::refusal::Refusal::Changes.error(format!("{branch}: {why}; {then}")))
         }
         None => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Ids name directories: no `/`, and the branch reads back from its id.
-    #[test]
-    fn workspace_ids_round_trip() {
-        for branch in ["main", "agent/task-17", "a%2Fb", "100%", "x/%25/y"] {
-            let id = workspace_id(branch);
-            assert!(!id.contains('/'), "{id}");
-            assert_eq!(workspace_branch(&id), branch);
-        }
-        assert_eq!(workspace_id("agent/task-17"), "agent%2Ftask-17");
     }
 }

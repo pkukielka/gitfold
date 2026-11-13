@@ -490,6 +490,10 @@ unmount_fs
 eq "the base caught up at unmount" "$(R rev-parse six)" "$(cat "$COMMON/gitfold/six/base")"
 c2=$(R commit-tree "six^{tree}" -p six -m 'moved while unmounted')
 R update-ref refs/heads/six "$c2"                                  # base now behind the tip
+rm -rf "$COMMON/gitfold/.tasks/six"
+check "remove --check catches up offline" "$BIN" -C "$REPO" remove six --check
+eq "and catching up sets up no task folder" "$(R rev-parse six) no" \
+    "$(cat "$COMMON/gitfold/six/base") $(test -e "$COMMON/gitfold/.tasks/six" && echo made || echo no)"
 check "remove catches up offline and removes" "$BIN" -C "$REPO" remove six
 }
 

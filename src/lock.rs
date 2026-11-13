@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use super::worktree::state_root;
+use crate::state::state_root;
 
 /// The repository lock (see `lock`); released when dropped, also when the
 /// process dies.

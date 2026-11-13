@@ -467,3 +467,38 @@ impl<F: Fn(&[u8], &DirRec, &TEntry) -> u32> IndexWalk<'_, F> {
         }
     }
 }
+
+/// What is at a path of a stored tree.
+#[derive(Clone, Copy)]
+pub enum Lower {
+    Tree(u32),
+    /// Submodule: an empty directory.
+    Gitlink,
+    File(u32),
+}
+
+impl Lower {
+    pub fn of(e: &TEntry) -> Lower {
+        match e.kind {
+            EntryKind::Tree => Lower::Tree(e.id),
+            EntryKind::Commit => Lower::Gitlink,
+            _ => Lower::File(e.id),
+        }
+    }
+}
+
+impl Store {
+    /// The entry at `path` (`/`-separated) below tree `tree`, if any.
+    pub fn entry_at(&self, tree: u32, path: &[u8]) -> Option<Lower> {
+        let mut cur = Lower::Tree(tree);
+        if path.is_empty() {
+            return Some(cur);
+        }
+        for comp in path.split(|b| *b == b'/') {
+            let Lower::Tree(tree) = cur else { return None };
+            let table = self.tree(tree);
+            cur = Lower::of(table.find(comp)?);
+        }
+        Some(cur)
+    }
+}

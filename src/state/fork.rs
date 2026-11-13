@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
-use super::Workspace;
 use crate::fsutil::{self, Unreadable};
 use crate::git;
 use crate::git::worktree;
@@ -29,16 +28,11 @@ use crate::state::{self, StateDir};
 /// Files of a state directory a fork copies (`upper` is copied as a tree;
 /// `branch` is written for the fork; `tmp` holds only interrupted copy-ups).
 /// `reads` too: the changes copied were built on those reads.
-const COPIED: [&str; 4] = [
-    state::BASE,
-    state::MARKERS,
-    state::TIMES,
-    super::reads::READS,
-];
+const COPIED: [&str; 4] = [state::BASE, state::MARKERS, state::TIMES, state::READS];
 
 /// The source's git index, copied into the new state directory with the rest
 /// (under the same lock) and moved into the fork's registration.
-pub const INDEX: &str = ".index";
+const INDEX: &str = ".index";
 
 /// Forks workspace `from` into new branch `to`, with `copy` filling the new
 /// state directory from the source's (see `copy_state_dir`). `mount` is the
@@ -59,7 +53,7 @@ pub fn fork(
     ensure!(!git::branch_exists(to), "branch {to} exists already");
     let (source, target) = (StateDir::of(common_dir, from), StateDir::of(common_dir, to));
     let (dst, to_admin) = (&target.dir, &target.admin);
-    let to_pin = worktree::pin_ref(&target.id);
+    let to_pin = target.pin_ref();
     // Left by an earlier branch of that name: reusing them would mix its state
     // in, and a failure here would delete them.
     ensure!(
@@ -73,12 +67,17 @@ pub fn fork(
         "the base pin {to_pin} of an earlier branch {to} is left; delete it with `git \
          update-ref -d {to_pin}`"
     );
-    worktree::refuse_if_busy(common_dir, from, "branch from it once that is done")?;
+    worktree::refuse_if_busy(
+        common_dir,
+        &source.admin,
+        from,
+        "branch from it once that is done",
+    )?;
     let tip_ref = format!("refs/heads/{from}");
     let before = git::resolve(&tip_ref)?.id;
     let copied = source.opened();
     if copied {
-        let tmp = worktree::state_root(common_dir).join(format!(".fork-{}", target.id));
+        let tmp = state::state_root(common_dir).join(format!(".fork-{}", target.id));
         // Left by an interrupted fork.
         if tmp.exists() {
             fs::remove_dir_all(&tmp)?;
@@ -160,26 +159,26 @@ pub fn fork(
     })
 }
 
-/// Copies state directory `src` of workspace `branch` into new directory
+/// Copies the stored state `src` of workspace `branch` into new directory
 /// `dst`: the files in `COPIED`, the `upper` tree with modes and times (the
 /// index the fork starts with recorded them), and its registration's git index.
 /// Run on a source nothing writes to meanwhile.
-pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &Path, dst: &Path) -> Result<()> {
+pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &StateDir, dst: &Path) -> Result<()> {
     // Checked again here, where nothing writes through the mount: a git command
     // started since (a stash, a commit) holds `index.lock` while it rewrites
     // files, and would be copied half-done.
-    worktree::refuse_if_busy(common_dir, branch, "branch from it once that is done")?;
-    let index = StateDir::of(common_dir, branch).index();
+    let then = "branch from it once that is done";
+    worktree::refuse_if_busy(common_dir, &src.admin, branch, then)?;
     fs::create_dir_all(dst)?;
     for name in COPIED {
-        match fs::copy(src.join(name), dst.join(name)) {
+        match fs::copy(src.dir.join(name), dst.join(name)) {
             Ok(_) => {}
             // Markers and times exist only once something needed them.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound && name != state::BASE => {}
             Err(e) => return Err(e).with_context(|| format!("copying {name}")),
         }
     }
-    match fs::copy(&index, dst.join(INDEX)) {
+    match fs::copy(src.index(), dst.join(INDEX)) {
         Ok(_) => {}
         // No registration (deleted since): the fork's first open writes one.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -188,7 +187,7 @@ pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &Path, dst: &Path) -
     // Made when the workspace opens; a workspace never written to may lack it.
     // Under the workspace's lock (or unmounted): its unreadable files can be
     // lifted for the copy.
-    let upper = src.join(state::UPPER);
+    let upper = src.upper();
     match fs::symlink_metadata(&upper) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         _ => fsutil::copy_tree(
@@ -257,24 +256,7 @@ fn mount_of(gitfile: &Path, branch: &str) -> Option<PathBuf> {
     Some(mount)
 }
 
-impl Workspace {
-    /// Copies this open workspace's state into `dst` (see `copy_state_dir`),
-    /// with every write through the mount held off meanwhile.
-    pub fn copy_state(&self, dst: &Path) -> Result<()> {
-        let mut layers = self.layers.write();
-        // Copy-ups write under a shared `layers`; none is half-done now.
-        layers.times.save()?;
-        layers.markers.sync()?;
-        copy_state_dir(&self.common_dir, &self.branch, &self.state_dir, dst)
-    }
-}
-
 /// `copy_state_dir` for the stored (closed) workspace of `branch`.
 pub fn copy_stored(common_dir: &Path, branch: &str, dst: &Path) -> Result<()> {
-    copy_state_dir(
-        common_dir,
-        branch,
-        &StateDir::of(common_dir, branch).dir,
-        dst,
-    )
+    copy_state_dir(common_dir, branch, &StateDir::of(common_dir, branch), dst)
 }
