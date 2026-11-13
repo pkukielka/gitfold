@@ -37,7 +37,7 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
         return Ok(());
     }
     let store = Store::default();
-    let s = status::status(&store, &common_dir, &state)?;
+    let s = status::status(&store, &state)?;
     let note = base_note(name, &s.base);
     if !note.is_empty() {
         eprintln!("note: {name}: {note}; changes are against the stored base");
@@ -129,7 +129,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         "branch", "changed", "deleted", "ignored", "base", "last"
     );
     for w in list {
-        let s = match status::status(&store, &common_dir, &w.state) {
+        let s = match status::status(&store, &w.state) {
             Ok(s) => s,
             Err(e) => {
                 println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.state.id);

@@ -158,11 +158,11 @@ pub fn fork(
     })
 }
 
-/// Copies the stored state `src` of workspace `branch` into new directory
-/// `dst`: the files in `COPIED`, the `upper` tree with modes and times (the
+/// Copies the stored state `src` of a workspace into new directory `dst`: the files in `COPIED`, the `upper` tree with modes and times (the
 /// index the fork starts with recorded them), and its registration's git index.
 /// Run on a source nothing writes to meanwhile.
-pub fn copy_state_dir(common_dir: &Path, branch: &str, src: &StateDir, dst: &Path) -> Result<()> {
+pub fn copy_state_dir(src: &StateDir, dst: &Path) -> Result<()> {
+    let (common_dir, branch) = (&src.common_dir, &src.branch);
     // Checked again here, where nothing writes through the mount: a git command
     // started since (a stash, a commit) holds `index.lock` while it rewrites
     // files, and would be copied half-done.
@@ -256,5 +256,5 @@ fn mount_of(gitfile: &Path, branch: &str) -> Option<PathBuf> {
 
 /// `copy_state_dir` for the stored (closed) workspace of `branch`.
 pub fn copy_stored(common_dir: &Path, branch: &str, dst: &Path) -> Result<()> {
-    copy_state_dir(common_dir, branch, &StateDir::of(common_dir, branch), dst)
+    copy_state_dir(&StateDir::of(common_dir, branch), dst)
 }

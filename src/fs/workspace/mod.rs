@@ -526,7 +526,7 @@ impl Workspace {
         // Copy-ups write under a shared `layers`; none is half-done now.
         layers.times.save()?;
         layers.markers.sync()?;
-        state::fork::copy_state_dir(&self.common_dir, &self.branch, &self.state, dst)
+        state::fork::copy_state_dir(&self.state, dst)
     }
 }
 

@@ -110,7 +110,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     let store = Store::default();
     let uncommitted = match opened {
         true => {
-            let s = status::status(&store, &common_dir, &state)?;
+            let s = status::status(&store, &state)?;
             s.changed.into_iter().chain(s.deleted).collect()
         }
         false => Vec::new(),
@@ -218,7 +218,7 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
     let mut changed = diff(common_dir, &base.to_string(), &spec)?;
     let state = StateDir::of(common_dir, &rev);
     if branch && state.opened() {
-        let s = status::status(store, common_dir, &state)?;
+        let s = status::status(store, &state)?;
         changed.extend(s.changed.into_iter().chain(s.deleted));
     }
     Ok(Target::new(rev, changed))

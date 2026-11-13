@@ -133,8 +133,9 @@ impl Status {
     }
 }
 
-/// The changes of the workspace stored in `state`, in repository `common_dir`.
-pub fn status(store: &Store, common_dir: &Path, state: &StateDir) -> Result<Status> {
+/// The changes of the workspace stored in `state`.
+pub fn status(store: &Store, state: &StateDir) -> Result<Status> {
+    let common_dir = &state.common_dir;
     let base = state.read_base()?;
     let tree = store.load_tree(base.tree)?;
     let (whiteouts, opaque) = Markers::read(&state.markers())?;

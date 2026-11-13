@@ -160,7 +160,7 @@ pub fn check_workspace(
     }
     let mut ignored = 0;
     if !force && state.opened() {
-        let mut s = status::status(store, common_dir, &state)?;
+        let mut s = status::status(store, &state)?;
         // Changes are measured against the base; behind the tip (the branch moved
         // after the daemon last saw it), a file edited back to the base's content
         // would look unchanged. Catch up as the daemon would have.
@@ -171,7 +171,7 @@ pub fn check_workspace(
                      failed ({e:#}); mount it, open it once, or use --force"
                 ))
             })?;
-            s = status::status(store, common_dir, &state)?;
+            s = status::status(store, &state)?;
         }
         ignored = s.ignored;
         let tip = Tip::of(branch, &s.base);
@@ -204,7 +204,6 @@ pub fn check_workspace(
 /// Deletes the workspace of `branch` (checked by `check_workspace`, which
 /// counted `ignored` files in it); returns what was done.
 pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Result<String> {
-    check_name(branch)?;
     let state = StateDir::of(common_dir, branch);
     // The registration first: without it, the state alone is resumed correctly
     // (the registration is recreated); the reverse is not.
