@@ -13,8 +13,8 @@
 # - `section NAME FUNCTION` runs a section in a subshell of its own (see
 #   there); SECTION=<text> runs only the sections whose name contains it,
 #   and PARALLEL=1 runs them all at once (the output kept in order); it is
-#   an error if no section matches, unless SECTION_OPTIONAL=1 (tests/run.sh
-#   checks across suites).
+#   an error if no section matches, unless SECTIONS_RUN_FILE is set: then
+#   their number is written there (tests/run.sh checks across suites).
 
 exec </dev/null
 ROOT=$(mktemp -d "/tmp/gf-$NAME.XXXXXX")
@@ -107,8 +107,9 @@ finish() {
         wait
         for i in $(seq "$SECTION_N"); do [ ! -f "$ROOT/$i.out" ] || cat "$ROOT/$i.out"; done
     fi
-    if [ -n "${SECTION:-}" ] && [ -z "${SECTION_OPTIONAL:-}" ] && [ "$SECTION_N" -gt 0 ] &&
-        [ "$SECTIONS_RUN" = 0 ]; then
+    if [ -n "${SECTIONS_RUN_FILE:-}" ]; then
+        echo "$SECTIONS_RUN" >"$SECTIONS_RUN_FILE"
+    elif [ -n "${SECTION:-}" ] && [ "$SECTION_N" -gt 0 ] && [ "$SECTIONS_RUN" = 0 ]; then
         fail "SECTION=$SECTION matches no section"
     fi
     local n=0

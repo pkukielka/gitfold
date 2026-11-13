@@ -722,6 +722,8 @@ mount and real git (build with `--release` first):
 - `tests/run.sh [SUITE...]`: the suites at once, summed up (by default all
   but `workspace.sh`); `PARALLEL=1 tests/run.sh` takes about as long as the
   slowest, and `SECTION=inbox tests/run.sh` finds the section in any of them.
+  Suites running side by side load the machine like `PARALLEL=1`: if a timing
+  check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
