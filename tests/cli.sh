@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end test of the workspace management commands: branch, list, changes,
-# remove, prune.
+# End-to-end test of the commands (branch and fork, list, changes, overlaps,
+# the task folder, messages, remove, prune, prewarm), mount and unmount, and
+# kernel-facing details.
 # usage: tests/cli.sh
 # Each section runs on a fresh repository below /tmp/gf-cli.XXXXXX (see
 # tests/lib.sh); SECTION=<text> runs only the sections whose name contains it.
@@ -913,6 +914,14 @@ R branch ec1; R branch ec2
 code() { "$@" >/dev/null 2>&1; echo $?; }
 eq "not found: exit code 3" 3 "$(code "$BIN" -C "$REPO" remove nope)"
 eq "--check of a missing workspace: 3" 3 "$(code "$BIN" -C "$REPO" remove nope --check)"
+for cmd in "changes nope" "changes bad..name" "prewarm nope meta" "track-reads nope on" "send nope hi"; do
+    eq "$cmd: exit code 3 as everywhere" 3 "$(code "$BIN" -C "$REPO" $cmd)"
+done
+flock "$COMMON" sleep 2 & HOLD=$!
+sleep 0.3
+eq "the lock held by another command: in use, exit 5" 5 "$(code "$BIN" -C "$REPO" remove nope)"
+eq "--wait retries until it is free" 3 "$(code "$BIN" -C "$REPO" remove nope --wait 10)"
+wait $HOLD
 mount_fs
 cat "$MNT/ec1/a.txt" >/dev/null
 unmount_fs

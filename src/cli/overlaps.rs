@@ -102,9 +102,7 @@ pub fn overlaps(
         bail!("{branch} is a snapshot: it reads nothing and changes nothing");
     }
     let common_dir = git::init(repo)?;
-    if !git::branch_exists(branch) {
-        return Err(Refusal::NotFound.error(format!("no branch {branch}")));
-    }
+    git::require_branch(branch)?;
     let state_dir = worktree::state_root(&common_dir).join(workspace_id(branch));
     let opened = state_dir.join("base").exists();
     let base = match opened {

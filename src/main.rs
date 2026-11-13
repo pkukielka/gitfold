@@ -307,7 +307,19 @@ pub const VERSION: &str = env!("GITFOLD_VERSION");
 /// `VERSION` and the git commit built from, if known, for `--version`.
 const LONG_VERSION: &str = env!("GITFOLD_LONG_VERSION");
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    let code = match run() {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("Error: {e:?}");
+            refusal::Refusal::of(&e).map_or(1, |r| r.exit_code())
+        }
+    };
+    std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+/// Runs the command; its exit code (see `refusal` for the codes errors get).
+fn run() -> Result<i32> {
     // Blob buffers are short-lived and often large. glibc raises its mmap threshold
     // after such frees, after which big buffers come from arenas that are never
     // returned to the OS (~600 MB retained after one pass over chromium). A fixed
@@ -349,7 +361,7 @@ fn main() -> Result<()> {
                     log.display()
                 );
                 println!("unmount with: gitfold unmount {}", mountpoint.display());
-                return Ok(());
+                return Ok(0);
             }
             daemon::unmount_on_signal(mountpoint.clone());
             prewarm::set_max_walks(prewarm_walks as usize);
@@ -431,10 +443,7 @@ fn main() -> Result<()> {
             session.run()?;
         }
         Command::Unmount { mountpoint } => cli::mount::unmount(&mountpoint)?,
-        Command::Version { mountpoint } => match cli::mount::version(mountpoint.as_deref())? {
-            0 => {}
-            code => std::process::exit(code),
-        },
+        Command::Version { mountpoint } => return cli::mount::version(mountpoint.as_deref()),
         Command::Branch {
             branch,
             from,
@@ -443,14 +452,14 @@ fn main() -> Result<()> {
             with_changes,
         } => {
             let repo = repo()?;
-            or_exit(cli::manage::branch(
+            cli::manage::branch(
                 &repo,
                 &branch,
                 from.as_deref(),
                 prewarm,
                 track_reads,
                 with_changes,
-            ));
+            )?;
         }
         Command::List { stat } => cli::manage::list(&repo()?, stat)?,
         Command::Changes { branch, nul, stat } => {
@@ -471,15 +480,10 @@ fn main() -> Result<()> {
                 (_, true) => cli::overlaps::Kinds::Writes,
                 _ => cli::overlaps::Kinds::Both,
             };
-            let found = (|| {
-                let repo = repo()?;
-                let branch = cli::branch_or_current(branch, &repo)?;
-                cli::overlaps::overlaps(&repo, &branch, &against, against_workspaces, kinds, nul)
-            })();
-            match found {
-                Ok(true) => std::process::exit(cli::overlaps::FOUND),
-                Ok(false) => {}
-                Err(e) => or_exit(Err(e)),
+            let repo = repo()?;
+            let branch = cli::branch_or_current(branch, &repo)?;
+            if cli::overlaps::overlaps(&repo, &branch, &against, against_workspaces, kinds, nul)? {
+                return Ok(cli::overlaps::FOUND);
             }
         }
         Command::Watch {
@@ -490,13 +494,7 @@ fn main() -> Result<()> {
             let repo = repo()?;
             let current = cli::branch_or_current(None, &repo).ok();
             let target = if target == "." { String::new() } else { target };
-            or_exit(cli::inbox::watch(
-                &repo,
-                current.as_deref(),
-                &target,
-                timeout,
-                json,
-            ));
+            cli::inbox::watch(&repo, current.as_deref(), &target, timeout, json)?;
         }
         Command::Inbox {
             branch,
@@ -510,7 +508,7 @@ fn main() -> Result<()> {
             let found = repo().and_then(|repo| Ok((cli::branch_or_current(branch, &repo)?, repo)));
             let (branch, repo) = match found {
                 Ok(found) => found,
-                Err(_) if claude_hook.is_some() => return Ok(()),
+                Err(_) if claude_hook.is_some() => return Ok(0),
                 Err(e) => return Err(e),
             };
             let args = cli::inbox::InboxArgs {
@@ -521,11 +519,10 @@ fn main() -> Result<()> {
                 hook: claude_hook,
             };
             match cli::inbox::inbox(&repo, &branch, args) {
-                Ok(0) => {}
-                Ok(code) => std::process::exit(code),
+                Ok(code) => return Ok(code),
                 // A hook's error would show on every tool call: logged, not raised.
                 Err(e) if claude_hook.is_some() => log::warn!("gitfold inbox: {e:#}"),
-                Err(e) => or_exit(Err(e)),
+                Err(e) => return Err(e),
             }
         }
         Command::Send {
@@ -542,13 +539,7 @@ fn main() -> Result<()> {
                 [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())?,
                 words => words.join(" "),
             };
-            or_exit(cli::inbox::send(
-                &repo,
-                &to,
-                &from,
-                subject.as_deref(),
-                &body,
-            ));
+            cli::inbox::send(&repo, &to, &from, subject.as_deref(), &body)?;
         }
         Command::Remove {
             name,
@@ -557,7 +548,7 @@ fn main() -> Result<()> {
             wait,
         } => {
             let wait = std::time::Duration::from_secs(wait);
-            or_exit(cli::manage::remove(&repo()?, &name, force, check, wait));
+            cli::manage::remove(&repo()?, &name, force, check, wait)?;
         }
         Command::Prune => cli::manage::prune(&repo()?)?,
         Command::Prewarm { branch, mode } => cli::manage::prewarm(&repo()?, &branch, mode)?,
@@ -576,13 +567,5 @@ fn main() -> Result<()> {
             bench::read::run(&rev, &threads)?;
         }
     }
-    Ok(())
-}
-
-/// Exits with the error's refusal code (see `refusal`), or 1, if `result` failed.
-fn or_exit(result: Result<()>) {
-    if let Err(e) = result {
-        eprintln!("Error: {e:?}");
-        std::process::exit(refusal::Refusal::of(&e).map_or(1, |r| r.exit_code()));
-    }
+    Ok(0)
 }

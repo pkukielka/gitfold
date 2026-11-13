@@ -1,7 +1,8 @@
-//! The daemon's control socket: how `gitfold remove` asks a running daemon to
-//! remove a workspace or snapshot, instead of requiring an unmount,
-//! `gitfold unmount` asks it to stop prewarm walks first, and `gitfold
-//! prewarm` to walk an open workspace.
+//! The daemon's control socket: how commands ask a running daemon to do what
+//! they would do themselves unmounted (`remove`, `branch --with-changes`), to
+//! apply a setting to an open workspace (`prewarm`, `track-reads`), to stop
+//! prewarm walks before an unmount (and resume them if it fails), or to tell
+//! its version.
 //!
 //! A Unix socket at `.git/gitfold/.control`, so the repository's permissions
 //! guard it (an abstract socket name could be taken by any local user), and
@@ -54,6 +55,7 @@ const REFUSAL: &str = "\nrefusal: ";
 /// How long the daemon waits for a client to send its request.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum Request {
     /// Remove workspace `name`, or snapshot `@<rev>`.
     Remove {
@@ -277,4 +279,53 @@ fn reply(stream: &mut UnixStream, answer: Result<String>) {
     };
     // The client may have gone (Ctrl-C); nothing to do then.
     let _ = stream.write_all(reply.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every request reads back as sent: the wire format daemons and clients of
+    /// different builds share.
+    #[test]
+    fn requests_round_trip() {
+        let names = ["ws", "agent/task 17", "100%/x", "@origin/main~2"];
+        let mut requests = vec![
+            Request::StopPrewarm,
+            Request::ResumePrewarm,
+            Request::Version,
+        ];
+        for n in names {
+            for (force, check) in [(false, false), (true, false), (false, true), (true, true)] {
+                requests.push(Request::Remove {
+                    name: n.to_string(),
+                    force,
+                    check,
+                });
+            }
+            requests.push(Request::Prewarm {
+                branch: n.to_string(),
+            });
+            requests.push(Request::TrackReads {
+                branch: n.to_string(),
+            });
+            requests.push(Request::Fork {
+                from: n.to_string(),
+                to: format!("{n}-2"),
+            });
+        }
+        for r in requests {
+            assert_eq!(Request::decode(&r.encode()).unwrap(), r);
+        }
+    }
+
+    /// A verb this build doesn't know (a newer client's) is refused as such.
+    #[test]
+    fn unknown_requests() {
+        for bytes in [&b"freeze\nws\n"[..], b"remove\n1\nws", b"", b"\xff"] {
+            assert!(Request::decode(bytes).is_err(), "{bytes:?}");
+        }
+        let e = Request::decode(b"freeze\nws\n").unwrap_err();
+        assert_eq!(e.to_string(), UNKNOWN);
+    }
 }

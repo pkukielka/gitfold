@@ -24,7 +24,6 @@ use super::{Workspace, read_base};
 use crate::daemon::prewarm::BRANCH_KEY;
 use crate::git;
 use crate::git::worktree::{self, workspace_id};
-use crate::refusal::Refusal;
 
 /// Files of a state directory a fork copies (`upper` is copied as a tree;
 /// `branch` is written for the fork; `tmp` holds only interrupted copy-ups).
@@ -50,9 +49,7 @@ pub fn fork(
         !to.starts_with('@'),
         "branch names starting with @ can't be opened as workspaces (@<rev> is a snapshot)"
     );
-    if !git::branch_exists(from) {
-        return Err(Refusal::NotFound.error(format!("no branch {from}")));
-    }
+    git::require_branch(from)?;
     ensure!(!git::branch_exists(to), "branch {to} exists already");
     let root = worktree::state_root(common_dir);
     let (from_id, to_id) = (workspace_id(from), workspace_id(to));
