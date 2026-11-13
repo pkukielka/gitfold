@@ -19,8 +19,7 @@ use crate::git::promisor;
 use crate::git::worktree;
 use crate::git::{self, Commit};
 use crate::inode;
-use crate::prewarm;
-use crate::prewarm::Prewarm;
+use crate::prewarm::{self, Prewarm};
 use crate::refusal::Refusal;
 use crate::store::{DirRec, Store};
 

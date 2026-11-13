@@ -1,6 +1,6 @@
 //! The mount table: which gitfold mount is where, and the source name a mount
-//! shows (its repository), written by the daemon and read back by `unmount`
-//! and the daemon's removals.
+//! shows (its repository), written by the daemon and read back by commands
+//! (`unmount`, `version`) and the daemon's removals.
 
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
@@ -11,30 +11,54 @@ use anyhow::Result;
 /// The source of the gitfold mount at `path` (`fs_name` of the
 /// repository's git common directory), or `None` if no gitfold mount is there.
 pub fn gitfold_source(path: &Path) -> Result<Option<String>> {
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo")?;
-    let want = path.display().to_string();
-    for line in mountinfo.lines() {
+    // Bytes: other mounts' paths need not be UTF-8.
+    let mountinfo = fs::read("/proc/self/mountinfo")?;
+    Ok(source_in(&mountinfo, path.as_os_str().as_bytes()))
+}
+
+/// The source of the gitfold mount at `path` in mount table `mountinfo`.
+fn source_in(mountinfo: &[u8], path: &[u8]) -> Option<String> {
+    for line in mountinfo.split(|b| *b == b'\n') {
         // id parent dev root mount-point options ... - fstype source super-options
-        let fields: Vec<&str> = line.split(' ').collect();
-        let Some(dash) = fields.iter().position(|f| *f == "-") else {
+        let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
+        let Some(dash) = fields.iter().position(|f| *f == b"-") else {
             continue;
         };
-        if fields.get(dash + 1) == Some(&"fuse.gitfold")
-            && fields.get(4).is_some_and(|m| unescape(m) == want)
+        if fields.get(dash + 1) == Some(&b"fuse.gitfold".as_slice())
+            && fields.get(4).is_some_and(|m| unescape(m) == path)
         {
-            return Ok(fields.get(dash + 2).map(|s| unescape(s)));
+            let source = fields.get(dash + 2).map(|s| unescape(s))?;
+            return Some(String::from_utf8_lossy(&source).into_owned());
         }
     }
-    Ok(None)
+    None
 }
 
 /// Undoes the mount table's escapes: the kernel octal-escapes space, tab,
 /// newline and backslash (the backslash last, so `\134040` stays `\040`).
-fn unescape(s: &str) -> String {
-    s.replace("\\040", " ")
-        .replace("\\011", "\t")
-        .replace("\\012", "\n")
-        .replace("\\134", "\\")
+fn unescape(s: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let byte = match s.get(i..i + 4) {
+            Some(b"\\040") => Some(b' '),
+            Some(b"\\011") => Some(b'\t'),
+            Some(b"\\012") => Some(b'\n'),
+            Some(b"\\134") => Some(b'\\'),
+            _ => None,
+        };
+        match byte {
+            Some(b) => {
+                out.push(b);
+                i += 4;
+            }
+            None => {
+                out.push(s[i]);
+                i += 1;
+            }
+        }
+    }
+    out
 }
 
 /// The source a mount of `common_dir` shows in the mount table (`FSName`): the
@@ -98,7 +122,17 @@ mod tests {
     /// The kernel's mount-table escapes, the backslash last.
     #[test]
     fn mount_table_unescaped() {
-        assert_eq!(unescape(r"/a\040b\011c\012d\134e"), "/a b\tc\nd\\e");
-        assert_eq!(unescape(r"\134040"), r"\040");
+        assert_eq!(unescape(br"/a\040b\011c\012d\134e"), b"/a b\tc\nd\\e");
+        assert_eq!(unescape(br"\134040"), br"\040");
+    }
+
+    /// Found by its path's bytes, whatever other mounts' paths hold.
+    #[test]
+    fn source_of_mount() {
+        let table: &[u8] = b"36 1 0:30 / /x\xff/m rw - ext4 /dev/sda rw\n\
+            37 1 0:31 / /a\\040b\xfe rw,nosuid - fuse.gitfold /r/.git rw\n";
+        assert_eq!(source_in(table, b"/a b\xfe").as_deref(), Some("/r/.git"));
+        assert_eq!(source_in(table, b"/x\xff/m"), None);
+        assert_eq!(source_in(table, b"/elsewhere"), None);
     }
 }

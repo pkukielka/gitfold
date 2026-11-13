@@ -11,7 +11,6 @@ use std::fs;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::os::fd::FromRawFd;
-
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
