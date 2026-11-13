@@ -43,7 +43,9 @@ impl ContentCache {
                 let Some(blobs) = blobs.upgrade() else { return };
                 let now = activity.load(Ordering::Relaxed);
                 if now == seen && now != trimmed {
-                    *blobs.lock() = Blobs::default();
+                    // Freed after unlocking: reads don't wait on the frees.
+                    let old = std::mem::take(&mut *blobs.lock());
+                    drop(old);
                     unsafe { libc::malloc_trim(0) };
                     trimmed = now;
                 }
@@ -64,12 +66,19 @@ impl ContentCache {
         }
         let data = load()?;
         let mut blobs = self.blobs.lock();
+        // Another read of the file (readahead) loaded it meanwhile: counted once.
+        if let Some(cached) = blobs.by_ino.get(&ino) {
+            return Ok(cached.clone());
+        }
+        // Crude, but reads of a file are clustered. Freed after unlocking.
+        let mut old = None;
         if blobs.bytes + data.len() > MAX_BYTES {
-            // Crude, but reads of a file are clustered.
-            *blobs = Blobs::default();
+            old = Some(std::mem::take(&mut *blobs));
         }
         blobs.bytes += data.len();
         blobs.by_ino.insert(ino, data.clone());
+        drop(blobs);
+        drop(old);
         Ok(data)
     }
 }

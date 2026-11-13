@@ -52,18 +52,14 @@ pub enum Slot {
     Namespace(String),
 }
 
-impl Slot {
-    /// The workspace, if it is one.
-    pub fn workspace(self) -> Option<Arc<Workspace>> {
-        match self {
-            Slot::Workspace(ws) => Some(ws),
-            Slot::Namespace(_) => None,
-        }
-    }
+/// A workspace's settings (see `Workspaces::branch_settings`).
+struct BranchSettings {
+    prewarm: Prewarm,
+    track_reads: bool,
 }
 
 /// What is registered in a slot.
-pub enum Registered {
+enum Registered {
     Workspace(Arc<Workspace>),
     /// A directory holding the next component of longer names, e.g. `feature`
     /// or `@origin`.
@@ -226,9 +222,9 @@ impl Workspaces {
     /// every file first would leave the agent's reads to the kernel's cache,
     /// unseen.
     fn branch_mode(&self, branch: &str) -> Prewarm {
-        let local = settings::Local::read(&self.common_dir);
-        match local.prewarm(branch).unwrap_or(self.prewarm) {
-            Prewarm::Content if local.track_reads(branch).unwrap_or(self.track_reads) => {
+        let settings = self.branch_settings(branch);
+        match settings.prewarm {
+            Prewarm::Content if settings.track_reads => {
                 warn!("workspace {branch}: prewarm content walks as meta while reads are tracked");
                 Prewarm::Meta
             }
@@ -236,13 +232,18 @@ impl Workspaces {
         }
     }
 
-    /// The prewarm mode set for the workspace of `branch`, else the mount's.
-    fn configured_prewarm(&self, branch: &str) -> Prewarm {
-        settings::prewarm(&self.common_dir, branch).unwrap_or(self.prewarm)
+    /// The settings of the workspace of `branch`, the mount's where it has
+    /// none; read at once.
+    fn branch_settings(&self, branch: &str) -> BranchSettings {
+        let local = settings::Local::read(&self.common_dir);
+        BranchSettings {
+            prewarm: local.prewarm(branch).unwrap_or(self.prewarm),
+            track_reads: local.track_reads(branch).unwrap_or(self.track_reads),
+        }
     }
 
     fn tracks_reads(&self, branch: &str) -> bool {
-        settings::track_reads(&self.common_dir, branch).unwrap_or(self.track_reads)
+        self.branch_settings(branch).track_reads
     }
 
     /// The open workspace of `branch`.
@@ -586,7 +587,7 @@ fn settle(
     ws: &Arc<Workspace>,
     refuse_if_used: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
-    let started = std::time::Instant::now();
+    let started = Instant::now();
     while Arc::strong_count(ws) > 2 && started.elapsed() < IN_FLIGHT_WAIT {
         thread::sleep(Duration::from_millis(10));
     }

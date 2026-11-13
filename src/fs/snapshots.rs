@@ -26,6 +26,7 @@ use crate::store::{DirRec, Store};
 /// One root entry. Every name gets its own slot, and so its own directory
 /// inodes, since a directory can't have two parents in the kernel. Names that
 /// resolve to the same commit share `dirs` and the worktree registration.
+#[derive(Clone)]
 pub struct Snapshot {
     commit: ObjectId,
     /// Content of the virtual `.git` file in the snapshot root.
@@ -89,11 +90,12 @@ impl Snapshots {
     }
 
     pub fn dir_rec(&self, slot: u32, dir: u32) -> Result<DirRec, Errno> {
-        self.get(slot)?
-            .dirs
-            .get(dir as usize)
-            .copied()
-            .ok_or(Errno::ENOENT)
+        // Under the list's guard, not through `get`: no shared refcount to bump
+        // for every entry a walk looks up.
+        let list = self.list.read();
+        let snapshot = list.get(slot as usize).and_then(Option::as_ref);
+        let rec = snapshot.and_then(|s| s.dirs.get(dir as usize).copied());
+        rec.ok_or(Errno::ENOENT)
     }
 
     /// The commit of open snapshot `name`.
@@ -175,9 +177,8 @@ impl Snapshots {
             let commit = open.or_else(resolve).ok_or_else(|| {
                 Refusal::NotFound.error(format!("no snapshot {}", String::from_utf8_lossy(name)))
             })?;
-            let shared = (self.list.read().iter().enumerate()).any(|(i, s)| {
-                Some(i as u32) != slot && s.as_ref().is_some_and(|s| s.commit == commit)
-            });
+            // Out of the root already, and no snapshot opens meanwhile.
+            let shared = self.open_names_of(&commit) > 0;
             remove_registration(&commit, shared)
         })();
         if let Some(slot) = slot {
@@ -257,11 +258,7 @@ impl Snapshots {
             .find(|s| s.commit == commit.id)
             .cloned();
         let snapshot = match existing {
-            Some(s) => Snapshot {
-                commit: s.commit,
-                gitfile: s.gitfile.clone(),
-                dirs: s.dirs.clone(),
-            },
+            Some(s) => Snapshot::clone(&s),
             None => self.create(store, spec, commit, loaded, &path)?,
         };
         let slot = {

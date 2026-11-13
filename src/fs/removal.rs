@@ -111,23 +111,15 @@ impl Removal {
         force: bool,
         refuse_if_used: impl FnOnce() -> Result<()>,
     ) -> Result<(String, bool)> {
-        let (store, common_dir) = (&*self.store, &self.common_dir);
-        // Open: the daemon keeps its base at the tip; closed: it catches up.
-        let check = |ws: Option<&Workspace>| {
-            let catch_up = || match ws {
-                Some(ws) => ws.sync(store),
-                None => workspace::catch_up(store, common_dir, branch),
-            };
-            retire::check_workspace(store, common_dir, branch, force, &catch_up)
-        };
+        let common_dir = &self.common_dir;
         if let Some(open) = self.workspaces.get_open(branch) {
-            // Changes first, as `check` reports them.
-            check(Some(&open))?;
+            // Changes first, as `check_workspace` reports them.
+            self.check_workspace(branch, force, Some(&open))?;
             self.refuse_if_used(&self.mount_point.join(branch), branch)?;
             // `open` dropped here: the wait for requests in flight counts references.
         }
         self.workspaces.remove(branch, refuse_if_used, |ws| {
-            let ignored = check(ws)?;
+            let ignored = self.check_workspace(branch, force, ws)?;
             retire::delete_workspace(common_dir, branch, ignored)
         })
     }
@@ -154,12 +146,9 @@ impl Removal {
                 true,
             );
         }
-        let (store, common_dir) = (&*self.store, &self.common_dir);
         // Not open: checked while it can't be opened (catching up may write).
-        let closed = self.workspaces.check_closed(name, || {
-            let catch_up = || workspace::catch_up(store, common_dir, name);
-            retire::check_workspace(store, common_dir, name, force, &catch_up)
-        })?;
+        let closed =
+            (self.workspaces).check_closed(name, || self.check_workspace(name, force, None))?;
         let ignored = match closed {
             Some(ignored) => ignored,
             None => {
@@ -169,8 +158,7 @@ impl Removal {
                 })?;
                 // Changes first, both reported: a shell sitting in it must not
                 // hide uncommitted work from the check.
-                let changes =
-                    retire::check_workspace(store, common_dir, name, force, &|| open.sync(store));
+                let changes = self.check_workspace(name, force, Some(&open));
                 match (changes, self.refuse_if_used(&path, name)) {
                     (Ok(ignored), Ok(())) => ignored,
                     (Err(changes), Err(used))
@@ -183,6 +171,24 @@ impl Removal {
             }
         };
         Ok(retire::removable_workspace(name, ignored))
+    }
+
+    /// `retire::check_workspace` for the workspace of `branch`, `open` or not:
+    /// a base behind the branch tip is brought up to it first, by the open
+    /// workspace's sync (the daemon keeps it at the tip) or a closed one's
+    /// catch-up.
+    fn check_workspace(
+        &self,
+        branch: &str,
+        force: bool,
+        open: Option<&Workspace>,
+    ) -> Result<usize> {
+        let (store, common_dir) = (&*self.store, &self.common_dir);
+        let catch_up = || match open {
+            Some(ws) => ws.sync(store),
+            None => workspace::catch_up(store, common_dir, branch),
+        };
+        retire::check_workspace(store, common_dir, branch, force, &catch_up)
     }
 
     /// Refuses once the mount is being unmounted (`closed`), or detached

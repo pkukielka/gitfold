@@ -154,17 +154,6 @@ fn expand_home(dir: &str) -> PathBuf {
     }
 }
 
-/// The prewarm mode set for the workspace of `branch` (see `Local::prewarm`).
-/// Read when it opens, so a change counts from the next open.
-pub fn prewarm(common_dir: &Path, branch: &str) -> Option<Prewarm> {
-    Local::read(common_dir).prewarm(branch)
-}
-
-/// Whether the workspace of `branch` records reads, if set.
-pub fn track_reads(common_dir: &Path, branch: &str) -> Option<bool> {
-    Local::read(common_dir).track_reads(branch)
-}
-
 /// Stores `mode` as the prewarm mode of the workspace of `branch` (see
 /// `set_branch`).
 pub fn set_prewarm(git_dir: &Path, branch: &str, mode: Prewarm) -> Result<()> {
