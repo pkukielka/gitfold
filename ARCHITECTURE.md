@@ -168,10 +168,15 @@ Then, per request (`fs/workspace/`):
 | `bench/` | `bench.sh` (native vs mount), `probe.sh` (content reads), `writes.sh` (write workloads), `RESULTS.md` (measurement log) |
 | `tests/workspace.sh` | end-to-end workspace test on a scratch clone |
 | `tests/rebase.sh` | end-to-end test of rebases with git operations (conflicts, stash, amend, resets, bisect) |
-| `tests/cli.sh` | end-to-end test of the commands (branch and fork, list, changes, overlaps, the task folder, messages, remove, prune, prewarm), mount and unmount, and kernel-facing details, in isolated sections |
+| `tests/manage.sh` | end-to-end test of branch and its forks, list, changes, remove and prune |
+| `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
+| `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
+| `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send and watch |
+| `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
+| `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
 | `tests/race-modes.pl` | helper of `tests/workspace.sh`: lifted modes must stay invisible |
-| `tests/cache-tree.pl` | helper of `tests/cli.sh`: prints an index's cache tree, to compare with git's |
+| `tests/cache-tree.pl` | helper of `tests/status.sh`: prints an index's cache tree, to compare with git's |
 | `tests/lib.sh` | what the suites share: a directory per run, timeouts, sections, cleanup |
 
 ## Glossary

@@ -711,11 +711,19 @@ Tests: `cargo test` runs the unit tests (logic without a mount or git:
 parsing, formats, settings, a few scratch files); the end-to-end suites drive the release binary, a real
 mount and real git (build with `--release` first):
 
-- `tests/cli.sh`: the commands, one section at a time, each on a fresh
-  repository; `SECTION=inbox tests/cli.sh` runs the sections whose name
-  contains `inbox`, and `PARALLEL=1` runs them all at once (about 10 s
-  instead of 50; a few timing checks may then be flaky on a loaded machine).
-  A section that ends early counts as a failure.
+- `tests/manage.sh` (branch, list, changes, remove, prune), `tests/status.sh`
+  (what a workspace's status sees: ignore rules, modes, half-way git
+  operations, the index), `tests/mount.sh` (mount, unmount, version,
+  prewarm) and `tests/agents.sh` (overlaps, the task folder, messages): one
+  section at a time, each on a fresh repository. `SECTION=inbox
+  tests/agents.sh` runs the sections whose name contains `inbox`, and
+  `PARALLEL=1` runs them all at once (a few timing checks may then be flaky on
+  a loaded machine). A section that ends early counts as a failure.
+- `tests/run.sh [SUITE...]`: the suites at once, summed up (by default all
+  but `workspace.sh`); `PARALLEL=1 tests/run.sh` takes about as long as the
+  slowest, and `SECTION=inbox tests/run.sh` finds the section in any of them.
+  Suites running side by side load the machine like `PARALLEL=1`: if a timing
+  check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
