@@ -9,7 +9,7 @@
 //! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //!
 //! The state of the workspace of branch `b` is `.git/gitfold/<id>/`, `<id>`
-//! being `b` with `%` and `/` escaped (`workspace_id`): `base` (the
+//! being `b` with `%`, `/` and a leading `.` escaped (`workspace_id`): `base` (the
 //! commit its changes are against, written last when it is made, so its
 //! presence means the workspace was opened), `branch`, `upper/`, `markers`,
 //! `times`, `reads`, `tmp/`. Its worktree registration (the admin directory,
@@ -39,7 +39,7 @@ use crate::store::FileRec;
 /// The file naming a workspace's base commit.
 pub const BASE: &str = "base";
 /// The file naming its branch (for people: the id is escaped).
-pub const BRANCH: &str = "branch";
+const BRANCH: &str = "branch";
 /// The directory of the files that differ from the base.
 pub const UPPER: &str = "upper";
 /// The log of deleted paths (whiteouts, opaque directories).
@@ -56,6 +56,10 @@ pub const ADMIN_PREFIX: &str = "gitfold-ws-";
 /// Where the stored state of one workspace is.
 #[derive(Clone)]
 pub struct StateDir {
+    /// The repository's git common directory.
+    pub common_dir: PathBuf,
+    /// The workspace's branch.
+    pub branch: String,
     /// The branch, escaped (`workspace_id`).
     pub id: String,
     /// `.git/gitfold/<id>`.
@@ -67,12 +71,14 @@ pub struct StateDir {
 impl StateDir {
     /// The state of the workspace of `branch` in repository `common_dir`.
     pub fn of(common_dir: &Path, branch: &str) -> StateDir {
-        StateDir::of_id(common_dir, &workspace_id(branch))
+        StateDir::of_id(common_dir, &workspace_id(branch), branch)
     }
 
-    /// The state of the workspace with id `id`.
-    pub fn of_id(common_dir: &Path, id: &str) -> StateDir {
+    /// The state of the workspace with id `id`, of `branch`.
+    fn of_id(common_dir: &Path, id: &str, branch: &str) -> StateDir {
         StateDir {
+            common_dir: common_dir.to_path_buf(),
+            branch: branch.to_string(),
             id: id.to_string(),
             dir: state_root(common_dir).join(id),
             admin: common_dir
@@ -128,13 +134,23 @@ pub fn state_root(common_dir: &Path) -> PathBuf {
 }
 
 /// A workspace's id, naming its state and registration directories: the branch
-/// with `%` and `/` escaped.
+/// with `%` and `/` escaped, and a leading `.`, so no id is `.` or `..` (or
+/// the dot names kept next to the ids), whatever the name: git refuses such
+/// branch names, but one not checked would point a removal elsewhere.
 pub fn workspace_id(branch: &str) -> String {
-    branch.replace('%', "%25").replace('/', "%2F")
+    let id = branch.replace('%', "%25").replace('/', "%2F");
+    match id.strip_prefix('.') {
+        Some(rest) => format!("%2E{rest}"),
+        None => id,
+    }
 }
 
 /// The branch of workspace id `id` (inverse of `workspace_id`).
 pub fn workspace_branch(id: &str) -> String {
+    let id = match id.strip_prefix("%2E") {
+        Some(rest) => format!(".{rest}"),
+        None => id.to_string(),
+    };
     id.replace("%2F", "/").replace("%25", "%")
 }
 
@@ -190,8 +206,8 @@ pub fn list(common_dir: &Path) -> Result<Vec<Stored>> {
         }
         let branch = read_branch(&entry.path()).unwrap_or_else(|| workspace_branch(&id));
         list.push(Stored {
+            state: StateDir::of_id(common_dir, &id, &branch),
             branch,
-            state: StateDir::of_id(common_dir, &id),
         });
     }
     list.sort_by(|a, b| a.branch.cmp(&b.branch));
@@ -199,7 +215,7 @@ pub fn list(common_dir: &Path) -> Result<Vec<Stored>> {
 }
 
 /// The base commit of the workspace stored in `dir`.
-pub fn read_base(dir: &Path) -> Result<git::Commit> {
+fn read_base(dir: &Path) -> Result<git::Commit> {
     let base_file = dir.join(BASE);
     let hex = fs::read_to_string(&base_file)
         .with_context(|| format!("reading {}", base_file.display()))?;
@@ -217,7 +233,7 @@ pub fn write_branch(dir: &Path, branch: &str) -> io::Result<()> {
 }
 
 /// The branch recorded for the workspace stored in `dir`, if readable.
-pub fn read_branch(dir: &Path) -> Option<String> {
+fn read_branch(dir: &Path) -> Option<String> {
     let text = fs::read_to_string(dir.join(BRANCH)).ok()?;
     Some(text.trim_end_matches('\n').to_string())
 }
@@ -266,9 +282,19 @@ mod tests {
     /// Ids name directories: no `/`, and the branch reads back from its id.
     #[test]
     fn workspace_ids_round_trip() {
-        for branch in ["main", "agent/task-17", "a%2Fb", "100%", "x/%25/y"] {
+        for branch in [
+            "main",
+            "agent/task-17",
+            "a%2Fb",
+            "100%",
+            "x/%25/y",
+            "..",
+            ".",
+            ".x",
+            "%2Ex",
+        ] {
             let id = workspace_id(branch);
-            assert!(!id.contains('/'), "{id}");
+            assert!(!id.contains('/') && !id.starts_with('.'), "{id}");
             assert_eq!(workspace_branch(&id), branch);
         }
         assert_eq!(workspace_id("agent/task-17"), "agent%2Ftask-17");

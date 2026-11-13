@@ -435,7 +435,7 @@ impl Workspaces {
                 .load_tree(commit.tree)
                 .map_err(|e| load_failed(&format!("loading workspace {branch}"), e))
         };
-        let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
+        let tip = git::branch_tip(branch).ok();
         match state.read_base().ok() {
             // Resuming needs only the base: the sync thread moves it to the tip,
             // fetching then if it can't now.
@@ -493,7 +493,7 @@ impl Workspaces {
         let new_base = if state.opened() {
             None
         } else {
-            Some(git::resolve(&format!("refs/heads/{branch}")).map_err(|e| fail("resolving", e))?)
+            Some(git::branch_tip(branch).map_err(|e| fail("resolving", e))?)
         };
         let created = new_base.is_some();
         let path = self.mount_point.join(branch);
@@ -517,8 +517,8 @@ impl Workspaces {
         // HEAD points at, the branch tip: that is the base for a new workspace,
         // and if the registration was deleted after commits made here, the tip's
         // files are the ones upper holds (the old base would show them as changed).
-        worktree::register_branch(&admin, branch, &path.join(".git"), || {
-            let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
+        worktree::register_branch(&admin, branch, &path.join(".git"), |index| {
+            let tip = git::branch_tip(branch).ok();
             // A load under `creating`, but rarely a fetch: `preload` loaded the tip
             // (or it is in backoff, refused at once), unless the branch moved since.
             let tree = tip.and_then(|c| store.load_tree(c.tree).ok());
@@ -528,7 +528,7 @@ impl Workspaces {
             store.write_index(&dirs, &mut writer, |path, _, _| {
                 inode::path_local(path) as u32
             });
-            writer.finish()
+            crate::fsutil::write_atomic(index, &writer.finish())
         })
         .map_err(|e| fail("registering worktree", e))?;
         info!(

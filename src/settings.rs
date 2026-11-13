@@ -10,7 +10,7 @@
 //! writes them (not included files), at the moment they are needed: the
 //! daemon's repository handle has the config as it was at mount time.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -25,11 +25,15 @@ const PREWARM: &str = "gitfoldPrewarm";
 const TRACK_READS: &str = "gitfoldTrackReads";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
-pub const TASK_DIR: &str = "taskDir";
+const TASK_DIR: &str = "taskDir";
 /// `gitfold.tasksDir`: where task folders are kept.
-pub const TASKS_DIR: &str = "tasksDir";
+const TASKS_DIR: &str = "tasksDir";
 /// `gitfold.inbox`: the inbox's name in a task folder.
-pub const INBOX: &str = "inbox";
+const INBOX: &str = "inbox";
+/// The task folder's name unless `gitfold.taskDir` says otherwise.
+const DEFAULT_TASK_DIR: &str = ".task";
+/// The inbox's name unless `gitfold.inbox` says otherwise.
+const DEFAULT_INBOX: &str = "inbox";
 
 /// The repository's own config file, read once: for several settings at a
 /// time (a task folder's name and place, a fork's settings).
@@ -43,9 +47,52 @@ impl Local {
     }
 
     /// `gitfold.<key>`, trimmed, if set and not empty.
-    pub fn repository(&self, key: &str) -> Option<String> {
+    fn repository(&self, key: &str) -> Option<String> {
         let value = self.0.as_ref()?.string_by("gitfold", None, key)?;
         non_empty(value.to_string())
+    }
+
+    /// The task folder's name in a workspace: `gitfold.taskDir` if it is one
+    /// name in the workspace root, not one of its special names; else (warned
+    /// about if set) `.task`.
+    pub fn task_dir(&self) -> String {
+        match self.repository(TASK_DIR) {
+            Some(name) if !name.contains('/') && ![".", "..", ".git"].contains(&name.as_str()) => {
+                name
+            }
+            Some(name) => {
+                warn!("gitfold.taskDir {name:?} isn't a single name: using {DEFAULT_TASK_DIR}");
+                DEFAULT_TASK_DIR.to_string()
+            }
+            None => DEFAULT_TASK_DIR.to_string(),
+        }
+    }
+
+    /// Where task folders are kept (`gitfold.tasksDir`, `~` expanded), if set:
+    /// absolute, as relative paths would depend on each process's current
+    /// directory; another value is warned about and counts as unset.
+    pub fn tasks_dir(&self) -> Option<PathBuf> {
+        let dir = expand_home(&self.repository(TASKS_DIR)?);
+        if !dir.is_absolute() {
+            let shown = dir.display();
+            warn!("gitfold.tasksDir {shown} isn't absolute: using the default");
+            return None;
+        }
+        Some(dir)
+    }
+
+    /// The name of a task folder's inbox: `gitfold.inbox` if it is one plain
+    /// name (not starting with a dot: files being written); else (warned about
+    /// if set) `inbox`.
+    pub fn inbox(&self) -> String {
+        match self.repository(INBOX) {
+            Some(name) if !name.contains('/') && !name.starts_with('.') => name,
+            Some(name) => {
+                warn!("gitfold.inbox {name:?} isn't a plain name: using {DEFAULT_INBOX}");
+                DEFAULT_INBOX.to_string()
+            }
+            None => DEFAULT_INBOX.to_string(),
+        }
     }
 
     /// The prewarm mode set for the workspace of `branch`, if any; a value
@@ -97,9 +144,14 @@ fn branch_key(branch: &str, key: &str) -> String {
     format!("branch.{branch}.{key}")
 }
 
-/// `gitfold.<key>` (see `Local::repository`).
-pub fn repository(common_dir: &Path, key: &str) -> Option<String> {
-    Local::read(common_dir).repository(key)
+/// `dir` with a leading `~` as the home directory.
+fn expand_home(dir: &str) -> PathBuf {
+    let home = || std::env::home_dir().unwrap_or_default();
+    match dir.strip_prefix("~") {
+        Some("") => home(),
+        Some(rest) if rest.starts_with('/') => home().join(&rest[1..]),
+        _ => PathBuf::from(dir),
+    }
 }
 
 /// The prewarm mode set for the workspace of `branch` (see `Local::prewarm`).
@@ -137,8 +189,7 @@ fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()
 
 /// Gives branch `to` the settings set for branch `from` (a fork); one that
 /// can't be written is warned about.
-pub fn copy_branch(common_dir: &Path, from: &str, to: &str) {
-    let local = Local::read(common_dir);
+pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
     // Every per-branch setting.
     let copied = [
         (

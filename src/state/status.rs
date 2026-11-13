@@ -133,8 +133,9 @@ impl Status {
     }
 }
 
-/// The changes of the workspace stored in `state`, in repository `common_dir`.
-pub fn status(store: &Store, common_dir: &Path, state: &StateDir) -> Result<Status> {
+/// The changes of the workspace stored in `state`.
+pub fn status(store: &Store, state: &StateDir) -> Result<Status> {
+    let common_dir = &state.common_dir;
     let base = state.read_base()?;
     let tree = store.load_tree(base.tree)?;
     let (whiteouts, opaque) = Markers::read(&state.markers())?;
@@ -228,7 +229,10 @@ impl Walk<'_> {
             Err(e) if not_found(&e) => return Ok(()),
             Err(e) => return Err(e).with_context(|| format!("listing {}", dir_path.display())),
         };
-        self.saw(&fs::metadata(&dir_path)?);
+        // Directories below were seen as entries of their parent.
+        if dir.is_empty() {
+            self.saw(&fs::metadata(&dir_path)?);
+        }
         let table = tree.map(|t| self.store.tree(t));
         let lists = self.ignore.patterns.len();
         if ignoring == Ignoring::Match {
@@ -254,9 +258,7 @@ impl Walk<'_> {
                 if !matches!(lower, Some(Lower::Tree(_) | Lower::Gitlink))
                     && fs::symlink_metadata(entry.path().join(".git")).is_ok()
                 {
-                    let ignored = ignoring == Ignoring::All
-                        || (ignoring == Ignoring::Match && self.is_ignored(&path, true));
-                    if ignored {
+                    if self.counts_ignored(ignoring, &path, true) {
                         self.ignored += 1;
                     } else {
                         self.changed.push(path);
@@ -284,9 +286,7 @@ impl Walk<'_> {
                     false
                 }
                 // Untracked: ignored output, or a new file.
-                None if ignoring == Ignoring::All
-                    || (ignoring == Ignoring::Match && self.is_ignored(&path, false)) =>
-                {
+                None if self.counts_ignored(ignoring, &path, false) => {
                     self.ignored += 1;
                     continue;
                 }
@@ -307,10 +307,15 @@ impl Walk<'_> {
     fn add_gitignore(&mut self, dir: &[u8], table: Option<&TreeTable>) -> Result<()> {
         let path = join(dir, b".gitignore");
         let upper = upper_path(self.upper, &path);
-        let bytes = match fs::symlink_metadata(&upper) {
-            Ok(meta) if meta.is_file() => Some(fs::read(&upper)?),
-            Ok(_) => None,
-            Err(e) if not_found(&e) => match table.and_then(|t| t.find(b".gitignore")) {
+        let meta = match fs::symlink_metadata(&upper) {
+            Ok(meta) => Some(meta),
+            Err(e) if not_found(&e) => None,
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = match meta {
+            Some(meta) if meta.is_file() => Some(fs::read(&upper)?),
+            Some(_) => None,
+            None => match table.and_then(|t| t.find(b".gitignore")) {
                 Some(e)
                     if matches!(e.kind, EntryKind::Blob | EntryKind::BlobExecutable)
                         && !hidden(self.whiteouts, self.opaque, &path) =>
@@ -320,7 +325,6 @@ impl Walk<'_> {
                 }
                 _ => None,
             },
-            Err(e) => return Err(e.into()),
         };
         if let Some(bytes) = bytes {
             let source = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(&path));
@@ -339,6 +343,12 @@ impl Walk<'_> {
         if let Ok(t) = meta.modified() {
             self.newest = self.newest.max(Some(t));
         }
+    }
+
+    /// Whether untracked `path` counts as ignored, below a directory where
+    /// `ignoring` holds.
+    fn counts_ignored(&self, ignoring: Ignoring, path: &[u8], is_dir: bool) -> bool {
+        ignoring == Ignoring::All || (ignoring == Ignoring::Match && self.is_ignored(path, is_dir))
     }
 
     /// Whether git ignores untracked `path`.
@@ -363,6 +373,10 @@ fn deleted_below(
 ) -> Result<()> {
     let in_upper = fs::symlink_metadata(upper_path(upper, path));
     match lower {
+        // Without a directory there, upper has nothing below: all of it is gone.
+        Lower::Tree(_) if !in_upper.as_ref().is_ok_and(|m| m.is_dir()) => {
+            all_below(store, path, lower, out)
+        }
         Lower::Tree(tree) => {
             let table = store.tree(tree);
             for e in table.entries() {
@@ -384,4 +398,19 @@ fn deleted_below(
         }
     }
     Ok(())
+}
+
+/// Every base file and submodule at or below `path` (lower entry `lower`).
+fn all_below(store: &Store, path: &[u8], lower: Lower, out: &mut BTreeSet<Vec<u8>>) {
+    match lower {
+        Lower::Tree(tree) => {
+            let table = store.tree(tree);
+            for e in table.entries() {
+                all_below(store, &join(path, table.name(e)), Lower::of(e), out);
+            }
+        }
+        Lower::Gitlink | Lower::File(_) => {
+            out.insert(path.to_vec());
+        }
+    }
 }

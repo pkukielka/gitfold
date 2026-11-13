@@ -29,6 +29,7 @@ pub fn register(
     gitfile: &Path,
 ) -> Result<PathBuf> {
     let dir = snapshot_admin_dir(common_dir, &commit.id);
+    let index = |path: &Path| fsutil::write_atomic(path, index);
     write_admin(&dir, gitfile, index, &format!("{}\n", commit.id))?;
     Ok(dir)
 }
@@ -44,12 +45,13 @@ pub fn snapshot_admin_dir(common_dir: &Path, commit: &ObjectId) -> PathBuf {
 /// Registers a workspace on `branch` with admin directory `dir` (see
 /// `StateDir::admin`). HEAD and the index belong to git once the worktree exists,
 /// so they are only written when it is new or incomplete (`index` is called
-/// then); otherwise this just points `gitdir` at the current mount path.
+/// then, to put the index at the path it is given); otherwise this just points
+/// `gitdir` at the current mount path.
 pub fn register_branch(
     dir: &Path,
     branch: &str,
     gitfile: &Path,
-    index: impl FnOnce() -> Vec<u8>,
+    index: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
     if dir.join("HEAD").exists() && dir.join("index").exists() {
         fsutil::write_atomic(
@@ -57,12 +59,7 @@ pub fn register_branch(
             format!("{}\n", gitfile.display()).as_bytes(),
         )?;
     } else {
-        write_admin(
-            dir,
-            gitfile,
-            &index(),
-            &format!("ref: refs/heads/{branch}\n"),
-        )?;
+        write_admin(dir, gitfile, index, &format!("ref: refs/heads/{branch}\n"))?;
     }
     Ok(())
 }
@@ -71,7 +68,12 @@ pub fn register_branch(
 /// `register_branch`) treat a directory with HEAD as a worktree, so a crash
 /// earlier leaves something that is rewritten next time instead of a worktree
 /// without an index.
-fn write_admin(dir: &Path, gitfile: &Path, index: &[u8], head: &str) -> Result<()> {
+fn write_admin(
+    dir: &Path,
+    gitfile: &Path,
+    index: impl FnOnce(&Path) -> std::io::Result<()>,
+    head: &str,
+) -> Result<()> {
     fs::create_dir_all(dir)?;
     fsutil::write_atomic(&dir.join("commondir"), b"../..\n")?;
     fsutil::write_atomic(
@@ -80,7 +82,7 @@ fn write_admin(dir: &Path, gitfile: &Path, index: &[u8], head: &str) -> Result<(
     )?;
     // Keeps `git worktree prune` from deleting the entry while unmounted.
     fsutil::write_atomic(&dir.join("locked"), b"managed by gitfold\n")?;
-    fsutil::write_atomic(&dir.join("index"), index)?;
+    index(&dir.join("index"))?;
     fsutil::write_atomic(&dir.join("HEAD"), head.as_bytes())?;
     Ok(())
 }

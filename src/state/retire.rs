@@ -29,13 +29,40 @@ fn shown(paths: &[Vec<u8>]) -> String {
     s.join("\n")
 }
 
-/// Whether the workspace's base is the branch tip, as a note for the user.
-pub(crate) fn base_note(branch: &str, base: &gix::ObjectId) -> &'static str {
-    match git::resolve(&format!("refs/heads/{branch}")) {
-        Err(_) => "branch deleted",
-        Ok(tip) if tip.id != *base => "base behind the branch tip (mount to update)",
-        Ok(_) => "",
+/// Where a workspace's stored base is, relative to its branch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tip {
+    /// The base is the branch tip.
+    At,
+    /// The branch moved after the daemon last saw it.
+    Behind,
+    /// The branch is gone.
+    Deleted,
+}
+
+impl Tip {
+    /// Where `base`, the base of the workspace of `branch`, is.
+    fn of(branch: &str, base: &gix::ObjectId) -> Tip {
+        match git::branch_tip(branch) {
+            Err(_) => Tip::Deleted,
+            Ok(tip) if tip.id != *base => Tip::Behind,
+            Ok(_) => Tip::At,
+        }
     }
+
+    /// What to tell the user about it: nothing at the tip.
+    fn note(self) -> &'static str {
+        match self {
+            Tip::At => "",
+            Tip::Behind => "base behind the branch tip (mount to update)",
+            Tip::Deleted => "branch deleted",
+        }
+    }
+}
+
+/// Whether the workspace's base is the branch tip, as a note for the user.
+pub fn base_note(branch: &str, base: &gix::ObjectId) -> &'static str {
+    Tip::of(branch, base).note()
 }
 
 /// What `remove --check` says of a workspace that can be removed.
@@ -89,21 +116,17 @@ pub fn remove_snapshot_registration(
     })
 }
 
-/// Brings a workspace's stored base up to its branch tip: (store, common_dir,
-/// branch).
-pub type CatchUp<'a> = dyn Fn(&Store, &Path, &str) -> Result<()> + 'a;
-
 /// Fails if the workspace of `branch` doesn't exist, or (unless `force`) has
 /// uncommitted changes or a git operation in progress; returns how many
 /// ignored files it holds. `catch_up` brings its stored base up to the branch
 /// tip, if it is behind: `fs::workspace::catch_up` for a closed workspace, or
-/// the open workspace's `sync`.
+/// the open workspace's `sync` (`state` can't open one).
 pub fn check_workspace(
     store: &Store,
     common_dir: &Path,
     branch: &str,
     force: bool,
-    catch_up: &CatchUp<'_>,
+    catch_up: &dyn Fn() -> Result<()>,
 ) -> Result<usize> {
     // `..` would point it at the git directory itself.
     check_name(branch)?;
@@ -137,26 +160,26 @@ pub fn check_workspace(
     }
     let mut ignored = 0;
     if !force && state.opened() {
-        let mut s = status::status(store, common_dir, &state)?;
+        let mut s = status::status(store, &state)?;
         // Changes are measured against the base; behind the tip (the branch moved
         // after the daemon last saw it), a file edited back to the base's content
         // would look unchanged. Catch up as the daemon would have.
-        let tip = git::resolve(&format!("refs/heads/{branch}")).ok();
-        if tip.is_some_and(|tip| tip.id != s.base) {
-            catch_up(store, common_dir, branch).map_err(|e| {
+        if Tip::of(branch, &s.base) == Tip::Behind {
+            catch_up().map_err(|e| {
                 changes(format!(
                     "workspace {branch}: its base is behind the branch tip and catching up \
                      failed ({e:#}); mount it, open it once, or use --force"
                 ))
             })?;
-            s = status::status(store, common_dir, &state)?;
+            s = status::status(store, &state)?;
         }
         ignored = s.ignored;
-        let note = base_note(branch, &s.base);
-        if !note.is_empty() && note != "branch deleted" {
+        let tip = Tip::of(branch, &s.base);
+        if tip == Tip::Behind {
             return Err(changes(format!(
-                "workspace {branch}: {note}, so its changes can't be told; mount it, open \
-                 it once, or use --force"
+                "workspace {branch}: {}, so its changes can't be told; mount it, open it \
+                 once, or use --force",
+                tip.note()
             )));
         }
         if !s.changed.is_empty() || !s.deleted.is_empty() {
@@ -181,7 +204,6 @@ pub fn check_workspace(
 /// Deletes the workspace of `branch` (checked by `check_workspace`, which
 /// counted `ignored` files in it); returns what was done.
 pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Result<String> {
-    check_name(branch)?;
     let state = StateDir::of(common_dir, branch);
     // The registration first: without it, the state alone is resumed correctly
     // (the registration is recreated); the reverse is not.
@@ -207,7 +229,8 @@ fn index_matches_head(admin: &Path) -> Result<bool> {
     }
 }
 
-pub(crate) fn remove_dir(dir: &Path) -> Result<()> {
+/// Removes directory `dir` and what it holds, if it is there.
+pub fn remove_dir(dir: &Path) -> Result<()> {
     match fs::remove_dir_all(dir) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
             Err(e).with_context(|| format!("removing {}", dir.display()))

@@ -386,8 +386,8 @@ workspaces cheaply. Until it is removed,
 git treats the branch as checked out, even while unmounted: you can't check it
 out elsewhere or delete it.
 
-**How it's stored.** The workspace id is the branch name with `%` and `/`
-escaped (`agent%2Ftask-17`). The worktree registration is
+**How it's stored.** The workspace id is the branch name with `%`, `/` and a
+leading `.` escaped (`agent%2Ftask-17`). The worktree registration is
 `.git/worktrees/gitfold-ws-<id>`; the changes are in `.git/gitfold/<id>/`:
 `upper/` holds every file that differs from the workspace's base (the branch's
 last tip, see above), as real files; `markers` records deleted files so they

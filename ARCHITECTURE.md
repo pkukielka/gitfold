@@ -203,7 +203,7 @@ Then, per request (`fs/workspace/`):
 - **Opaque**: a directory recreated over a whiteout, or a lower directory
   copied into upper by a rename; its lower children stay hidden.
 - **Copy-up**: copying a lower file to upper before its first modification.
-- **Workspace id**: the branch name with `%` and `/` escaped
+- **Workspace id**: the branch name with `%`, `/` and a leading `.` escaped
   (`feature%2Flogin`); names `.git/worktrees/gitfold-ws-<id>` and
   `.git/gitfold/<id>`.
 - **Namespace directory**: a directory for one component of longer names

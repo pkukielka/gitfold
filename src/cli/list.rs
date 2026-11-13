@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use super::write_path;
 use crate::git;
+use crate::settings;
 use crate::state::retire::{base_note, check_name};
 use crate::state::status;
 use crate::state::task::TaskDir;
@@ -36,7 +37,7 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
         return Ok(());
     }
     let store = Store::default();
-    let s = status::status(&store, &common_dir, &state)?;
+    let s = status::status(&store, &state)?;
     let note = base_note(name, &s.base);
     if !note.is_empty() {
         eprintln!("note: {name}: {note}; changes are against the stored base");
@@ -114,6 +115,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
     let store = Store::default();
     let list = state::list(&common_dir)?;
+    let local = settings::Local::read(&common_dir);
     if list.is_empty() {
         println!("no workspaces");
         return Ok(());
@@ -127,7 +129,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         "branch", "changed", "deleted", "ignored", "base", "last"
     );
     for w in list {
-        let s = match status::status(&store, &common_dir, &w.state) {
+        let s = match status::status(&store, &w.state) {
             Ok(s) => s,
             Err(e) => {
                 println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.state.id);
@@ -146,7 +148,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             }
             false => String::new(),
         };
-        let task = TaskDir::of(&common_dir, &w.branch);
+        let task = TaskDir::with(&local, &common_dir, &w.branch);
         let last = [
             last_change(&common_dir, &w.branch, &w.state, &s),
             task.newest(),
