@@ -24,6 +24,7 @@ use anyhow::{Context, Result};
 use log::warn;
 
 use crate::git::worktree::{self, workspace_id};
+use crate::settings;
 
 /// The folder's name unless `gitfold.taskDir` says otherwise.
 pub const DEFAULT_NAME: &str = ".task";
@@ -43,16 +44,9 @@ impl TaskDir {
     /// The task folder of `branch` in repository `common_dir`, as configured;
     /// a setting that can't be used is warned about and the default used.
     pub fn of(common_dir: &Path, branch: &str) -> TaskDir {
-        let config = config(common_dir);
-        let get = |key: &str| {
-            config
-                .as_ref()
-                .and_then(|c| c.string_by("gitfold", None, key))
-                .map(|v| v.to_string().trim().to_string())
-                .filter(|v| !v.is_empty())
-        };
+        let get = |key: &str| settings::repository(common_dir, key);
         // One name in the workspace root, not one of its special names.
-        let name = match get("taskDir") {
+        let name = match get(settings::TASK_DIR) {
             Some(name) if !name.contains('/') && ![".", "..", ".git"].contains(&name.as_str()) => {
                 name
             }
@@ -64,7 +58,7 @@ impl TaskDir {
         };
         let default = || worktree::state_root(common_dir).join(".tasks");
         // Relative paths would depend on each process's current directory.
-        let root = match get("tasksDir").map(|d| expand_home(&d)) {
+        let root = match get(settings::TASKS_DIR).map(|d| expand_home(&d)) {
             Some(dir) if dir.is_absolute() => dir,
             Some(dir) => {
                 warn!(
@@ -147,11 +141,8 @@ impl TaskDir {
 /// The name of a task folder's inbox: `gitfold.inbox` if it is one plain name
 /// (not starting with a dot), else `inbox`.
 pub fn inbox_name(common_dir: &Path) -> String {
-    let name = config(common_dir)
-        .and_then(|c| c.string_by("gitfold", None, "inbox").map(|v| v.to_string()))
-        .map(|v| v.trim().to_string());
-    match name {
-        Some(name) if !name.is_empty() && !name.contains('/') && !name.starts_with('.') => name,
+    match settings::repository(common_dir, settings::INBOX) {
+        Some(name) if !name.contains('/') && !name.starts_with('.') => name,
         Some(name) => {
             warn!("gitfold.inbox {name:?} isn't a plain name: using {DEFAULT_INBOX}");
             DEFAULT_INBOX.to_string()
@@ -162,12 +153,6 @@ pub fn inbox_name(common_dir: &Path) -> String {
 
 /// The inbox's name unless `gitfold.inbox` says otherwise.
 const DEFAULT_INBOX: &str = "inbox";
-
-/// The repository's own config file (where `git config` writes), read now.
-fn config(common_dir: &Path) -> Option<gix::config::File> {
-    let path = common_dir.join("config");
-    gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok()
-}
 
 fn expand_home(dir: &str) -> PathBuf {
     let home = || std::env::home_dir().unwrap_or_default();

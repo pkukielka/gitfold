@@ -5,6 +5,7 @@ mod fs;
 mod git;
 mod inode;
 mod refusal;
+mod settings;
 mod store;
 
 use std::path::PathBuf;

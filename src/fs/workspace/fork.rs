@@ -21,7 +21,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 
 use super::{Workspace, read_base};
-use crate::daemon::prewarm::BRANCH_KEY;
 use crate::git;
 use crate::git::worktree::{self, workspace_id};
 
@@ -141,7 +140,7 @@ pub fn fork(
         }
         return Err(e);
     }
-    copy_settings(common_dir, from, to);
+    crate::settings::copy_branch(common_dir, from, to);
     let done = match copied {
         true => format!("created branch {to} at {from}, with its uncommitted changes"),
         false => {
@@ -308,22 +307,6 @@ fn mount_of(gitfile: &Path, branch: &str) -> Option<PathBuf> {
         mount.pop();
     }
     Some(mount)
-}
-
-/// Gives `to` the workspace settings set for `from`, if any: its prewarm mode
-/// and read tracking.
-fn copy_settings(common_dir: &Path, from: &str, to: &str) {
-    for name in [BRANCH_KEY, super::reads::BRANCH_KEY] {
-        let key = |b: &str| format!("branch.{b}.{name}");
-        // Not set: `git config --get` fails.
-        let Ok(value) = git::cmd::output(common_dir, &["config", "--local", "--get", &key(from)])
-        else {
-            continue;
-        };
-        if !value.trim().is_empty() {
-            let _ = git::cmd::run(common_dir, &["config", "--local", &key(to), value.trim()]);
-        }
-    }
 }
 
 impl Workspace {

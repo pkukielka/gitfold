@@ -17,10 +17,11 @@ use crate::fs::workspace::retire::{
     remove_snapshot_registration, remove_workspace,
 };
 use crate::fs::workspace::task::TaskDir;
-use crate::fs::workspace::{fork, reads, status};
+use crate::fs::workspace::{fork, status};
 use crate::git;
 use crate::git::worktree::{self, workspace_branch, workspace_id};
 use crate::refusal::Refusal;
+use crate::settings;
 use crate::store::Store;
 
 /// Takes the repository's daemon lock exclusively, failing if a gitfold daemon
@@ -152,15 +153,14 @@ pub fn track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
 
 /// Stores whether branch `name`'s workspace records reads, in git config.
 fn set_track_reads(repo: &Path, name: &str, on: bool) -> Result<()> {
-    let key = format!("branch.{name}.{}", reads::BRANCH_KEY);
-    git::cmd::run(repo, &["config", &key, if on { "true" } else { "false" }])
+    let value = if on { "true" } else { "false" };
+    settings::set_branch(repo, name, settings::TRACK_READS, value)
 }
 
 /// Stores `mode` as branch `name`'s prewarm mode, in git config.
 fn set_prewarm(repo: &Path, name: &str, mode: Prewarm) -> Result<()> {
-    let key = format!("branch.{name}.{}", crate::daemon::prewarm::BRANCH_KEY);
     let value = ValueEnum::to_possible_value(&mode).expect("not skipped");
-    git::cmd::run(repo, &["config", &key, value.get_name()])
+    settings::set_branch(repo, name, settings::PREWARM, value.get_name())
 }
 
 /// `gitfold changes`: the uncommitted changes of workspace `name` relative to
