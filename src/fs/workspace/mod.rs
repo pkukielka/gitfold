@@ -16,17 +16,14 @@
 //! The base follows the branch tip (`rebase`), without visible effect.
 //!
 //! - `nodes`: local id ↔ (parent, name) table.
-//! - `fork`: copying a workspace into a new branch (`branch --with-changes`).
-//! - `markers`: persisted whiteouts and opaque markers.
-//! - `times`: timestamps of files dropped from upper.
+//! - `fork`: copying an open workspace's state under its lock (the rest of a
+//!   fork is `state::fork`).
 //! - `rebase`: moving the base to the branch tip.
-//! - `reads`: the files read in it (`gitfold overlaps`).
-//! - `task`: the task folder (the `.task` link), kept apart from the changes.
-//! - `status`: a workspace's changes, read from its state directory (for
-//!   `list`, `changes`, `overlaps` and `remove`).
-//! - `retire`: the rules for removing a workspace or a snapshot's
-//!   registration.
+//! - `reads`: recording the files read in it (`gitfold overlaps`).
 //! - `write`: mutations and copy-up.
+//!
+//! What a workspace stores, and what commands read from it without a mount
+//! (its changes, the removal rules, forks, the task folder), is `state`.
 
 pub mod fork;
 mod nodes;

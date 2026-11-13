@@ -116,25 +116,28 @@ Then, per request (`fs/workspace/`):
 | `src/fs/mod.rs` | FUSE adapter: translates requests and owns kernel-facing policy (TTLs, init flags, `ENOSYS` replies) |
 | `src/fs/view.rs` | what an inode is: attributes, lookups, directory listings, content |
 | `src/fs/snapshots.rs` | `@<rev>` registry: creating snapshots, listing them per namespace |
-| `src/fs/workspaces/mod.rs` | name resolution below the root; workspace and namespace registry; opening workspaces; busy marks; the sync thread; applying prewarm and read-tracking settings to open workspaces |
-| `src/fs/workspaces/requests.rs` | the daemon's side of `branch --with-changes`: marking branches busy, the request lock |
+| `src/fs/workspaces/mod.rs` | name resolution below the root; workspace and namespace registry; opening workspaces; the sync thread |
+| `src/fs/workspaces/busy.rs` | busy marks: branches a request works on, not opened, removed or worked on meanwhile |
+| `src/fs/workspaces/requests.rs` | the control requests served on workspaces: forks (with the request lock), applying prewarm and read-tracking settings |
 | `src/fs/workspace/mod.rs` | one workspace: merged lower/upper view, lookups, cached listings, reads |
 | `src/fs/workspace/write.rs` | copy-up and mutations |
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
-| `src/fs/workspace/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
-| `src/fs/workspace/reads.rs` | read tracking: the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/workspace/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`) |
-| `src/fs/workspace/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
-| `src/fs/workspace/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
-| `src/fs/workspace/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
-| `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
+| `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
+| `src/fs/workspace/fork.rs` | copying an open workspace's state under its lock, for a fork |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
-| `src/store.rs` | shared tree tables, file ids, directory layout, index walk |
-| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory and registration; the files in it), its base and branch files |
+| `src/store.rs` | shared tree tables, file ids, directory layout, index walk; what is at a path of a tree (`Lower`, `entry_at`), whether a file matches a stored one |
+| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory and registration; the files in it), ids, its base and branch files |
+| `src/state/markers.rs` | whiteouts and opaque markers, as an append-only log |
+| `src/state/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged) |
+| `src/state/reads.rs` | the read log's format (`gitfold overlaps`) |
+| `src/state/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`) |
+| `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
+| `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
+| `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): reading, writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
@@ -143,7 +146,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access |
 | `src/git/cmd.rs` | running git itself (`command`, `run`, `output`) |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
-| `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check, workspace ids |
+| `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check |
 | `src/git/lock.rs` | the repository lock, held by a mounted daemon and by `remove`/`prune` |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, the mount table, the mount's source name |

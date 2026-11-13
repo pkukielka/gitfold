@@ -1,4 +1,13 @@
-//! A workspace's stored state, mounted or not: where it is, and its base.
+//! A workspace's stored state, mounted or not: where it is, what is in it, and
+//! what commands do with it without going through the mount.
+//!
+//! - `markers`, `times`, `reads`: the formats of its deletion log, timestamps
+//!   and read log.
+//! - `status`: its uncommitted changes, ignored files, last change, line counts.
+//! - `retire`: the rules for removing a workspace or a snapshot's
+//!   registration.
+//! - `fork`: a new branch with a copy of a workspace (`branch --with-changes`).
+//! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //!
 //! The state of the workspace of branch `b` is `.git/gitfold/<id>/`, `<id>`
 //! being `b` with `%` and `/` escaped (`workspace_id`): `base` (the
