@@ -304,6 +304,103 @@ for b in tk tk2 tk3 fk-old old tracked; do "$BIN" -C "$REPO" remove --force "$b"
 R branch -q -D tk tk2 tk3 fk-old old tracked
 rm -rf "$TASKS" "$T/tasks"
 
+echo "== inbox, send, watch"
+R branch ib; R branch ib2
+IB=$COMMON/gitfold/.tasks/ib
+out=$("$BIN" -C "$REPO" send nope hi 2>&1); rc=$?
+eq "send to no branch: exit 3" 3 "$rc"
+eq "send, unmounted, to a branch never opened" "sent to ib" "$("$BIN" -C "$REPO" send ib --from ib2 -s "lexer API" I changed it 2>&1)"
+echo "a longer
+body" | "$BIN" -C "$REPO" send ib - >/dev/null
+eq "--peek lists, taking nothing" "ib2	lexer API
+user	a longer" "$("$BIN" -C "$REPO" inbox ib --peek 2>&1)"
+out=$("$BIN" -C "$REPO" inbox ib 2>&1)
+eq "inbox takes them, oldest first, as sent" "from: ib2
+subject: lexer API
+
+I changed it
+
+from: user
+
+a longer
+body" "$(grep -v '^time: ' <<<"$out")"
+check "with a time header" grep -qE '^time: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$out"
+eq "taken once: gone after" "" "$("$BIN" -C "$REPO" inbox ib 2>&1)"
+eq "an empty inbox: --peek prints nothing" "" "$("$BIN" -C "$REPO" inbox ib --peek 2>&1)"
+start=$(date +%s%N)
+eq "--wait --timeout with nothing: nothing, after the wait" "" "$("$BIN" -C "$REPO" inbox ib --wait --timeout 1 2>&1)"
+eq "  (about a second)" yes "$( (( ($(date +%s%N) - start) / 1000000 >= 900 )) && echo yes || echo no)"
+"$BIN" -C "$REPO" inbox ib --wait --timeout 10 >"$T/waited" 2>&1 & WP=$!
+sleep 0.3; start=$(date +%s%N)
+"$BIN" -C "$REPO" send ib wake up >/dev/null; wait $WP
+eq "--wait returns with the message as it arrives" "wake up" "$(tail -1 "$T/waited")"
+eq "  (at once)" yes "$( (( ($(date +%s%N) - start) / 1000000 < 2000 )) && echo yes || echo no)"
+"$BIN" -C "$REPO" inbox ib --wait --timeout 10 >"$T/waited" 2>&1 & WP=$!
+sleep 0.3; rm -rf "$IB/inbox"; sleep 0.3
+"$BIN" -C "$REPO" send ib after the inbox was deleted >/dev/null; wait $WP
+eq "a waiter whose inbox directory is deleted watches the new one" "after the inbox was deleted" "$(tail -1 "$T/waited")"
+printf 'from: x\r\nsubject: crlf\r\n\r\nbody\r\n' >"$IB/inbox/0001-x"; printf 'Hello\n\nworld\n' >"$IB/inbox/0002-y"
+eq "a CRLF message; one without headers, all body" "x	crlf
+	Hello" "$("$BIN" -C "$REPO" inbox ib --peek 2>&1)"
+"$BIN" -C "$REPO" inbox ib >/dev/null
+echo "from: z
+
+left" >"$IB/inbox/.taken-999999-0003-z"
+eq "a message a dead reader took is put back" "from: z
+
+left" "$("$BIN" -C "$REPO" inbox ib 2>&1)"
+"$BIN" -C "$REPO" send ib for ib only >/dev/null
+"$BIN" -C "$REPO" branch -w --from ib ibf >/dev/null 2>&1
+eq "a fork leaves the inbox behind" "no 1" "$(test -e "$COMMON/gitfold/.tasks/ibf/inbox" && echo yes || echo no) $("$BIN" -C "$REPO" inbox ib --peek | wc -l)"
+eq "the post-tool-use hook skips a subagent's tool calls" "" "$(echo '{"agent_id":"a1","hook_event_name":"PostToolUse"}' | "$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use 2>&1)"
+eq "  (and leaves the message)" 1 "$("$BIN" -C "$REPO" inbox ib --peek | wc -l)"
+"$BIN" -C "$REPO" inbox ib >/dev/null
+for i in $(seq 40); do "$BIN" -C "$REPO" send ib "m$i" >/dev/null; done
+"$BIN" -C "$REPO" inbox ib >"$T/r1" 2>&1 & "$BIN" -C "$REPO" inbox ib >"$T/r2" 2>&1 & wait
+eq "two readers at once: each message to one of them" "40 40" "$(cat "$T/r1" "$T/r2" | grep -c '^m[0-9]') $(cat "$T/r1" "$T/r2" | grep '^m[0-9]' | sort -u | wc -l)"
+"$BIN" -C "$REPO" send ib -s 'q"x' 'tab	here' >/dev/null
+eq "--json" '{"file":"X","headers":{"from":"user","subject":"q\"x"},"body":"tab\there\n"}' "$("$BIN" -C "$REPO" inbox ib --json 2>&1 | sed -E 's/"file":"[^"]*"/"file":"X"/; s/,?"time":"[^"]*"//')"
+"$BIN" -C "$REPO" watch ib:notes --timeout 10 >"$T/watched" 2>&1 & WP=$!
+sleep 0.3; echo n >"$IB/notes/a.md"; echo m >"$IB/notes/b.md"; wait $WP
+eq "watch: what changed in a burst, then exits" "C	a.md
+C	b.md" "$(cat "$T/watched")"
+"$BIN" -C "$REPO" watch ib:notes --timeout 10 >"$T/watched" 2>&1 & WP=$!
+sleep 0.3; rm "$IB/notes/a.md"; wait $WP
+eq "watch: a deletion" "D	a.md" "$(cat "$T/watched")"
+echo h >"$IB/notes/handoff.md"
+"$BIN" -C "$REPO" watch ib:notes --timeout 10 >"$T/watched" 2>&1 & WP=$!
+sleep 0.3; echo new >"$IB/notes/.tmp"; mv "$IB/notes/.tmp" "$IB/notes/handoff.md"; rm "$IB/notes/b.md"; wait $WP
+eq "watch: each name's last change (a file replaced: changed)" "D	b.md
+C	handoff.md" "$(cat "$T/watched")"
+check "watch refuses a file" fails "$BIN" -C "$REPO" watch ib:notes/handoff.md --timeout 1
+eq "watch --timeout: nothing" "" "$("$BIN" -C "$REPO" watch ib:notes --timeout 1 2>&1)"
+check "watch refuses .." fails "$BIN" -C "$REPO" watch ib:../x --timeout 1
+eq "--claude-hook outside a workspace: silent, exit 0" "0" "$(cd / && "$BIN" inbox --claude-hook post-tool-use </dev/null 2>&1; echo $?)"
+eq "--claude-hook, nothing new: silent" "" "$("$BIN" -C "$REPO" inbox ib --claude-hook user-prompt-submit </dev/null 2>&1; "$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use </dev/null 2>&1)"
+"$BIN" -C "$REPO" send ib -s s1 one >/dev/null
+eq "--claude-hook user-prompt-submit: the messages, introduced" "yes yes" "$("$BIN" -C "$REPO" inbox ib --claude-hook user-prompt-submit </dev/null | grep -c -e '^New messages in your gitfold inbox' -e '^one$' | sed 's/^2$/yes yes/')"
+"$BIN" -C "$REPO" send ib 'two "quoted"' >/dev/null
+eq "--claude-hook post-tool-use: additionalContext JSON" yes "$("$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use </dev/null | grep -q '^{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"New messages.*two \\"quoted\\"\\n"}}$' && echo yes)"
+"$BIN" -C "$REPO" inbox ib --claude-hook rewake </dev/null >"$T/rw.out" 2>"$T/rw.err" & WP=$!
+sleep 0.3
+start=$(date +%s%N)
+eq "a second rewake waiter exits at once (one per inbox)" "0" "$("$BIN" -C "$REPO" inbox ib --claude-hook rewake </dev/null >/dev/null 2>&1; echo $?)"
+eq "  (at once)" yes "$( (( ($(date +%s%N) - start) / 1000000 < 1000 )) && echo yes || echo no)"
+"$BIN" -C "$REPO" send ib wake >/dev/null; wait $WP; rc=$?
+eq "--claude-hook rewake: exit 2, the message on stderr" "2 yes" "$rc $(grep -qx wake "$T/rw.err" && echo yes)"
+mount_fs
+(cd "$MNT/ib2" && "$BIN" watch . --timeout 10 >"$T/watched" 2>&1) & WP=$!
+sleep 0.3; echo s >"$MNT/ib2/.task/status"; wait $WP
+eq "in a workspace: its own folder; writes through the link seen" "C	status" "$(cat "$T/watched")"
+eq "send from a workspace: from it" "from: ib2" "$(cd "$MNT/ib2" && "$BIN" send ib hi >/dev/null && "$BIN" inbox ib | head -1)"
+unmount_fs
+R config gitfold.inbox mail
+"$BIN" -C "$REPO" send ib configured >/dev/null
+check "gitfold.inbox names it" test -n "$(ls "$IB/mail")"
+R config --unset gitfold.inbox
+for b in ib ib2 ibf; do "$BIN" -C "$REPO" remove --force "$b" >/dev/null 2>&1; done
+R branch -q -D ib ib2 ibf; rm -rf "$COMMON/gitfold/.tasks"
+
 echo "== remove"
 check "uncommitted changes refused" fails "$BIN" -C "$REPO" remove agent/one
 out=$("$BIN" -C "$REPO" remove agent/one 2>&1); eq "refusal lists the paths" yes "$(grep -q new.txt <<<"$out" && echo yes)"

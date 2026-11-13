@@ -1,9 +1,11 @@
 //! The commands run from the shell, not by the daemon.
 //!
+//! - `inbox`: `watch`, `inbox`, `send`: messages and watching on task folders.
 //! - `manage`: `branch`, `list`, `changes`, `remove`, `prune`, `prewarm`.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
 
+pub mod inbox;
 pub mod manage;
 pub mod mount;
 pub mod overlaps;

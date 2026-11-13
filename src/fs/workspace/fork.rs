@@ -97,7 +97,8 @@ pub fn fork(
     // the branch exists: once it does, opening it makes an empty folder.
     let to_task = super::task::TaskDir::of(common_dir, to);
     let kept_task = to_task.dir.exists();
-    let task_copied = match to_task.copy_from(&super::task::TaskDir::of(common_dir, from)) {
+    let inbox = super::task::inbox_name(common_dir);
+    let task_copied = match to_task.copy_from(&super::task::TaskDir::of(common_dir, from), &inbox) {
         Ok(copied) => copied,
         Err(e) => {
             log::warn!("copying the task folder of {from} into {to}: {e:#}");

@@ -75,6 +75,43 @@ A fork (`gitfold branch -w`) copies it. Use `git stash -u` rather than
 `git stash --all`, which fails on the folder's link. Its name can differ per repository
 (`git config gitfold.taskDir`); check with `ls -a` at the workspace root.
 
+## Messages between agents
+
+```
+gitfold send agent/task-18 -s "lexer API" "I renamed Lexer::next to Lexer::advance"
+gitfold inbox                  # take (and print) the messages sent to you
+gitfold inbox --wait --timeout 600   # none yet? wait up to 10 minutes for one
+gitfold inbox --peek           # list them without taking
+gitfold watch agent/b:.        # wait until something in agent/b's task folder changes
+```
+
+Each message is taken once. Messages are files in `.task/inbox/`, so anything
+can send one: an orchestrator, a script, a person (`gitfold send <BRANCH>
+<TEXT>` from the repository, as `user`).
+
+**Delivery without polling, in Claude Code:** add to `~/.claude/settings.json`
+(the commands do nothing outside a gitfold workspace):
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command",
+      "command": "gitfold inbox --claude-hook user-prompt-submit" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command",
+      "command": "gitfold inbox --claude-hook post-tool-use" }] }],
+    "Stop": [{ "hooks": [{ "type": "command",
+      "command": "gitfold inbox --claude-hook rewake",
+      "async": true, "asyncRewake": true, "timeout": 86400 }] }]
+  }
+}
+```
+
+Messages then arrive in the conversation by themselves: with your next
+prompt, after the agent's next tool call, or, when the session is idle, by
+waking it (the `Stop` hook waits for a message and wakes the session when one
+comes; one waiter per inbox). Other harnesses: run `gitfold inbox --wait`
+between tasks, or as a background command that ends when a message arrives.
+
 ## Starting work
 
 ```

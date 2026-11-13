@@ -170,6 +170,69 @@ enum Command {
         #[arg(short = 'z')]
         nul: bool,
     },
+    /// Wait for a change in a directory of a task folder, and print it.
+    ///
+    /// <TARGET> is <BRANCH>:<DIR>, or <DIR> of the workspace you are in (`.`
+    /// for the folder itself). Waits until a file there is written, created,
+    /// moved in, deleted or moved out (not below it; dot names don't count),
+    /// prints `C` (changed) or `D` (deleted), a tab and the name for it and
+    /// whatever else changed right after, and exits. Plain inotify on the
+    /// folder's directory: mounted or not, whoever writes.
+    Watch {
+        target: String,
+        /// Give up after this many seconds, printing nothing.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
+        /// One JSON object per line: {"event": "changed"|"deleted", "path"}.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Take the messages in a workspace's inbox and print them.
+    ///
+    /// The inbox is `inbox/` in the task folder (`gitfold.inbox` names it). Each
+    /// message is taken once, whoever else reads: printed as sent (headers, an
+    /// empty line, the body), an empty line between messages, and deleted.
+    Inbox {
+        /// The workspace's branch (default: the workspace you are in).
+        branch: Option<String>,
+        /// If there are none, wait for one.
+        #[arg(long)]
+        wait: bool,
+        /// With --wait: give up after this many seconds.
+        #[arg(long, value_name = "SECS", requires = "wait")]
+        timeout: Option<u64>,
+        /// Only list them, taking nothing: sender and subject (or first line),
+        /// one per line; nothing if there are none.
+        #[arg(long, conflicts_with = "wait")]
+        peek: bool,
+        /// One JSON object per message: {"file", "headers", "body"}.
+        #[arg(long)]
+        json: bool,
+        /// Hand them to a Claude Code hook: `user-prompt-submit` (as context),
+        /// `post-tool-use` (as `additionalContext`), or `rewake` (an async
+        /// `Stop` hook with `asyncRewake`: waits for one, then wakes the idle
+        /// session). See skills/gitfold/SKILL.md.
+        #[arg(long, value_enum, value_name = "EVENT", conflicts_with = "peek")]
+        claude_hook: Option<cli::inbox::Hook>,
+    },
+    /// Leave a message in a workspace's inbox.
+    ///
+    /// Written atomically into <BRANCH>'s task folder: `from:` and `time:`
+    /// headers, `subject:` if given, an empty line, then the text (`-`: read
+    /// from stdin). The branch needs no workspace yet. Exit codes: 3 no such
+    /// branch, 1 other errors.
+    Send {
+        /// The recipient's branch.
+        to: String,
+        /// The message (`-`: read it from stdin).
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// Who it is from (default: the workspace you are in, else `user`).
+        #[arg(long)]
+        from: Option<String>,
+        #[arg(short, long)]
+        subject: Option<String>,
+    },
     /// Delete a workspace, or a snapshot's registration.
     ///
     /// A workspace: its registration, stored changes and base ref (its commits
@@ -418,6 +481,74 @@ fn main() -> Result<()> {
                 Ok(false) => {}
                 Err(e) => or_exit(Err(e)),
             }
+        }
+        Command::Watch {
+            target,
+            timeout,
+            json,
+        } => {
+            let repo = repo()?;
+            let current = cli::branch_or_current(None, &repo).ok();
+            let target = if target == "." { String::new() } else { target };
+            or_exit(cli::inbox::watch(
+                &repo,
+                current.as_deref(),
+                &target,
+                timeout,
+                json,
+            ));
+        }
+        Command::Inbox {
+            branch,
+            wait,
+            timeout,
+            peek,
+            json,
+            claude_hook,
+        } => {
+            // A hook runs in every session: outside a workspace, nothing to do.
+            let found = repo().and_then(|repo| Ok((cli::branch_or_current(branch, &repo)?, repo)));
+            let (branch, repo) = match found {
+                Ok(found) => found,
+                Err(_) if claude_hook.is_some() => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            let args = cli::inbox::InboxArgs {
+                wait,
+                timeout,
+                peek,
+                json,
+                hook: claude_hook,
+            };
+            match cli::inbox::inbox(&repo, &branch, args) {
+                Ok(0) => {}
+                Ok(code) => std::process::exit(code),
+                // A hook's error would show on every tool call: logged, not raised.
+                Err(e) if claude_hook.is_some() => log::warn!("gitfold inbox: {e:#}"),
+                Err(e) => or_exit(Err(e)),
+            }
+        }
+        Command::Send {
+            to,
+            text,
+            from,
+            subject,
+        } => {
+            let repo = repo()?;
+            let from = from
+                .or_else(|| cli::branch_or_current(None, &repo).ok())
+                .unwrap_or_else(|| "user".to_string());
+            let body = match text.as_slice() {
+                [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())?,
+                words => words.join(" "),
+            };
+            or_exit(cli::inbox::send(
+                &repo,
+                &to,
+                &from,
+                subject.as_deref(),
+                &body,
+            ));
         }
         Command::Remove {
             name,
