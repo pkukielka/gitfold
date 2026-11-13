@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use crate::daemon::control;
-use crate::daemon::{self, procs};
+use crate::daemon::prewarm::Prewarm;
+use crate::daemon::{self, procs, serve};
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
@@ -21,7 +22,7 @@ const MOUNT_WAIT: Duration = Duration::from_secs(60);
 /// The default log file of a mount at `mountpoint`:
 /// `$XDG_STATE_HOME/gitfold/<escaped mount point>.log`, by default under
 /// `~/.local/state`.
-pub fn default_log(mountpoint: &Path) -> Result<PathBuf> {
+fn default_log(mountpoint: &Path) -> Result<PathBuf> {
     let state = std::env::var_os("XDG_STATE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
@@ -34,10 +35,77 @@ pub fn default_log(mountpoint: &Path) -> Result<PathBuf> {
     Ok(state.join("gitfold").join(format!("{name}.log")))
 }
 
+/// The arguments of `gitfold mount`.
+#[derive(clap::Args)]
+pub struct MountArgs {
+    /// The repository: its top-level work tree or its git directory.
+    pub repo: PathBuf,
+    pub mountpoint: PathBuf,
+    /// Stay in the foreground, logging to stderr (for service managers).
+    #[arg(long)]
+    pub foreground: bool,
+    /// Log file in the background (default:
+    /// ~/.local/state/gitfold/<mount point>.log).
+    #[arg(long)]
+    pub log: Option<PathBuf>,
+    /// FUSE worker threads (default: number of CPUs).
+    #[arg(long)]
+    pub threads: Option<usize>,
+    /// Have the kernel send open/release for every file (slower; for comparison).
+    #[arg(long)]
+    pub kernel_open: bool,
+    /// Populate kernel caches in the background after a snapshot or workspace is opened.
+    #[arg(long, value_enum, default_value = "meta")]
+    pub prewarm: Prewarm,
+    /// Prewarm threads per walk (default: 4, or half the CPUs if fewer).
+    #[arg(long)]
+    pub prewarm_threads: Option<usize>,
+    /// Walks running at once; the others wait.
+    #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
+    pub prewarm_walks: u64,
+    /// Record the files agents read in workspaces, for `gitfold overlaps`
+    /// (branches can say otherwise: `gitfold track-reads`). A tracked
+    /// workspace's prewarm `content` walks as `meta`: its walk would read
+    /// every file before the agent.
+    #[arg(long)]
+    pub track_reads: bool,
+}
+
+/// `gitfold mount`: in the foreground, the daemon itself; else starts it in the
+/// background (see `start`) and says where it logs.
+pub fn mount(args: MountArgs) -> Result<()> {
+    let mountpoint = daemon::check(&args.mountpoint)?;
+    if args.foreground {
+        return serve::run(serve::Options {
+            repo: args.repo,
+            mountpoint,
+            threads: args.threads,
+            kernel_open: args.kernel_open,
+            prewarm: args.prewarm,
+            prewarm_threads: args.prewarm_threads,
+            prewarm_walks: args.prewarm_walks,
+            track_reads: args.track_reads,
+        });
+    }
+    let mountpoint = &mountpoint;
+    let log = match args.log {
+        Some(log) => std::path::absolute(log)?,
+        None => default_log(mountpoint)?,
+    };
+    start(mountpoint, &log)?;
+    println!(
+        "mounted at {} (log: {})",
+        mountpoint.display(),
+        log.display()
+    );
+    println!("unmount with: gitfold unmount {}", mountpoint.display());
+    Ok(())
+}
+
 /// Runs this command again with `--foreground`, detached and logging to `log`,
 /// and waits until `mountpoint` is mounted. The daemon resolves its arguments
 /// in this process's working directory, then moves to `/`.
-pub fn start(mountpoint: &Path, log: &Path) -> Result<()> {
+fn start(mountpoint: &Path, log: &Path) -> Result<()> {
     if let Some(dir) = log.parent() {
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }

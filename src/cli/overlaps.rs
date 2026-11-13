@@ -18,7 +18,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use gix::ObjectId;
 
-use super::manage::{quote, workspaces};
+use super::write_path;
 use crate::git;
 use crate::refusal::Refusal;
 use crate::state::reads;
@@ -78,17 +78,19 @@ fn git_reads(path: &[u8]) -> bool {
     name == b".gitignore" || name == b".gitattributes"
 }
 
-/// `gitfold overlaps`: prints, for workspace `branch`, `R` (read) and `W`
-/// (written) lines naming each target that changed the path since; returns
-/// whether there were any.
-pub fn overlaps(
-    repo: &Path,
-    branch: &str,
-    against: &[String],
-    against_workspaces: bool,
-    kinds: Kinds,
-    nul: bool,
-) -> Result<bool> {
+/// `gitfold overlaps`: prints, for a workspace, `R` (read) and `W` (written)
+/// lines naming each target that changed the path since; returns the exit
+/// code, `FOUND` if there were any.
+pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
+    let kinds = args.kinds();
+    let OverlapsArgs {
+        branch,
+        against,
+        against_workspaces,
+        nul,
+        ..
+    } = args;
+    let branch = &super::branch_or_current(branch, repo)?;
     check_name(branch)?;
     if branch.starts_with('@') {
         bail!("{branch} is a snapshot: it reads nothing and changes nothing");
@@ -133,17 +135,17 @@ pub fn overlaps(
     }
 
     let mut targets = Vec::new();
-    let mut revs: Vec<String> = against.to_vec();
+    let mut revs = against;
     if revs.is_empty() && !against_workspaces {
         revs.push(default_target(&common_dir)?);
     }
     for rev in revs {
-        anyhow::ensure!(rev != branch, "{branch} can't be compared with itself");
+        anyhow::ensure!(rev != *branch, "{branch} can't be compared with itself");
         targets.push(rev_target(&common_dir, &store, &base, rev)?);
     }
     if against_workspaces {
-        for w in workspaces(&common_dir)? {
-            if w.branch == branch || !git::branch_exists(&w.branch) {
+        for w in crate::state::list(&common_dir)? {
+            if w.branch == *branch || !git::branch_exists(&w.branch) {
                 continue;
             }
             if targets.iter().any(|t| t.name == w.branch) {
@@ -181,19 +183,10 @@ pub fn overlaps(
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     for (path, kind, target) in &lines {
         write!(out, "{kind}\t{target}\t")?;
-        match nul {
-            true => {
-                out.write_all(path)?;
-                out.write_all(b"\0")?;
-            }
-            false => {
-                out.write_all(&quote(path))?;
-                out.write_all(b"\n")?;
-            }
-        }
+        write_path(&mut out, path, nul)?;
     }
     out.flush()?;
-    Ok(!lines.is_empty())
+    Ok(if lines.is_empty() { 0 } else { FOUND })
 }
 
 /// The remote's default branch (`origin/HEAD`, normally `origin/main`), else
@@ -241,6 +234,41 @@ fn diff(common_dir: &Path, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
         .filter(|p| !p.is_empty())
         .map(<[u8]>::to_vec)
         .collect())
+}
+
+/// The arguments of `gitfold overlaps`.
+#[derive(clap::Args)]
+pub struct OverlapsArgs {
+    /// The workspace's branch (default: the workspace you are in).
+    pub branch: Option<String>,
+    /// What to compare with (repeatable; default: origin/HEAD, the remote's
+    /// default branch, else main).
+    #[arg(long, value_name = "REV")]
+    pub against: Vec<String>,
+    /// Compare with every other workspace (instead of the default target;
+    /// with --against, as well).
+    #[arg(long)]
+    pub against_workspaces: bool,
+    /// Only files read.
+    #[arg(long, conflicts_with = "writes")]
+    pub reads: bool,
+    /// Only paths changed.
+    #[arg(long)]
+    pub writes: bool,
+    /// End each line with NUL instead of a newline, paths unquoted.
+    #[arg(short = 'z')]
+    pub nul: bool,
+}
+
+impl OverlapsArgs {
+    /// Which lines `--reads` and `--writes` ask for.
+    fn kinds(&self) -> Kinds {
+        match (self.reads, self.writes) {
+            (true, _) => Kinds::Reads,
+            (_, true) => Kinds::Writes,
+            _ => Kinds::Both,
+        }
+    }
 }
 
 #[cfg(test)]

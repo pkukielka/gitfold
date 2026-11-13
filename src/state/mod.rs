@@ -165,6 +165,39 @@ pub fn ancestors(path: &[u8]) -> impl Iterator<Item = &[u8]> {
         .map(|(i, _)| &path[..i])
 }
 
+/// A stored workspace: its branch and where its state is.
+pub struct Stored {
+    pub branch: String,
+    pub state: StateDir,
+}
+
+/// The workspaces stored in repository `common_dir`, by branch.
+pub fn list(common_dir: &Path) -> Result<Vec<Stored>> {
+    let dir = state_root(common_dir);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("listing {}", dir.display())),
+    };
+    let mut list = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        // Not a workspace: `.tasks`, `.control`, the `.lock` of earlier builds
+        // (branch names, so ids, never start with a dot).
+        if id.starts_with('.') {
+            continue;
+        }
+        let branch = read_branch(&entry.path()).unwrap_or_else(|| workspace_branch(&id));
+        list.push(Stored {
+            branch,
+            state: StateDir::of_id(common_dir, &id),
+        });
+    }
+    list.sort_by(|a, b| a.branch.cmp(&b.branch));
+    Ok(list)
+}
+
 /// The base commit of the workspace stored in `dir`.
 pub fn read_base(dir: &Path) -> Result<git::Commit> {
     let base_file = dir.join(BASE);
