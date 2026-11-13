@@ -127,7 +127,7 @@ pub fn pin_ref(id: &str) -> String {
     format!("refs/gitfold/{id}")
 }
 
-fn git(common_dir: &Path, args: &[&str]) -> Result<()> {
+pub(crate) fn git(common_dir: &Path, args: &[&str]) -> Result<()> {
     let status = std::process::Command::new("git")
         .arg("--git-dir")
         .arg(common_dir)
@@ -193,4 +193,36 @@ pub fn workspace_branch(id: &str) -> String {
 pub fn is_snapshot_registration(name: &str) -> bool {
     name.strip_prefix(SNAPSHOT_PREFIX)
         .is_some_and(|hex| hex.len() == SNAPSHOT_HEX && hex.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// `git` with `args` in `common_dir`, returning its standard output.
+pub(crate) fn git_output(common_dir: &Path, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .arg("--git-dir")
+        .arg(common_dir)
+        .args(args)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git {} failed ({})",
+        args.join(" "),
+        out.status
+    );
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Refuses (a git operation in progress, `Refusal::Changes`) if git is busy in
+/// the workspace of `branch`; `then` says what to do once it is done.
+pub fn refuse_if_busy(common_dir: &Path, branch: &str, then: &str) -> Result<()> {
+    let admin = ws_admin_dir(common_dir, &workspace_id(branch));
+    match admin
+        .exists()
+        .then(|| git_busy(common_dir, &admin, branch))
+        .flatten()
+    {
+        Some(why) => {
+            Err(crate::refusal::Refusal::Changes.error(format!("{branch}: {why}; {then}")))
+        }
+        None => Ok(()),
+    }
 }

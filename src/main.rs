@@ -70,11 +70,22 @@ enum Command {
     /// same build, 3 another build (remount to upgrade), 4 a daemon too old to
     /// tell, 5 no answer (busy), 1 other errors.
     Version { mountpoint: Option<PathBuf> },
-    /// Create a branch to open as a workspace.
+    /// Create a branch to open as a workspace, with a workspace's changes if asked.
     ///
-    /// The workspace is <MOUNTPOINT>/<BRANCH>.
+    /// The workspace is <MOUNTPOINT>/<BRANCH>. With --with-changes, the branch
+    /// starts at the tip of the workspace --from names (default: the one you are
+    /// in), and its workspace with a copy of that one's uncommitted changes and
+    /// staged state: the same files and the same `git status`, from then on each
+    /// on its own. Only the changes are copied, so it costs what they weigh, not
+    /// the tree. Exit codes: 3 no such branch, 4 a git operation in progress in
+    /// the source, 5 the source or the new branch busy (being removed, or the
+    /// new branch being made), 1 other errors, 2 usage errors.
     Branch {
         branch: String,
+        /// Copy the uncommitted changes of the workspace --from names, or of the
+        /// one you are in.
+        #[arg(short = 'w', long)]
+        with_changes: bool,
         /// Start point (default: HEAD of the worktree you are in, as for `git
         /// branch`).
         #[arg(long)]
@@ -274,6 +285,9 @@ fn main() -> Result<()> {
                         Ok("prewarm resumed".into())
                     }
                     control::Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
+                    control::Request::Fork { from, to } => workspaces
+                        .fork(&from, &to)
+                        .inspect(|done| log::info!("{done}")),
                     control::Request::StopPrewarm => {
                         prewarm::stop_for_unmount(mounted.clone());
                         log::info!("prewarm stopped for the unmount");
@@ -292,7 +306,17 @@ fn main() -> Result<()> {
             branch,
             from,
             prewarm,
-        } => cli::manage::branch(&repo()?, &branch, from.as_deref(), prewarm)?,
+            with_changes,
+        } => {
+            let repo = repo()?;
+            or_exit(cli::manage::branch(
+                &repo,
+                &branch,
+                from.as_deref(),
+                prewarm,
+                with_changes,
+            ));
+        }
         Command::List => cli::manage::list(&repo()?)?,
         Command::Changes { branch, nul } => {
             let repo = repo()?;
@@ -306,10 +330,7 @@ fn main() -> Result<()> {
             wait,
         } => {
             let wait = std::time::Duration::from_secs(wait);
-            if let Err(e) = cli::manage::remove(&repo()?, &name, force, check, wait) {
-                eprintln!("Error: {e:?}");
-                std::process::exit(refusal::Refusal::of(&e).map_or(1, |r| r.exit_code()));
-            }
+            or_exit(cli::manage::remove(&repo()?, &name, force, check, wait));
         }
         Command::Prune => cli::manage::prune(&repo()?)?,
         Command::Prewarm { branch, mode } => cli::manage::prewarm(&repo()?, &branch, mode)?,
@@ -328,4 +349,12 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Exits with the error's refusal code (see `refusal`), or 1, if `result` failed.
+fn or_exit(result: Result<()>) {
+    if let Err(e) = result {
+        eprintln!("Error: {e:?}");
+        std::process::exit(refusal::Refusal::of(&e).map_or(1, |r| r.exit_code()));
+    }
 }

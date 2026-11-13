@@ -16,6 +16,7 @@
 //! The base follows the branch tip (`rebase`), without visible effect.
 //!
 //! - `nodes`: local id ↔ (parent, name) table.
+//! - `fork`: copying a workspace into a new branch (`branch --with-changes`).
 //! - `markers`: persisted whiteouts and opaque markers.
 //! - `times`: timestamps of files dropped from upper.
 //! - `rebase`: moving the base to the branch tip.
@@ -23,6 +24,7 @@
 //!   `list` and `remove`).
 //! - `write`: mutations and copy-up.
 
+pub mod fork;
 mod markers;
 mod nodes;
 mod rebase;

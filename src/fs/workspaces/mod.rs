@@ -9,14 +9,19 @@
 //! branch is the workspace, the ones before it are namespaces. For revs the
 //! namespace reading wins over git's shorthand (`origin` for `origin/HEAD`), or
 //! `origin/main` would be unreachable; `origin/HEAD` is then `@origin/HEAD`.
+//!
+//! - `requests`: the requests for `gitfold branch --with-changes` while
+//!   mounted, and their busy marks.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+mod requests;
 
 use fuser::Errno;
 use log::{error, info, warn};
@@ -60,8 +65,15 @@ pub struct Workspaces {
     by_path: Mutex<HashMap<String, u32>>,
     /// Serializes workspace creation.
     creating: Mutex<()>,
-    /// Branches whose workspace is being removed: not opened meanwhile.
-    removing: Mutex<HashSet<String>>,
+    /// Branches whose workspace is being removed, checked while closed, or
+    /// worked on by a request (`mark_busy`): not opened, removed or worked on
+    /// again meanwhile.
+    busy: Mutex<HashMap<String, Mark>>,
+    /// Taken shared by requests that may take long (copying a workspace)
+    /// while they work, exclusively by `close_requests` at unmount, which waits
+    /// for them: a fork cut off half-way would leave a workspace without its
+    /// branch.
+    requests: RwLock<bool>,
     /// Bumped whenever an entry is added, invalidating cached namespace listings.
     mtime: Mutex<SystemTime>,
 }
@@ -83,7 +95,8 @@ impl Workspaces {
             list: RwLock::new(Vec::new()),
             by_path: Mutex::new(HashMap::new()),
             creating: Mutex::new(()),
-            removing: Mutex::new(HashSet::new()),
+            busy: Mutex::new(HashMap::new()),
+            requests: RwLock::new(false),
             mtime: Mutex::new(SystemTime::now()),
         }
     }
@@ -227,13 +240,17 @@ impl Workspaces {
             if self.by_path.lock().contains_key(branch) {
                 return Ok(None);
             }
-            if !self.removing.lock().insert(branch.to_string()) {
-                return Err(Refusal::InUse.error(format!("workspace {branch} is being removed")));
+            if !self.try_mark(branch, false) {
+                return Err(busy_error(branch));
             }
         }
-        let result = check();
-        self.removing.lock().remove(branch);
-        result.map(Some)
+        // Unmarked even if `check` panics.
+        let _busy = Busy {
+            set: &self.busy,
+            branch: branch.to_string(),
+            shared: false,
+        };
+        check().map(Some)
     }
 
     /// The open workspace of `branch`.
@@ -293,7 +310,7 @@ impl Workspaces {
         }
         .and_then(|()| remove(ws.map(|ws| &**ws)));
         let _creating = self.creating.lock();
-        self.removing.lock().remove(branch);
+        unmark(&self.busy, branch, false);
         let open = taken.is_some();
         if let Some((slot, ws)) = taken {
             let entry = &mut self.list.write()[slot as usize].1;
@@ -314,10 +331,8 @@ impl Workspaces {
     /// registry if open.
     fn take(&self, branch: &str) -> anyhow::Result<Option<(u32, Arc<Workspace>)>> {
         let _creating = self.creating.lock();
-        if !self.removing.lock().insert(branch.to_string()) {
-            return Err(
-                Refusal::InUse.error(format!("workspace {branch} is already being removed"))
-            );
+        if !self.try_mark(branch, false) {
+            return Err(busy_error(branch));
         }
         let Some(slot) = self.by_path.lock().get(branch).copied() else {
             return Ok(None);
@@ -330,7 +345,7 @@ impl Workspaces {
             }
             other => {
                 *entry = other;
-                self.removing.lock().remove(branch);
+                unmark(&self.busy, branch, false);
                 return Err(Refusal::NotFound.error(format!(
                     "{branch} is a namespace directory, not a workspace"
                 )));
@@ -447,13 +462,29 @@ impl Workspaces {
         Ok(())
     }
 
+    /// Waits (lock-free, until `OPEN_WAIT` after `started`) while requests read
+    /// `branch` (a copy of the closed workspace), so an agent's open
+    /// doesn't fail because a supervisor read it; EBUSY while it is marked
+    /// exclusively (removed, checked, copied into).
+    fn wait_for_readers(&self, branch: &str, started: Instant) -> Result<(), Errno> {
+        loop {
+            match self.busy.lock().get(branch) {
+                Some(m) if m.exclusive => return Err(Errno::EBUSY),
+                Some(m) if m.readers > 0 => {}
+                _ => return Ok(()),
+            }
+            if started.elapsed() > OPEN_WAIT {
+                return Err(Errno::EBUSY);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// EBUSY if the workspace of `branch` can't be opened now: it is being
     /// removed, or the branch is checked out elsewhere (git allows one checkout
     /// per branch).
     fn refuse_open(&self, branch: &str) -> Result<(), Errno> {
-        if self.removing.lock().contains(branch) {
-            return Err(Errno::EBUSY);
-        }
+        self.wait_for_readers(branch, Instant::now())?;
         let admin = worktree::ws_admin_dir(&self.common_dir, &workspace_id(branch));
         if let Some(other) = self.checked_out_elsewhere(branch, &admin) {
             warn!(
@@ -465,10 +496,20 @@ impl Workspaces {
     }
 
     fn open_workspace(&self, store: &Arc<Store>, branch: &str) -> Result<u64, Errno> {
-        let _creating = self.creating.lock();
-        if let Some(&slot) = self.by_path.lock().get(branch) {
-            return Ok(inode::ws(slot, 0));
-        }
+        // Never waits for readers while holding `creating`: a copy marks its
+        // source a reader, and every open, removal and request needs `creating`.
+        let started = Instant::now();
+        let _creating = loop {
+            let creating = self.creating.lock();
+            if let Some(&slot) = self.by_path.lock().get(branch) {
+                return Ok(inode::ws(slot, 0));
+            }
+            if !self.busy.lock().get(branch).is_some_and(|m| m.readers > 0) {
+                break creating;
+            }
+            drop(creating);
+            self.wait_for_readers(branch, started)?;
+        };
         self.refuse_open(branch)?;
         let id = workspace_id(branch);
         let admin = worktree::ws_admin_dir(&self.common_dir, &id);
@@ -587,4 +628,49 @@ fn settle(
         return Err(Refusal::InUse.error(format!("workspace {branch} is busy; try again")));
     }
     refuse_if_used()
+}
+
+/// How long opening a workspace waits for requests reading it.
+const OPEN_WAIT: Duration = Duration::from_secs(30);
+
+/// A branch's marks in `Workspaces::busy`.
+#[derive(Default, PartialEq)]
+struct Mark {
+    /// Requests reading it (the source of a copy).
+    readers: usize,
+    /// Being removed, checked while closed, or copied into.
+    exclusive: bool,
+}
+
+/// A branch marked busy by `Workspaces::mark_busy`, until dropped.
+struct Busy<'a> {
+    set: &'a Mutex<HashMap<String, Mark>>,
+    branch: String,
+    shared: bool,
+}
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        unmark(self.set, &self.branch, self.shared);
+    }
+}
+
+/// Undoes a shared or exclusive mark of `branch` (see `Workspaces::try_mark`).
+fn unmark(set: &Mutex<HashMap<String, Mark>>, branch: &str, shared: bool) {
+    let mut busy = set.lock();
+    if let Some(mark) = busy.get_mut(branch) {
+        match shared {
+            true => mark.readers = mark.readers.saturating_sub(1),
+            false => mark.exclusive = false,
+        }
+        if *mark == Mark::default() {
+            busy.remove(branch);
+        }
+    }
+}
+
+/// The refusal of a branch busy with something else.
+fn busy_error(branch: &str) -> anyhow::Error {
+    let message = format!("{branch} is busy (being removed, checked or copied); retry");
+    Refusal::InUse.error(message)
 }
