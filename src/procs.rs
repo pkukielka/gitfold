@@ -1,10 +1,11 @@
 //! Processes using a mount, from `/proc`: for `gitfold unmount` (who keeps it
 //! busy) and the daemon's removals (who uses a workspace), and the process's
-//! own ancestors (a shell inside the mount running the command).
+//! own ancestors (a shell inside the mount running the command); this user's
+//! processes (`own`, also searched for prewarm walkers).
 
 use std::fs;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// A process using a mount.
 pub struct User {
@@ -25,14 +26,9 @@ impl std::fmt::Display for User {
 /// their paths no longer resolve to the mount point. Nothing below the mount
 /// point is looked up through the mount.
 pub fn users(mountpoint: &Path, path: &Path) -> Vec<User> {
-    let Ok(procs) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
     // Only needed (and only stat-ed: through the mount) for links to the
     // mount point itself, never for a path below it.
     let mount_dev = std::cell::OnceCell::new();
-    let uid = unsafe { libc::getuid() };
-    let below = |p: &Path| p.starts_with(path);
     // A link to the mount point itself may be the directory under the mount
     // (entered before mounting): the device tells. Stat-ing it goes through
     // the mount root, which the daemon still serves.
@@ -47,14 +43,7 @@ pub fn users(mountpoint: &Path, path: &Path) -> Vec<User> {
         })
     };
     let mut users = Vec::new();
-    for proc in procs.flatten() {
-        let Some(pid) = proc.file_name().to_str().and_then(|s| s.parse().ok()) else {
-            continue;
-        };
-        if proc.metadata().map_or(true, |m| m.uid() != uid) {
-            continue;
-        }
-        let dir = proc.path();
+    for (pid, dir) in own() {
         let uses = ["cwd", "root", "exe"]
             .iter()
             .any(|n| in_mount(&dir.join(n)))
@@ -66,7 +55,7 @@ pub fn users(mountpoint: &Path, path: &Path) -> Vec<User> {
             || fs::read_to_string(dir.join("maps")).is_ok_and(|maps| {
                 maps.lines()
                     .filter_map(|l| l.find('/').map(|at| Path::new(&l[at..])))
-                    .any(below)
+                    .any(|p| p.starts_with(path))
             });
         if uses {
             let cmdline = fs::read(dir.join("cmdline")).unwrap_or_default();
@@ -84,6 +73,17 @@ pub fn users(mountpoint: &Path, path: &Path) -> Vec<User> {
         }
     }
     users
+}
+
+/// The processes of this user: (pid, its `/proc` directory).
+pub fn own() -> impl Iterator<Item = (u32, PathBuf)> {
+    let uid = unsafe { libc::getuid() };
+    let procs = fs::read_dir("/proc").into_iter().flatten().flatten();
+    procs.filter_map(move |proc| {
+        let pid = proc.file_name().to_str()?.parse().ok()?;
+        let ours = proc.metadata().is_ok_and(|m| m.uid() == uid);
+        ours.then(|| (pid, proc.path()))
+    })
 }
 
 /// This process and its ancestors (its parent, the parent's parent, ...).

@@ -101,10 +101,10 @@ pub fn set_max_walks(n: usize) {
 
 /// Walks `root` (see `run`) in a separate `gitfold prewarm-walk` process, now
 /// or once fewer than `MAX_WALKS` run, or once walks resume if stopped for an
-/// unmount; not if a walk of `root` is known already. Not in the daemon itself: a daemon killed with SIGKILL while
-/// its own threads wait on requests to its mount never finishes dying, and the
-/// mount hangs; a separate walker's requests just fail once the daemon is gone,
-/// and it exits.
+/// unmount; not if a walk of `root` is known already. Not in the daemon itself:
+/// a daemon killed with SIGKILL while its own threads wait on requests to its
+/// mount never finishes dying, and the mount hangs; a separate walker's
+/// requests just fail once the daemon is gone, and it exits.
 pub fn spawn(root: PathBuf, mode: Prewarm, threads: usize) -> Spawned {
     if mode == Prewarm::None {
         return Spawned::Known;
@@ -199,33 +199,26 @@ fn launch(walks: Vec<Walk>) {
         let mut state = WALKS.lock();
         let at = state.starting.iter().position(|s| s.walk.root == walk.root);
         let wanted = at.is_some_and(|at| !state.starting[at].cancelled) && !state.stopped;
-        // Dropped from `starting` once it can no longer use the mount: the
-        // stoppers wait for that.
-        let forget = |state: &mut Walks| {
-            if let Some(at) = state.starting.iter().position(|s| s.walk.root == walk.root) {
-                state.starting.remove(at);
-            }
-        };
         let child = match spawned {
-            Ok(child) if wanted => {
-                forget(&mut state);
-                Some(child)
-            }
+            Ok(child) if wanted => Some(child),
             Ok(mut child) => {
                 // Stopped meanwhile: stop it now, unlocked.
                 drop(state);
                 unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
                 let _ = child.wait();
                 state = WALKS.lock();
-                forget(&mut state);
                 None
             }
             Err(e) => {
                 warn!("prewarm of {}: {e}", walk.root.display());
-                forget(&mut state);
                 None
             }
         };
+        // Dropped from `starting` once it can no longer use the mount: the
+        // stoppers wait for that.
+        if let Some(at) = state.starting.iter().position(|s| s.walk.root == walk.root) {
+            state.starting.remove(at);
+        }
         let Some(child) = child else {
             // Its slot is free: the next queued walk may start.
             let next = next_walks(&mut state);
@@ -306,12 +299,16 @@ pub fn stop_all() -> u64 {
             s.cancelled = true;
             paused.push(s.walk.clone());
         }
-        let running = std::mem::take(running);
-        paused.extend(running.iter().map(|(_, w)| w.clone()));
+        let pids = (running.drain(..))
+            .map(|(p, w)| {
+                paused.push(w);
+                p as libc::pid_t
+            })
+            .collect();
         paused.extend(queued.drain(..));
-        (running, walks.stops)
+        (pids, walks.stops)
     };
-    terminate(pids.iter().map(|(p, _)| *p as libc::pid_t).collect());
+    terminate(pids);
     wait_for_starting(|_| true);
     stop
 }
@@ -406,12 +403,9 @@ pub fn stop_under(path: &Path) -> bool {
         }
         // Unlisted first, so their reaper doesn't take it for an unmount (and
         // meanwhile, while they die, another walk may start).
-        let (under, others) = std::mem::take(&mut walks.running)
-            .into_iter()
-            .partition(|(_, w)| w.root.starts_with(path));
-        walks.running = others;
-        let pids: Vec<_> = (under.into_iter())
-            .map(|(p, _): (u32, Walk)| p as libc::pid_t)
+        let pids: Vec<_> = (walks.running)
+            .extract_if(.., |(_, w)| w.root.starts_with(path))
+            .map(|(p, _)| p as libc::pid_t)
             .collect();
         (pids, dropped)
     };
@@ -425,19 +419,9 @@ pub fn stop_under(path: &Path) -> bool {
 /// prewarm-walk <root>` processes of the same binary name, or `prewarm <root>`
 /// from older daemons), for `gitfold unmount`.
 pub fn stop_below(mountpoint: &Path) {
-    let Ok(procs) = fs::read_dir("/proc") else {
-        return;
-    };
-    let uid = unsafe { libc::getuid() };
     let mut pids = Vec::new();
-    for entry in procs.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<libc::pid_t>() else {
-            continue;
-        };
-        if entry.metadata().map_or(true, |m| m.uid() != uid) {
-            continue;
-        }
-        let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
+    for (pid, dir) in crate::procs::own() {
+        let Ok(cmdline) = fs::read(dir.join("cmdline")) else {
             continue;
         };
         let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
@@ -449,7 +433,7 @@ pub fn stop_below(mountpoint: &Path) {
             .is_some_and(|root| Path::new(OsStr::from_bytes(root)).starts_with(mountpoint));
         let walker = matches!(args.get(1), Some(&b"prewarm-walk" | &b"prewarm"));
         if is_gitfold && walker && below {
-            pids.push(pid);
+            pids.push(pid as libc::pid_t);
         }
     }
     terminate(pids);
