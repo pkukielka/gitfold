@@ -10,9 +10,10 @@ use anyhow::{Result, bail};
 
 use crate::git;
 use crate::inotify::{self, Inotify};
+use crate::state::task::TaskDir;
 
 use super::message::{is_message, json_str};
-use super::{deadline, remaining, task_dir};
+use super::{deadline, remaining};
 
 /// How long a watch keeps collecting events after the first, so one burst
 /// (a file written then renamed, several messages) comes out together.
@@ -20,11 +21,10 @@ const SETTLE: Duration = Duration::from_millis(100);
 
 /// `gitfold watch`: waits until something in `target` (`[<BRANCH>:]<DIR>`, a
 /// directory of a task folder; the current workspace's when no branch is
-/// given) is written,
-/// created, moved in, deleted or moved out, then prints what (`C` or `D`, a tab
-/// and the name, each name's last change; or JSON), collecting a burst of them,
-/// and exits; `D` and `.` if the directory itself goes. Prints nothing if
-/// `timeout` passes first.
+/// given) is written, created, moved in, deleted or moved out, then prints
+/// what (`C` or `D`, a tab and the name, each name's last change; or JSON),
+/// collecting a burst of them, and exits; `D` and `.` if the directory itself
+/// goes. Prints nothing if `timeout` passes first.
 pub fn watch(repo: &Path, args: WatchArgs) -> Result<()> {
     let WatchArgs {
         target,
@@ -43,7 +43,8 @@ pub fn watch(repo: &Path, args: WatchArgs) -> Result<()> {
     if dir.split('/').any(|c| c == "..") {
         bail!("{dir}: a directory of the task folder, without `..`");
     }
-    let root = task_dir(&common_dir, &branch)?;
+    git::require_branch(&branch)?;
+    let root = TaskDir::of(&common_dir, &branch).dir;
     let path = if dir.is_empty() || dir == "." {
         root
     } else {
