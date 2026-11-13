@@ -403,6 +403,12 @@ So do a workspace's base following a branch that moved, and the checks of
 
 ### With coding agents
 
+- [skills/gitfold/SKILL.md](skills/gitfold/SKILL.md) tells agents how to work
+  in a mount: workspaces and snapshots, forking a workspace, merge previews,
+  cleaning up, and what differs from a checkout. It is a Claude Code skill:
+  `ln -s "$PWD/skills/gitfold" ~/.claude/skills/gitfold` (or into a project's
+  `.claude/skills/`). It is plain markdown, so other agents can be pointed at
+  it from their instructions (`AGENTS.md`).
 - Workspaces an agent only reads a few files in are cheaper without the prewarm
   walk: give their branch prewarm mode `none` (see [Usage](#usage)).
 - **Claude Code's git scans** (measured with Claude Code 2.1.322 and a git
