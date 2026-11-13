@@ -1,15 +1,18 @@
 //! The commands run from the shell, not by the daemon.
 //!
 //! - `inbox`: `watch`, `inbox`, `send`: messages and watching on task folders.
-//! - `manage`: `branch`, `list`, `changes`, `remove`, `prune`, `prewarm`,
-//!   `track-reads`.
+//! - `branch`: `branch` (and its forks), `prewarm`, `track-reads`.
+//! - `list`: `list`, `changes`.
+//! - `remove`: `remove`, `prune`.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
 
+pub mod branch;
 pub mod inbox;
-pub mod manage;
+pub mod list;
 pub mod mount;
 pub mod overlaps;
+pub mod remove;
 
 use std::path::Path;
 
@@ -53,5 +56,62 @@ pub fn local_or_daemon(
                 common_dir.display()
             ))),
         },
+    }
+}
+
+/// `path` as git prints it with `core.quotePath` on (the default): as is,
+/// unless it has a control character, a double quote, a backslash or a byte
+/// above 0x7f; then in double quotes, with C escapes and octal for the rest.
+pub fn quote(path: &[u8]) -> Vec<u8> {
+    let plain = |b: u8| (0x20..0x7f).contains(&b) && b != b'"' && b != b'\\';
+    if path.iter().all(|&b| plain(b)) {
+        return path.to_vec();
+    }
+    let mut out = vec![b'"'];
+    for &b in path {
+        match b {
+            b'\x07' => out.extend(b"\\a"),
+            b'\x08' => out.extend(b"\\b"),
+            b'\t' => out.extend(b"\\t"),
+            b'\n' => out.extend(b"\\n"),
+            b'\x0b' => out.extend(b"\\v"),
+            b'\x0c' => out.extend(b"\\f"),
+            b'\r' => out.extend(b"\\r"),
+            b'"' => out.extend(b"\\\""),
+            b'\\' => out.extend(b"\\\\"),
+            b if plain(b) => out.push(b),
+            b => out.extend(format!("\\{b:03o}").bytes()),
+        }
+    }
+    out.push(b'"');
+    out
+}
+
+/// Writes `path` ending a line of output: quoted as git quotes paths, then a
+/// newline; or as it is, then a NUL (`nul`, git's `-z`).
+pub fn write_path(out: &mut impl std::io::Write, path: &[u8], nul: bool) -> std::io::Result<()> {
+    match nul {
+        true => {
+            out.write_all(path)?;
+            out.write_all(b"\0")
+        }
+        false => {
+            out.write_all(&quote(path))?;
+            out.write_all(b"\n")
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quoted_as_git_quotes() {
+        assert_eq!(quote(b"plain/path.txt"), b"plain/path.txt");
+        assert_eq!(quote(b"t\tb"), b"\"t\\tb\"");
+        assert_eq!(quote(b"q\"b\\s"), b"\"q\\\"b\\\\s\"");
+        assert_eq!(quote("é".as_bytes()), b"\"\\303\\251\"");
+        assert_eq!(quote(b"\x7f"), b"\"\\177\"");
     }
 }

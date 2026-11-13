@@ -456,7 +456,7 @@ fn run() -> Result<i32> {
             with_changes,
         } => {
             let repo = repo()?;
-            cli::manage::branch(
+            cli::branch::branch(
                 &repo,
                 &branch,
                 from.as_deref(),
@@ -465,11 +465,11 @@ fn run() -> Result<i32> {
                 with_changes,
             )?;
         }
-        Command::List { stat } => cli::manage::list(&repo()?, stat)?,
+        Command::List { stat } => cli::list::list(&repo()?, stat)?,
         Command::Changes { branch, nul, stat } => {
             let repo = repo()?;
             let branch = cli::branch_or_current(branch, &repo)?;
-            cli::manage::changes(&repo, &branch, nul, stat)?
+            cli::list::changes(&repo, &branch, nul, stat)?
         }
         Command::Overlaps {
             branch,
@@ -552,11 +552,11 @@ fn run() -> Result<i32> {
             wait,
         } => {
             let wait = std::time::Duration::from_secs(wait);
-            cli::manage::remove(&repo()?, &name, force, check, wait)?;
+            cli::remove::remove(&repo()?, &name, force, check, wait)?;
         }
-        Command::Prune => cli::manage::prune(&repo()?)?,
-        Command::Prewarm { branch, mode } => cli::manage::prewarm(&repo()?, &branch, mode)?,
-        Command::TrackReads { branch, on } => cli::manage::track_reads(&repo()?, &branch, on)?,
+        Command::Prune => cli::remove::prune(&repo()?)?,
+        Command::Prewarm { branch, mode } => cli::branch::prewarm(&repo()?, &branch, mode)?,
+        Command::TrackReads { branch, on } => cli::branch::track_reads(&repo()?, &branch, on)?,
         Command::PrewarmWalk {
             root,
             mode,

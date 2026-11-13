@@ -18,7 +18,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use gix::ObjectId;
 
-use super::manage::{quote, workspaces};
+use super::write_path;
 use crate::git;
 use crate::refusal::Refusal;
 use crate::state::reads;
@@ -142,7 +142,7 @@ pub fn overlaps(
         targets.push(rev_target(&common_dir, &store, &base, rev)?);
     }
     if against_workspaces {
-        for w in workspaces(&common_dir)? {
+        for w in crate::state::list(&common_dir)? {
             if w.branch == branch || !git::branch_exists(&w.branch) {
                 continue;
             }
@@ -181,16 +181,7 @@ pub fn overlaps(
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     for (path, kind, target) in &lines {
         write!(out, "{kind}\t{target}\t")?;
-        match nul {
-            true => {
-                out.write_all(path)?;
-                out.write_all(b"\0")?;
-            }
-            false => {
-                out.write_all(&quote(path))?;
-                out.write_all(b"\n")?;
-            }
-        }
+        write_path(&mut out, path, nul)?;
     }
     out.flush()?;
     Ok(!lines.is_empty())

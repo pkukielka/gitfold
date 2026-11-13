@@ -1,5 +1,5 @@
 //! Removing a workspace or a snapshot's registration: the rules shared by the
-//! offline `gitfold remove` (`cli::manage`) and the daemon's removal while
+//! offline `gitfold remove` (`cli::remove`) and the daemon's removal while
 //! mounted (`fs::removal`). A name is checked first (`..` would point a removal
 //! at the git directory itself); a workspace is removed only without
 //! uncommitted or staged changes or a git operation in progress, unless forced;
