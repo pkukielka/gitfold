@@ -139,9 +139,14 @@ impl Workspace {
     }
 
     fn sync_with(&self, store: &Store, fetch: bool) -> Result<()> {
-        // With layers shown, git is surrendered (see `lens`), and an upper file
-        // identical to a layer's mustn't be dropped as unchanged: both wait.
-        if !self.git_idle() || self.lensed() {
+        // With layers shown, commits made on the lens commit go onto the
+        // branch (see `lens`), but the base waits, and an upper file
+        // identical to a layer's mustn't be dropped as unchanged.
+        if self.lensed() {
+            self.limit_touched();
+            return self.sync_lens();
+        }
+        if !self.git_idle() {
             self.limit_touched();
             return Ok(());
         }

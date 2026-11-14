@@ -135,10 +135,15 @@ enum Command {
     /// Each layer is a workspace's work (uncommitted included) as it was when
     /// added or updated, shown over the workspace's base and under its own
     /// changes; higher layers win a path. A layer's files can't be written
-    /// there, and while any layer is shown, git is off in the workspace (its
-    /// commands say why): `gitfold lens off` turns it back on. Stored with the
-    /// workspace; while mounted, shown at once. Exit codes: 3 no such
-    /// workspace or layer, 1 other errors, 2 usage errors.
+    /// there, and git sees only the workspace's own changes. Files marked
+    /// `gitfold-blend=hunk` in .gitattributes are blended instead (the
+    /// layers' lines and the workspace's own, which it writes), with HEAD at a
+    /// lens commit; commits made on it go onto the branch with only the
+    /// workspace's changes. Where git can't be kept right, it is turned off
+    /// there, saying why. Stored with the workspace; while mounted, shown at
+    /// once. Exit codes: 3 no such workspace or layer, 4 git busy (or
+    /// commits that can't go onto the branch yet, or own lines that depend
+    /// on a layer's), 1 other errors, 2 usage errors.
     Layer(cli::layer::LayerArgs),
     /// Hide every layer of a workspace (see `gitfold layer`).
     Lens(cli::layer::LensArgs),

@@ -38,7 +38,7 @@ const HEADER_LEN: usize = 12;
 
 /// Stat data of an index entry, as git compares it with `lstat` (each field
 /// the low 32 bits).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Stat {
     /// Seconds and nanoseconds.
     pub ctime: (u32, u32),

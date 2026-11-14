@@ -19,7 +19,7 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
-use gix::bstr::BStr;
+use gix::bstr::ByteSlice;
 use gix::objs::tree::EntryKind;
 
 use super::StateDir;
@@ -120,10 +120,20 @@ pub fn shown_anywhere(common_dir: &std::path::Path, branch: &str) -> Result<bool
 
 /// What a workspace with layers shows below its own changes.
 pub struct View {
+    /// M: the base's tree with the shown layers' changes.
     pub tree: ObjectId,
-    /// The paths shown layers changed (deleted ones too), with the layer (its
-    /// index in `Lens::layers`) whose version shows.
+    /// H: the base's tree with only the blended files blended (see `blend`).
+    pub hunk_tree: ObjectId,
+    /// The paths the layers' whole files replace or delete, with the layer
+    /// (its index in `Lens::layers`) whose version shows: read-only.
     pub mixed: HashMap<Vec<u8>, usize>,
+    /// The blended files (see `blend`), with the layers blended in: the
+    /// workspace writes them, its own lines on top of theirs.
+    pub blended: HashMap<Vec<u8>, Vec<usize>>,
+    /// The seals of the layers blended in (L's parents after the base).
+    pub hunk_seals: Vec<ObjectId>,
+    /// What the agent should hear about it.
+    pub notes: Vec<String>,
 }
 
 /// One changed path between two trees, as `git diff-tree -r` reports it.
@@ -184,42 +194,124 @@ pub fn changes(
     Ok(changes)
 }
 
-/// The view of `lens` over base tree `base_tree`, or `None` if no layer is
+/// The view of `lens` over base commit `base`, or `None` if no layer is
 /// shown.
-pub fn view(
-    common_dir: &std::path::Path,
-    base_tree: &ObjectId,
-    lens: &Lens,
-) -> Result<Option<View>> {
+///
+/// A file is blended, rather than shown whole, if the attribute
+/// `gitfold-blend` is `hunk` for it (in the base's `.gitattributes` or
+/// `info/attributes`), the base has it and no shown layer deletes it: every
+/// layer's change to it is merged into the base's version, lines both sides
+/// add kept both (registries, manifests: files several agents append to).
+pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Result<Option<View>> {
     if !lens.is_on() {
         return Ok(None);
     }
-    let mut mixed = HashMap::new();
-    let mut edits: Vec<Change> = Vec::new();
-    for (i, layer) in lens.layers.iter().enumerate().filter(|(_, l)| l.on) {
-        for c in changes(common_dir, &layer.merge_base, &layer.seal)
-            .with_context(|| format!("layer {}", layer.branch))?
-        {
-            mixed.insert(c.path.clone(), i);
-            edits.push(c);
-        }
-    }
-    // Higher layers last, so they win; deletions of each layer before its
-    // additions (`changes`). A path deleted by a lower layer and added by a
-    // higher one ends added.
-    let tree = git::with_repo(|repo| -> Result<ObjectId> {
-        let mut editor = repo.edit_tree(*base_tree)?;
-        for c in &edits {
-            match c.new {
-                None => {
-                    editor.remove(BStr::new(&c.path))?;
-                }
-                Some((kind, oid)) => {
-                    editor.upsert(BStr::new(&c.path), kind, oid)?;
+    let shown: Vec<usize> = (0..lens.layers.len())
+        .filter(|&i| lens.layers[i].on)
+        .collect();
+    let stack: Vec<git::lens::Layer> = (shown.iter())
+        .map(|&i| git::lens::Layer {
+            seal: lens.layers[i].seal,
+            merge_base: lens.layers[i].merge_base,
+        })
+        .collect();
+    let base_tree = git::resolve(&base.to_string())?.tree;
+    let hunk = hunk_paths(common_dir, base, &base_tree, &stack)?;
+    let view = git::with_repo(|repo| {
+        git::lens::build_view(repo, *base, &stack, &|p| hunk.contains(p.as_bytes()))
+    })?;
+    let layer = |ix: usize| shown[ix];
+    let name = |ix: usize| lens.layers[shown[ix]].branch.clone();
+    let notes = (view.notes.iter())
+        .map(|n| match n {
+            git::lens::Note::NotBlended { layer, path } => format!(
+                "{}: {}'s change conflicts with what is below it, so it isn't blended in",
+                path,
+                name(*layer)
+            ),
+            git::lens::Note::HidesBase { layer, path } => format!(
+                "{}: {}'s version hides a change on your base since it diverged",
+                path,
+                name(*layer)
+            ),
+        })
+        .collect();
+    Ok(Some(View {
+        tree: view.view_tree,
+        hunk_tree: view.hunk_tree,
+        mixed: (view.mixed.iter())
+            .map(|(p, &ix)| (p.to_vec(), layer(ix)))
+            .collect(),
+        blended: (view.blended.iter())
+            .map(|(p, ixs)| (p.to_vec(), ixs.iter().map(|&ix| layer(ix)).collect()))
+            .collect(),
+        hunk_seals: (view.hunk_layers().into_iter())
+            .map(|ix| lens.layers[shown[ix]].seal)
+            .collect(),
+        notes,
+    }))
+}
+
+/// The paths the layers in `stack` change that are blended: `gitfold-blend`
+/// is `hunk` for them in the base's attributes, the base has them, and no
+/// layer deletes them.
+fn hunk_paths(
+    common_dir: &std::path::Path,
+    base: &ObjectId,
+    base_tree: &ObjectId,
+    stack: &[git::lens::Layer],
+) -> Result<std::collections::HashSet<Vec<u8>>> {
+    let mut candidates = std::collections::BTreeSet::new();
+    let mut deleted = std::collections::HashSet::new();
+    git::with_repo(|repo| -> Result<()> {
+        let tree_of =
+            |c: ObjectId| -> Result<ObjectId> { Ok(repo.find_commit(c)?.tree_id()?.detach()) };
+        for layer in stack {
+            let (mb, seal) = (tree_of(layer.merge_base)?, tree_of(layer.seal)?);
+            for (path, change) in git::lens::delta(repo, mb, seal)? {
+                match change {
+                    git::lens::Change::Delete => {
+                        deleted.insert(path.to_vec());
+                    }
+                    git::lens::Change::Set(_) => {
+                        if git::lens::lookup(repo, *base_tree, path.as_ref())?.is_some() {
+                            candidates.insert(path.to_vec());
+                        }
+                    }
                 }
             }
         }
-        Ok(editor.write()?.detach())
+        Ok(())
     })?;
-    Ok(Some(View { tree, mixed }))
+    candidates.retain(|p| !deleted.contains(p));
+    if candidates.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut child = git::cmd::command(common_dir)
+        .args([
+            "check-attr",
+            "-z",
+            "--stdin",
+            &format!("--source={base}"),
+            "gitfold-blend",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+    let mut input = Vec::new();
+    for p in &candidates {
+        input.extend_from_slice(p);
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take().context("stdin")?;
+    let writer = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &input));
+    let out = child.wait_with_output()?;
+    let _ = writer.join();
+    anyhow::ensure!(out.status.success(), "git check-attr failed");
+    // path NUL attribute NUL value NUL ...
+    let fields: Vec<&[u8]> = out.stdout.split(|&b| b == 0).collect();
+    Ok((fields.chunks(3))
+        .filter(|f| f.len() == 3 && f[2] == b"hunk")
+        .map(|f| f[0].to_vec())
+        .collect())
 }

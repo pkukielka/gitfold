@@ -207,7 +207,7 @@ fn deny_hook() -> Result<()> {
         }
         git::init(&state.common_dir)?;
         let base = state.read_base()?;
-        let Some(view) = crate::state::lens::view(&state.common_dir, &base.tree, &lens)? else {
+        let Some(view) = crate::state::lens::view(&state.common_dir, &base.id, &lens)? else {
             return Ok(None);
         };
         let Some(&i) = view.mixed.get(path.as_bytes()) else {

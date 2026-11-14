@@ -138,6 +138,13 @@ pub fn git_busy(common_dir: &Path, admin: &Path, branch: &str) -> Option<GitBusy
             head: head.trim().to_string(),
         });
     }
+    git_running(common_dir, admin, branch)
+}
+
+/// Why git is not idle in the worktree with admin directory `admin` on
+/// `branch`, wherever its HEAD is (`git_busy` also wants it on the branch):
+/// an operation running or stopped half-way, or a ref locked.
+pub fn git_running(common_dir: &Path, admin: &Path, branch: &str) -> Option<GitBusy> {
     let exists = |p: PathBuf| fs::symlink_metadata(p).is_ok();
     if let Some(f) = BUSY.iter().find(|f| exists(admin.join(f))) {
         return Some(GitBusy::Operation(f));

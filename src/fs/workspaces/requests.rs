@@ -107,13 +107,17 @@ impl Workspaces {
                 let _ = notifier.inval_inode(INodeNo(inode::ws(slot, local)), 0, 0);
             }
         }
-        Ok(match ws.lensed() {
+        let mut done = match ws.lensed() {
             true => format!(
                 "{branch}: layers shown ({} entries changed)",
                 stale.inodes.len() - 1
             ),
             false => format!("{branch}: no layers shown"),
-        })
+        };
+        for note in &stale.notes {
+            done += &format!("\nnote: {note}");
+        }
+        Ok(done)
     }
 
     /// `gitfold track-reads`: starts or stops recording reads in the workspace

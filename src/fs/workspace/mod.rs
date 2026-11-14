@@ -143,6 +143,13 @@ struct Layers {
     mixed: std::collections::HashMap<Vec<u8>, usize>,
     /// Whether any layer is shown.
     lens_on: bool,
+    /// H: the base's tree with the blended files blended (the base's tree
+    /// when none is), and the blended files (see `lens`).
+    hunk: ObjectId,
+    blended: std::collections::HashMap<Vec<u8>, Vec<usize>>,
+    /// The lens commit HEAD is detached at while files are blended (see
+    /// `lens`).
+    lens_head: Option<ObjectId>,
     /// Whiteouts and opaque markers.
     markers: Markers,
     times: Times,
@@ -259,6 +266,9 @@ impl Workspace {
             view: base.tree,
             mixed: Default::default(),
             lens_on: false,
+            hunk: base.tree,
+            blended: Default::default(),
+            lens_head: None,
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,
         };

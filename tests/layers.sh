@@ -146,7 +146,39 @@ eq "the base caught up with the commit" "$(R rev-parse me)" "$(cat "$COMMON/gitf
 check "an unknown layer (exit 3)" sh -c "'$BIN' -C '$W' layer off nope; [ \$? = 3 ]"
 }
 
+blended_files_and_the_lens_commit() {
+echo 'reg.txt gitfold-blend=hunk' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
+R add -A; R commit -qm blendable
+R branch me; R branch la
+mount_fs
+W=$MNT/me
+echo fromA >>"$MNT/la/reg.txt"; echo la >>"$MNT/la/a.txt"
+cat "$W/reg.txt" >/dev/null
+check "add a layer" "$BIN" -C "$W" layer add la
+eq "the blended file has the layer's lines" "one two fromA" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+check "and is writable" test -w "$W/reg.txt"
+check "a whole file isn't" test ! -w "$W/a.txt"
+eq "HEAD at the lens commit" "gitfold lens: me + la (commits go to me; never push this commit)" "$(G "$W" log -1 --format=%s)"
+eq "git status clean" "" "$(git -C "$W" status --short)"
+echo fromMe >>"$W/reg.txt"
+eq "git diff: only own lines" "+fromMe" "$(git -C "$W" diff | grep '^+[^+]')"
+check "commit" G "$W" commit -qam mine
+for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = fromMe ] && break; sleep 0.1; done
+eq "the branch gets only own lines" "one two fromMe" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
+eq "git status still clean" "" "$(git -C "$W" status --short)"
+eq "HEAD at a new lens commit" "1" "$(G "$W" cat-file -p HEAD | grep -c '^gitfold-lens 1')"
+git init -q --bare "$T/remote.git"
+check "pushing HEAD is refused" fails G "$W" push -q "$T/remote.git" HEAD:refs/heads/main
+check "pushing the branch isn't" G "$W" push -q "$T/remote.git" me
+echo moreMe >>"$W/reg.txt"
+check "lens off" "$BIN" -C "$W" lens off
+eq "the layer's lines gone, own ones kept" "one two fromMe moreMe" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+eq "back on the branch, the uncommitted line its change" "me| M reg.txt" \
+    "$(G "$W" branch --show-current)|$(git -C "$W" status --short)"
+}
+
 section "layers: shown in a workspace" layers_shown_in_a_workspace
+section "layers: blended files, the lens commit" blended_files_and_the_lens_commit
 section "seal: uncommitted work as a commit" seal_uncommitted_work_as_a_commit
 section "mix: workspaces merged into a snapshot" mix_workspaces_into_a_snapshot
 finish
