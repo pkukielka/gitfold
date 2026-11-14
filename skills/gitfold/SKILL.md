@@ -224,10 +224,10 @@ even on a huge tree. Each workspace then changes on its own.
   on per workspace with `gitfold branch <BRANCH> --track-reads on` (or
   `gitfold track-reads <BRANCH> on` for an existing one), or for the whole
   mount with `gitfold mount --track-reads`. Turn it on before the agent
-  starts: files read before aren't seen. Searches (`rg`, `grep`, Claude
-  Code's Grep) aren't recorded, only files an agent actually opened; a file
-  read after a search read it is seen through the plugin's hook (the Read
-  tool, and `cat`/`head`/`tail`/`sed` in Bash), not otherwise.
+  starts: files read before aren't recorded. Reads are what Claude Code's
+  hook (the plugin's) reports: the Read tool's files, and the files `cat`,
+  `head`, `tail`, `sed` ... show in Bash; with other agents, `overlaps` has
+  `W` lines only.
 - **Merge previews:** to see what several branches look like merged, before
   merging anything, make the merge commit with git and open it as a snapshot.
   No working tree, index or ref is touched (git 2.38 or later). This is a

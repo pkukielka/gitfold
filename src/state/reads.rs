@@ -1,5 +1,5 @@
-//! The read log of a workspace (`reads` in its state directory): the files read
-//! while read tracking is on (`fs::workspace::reads` records them), for
+//! The read log of a workspace (`state::READS` in its state directory): the
+//! files read while read tracking is on (`fs::workspace::reads` records them), for
 //! `gitfold overlaps`. NUL-terminated paths, once each, appended; a partial
 //! last path (a crash, an append in progress) is left out.
 

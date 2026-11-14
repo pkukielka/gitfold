@@ -48,7 +48,7 @@ pub const MARKERS: &str = "markers";
 pub const TIMES: &str = "times";
 /// Copy-ups in progress.
 const TMP: &str = "tmp";
-/// The read log (`reads`).
+/// The read log (`reads`): what Claude Code's hook reported.
 pub const READS: &str = "reads";
 /// A workspace's worktree registration is `<common>/worktrees/<prefix><id>`.
 pub const ADMIN_PREFIX: &str = "gitfold-ws-";

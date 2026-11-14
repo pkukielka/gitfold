@@ -175,9 +175,9 @@ pub struct BranchArgs {
     /// still wins.
     #[arg(long, value_enum)]
     pub prewarm: Option<Prewarm>,
-    /// Record the files read in this workspace, for `gitfold overlaps`, or
-    /// not, whatever the mount's --track-reads says (in git config,
-    /// branch.<BRANCH>.gitfoldTrackReads).
+    /// Record the files Claude Code reads in this workspace (its hook reports
+    /// them), for `gitfold overlaps`, or not, whatever the mount's
+    /// --track-reads says (in git config, branch.<BRANCH>.gitfoldTrackReads).
     #[arg(long, value_name = "on|off", value_parser = BoolishValueParser::new())]
     pub track_reads: Option<bool>,
     /// As Claude Code's `WorktreeCreate` hook (`worktree-create`): its

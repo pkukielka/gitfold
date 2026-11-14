@@ -71,13 +71,6 @@ impl Target {
     }
 }
 
-/// Whether git itself reads `path` in every directory it walks (`git status`
-/// reads each `.gitignore`): recorded, but not what the agent built on.
-fn git_reads(path: &[u8]) -> bool {
-    let name = path.rsplit(|b| *b == b'/').next().unwrap_or(path);
-    name == b".gitignore" || name == b".gitattributes"
-}
-
 /// `gitfold overlaps`: prints, for a workspace, `R` (read) and `W` (written)
 /// lines naming each target that changed the path since; returns the exit
 /// code, `FOUND` if there were any.
@@ -113,17 +106,24 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
         }
         false => (git::branch_tip(branch)?.id, Vec::new(), None),
     };
+    // Tracked by its setting but no log yet (not opened since): nothing read.
+    let tracked = crate::settings::Local::read(&common_dir).track_reads(branch);
+    let read = read.or_else(|| tracked.unwrap_or(false).then(Default::default));
     match (&read, kinds) {
         (None, Kinds::Reads) => {
             let message = format!(
-                "no reads recorded for {branch}: `gitfold track-reads {branch} on`, or mount \
-                 with --track-reads"
+                "no read log for {branch}: reads aren't tracked (`gitfold track-reads {branch} \
+                 on`, or mount with --track-reads), or it hasn't been opened since"
             );
             return Err(Refusal::NotFound.error(message));
         }
         (None, Kinds::Both) => eprintln!(
-            "note: reads aren't tracked in {branch} (`gitfold track-reads {branch} on`): \
-             writes only"
+            "note: no read log for {branch} (reads aren't tracked, or it hasn't been opened \
+             since): writes only"
+        ),
+        (Some(read), Kinds::Reads) if read.is_empty() => eprintln!(
+            "note: nothing recorded as read in {branch}: reads come from Claude Code's hook \
+             (the gitfold plugin)"
         ),
         _ => {}
     }
@@ -170,9 +170,9 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
         }
         if kinds != Kinds::Writes {
             for path in read.iter().flatten() {
-                // A path also written says more (git's own reads of a file the
-                // agent wrote, for one).
-                if t.touches(path) && !git_reads(path) && !written.contains(path.as_slice()) {
+                // A path also written says more: the agent read it and then
+                // changed it.
+                if t.touches(path) && !written.contains(path.as_slice()) {
                     lines.insert((path.clone(), 'R', t.name.clone()));
                 }
             }
@@ -291,11 +291,5 @@ mod tests {
         );
         assert!(!t.touches(b"a/bc"), "a sibling with a common prefix");
         assert!(!t.touches(b"dx"));
-    }
-
-    #[test]
-    fn git_reads_are_ignore_and_attribute_files() {
-        assert!(git_reads(b".gitignore") && git_reads(b"x/y/.gitattributes"));
-        assert!(!git_reads(b"x/.gitignore.bak") && !git_reads(b"gitignore"));
     }
 }

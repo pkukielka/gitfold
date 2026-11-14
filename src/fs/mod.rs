@@ -85,8 +85,6 @@ pub struct GitFold {
     workspaces: Arc<Workspaces>,
     content: ContentCache,
     counters: Counters,
-    /// Who reads: a file searcher's reads aren't recorded (`workspace::reads`).
-    scanners: crate::procs::Scanners,
     names: Arc<NameChanges>,
     /// See `Removal::closed`.
     removals_closed: Arc<parking_lot::Mutex<bool>>,
@@ -126,7 +124,6 @@ impl GitFold {
             names,
             removals_closed: Arc::default(),
             counters: Counters::default(),
-            scanners: crate::procs::Scanners::default(),
         }
     }
 
@@ -436,7 +433,7 @@ impl Filesystem for GitFold {
         reply.error(self.writable(newparent).err().unwrap_or(Errno::EPERM));
     }
 
-    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         bump(&self.counters.open);
         if flags.0 & libc::O_ACCMODE != libc::O_RDONLY
             && let Err(e) = self.writable(ino)
@@ -450,15 +447,7 @@ impl Filesystem for GitFold {
         match self.is_file(ino) {
             // Content is loaded lazily on the first read; with FOPEN_KEEP_CACHE later
             // opens of the same file are served from the kernel page cache.
-            Ok(true) => {
-                // Every open reaches us, cached or not: a read is seen. Only
-                // read-only ones: without FUSE_ATOMIC_O_TRUNC the kernel keeps
-                // O_TRUNC from us, so a read-write open may only write.
-                if flags.0 & libc::O_ACCMODE == libc::O_RDONLY {
-                    self.note_open(ino, req.pid());
-                }
-                reply.opened(FileHandle(0), FopenFlags::FOPEN_KEEP_CACHE)
-            }
+            Ok(true) => reply.opened(FileHandle(0), FopenFlags::FOPEN_KEEP_CACHE),
             Ok(false) => reply.error(Errno::EISDIR),
             Err(e) => reply.error(e),
         }
@@ -493,7 +482,7 @@ impl Filesystem for GitFold {
 
     fn read(
         &self,
-        req: &Request,
+        _req: &Request,
         ino: INodeNo,
         _fh: FileHandle,
         offset: u64,
@@ -504,7 +493,7 @@ impl Filesystem for GitFold {
     ) {
         bump(&self.counters.read);
         let _t = IoTimer::start(&self.counters);
-        match self.content(ino, offset, size, req.pid()) {
+        match self.content(ino, offset, size) {
             Ok(Content::Whole(data)) => {
                 let start = (offset as usize).min(data.len());
                 let end = start.saturating_add(size as usize).min(data.len());

@@ -14,8 +14,7 @@ use crate::shell;
 /// `PreToolUse` on Read and Bash (`gitfold track-reads --claude-hook
 /// pre-tool-use`): reports the files the tool is about to read to the daemon
 /// of the gitfold mount they are in, which records them in tracked
-/// workspaces: reads it may not see (the kernel serves a file read before, by
-/// a search say, from its cache; searches' reads aren't recorded). Read: its
+/// workspaces: the only reads recorded (ARCHITECTURE, "Overlaps"). Read: its
 /// `file_path`; Bash: the files simple viewers name (`named`). Before the tool
 /// runs, for the directory a command starts in; so a call the user then
 /// denies is recorded too. Async, on every such call: errors are only logged.

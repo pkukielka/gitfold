@@ -79,8 +79,8 @@ pub enum Request {
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
     /// Record that the files at `paths` (relative to the mount point) were
-    /// read, in the open, tracked workspaces they are in: reads served from
-    /// the kernel's cache, reported by a Claude Code hook.
+    /// read, in the open, tracked workspaces they are in, as Claude Code's
+    /// hook reports them.
     RecordReads { paths: Vec<String> },
 }
 
