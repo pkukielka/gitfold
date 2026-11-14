@@ -142,7 +142,7 @@ impl Workspace {
         // With layers shown, commits made on the lens commit go onto the
         // branch (see `lens`), but the base waits, and an upper file
         // identical to a layer's mustn't be dropped as unchanged.
-        if self.lensed() || self.lens_pending.swap(false, Ordering::Relaxed) {
+        if self.lensed() || self.lens_pending() {
             self.limit_touched();
             return self.sync_lens(store);
         }

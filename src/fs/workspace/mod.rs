@@ -135,8 +135,12 @@ pub struct Workspace {
     /// The session's notifier and its slot, to tell the kernel what a switch
     /// changed (see `lens`).
     kernel: std::sync::OnceLock<(fuser::Notifier, u32)>,
-    /// The stored layers differ from those shown: switch once registered.
-    pub lens_pending: AtomicBool,
+    /// The stored layers last refused (and when), retried by the sync thread
+    /// after a while (see `lens`).
+    lens_refused: Mutex<Option<(Vec<u8>, std::time::Instant)>>,
+    /// HEAD at a commit made on the lens commit that can't be extracted:
+    /// not tried again until HEAD moves (see `lens`).
+    lens_blocked: Mutex<Option<ObjectId>>,
 }
 
 /// The lower layer and how upper overrides it.
@@ -155,9 +159,6 @@ struct Layers {
     /// when none is), and the blended files (see `lens`).
     hunk: ObjectId,
     blended: std::collections::HashMap<Vec<u8>, Vec<usize>>,
-    /// The lens commit HEAD is detached at while files are blended (see
-    /// `lens`).
-    lens_head: Option<ObjectId>,
     /// What was last applied of the layers (see `lens`).
     applied: crate::state::lens::Applied,
     /// Whiteouts and opaque markers.
@@ -278,12 +279,11 @@ impl Workspace {
             lens_on: false,
             hunk: base.tree,
             blended: Default::default(),
-            lens_head: None,
             applied: Default::default(),
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,
         };
-        let (lensed, lens_pending) = lens::open_view(store, &state, &mut layers)?;
+        let lensed = lens::open_view(store, &state, &mut layers)?;
         // Copy-ups a crash interrupted; their target was never replaced.
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
@@ -313,7 +313,8 @@ impl Workspace {
             reads: Mutex::new(None),
             lens_lock: Mutex::new(()),
             kernel: std::sync::OnceLock::new(),
-            lens_pending: AtomicBool::new(lens_pending),
+            lens_refused: Mutex::new(None),
+            lens_blocked: Mutex::new(None),
         })
     }
 

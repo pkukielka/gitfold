@@ -352,7 +352,8 @@ pub const APPLIED: &str = "lens-applied";
 /// and git always describe the same layers: a workspace opens with these,
 /// and switches to the stored layers when they differ (a change made while
 /// it was closed, or a switch that failed half-way). Stored in `lens-applied`:
-/// `version 1`, `head <oid or ->`, a line `lens <bytes>` giving the length of
+/// `version 1`, `head <oid or ->`, `next <oid or ->` (the lens commit HEAD is
+/// being moved to, adopted if it got there), a line `lens <bytes>` giving the length of
 /// the layers file that follows, then NUL-terminated records: `S<path>` a
 /// path git was told to skip (skip-worktree), `B<path>` a blended path whose
 /// index entry git was given the blend for.
@@ -362,6 +363,9 @@ pub struct Applied {
     pub lens: Vec<u8>,
     /// The lens commit HEAD was detached at.
     pub head: Option<ObjectId>,
+    /// The lens commit HEAD was being moved to (a switch or an extraction
+    /// writes it first): if HEAD is there, it got there.
+    pub next: Option<ObjectId>,
     pub skipped: std::collections::BTreeSet<Vec<u8>>,
     pub blended: std::collections::BTreeSet<Vec<u8>>,
 }
@@ -375,13 +379,20 @@ impl Applied {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         let bad = || anyhow::anyhow!("{}: not a file this gitfold knows", path.display());
-        let mut rest = data.strip_prefix(b"version 1\nhead ").ok_or_else(bad)?;
-        let nl = rest.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
-        let head = match &rest[..nl] {
-            b"-" => None,
-            hex => Some(ObjectId::from_hex(hex)?),
+        let mut rest = data.strip_prefix(b"version 1\n").ok_or_else(bad)?;
+        let mut oid = |key: &[u8]| -> Result<Option<ObjectId>> {
+            rest = rest.strip_prefix(key).ok_or_else(bad)?;
+            let nl = rest.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
+            let oid = match &rest[..nl] {
+                b"-" => None,
+                hex => Some(ObjectId::from_hex(hex)?),
+            };
+            rest = &rest[nl + 1..];
+            Ok(oid)
         };
-        rest = rest[nl + 1..].strip_prefix(b"lens ").ok_or_else(bad)?;
+        let head = oid(b"head ")?;
+        let next = oid(b"next ")?;
+        rest = rest.strip_prefix(b"lens ").ok_or_else(bad)?;
         let nl = rest.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
         let len: usize = std::str::from_utf8(&rest[..nl])?.parse()?;
         rest = &rest[nl + 1..];
@@ -389,6 +400,7 @@ impl Applied {
         let mut applied = Applied {
             lens: rest[..len].to_vec(),
             head,
+            next,
             ..Default::default()
         };
         for record in rest[len..].split(|&b| b == 0).filter(|r| !r.is_empty()) {
@@ -402,8 +414,13 @@ impl Applied {
     }
 
     pub fn write(&self, state: &StateDir) -> Result<()> {
-        let head = self.head.map_or("-".to_string(), |h| h.to_string());
-        let mut data = format!("version 1\nhead {head}\nlens {}\n", self.lens.len()).into_bytes();
+        let show = |o: Option<ObjectId>| o.map_or("-".to_string(), |o| o.to_string());
+        let (head, next) = (show(self.head), show(self.next));
+        let mut data = format!(
+            "version 1\nhead {head}\nnext {next}\nlens {}\n",
+            self.lens.len()
+        )
+        .into_bytes();
         data.extend_from_slice(&self.lens);
         for (tag, set) in [(b'S', &self.skipped), (b'B', &self.blended)] {
             for path in set {

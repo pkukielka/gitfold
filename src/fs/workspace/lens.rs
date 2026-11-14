@@ -27,11 +27,14 @@
 //!   depend on lines that would go.
 //!
 //! What was applied (the layers, what git was told) is recorded apart from
-//! the layers stored (`state::lens::Applied`): a workspace opens showing what
-//! was applied, so the view and git agree, then switches to the stored
-//! layers if they differ (changed while it was closed, or a switch that
-//! failed half-way). Switches and the sync thread take `lens_lock`, so they
-//! never interleave.
+//! the layers stored (`state::lens::Applied`), step by step as git is told,
+//! the layers last: a workspace opens showing what was applied, so the view
+//! and git agree, then switches to the stored layers if they differ (changed
+//! while it was closed, or a switch that failed half-way). Before HEAD moves
+//! to a lens commit, the commit is recorded as `next`, and adopted if HEAD is
+//! found there. Switches and the sync thread take `lens_lock`, so they never
+//! interleave; git is told after the workspace's own lock is released, so
+//! git processes reading the workspace meanwhile don't wait on it.
 //!
 //! Where git can't be kept right (a bare repository, sparse checkout, a split
 //! or sparse index, an index git keeps locked), git is turned off in the
@@ -72,6 +75,13 @@ const GIT_OFF: &str = "lens-git-off";
 /// How long a switch waits for git to release the index.
 const INDEX_WAIT: Duration = Duration::from_secs(3);
 
+/// How long the sync thread waits before retrying a switch to stored layers
+/// that was refused.
+const RETRY_AFTER: Duration = Duration::from_secs(10);
+
+/// How far back from HEAD commits made on a lens commit are looked for.
+const CHAIN_LIMIT: usize = 10_000;
+
 /// What the kernel must be told after a switch (local ids of the workspace).
 #[derive(Default)]
 struct Stale {
@@ -79,6 +89,18 @@ struct Stale {
     inodes: Vec<u64>,
     /// Names added, removed or changed in type, by their directory's node.
     entries: Vec<(u64, Vec<u8>)>,
+}
+
+/// What git is to be told after a switch: worked out under the workspace's
+/// lock, told after it is released.
+struct GitPlan {
+    lens_on: bool,
+    base: ObjectId,
+    /// Layers' tracked whole files the workspace's own changes don't hide.
+    skipped: BTreeSet<Vec<u8>>,
+    /// Files layers add that the workspace's own changes don't hide.
+    added: Vec<Vec<u8>>,
+    blended: BTreeSet<Vec<u8>>,
 }
 
 /// The `.git` content while git is surrendered: git prints the path it names.
@@ -117,18 +139,38 @@ fn detached_head(admin: &std::path::Path) -> Option<ObjectId> {
     ObjectId::from_hex(head.trim().as_bytes()).ok()
 }
 
+/// Whether HEAD in the registration at `admin` is on `branch`.
+fn head_on(admin: &std::path::Path, branch: &str) -> bool {
+    fs::read_to_string(admin.join("HEAD"))
+        .is_ok_and(|h| h.trim() == format!("ref: refs/heads/{branch}"))
+}
+
+/// The lens commit HEAD is at as far as `applied` knows: its `next`, adopted
+/// if HEAD got there (a crash after moving it, before recording it).
+fn adopt_next(state: &StateDir, applied: &mut Applied) -> Result<()> {
+    if let Some(next) = applied.next.take() {
+        if detached_head(&state.admin) == Some(next) {
+            applied.head = Some(next);
+        }
+        applied.write(state)?;
+    }
+    Ok(())
+}
+
 /// Sets up what was last applied of the layers of the workspace in `state`
 /// (see the module doc) when it opens. Returns the `.git` content if git is
-/// surrendered, and whether the stored layers differ (it then switches).
+/// surrendered.
 pub(super) fn open_view(
     store: &Store,
     state: &StateDir,
     layers: &mut Layers,
-) -> Result<(Option<Vec<u8>>, bool)> {
-    let applied = Applied::read(state)?;
-    let pending = lens::stored_bytes(state)? != applied.lens;
+) -> Result<Option<Vec<u8>>> {
+    let mut applied = Applied::read(state)?;
+    adopt_next(state, &mut applied)?;
     let shown = applied.layers()?;
-    layers.lens_head = applied.head;
+    let off = fs::read_to_string(state.dir.join(GIT_OFF))
+        .ok()
+        .map(|why| surrendered(&shown, why.trim()));
     layers.applied = applied;
     let view = match lens::view(&state.common_dir, &layers.base, &shown) {
         Ok(view) => view,
@@ -136,11 +178,11 @@ pub(super) fn open_view(
         // the switch that follows reports it.
         Err(e) => {
             log::warn!("{}: its layers can't be shown: {e:#}", state.branch);
-            return Ok((Some(surrendered(&shown, "its layers are missing")), true));
+            return Ok(Some(surrendered(&shown, "its layers are missing")));
         }
     };
     let Some(view) = view else {
-        return Ok((None, pending));
+        return Ok(off);
     };
     layers.view_tree = store.load_tree(view.tree)?;
     layers.view = view.tree;
@@ -148,10 +190,7 @@ pub(super) fn open_view(
     layers.mixed = view.mixed;
     layers.blended = view.blended;
     layers.lens_on = true;
-    let off = fs::read_to_string(state.dir.join(GIT_OFF))
-        .ok()
-        .map(|why| surrendered(&shown, why.trim()));
-    Ok((off, pending))
+    Ok(off)
 }
 
 /// A blob's content at `path` in `tree` (empty if none).
@@ -160,41 +199,6 @@ fn content_at(tree: ObjectId, path: &[u8]) -> Result<Vec<u8>> {
     match item {
         Some(item) => git::read_blob(item.oid),
         None => Ok(Vec::new()),
-    }
-}
-
-/// `git merge-file`: `ours` with the change from `base` to `theirs` merged
-/// in, or `None` on a conflict. Its files are written in `dir`.
-fn merge3(
-    dir: &std::path::Path,
-    base: &[u8],
-    ours: &[u8],
-    theirs: &[u8],
-) -> Result<Option<Vec<u8>>> {
-    let files = [("ours", ours), ("base", base), ("theirs", theirs)];
-    let paths: Vec<std::path::PathBuf> = files
-        .iter()
-        .map(|(name, data)| {
-            let p = dir.join(format!("merge-{}-{name}", std::process::id()));
-            fs::write(&p, data).map(|()| p)
-        })
-        .collect::<std::io::Result<_>>()?;
-    let out = std::process::Command::new("git")
-        .arg("merge-file")
-        .arg("-p")
-        .args(&paths)
-        .output()?;
-    for p in &paths {
-        let _ = fs::remove_file(p);
-    }
-    // The number of conflicts (capped at 127), or a negative error (255).
-    match out.status.code() {
-        Some(0) => Ok(Some(out.stdout)),
-        Some(1..=127) => Ok(None),
-        _ => anyhow::bail!(
-            "git merge-file: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
     }
 }
 
@@ -239,6 +243,12 @@ impl Workspace {
         self.layers.read().lens_on
     }
 
+    /// Whether the stored layers differ from those applied (a cheap read).
+    pub(super) fn lens_pending(&self) -> bool {
+        let stored = lens::stored_bytes(&self.state).unwrap_or_default();
+        stored != self.layers.read().applied.lens
+    }
+
     /// Gives it the session's notifier and its slot, so it can tell the
     /// kernel what a switch or a surrender changed.
     pub fn set_kernel(&self, notifier: fuser::Notifier, slot: u32) {
@@ -275,7 +285,7 @@ impl Workspace {
                 "{branch}: git is busy ({busy}); switch its layers when it is done"
             )));
         }
-        if self.layers.read().lens_head.is_some() {
+        if self.layers.read().applied.head.is_some() {
             self.sync_lens_locked()?;
             if let Some(blocked) = self.extraction_blocked() {
                 return Err(Refusal::Changes.error(format!(
@@ -298,7 +308,7 @@ impl Workspace {
             None => (base_tree, base_tree, Default::default(), Default::default()),
         };
         let new_tree = store.load_tree(new_view)?;
-        let (stale, failed, done) = {
+        let (stale, mut failed, plan, applied, changed) = {
             let mut layers = self.layers.write();
             // Under the write lock: no write to a blended file can land
             // between reading it and replacing it.
@@ -331,24 +341,43 @@ impl Workspace {
                 failed.get_or_insert(e.into());
             }
             self.changed();
-            let git = self.tell_git(store, &mut layers, &stored, &stored_bytes, view.as_ref());
-            let why = git.as_ref().err().map(|e| format!("{e:#}"));
-            if let Err(e) = self.set_gitfile(&stored, why.as_deref()) {
-                failed.get_or_insert(e);
-            }
-            let mut done = match layers.lens_on {
-                true => format!("{branch}: layers shown ({} paths changed)", changes.len()),
-                false => format!("{branch}: no layers shown"),
-            };
-            if let Some(why) = why {
-                done += &format!("\nnote: git is off in it until the next switch: {why}");
-            }
-            for note in view.iter().flat_map(|v| &v.notes) {
-                done += &format!("\nnote: {note}");
-            }
-            (stale, failed, done)
+            let plan = self.git_plan(store, &layers);
+            (stale, failed, plan, layers.applied.clone(), changes.len())
         };
         self.invalidate(&stale);
+        // Git is told with the workspace usable meanwhile: the plan is the
+        // view just installed, and `lens_lock` keeps other switches away.
+        let mut applied = applied;
+        let git = self.tell_git(&plan, &mut applied, &stored, view.as_ref());
+        let why = git.err().map(|e| format!("{e:#}"));
+        // Applied even where git couldn't be told: git off is how the layers
+        // show then, and the sync thread doesn't retry every second. A switch
+        // asked for again (`gitfold layer`, `lens off`) tells git again.
+        applied.lens = stored_bytes;
+        let off = why.is_some()
+            && (plan.lens_on || applied.head.is_some() || !applied.skipped.is_empty());
+        {
+            let mut layers = self.layers.write();
+            if let Err(e) = applied.write(&self.state) {
+                failed.get_or_insert(e);
+            }
+            layers.applied = applied;
+        }
+        if let Err(e) = self.set_gitfile(&stored, why.as_deref().filter(|_| off)) {
+            failed.get_or_insert(e);
+        }
+        let mut done = match plan.lens_on {
+            true => format!("{branch}: layers shown ({changed} paths changed)"),
+            false => format!("{branch}: no layers shown"),
+        };
+        match (&why, off) {
+            (Some(why), true) => done += &format!("\nnote: git is off in it: {why}"),
+            (Some(why), false) => log::warn!("{branch}: giving git back after the layers: {why}"),
+            _ => {}
+        }
+        for note in view.iter().flat_map(|v| &v.notes) {
+            done += &format!("\nnote: {note}");
+        }
         match failed {
             Some(e) => Err(e),
             None => Ok(done),
@@ -356,7 +385,8 @@ impl Workspace {
     }
 
     /// The `.git` content after a switch: the registration, or with git not
-    /// kept right (`why`), the surrender (persisted, so a remount keeps it).
+    /// kept right (`why`), the surrender (persisted, so a remount keeps it);
+    /// the kernel is told.
     fn set_gitfile(&self, stored: &Lens, why: Option<&str>) -> Result<()> {
         let off = self.state.dir.join(GIT_OFF);
         let content = match why {
@@ -370,7 +400,18 @@ impl Workspace {
                 registered(&self.state)
             }
         };
-        *self.gitfile.write() = Arc::new(content);
+        let changed = {
+            let mut gitfile = self.gitfile.write();
+            let changed = **gitfile != content;
+            *gitfile = Arc::new(content);
+            changed
+        };
+        if changed {
+            self.invalidate(&Stale {
+                inodes: vec![GITFILE_LOCAL],
+                entries: Vec::new(),
+            });
+        }
         Ok(())
     }
 
@@ -403,7 +444,8 @@ impl Workspace {
                 continue;
             }
             let ours = fs::read(&upper)?;
-            match merge3(&self.tmp, &old, &ours, &new)?.or_else(|| line_set(&old, &ours, &new)) {
+            let merged = git::merge_file(&self.tmp, &old, &ours, &new)?;
+            match merged.or_else(|| line_set(&old, &ours, &new)) {
                 Some(merged) if merged != ours => out.push((path.clone(), merged)),
                 Some(_) => {}
                 None => {
@@ -431,23 +473,48 @@ impl Workspace {
         Ok(())
     }
 
+    /// What git is to be told for the view in `layers` (see `GitPlan`).
+    fn git_plan(&self, store: &Store, layers: &Layers) -> GitPlan {
+        let mut plan = GitPlan {
+            lens_on: layers.lens_on,
+            base: layers.base,
+            skipped: BTreeSet::new(),
+            added: Vec::new(),
+            blended: layers.blended.keys().cloned().collect(),
+        };
+        for path in layers.mixed.keys() {
+            if self.shadowed(layers, path) {
+                continue;
+            }
+            match store.entry_at(layers.base_tree, path) {
+                Some(Lower::File(_)) => {
+                    plan.skipped.insert(path.clone());
+                }
+                _ => plan.added.push(path.clone()),
+            }
+        }
+        plan.added.sort_unstable();
+        plan
+    }
+
     /// Has git see only the workspace's own changes with the layers in
-    /// `view` shown (or none), and records it (`Applied`): the layers'
-    /// tracked whole files skip-worktree, the files they add excluded, and
-    /// with blended files, HEAD at a lens commit and the blends in the
-    /// index. What was applied before is given back where no longer shown.
+    /// `view` shown (or none), as `plan` says, recording each step in
+    /// `applied` (and on disk) as it is done: the layers' tracked whole files
+    /// skip-worktree, the files they add excluded, and with blended files,
+    /// HEAD at a lens commit and the blends in the index. What was applied
+    /// before is given back where no longer shown. The errors' text is the
+    /// reason the surrendered `.git` gives.
     fn tell_git(
         &self,
-        store: &Store,
-        layers: &mut Layers,
+        plan: &GitPlan,
+        applied: &mut Applied,
         stored: &Lens,
-        stored_bytes: &[u8],
         view: Option<&lens::View>,
     ) -> Result<()> {
         let admin = &self.state.admin;
         let common_dir = &self.state.common_dir;
         let branch = &self.state.branch;
-        if layers.lens_on {
+        if plan.lens_on {
             // Worktree config would make git apply the shared `core.bare`
             // to every worktree.
             anyhow::ensure!(!git::is_bare(), "a bare repository");
@@ -459,39 +526,25 @@ impl Workspace {
         // What the branch tip has: the base, or past it by commits made with
         // layers shown (the base waits for the layers to go).
         let tip = git::branch_tip(branch)?;
-        let mut skipped = BTreeSet::new();
-        let mut added = Vec::new();
-        for path in layers.mixed.keys() {
-            if self.shadowed(layers, path) {
-                continue;
-            }
-            match store.entry_at(layers.base_tree, path) {
-                Some(Lower::File(_)) => {
-                    skipped.insert(path.clone());
-                }
-                _ => added.push(path.clone()),
-            }
-        }
-        let blended: BTreeSet<Vec<u8>> = layers.blended.keys().cloned().collect();
         let mut edits: HashMap<Vec<u8>, Edit> = HashMap::new();
-        for path in layers.applied.skipped.iter().chain(&skipped) {
+        for path in applied.skipped.iter().chain(&plan.skipped) {
             let edit = Edit {
-                skip_worktree: Some(skipped.contains(path)),
+                skip_worktree: Some(plan.skipped.contains(path)),
                 ..Default::default()
             };
             edits.insert(path.clone(), edit);
         }
         // Blended files: the index has the blend over the tip (what L has),
         // or the tip's version again.
-        let hunk = match (view, blended.is_empty()) {
-            (Some(v), false) if tip.id != layers.base => {
+        let hunk = match (view, plan.blended.is_empty()) {
+            (Some(v), false) if tip.id != plan.base => {
                 lens::view(common_dir, &tip.id, stored)?.map_or(v.hunk_tree, |t| t.hunk_tree)
             }
             (Some(v), false) => v.hunk_tree,
             _ => tip.tree,
         };
-        for path in layers.applied.blended.iter().chain(&blended) {
-            let tree = match blended.contains(path) {
+        for path in applied.blended.iter().chain(&plan.blended) {
+            let tree = match plan.blended.contains(path) {
                 true => hunk,
                 false => tip.tree,
             };
@@ -513,19 +566,17 @@ impl Workspace {
             }
         }
         self.edit_index(&edits)?;
-        layers.applied.skipped = skipped;
-        layers.applied.blended = blended;
-        layers.applied.lens = stored_bytes.to_vec();
-        layers.applied.write(&self.state)?;
-        added.sort_unstable();
-        match layers.lens_on {
-            true => worktree_config::set_excludes(admin, &added)?,
+        applied.skipped = plan.skipped.clone();
+        applied.blended = plan.blended.clone();
+        applied.write(&self.state)?;
+        match plan.lens_on {
+            true => worktree_config::set_excludes(admin, &plan.added)?,
             false => worktree_config::remove_excludes(admin)?,
         }
         // HEAD: at a lens commit while files are blended, else on the branch.
         // Moved only from where it was left (compare-and-swap).
         let head = detached_head(admin);
-        match (view, layers.blended.is_empty()) {
+        match (view, plan.blended.is_empty()) {
             (Some(v), false) => {
                 let names: Vec<&str> = (stored.layers.iter())
                     .filter(|l| l.on)
@@ -543,21 +594,23 @@ impl Workspace {
                 })?;
                 let pin = lens_ref(&self.state.id);
                 git::cmd::run(common_dir, &["update-ref", &pin, &vc.to_string()])?;
-                let old = match (head, layers.lens_head) {
+                let old = match (head, applied.head) {
                     (Some(h), Some(l)) if h == l => l.to_string(),
-                    (None, _) => tip.id.to_string(),
-                    _ => anyhow::bail!("HEAD moved meanwhile"),
+                    (None, _) if head_on(admin, branch) => tip.id.to_string(),
+                    _ => anyhow::bail!("HEAD isn't where gitfold left it"),
                 };
+                applied.next = Some(l);
+                applied.write(&self.state)?;
                 let (msg, new) = ("gitfold: lens", l.to_string());
                 git::cmd::run(
                     admin,
                     &["update-ref", "--no-deref", "-m", msg, "HEAD", &new, &old],
                 )?;
                 worktree_config::install_push_guard(admin)?;
-                layers.lens_head = Some(l);
+                (applied.head, applied.next) = (Some(l), None);
             }
             _ => {
-                if let Some(l) = layers.lens_head.take() {
+                if let Some(l) = applied.head {
                     if let Some(h) = head.filter(|&h| h != l) {
                         // Left L's line (amended, reset): kept, and said so.
                         let left = left_ref(&self.state.id);
@@ -573,11 +626,11 @@ impl Workspace {
                     }
                     worktree_config::remove_push_guard(admin)?;
                     git::cmd::run(common_dir, &["update-ref", "-d", &lens_ref(&self.state.id)])?;
+                    applied.head = None;
                 }
             }
         }
-        layers.applied.head = layers.lens_head;
-        layers.applied.write(&self.state)?;
+        applied.write(&self.state)?;
         Ok(())
     }
 
@@ -602,12 +655,12 @@ impl Workspace {
     /// one can't: HEAD (detached) isn't L after `sync_lens`, and L is on its
     /// first-parent line.
     fn extraction_blocked(&self) -> Option<String> {
-        let l = self.layers.read().lens_head?;
+        let l = self.layers.read().applied.head?;
         let head = detached_head(&self.state.admin)?;
         if head == l {
             return None;
         }
-        let on_line = git::with_repo(|repo| git::lens::chain(repo, l, head, 100))
+        let on_line = git::with_repo(|repo| git::lens::chain(repo, l, head, CHAIN_LIMIT))
             .ok()
             .flatten()
             .is_some();
@@ -619,18 +672,33 @@ impl Workspace {
         })
     }
 
-    /// The sync thread's part while layers show (`rebase`): applies stored
-    /// layers that differ from those applied (a switch that failed half-way,
-    /// a change made while closed), then `sync_lens_locked`.
+    /// The sync thread's part while layers show or are pending (`rebase`):
+    /// applies stored layers that differ from those applied (a switch that
+    /// failed half-way, a change made while closed), retrying a refused one
+    /// every `RETRY_AFTER`, then `sync_lens_locked`.
     pub(super) fn sync_lens(&self, store: &Store) -> Result<()> {
-        let pending = {
-            let layers = self.layers.read();
-            lens::stored_bytes(&self.state).is_ok_and(|b| b != layers.applied.lens)
-        };
-        if pending {
-            match self.switch(store) {
-                Ok(done) => log::info!("{done}"),
-                Err(e) => log::debug!("{}: layers not switched yet: {e:#}", self.state.branch),
+        if self.lens_pending() {
+            let stored = lens::stored_bytes(&self.state).unwrap_or_default();
+            let retry = {
+                let refused = self.lens_refused.lock();
+                refused
+                    .as_ref()
+                    .is_none_or(|(bytes, at)| *bytes != stored || at.elapsed() > RETRY_AFTER)
+            };
+            if retry {
+                match self.switch(store) {
+                    Ok(done) => {
+                        log::info!("{done}");
+                        *self.lens_refused.lock() = None;
+                    }
+                    Err(e) => {
+                        let mut refused = self.lens_refused.lock();
+                        if refused.as_ref().is_none_or(|(bytes, _)| *bytes != stored) {
+                            log::warn!("{}: its layers not switched yet: {e:#}", self.state.branch);
+                        }
+                        *refused = Some((stored, Instant::now()));
+                    }
+                }
             }
         }
         let _lens = self.lens_lock.lock();
@@ -645,7 +713,7 @@ impl Workspace {
     /// index holds the blends, which mustn't be committed on the branch;
     /// `gitfold lens off` gives it back.
     fn sync_lens_locked(&self) -> Result<()> {
-        let Some(l) = self.layers.read().lens_head else {
+        let Some(l) = self.layers.read().applied.head else {
             return Ok(());
         };
         let (admin, branch) = (&self.state.admin, &self.state.branch);
@@ -655,7 +723,7 @@ impl Workspace {
         let Some(head) = detached_head(admin) else {
             return self.surrender("HEAD left the lens commit");
         };
-        if head == l {
+        if head == l || *self.lens_blocked.lock() == Some(head) {
             return Ok(());
         }
         let stored = Lens::parse(&self.layers.read().applied.lens)?;
@@ -673,7 +741,7 @@ impl Workspace {
             |p: &BStr| -> Vec<usize> { blended.get(p.as_bytes()).cloned().unwrap_or_default() };
         let is_hunk = |p: &BStr| blended.contains_key(p.as_bytes());
         let done = git::with_repo(|repo| -> Result<Option<git::lens::Extraction>> {
-            let chain = match git::lens::chain(repo, l, head, 100)? {
+            let chain = match git::lens::chain(repo, l, head, CHAIN_LIMIT)? {
                 Some(chain) => chain,
                 // An amend of L: a commit on L's first parent instead.
                 None if first_parent(repo, head)? == first_parent(repo, l)? => vec![head],
@@ -695,17 +763,21 @@ impl Workspace {
                 .map(|c| c.path.to_str_lossy().into_owned())
                 .collect();
             log::warn!(
-                "{branch}: commit {} changes layers' lines ({}): it waits",
+                "{branch}: commit {} changes layers' lines ({}): it waits until amended",
                 blocked.commit,
                 paths.join(", ")
             );
+            *self.lens_blocked.lock() = Some(head);
         }
         if let Some(new_l) = done.lens {
+            let mut applied = self.layers.read().applied.clone();
+            applied.next = Some(new_l);
+            applied.write(&self.state)?;
             git::lens::advance(admin, branch, (tip.id, done.tip), (head, new_l))?;
-            let mut layers = self.layers.write();
-            layers.lens_head = Some(new_l);
-            layers.applied.head = Some(new_l);
-            layers.applied.write(&self.state)?;
+            (applied.head, applied.next) = (Some(new_l), None);
+            applied.write(&self.state)?;
+            self.layers.write().applied = applied;
+            *self.lens_blocked.lock() = None;
             log::info!(
                 "{branch}: {} commit(s) made on the lens extracted",
                 done.extracted.len()
@@ -717,21 +789,10 @@ impl Workspace {
     /// Turns git off in it, saying why, and tells the kernel.
     fn surrender(&self, why: &str) -> Result<()> {
         let stored = Lens::parse(&self.layers.read().applied.lens)?;
-        let content = surrendered(&stored, why);
-        {
-            let mut gitfile = self.gitfile.write();
-            if **gitfile == content {
-                return Ok(());
-            }
-            log::warn!("{}: git off: {why}", self.state.branch);
-            crate::fsutil::write_atomic(&self.state.dir.join(GIT_OFF), why.as_bytes())?;
-            *gitfile = Arc::new(content);
+        if self.gitfile.read().starts_with(&surrendered(&stored, why)) {
+            return Ok(());
         }
-        self.invalidate(&Stale {
-            inodes: vec![GITFILE_LOCAL],
-            entries: Vec::new(),
-        });
-        Ok(())
+        self.set_gitfile(&stored, Some(why))
     }
 
     /// What changed in the view between lower trees `old` and `new` (the
@@ -816,7 +877,7 @@ impl Workspace {
 
     /// Whether `path` is a layer's whole file (or its deletion).
     pub(super) fn is_mixed(layers: &Layers, path: &[u8]) -> bool {
-        !layers.mixed.is_empty() && layers.mixed.contains_key(path)
+        layers.mixed.contains_key(path)
     }
 
     /// Whether any path below directory `path` is a layer's: a whole file or

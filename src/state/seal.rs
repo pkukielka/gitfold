@@ -59,8 +59,8 @@ pub fn ref_prefix(id: &str) -> String {
 pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;
-    let theirs = layers_lines(state, &base)?;
-    let tree = tree_of(state, &base.tree, &s.changed, &s.deleted, &theirs)
+    let blends = blends(state, &base)?;
+    let tree = tree_of(state, &base.tree, &s.changed, &s.deleted, &blends)
         .with_context(|| format!("sealing {}", state.branch))?;
     let commit = commit(&state.common_dir, &tree, &base.id, &state.branch)?;
     let seals = list(&state.common_dir, &state.id)?;
@@ -118,7 +118,7 @@ fn tree_of(
     base: &ObjectId,
     changed: &[Vec<u8>],
     deleted: &[Vec<u8>],
-    theirs: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
+    blends: &Blends,
 ) -> Result<ObjectId> {
     let upper = state.upper();
     git::with_repo(|repo| {
@@ -151,11 +151,12 @@ fn tree_of(
                     0 => EntryKind::Blob,
                     _ => EntryKind::BlobExecutable,
                 };
-                match theirs.get(path) {
+                match blends.get(path) {
                     // A blended file: its own lines only.
-                    Some(lines) => {
-                        let data = fs::read(&file)?;
-                        (kind, repo.write_blob(without(&data, lines))?)
+                    Some((blend, before)) => {
+                        let own =
+                            own_lines(&std::env::temp_dir(), &fs::read(&file)?, blend, before)?;
+                        (kind, repo.write_blob(own)?)
                     }
                     None => {
                         let f = fs::File::open(&file)
@@ -199,11 +200,15 @@ fn commit(
     )?)
 }
 
-/// The layers' lines in each file the workspace in `state` shows blended
-/// (`state::lens`): those its upper copy has but the base hasn't, from the
-/// layers. A seal of it holds only its own lines: a workspace showing it as
-/// a layer has those layers' own work from them.
-fn layers_lines(state: &StateDir, base: &git::Commit) -> Result<HashMap<Vec<u8>, Vec<Vec<u8>>>> {
+/// Per blended path, the blend and the base's version (`blends`).
+type Blends = HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
+
+/// For each file the workspace in `state` shows blended (`state::lens`),
+/// the blend and the base's version: a seal of it holds the upper copy with
+/// the change from the blend back to the base's version merged in (only its
+/// own lines), so a workspace showing it as a layer gets the other layers'
+/// work from them, not through it.
+fn blends(state: &StateDir, base: &git::Commit) -> Result<Blends> {
     let applied = super::lens::Applied::read(state)?;
     if applied.blended.is_empty() {
         return Ok(HashMap::new());
@@ -217,36 +222,39 @@ fn layers_lines(state: &StateDir, base: &git::Commit) -> Result<HashMap<Vec<u8>,
     };
     let mut out = HashMap::new();
     for path in &applied.blended {
-        let (blend, before) = (content(view.hunk_tree, path)?, content(base.tree, path)?);
-        let mut left: HashMap<&[u8], usize> = HashMap::new();
-        for l in before.lines() {
-            *left.entry(l).or_default() += 1;
-        }
-        let mut lines = Vec::new();
-        for l in blend.lines() {
-            match left.get_mut(l) {
-                Some(n) if *n > 0 => *n -= 1,
-                _ => lines.push(l.to_vec()),
-            }
-        }
-        out.insert(path.clone(), lines);
+        out.insert(
+            path.clone(),
+            (content(view.hunk_tree, path)?, content(base.tree, path)?),
+        );
     }
     Ok(out)
 }
 
-/// `data` without one occurrence of each of `lines`.
-fn without(data: &[u8], lines: &[Vec<u8>]) -> Vec<u8> {
-    let mut drop: HashMap<&[u8], usize> = HashMap::new();
-    for l in lines {
-        *drop.entry(l).or_default() += 1;
+/// `upper`'s own lines: the change from `blend` to `before` merged into it,
+/// or if that conflicts (its lines interleave with the layers'), the layers'
+/// added lines taken out, once each.
+fn own_lines(tmp: &std::path::Path, upper: &[u8], blend: &[u8], before: &[u8]) -> Result<Vec<u8>> {
+    if let Some(own) = git::merge_file(tmp, blend, upper, before)? {
+        return Ok(own);
+    }
+    let mut left: HashMap<&[u8], usize> = HashMap::new();
+    for l in before.lines() {
+        *left.entry(l).or_default() += 1;
+    }
+    let mut theirs: HashMap<&[u8], usize> = HashMap::new();
+    for l in blend.lines() {
+        match left.get_mut(l) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => *theirs.entry(l).or_default() += 1,
+        }
     }
     let mut out = Vec::new();
-    for line in data.split_inclusive(|&b| b == b'\n') {
+    for line in upper.split_inclusive(|&b| b == b'\n') {
         let key = line.strip_suffix(b"\n").unwrap_or(line);
-        match drop.get_mut(key) {
+        match theirs.get_mut(key) {
             Some(n) if *n > 0 => *n -= 1,
             _ => out.extend_from_slice(line),
         }
     }
-    out
+    Ok(out)
 }

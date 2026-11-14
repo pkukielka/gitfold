@@ -199,7 +199,8 @@ fn deny_hook() -> Result<()> {
         let Some((state, path)) = super::workspace_at(&file) else {
             return Ok(None);
         };
-        let lens = Lens::read(&state)?;
+        // What is shown, which a pending switch may not have changed yet.
+        let lens = Lens::parse(&crate::state::lens::Applied::read(&state)?.lens)?;
         if !lens.is_on() {
             return Ok(None);
         }

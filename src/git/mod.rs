@@ -82,6 +82,40 @@ pub fn init(path: &Path) -> Result<PathBuf> {
     Ok(common)
 }
 
+/// `git merge-file`: `ours` with the change from `base` to `theirs` merged
+/// in, or `None` on a conflict. Its three inputs are written to temporary
+/// files in `dir`.
+pub fn merge_file(dir: &Path, base: &[u8], ours: &[u8], theirs: &[u8]) -> Result<Option<Vec<u8>>> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let files = [("ours", ours), ("base", base), ("theirs", theirs)];
+    let paths: Vec<PathBuf> = files
+        .iter()
+        .map(|(name, data)| {
+            let p = dir.join(format!("merge-{}-{n}-{name}", std::process::id()));
+            fs::write(&p, data).map(|()| p)
+        })
+        .collect::<std::io::Result<_>>()?;
+    let out = std::process::Command::new("git")
+        .arg("merge-file")
+        .arg("-p")
+        .args(&paths)
+        .output();
+    for p in &paths {
+        let _ = fs::remove_file(p);
+    }
+    let out = out?;
+    // The number of conflicts (capped at 127), or a negative error (255).
+    match out.status.code() {
+        Some(0) => Ok(Some(out.stdout)),
+        Some(1..=127) => Ok(None),
+        _ => bail!(
+            "git merge-file: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
+}
+
 /// The top of the work tree of the repository `init` opened, if it has one.
 pub fn work_tree() -> Option<PathBuf> {
     with_repo(|repo| repo.workdir().map(Path::to_path_buf))
