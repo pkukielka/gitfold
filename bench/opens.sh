@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Read tracking with every open seen (--kernel-open) vs the default
+# Every open sent to the daemon (--kernel-open) vs the default
 # (FUSE_NO_OPEN): per repo, mode and command, a fresh mount of a workspace
 # (branch gf-measure at HEAD, prewarm none), one cold run, three warm runs
 # (median), and the opens per run from the daemon's counters. Run from a

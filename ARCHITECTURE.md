@@ -1060,45 +1060,51 @@ something more; one command keeps the naming and checks in one place); holding
 `creating` across a whole fork (every other workspace's open waited for a copy
 of gigabytes).
 
-### Overlaps: reads seen by the filesystem, writes from stored state
+### Overlaps: reads from Claude Code's hook, writes from stored state
 
 **What:** `gitfold overlaps` compares what a workspace touched with what a target
 changed since the two diverged (`git diff <base>...<target>`, plus a target
 workspace's uncommitted changes). Writes are the workspace's commits since it
-diverged from the target and its stored uncommitted changes. Reads are the one
-thing only the filesystem sees: with tracking on, the daemon appends each
-file's path to `.git/gitfold/<id>/reads` at its first read from offset 0
-(NUL-terminated, once per path; a partial last path, from a crash or an append
-in progress, is dropped), unless the reader is a file searcher (`rg`, `grep`,
-`ugrep`, `ag`, `ack`, `git grep`), told by `/proc/<pid>/comm` or `argv[0]` (FUSE gives
-the reading thread; `procs::Scanners` remembers each for 1 s, and is asked
-before the path is built: a search's reads build none). The kernel caches contents, so that read is
-the only one the daemon gets; later reads cost nothing, and aren't seen:
-Claude Code's `PreToolUse` hook (`gitfold track-reads --claude-hook`; before the tool, so a command's `cd` counts once) reports
-its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
-...), and the daemon records them (a `record-reads` control request).
+diverged from the target and its stored uncommitted changes. Reads, with
+tracking on, are what Claude Code's `PreToolUse` hook (`gitfold track-reads
+--claude-hook`) reports: its Read tool's file, and the files simple viewers in
+its Bash commands show (`shell::files_read`); the daemon appends each path to
+`.git/gitfold/<id>/reads` (a `record-reads` control request; NUL-terminated,
+once per path; a partial last path, from a crash or an append in progress, is
+dropped). Before the tool runs: after it, the hook's `cwd` is the directory
+the command left, and its own `cd` would count twice.
 
 **Why:**
 
-- **Off by default, per workspace:** a whole-tree grep records every file, and
-  a first full read of Apache Spark took 6% longer. The mount's
-  `--track-reads` is the default; a branch's `gitfoldTrackReads` wins either
-  way, like its prewarm mode, and `gitfold track-reads` applies it to an open
-  workspace (a control request).
-- **Searches aren't reads:** a whole-tree `rg` records thousands of files, and
-  an `R` line for each says nothing about what the agent built on. Told by
-  the process: Claude Code's Grep tool runs `rg`, its `grep` is its own binary
-  as `ugrep` (argv[0]); its Read tool reads in its own process (threads named
-  `Bun Pool N`), Bash's `cat` as `cat` (measured with Claude Code 2.1.308).
-- **Cached reads from the hook, not from opens:** with opens on
-  (`--kernel-open`, `FOPEN_KEEP_CACHE`) every `open()` reaches the daemon with
-  its pid, cached or not, but each costs a round trip (~4.5 µs): seconds per
-  whole-tree search on Chromium ([bench/RESULTS.md](bench/RESULTS.md),
-  "opens"). Agents search often; the hook costs nothing per file. Evicting a
-  file from the cache after a search read it (so the next reader reaches the
-  daemon) costs the same round trip on every later search. inotify
-  `IN_ACCESS` sees cached reads but not who read; fanotify gives the pid
-  only to root.
+- **Off by default, per workspace:** `R` lines are for several agents on one
+  repository; recording is cheap (an append per reported read, and the hook
+  reports either way). The hook runs async before the tool: a read is
+  recorded a few milliseconds after the call starts, so an `overlaps` at that
+  very moment can miss it. The mount's `--track-reads` is the default; a branch's `gitfoldTrackReads`
+  wins either way, like its prewarm mode, and `gitfold track-reads` applies
+  it to an open workspace (a control request).
+- **Not from the filesystem.** It sees a process and a file, not whether
+  anyone looked at it. Tried and measured (2026-11-14):
+  - All reads but searches': builds, test runs and `tar` read hundreds of
+    files no one looked at (a `cargo build`: 59 in 0.01 s), and bulk readers
+    are an open list (indexers, formatters, linters, `fd | xargs`).
+  - Rates or counts per process: a slow build and a script reading 20 files
+    at once defeat any threshold; `make` spreads a build over one `cc1` per
+    source; process groups are shared by the harness, its searches and its
+    commands.
+  - Only listed readers (harnesses, viewers, editors): a listed program also
+    reads in bulk in its own process (a harness indexing the tree, an IDE,
+    `xargs wc -l`), and no rule about processes tells its deliberate reads
+    from those.
+  - The kernel's cache: the daemon sees only a file's first read, so a file
+    a search read first is unseen when the agent reads it. Seeing every open
+    (`--kernel-open`) costs a round trip each (~4.5 µs: seconds per
+    whole-tree search on Chromium, [bench/RESULTS.md](bench/RESULTS.md),
+    "opens"); evicting after a search costs the same on every later search;
+    inotify `IN_ACCESS` doesn't say who read, fanotify tells only root.
+
+  The harness alone knows what it showed the model. Other harnesses get `W`
+  lines only, until they can report their reads.
 - **Bash commands parsed, not only the Read tool:** Claude Code's hooks name
   no files a command read (only Read's `file_path`), so the hook parses the
   command, with `rable` (bash's grammar, validated against bash). Measured
@@ -1106,43 +1112,33 @@ its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
   (`bench/transcript-reads.py`, 2026-11-14): of 4,182 deliberate reads,
   248 were Read tool calls and 3,934 files shown by viewers in Bash
   (`sed -n` most); the Grep tool ran 4 times against 3,769 Bash searches.
-  889 (21%; 31% in subagents, which `rg` a tree and then `sed -n` the
-  matches) were of a file a search had already read: cached, seen only by
-  parsing the command. Among commands with a viewer, the walk's constructs
-  are common: loops 1,005, heredocs 866, `<` 826, `if` 570, `$(...)` 501,
-  subshells and `<(...)` 190 each. `pushd`/`popd`, `cd -P`/`-L` and
-  `builtin cd` appeared in none (handled anyway, to the shell's rules).
-  Agents that read through the Read tool would miss less without it.
-- **Content prewarm walks as meta** in a tracked workspace: the walk would read
-  every file first, and the agent's reads would come from the kernel's cache,
-  unseen. A per-workspace downgrade, not a refusal of the mount option: a
-  branch can turn tracking off.
+  The Read tool alone would miss 94% of them. Programs other than
+  viewers reading repository files were a handful (`awk`, `diff`). Among
+  commands with a viewer, the walk's constructs are common: loops 1,005,
+  heredocs 866, `<` 826, `if` 570, `$(...)` 501, subshells and `<(...)` 190
+  each. `pushd`/`popd`, `cd -P`/`-L` and `builtin cd` appeared in none
+  (handled anyway, to the shell's rules).
 - **One command for reads, writes and other workspaces:** a target that is a
   workspace brings its uncommitted changes, so comparing two workspaces is
   `--against <BRANCH>`, and every workspace `--against-workspaces`. A path
   matches through directories too (one workspace replaced `d` with a file,
   another changed `d/x`).
 - **An `R` line is dropped where a `W` line names the same path and target**
-  (unless `--reads`): git's own reads of a file the agent wrote (`git add`)
-  would otherwise repeat every `W`. Reads of `.gitignore` and `.gitattributes`
-  are left out: `git status` reads one in every directory it walks.
+  (unless `--reads`): a file the agent read and then changed is a `W`.
 - **The default target is `origin/HEAD`** (else `main`), not the branch's
   upstream: after `git push -u` that is the branch's own remote branch, which
   its work is ahead of, so nothing would ever overlap. A target that is also a
   branch is diffed as `refs/heads/<name>` (git would prefer a tag of that
   name).
 
-**Rejected:** separate commands for stale reads and for workspaces changing the same paths (`stale`, `overlaps`), each a case of this one;
-recording searches' reads (noise); opens on by default to see cached reads
-(seconds per search on large trees, above); parsing every Bash command for
-the files it reads (pipelines, scripts and builds can't be told: simple
-viewers only); a hand-written shell lexer for those (heredocs, `$((...))`,
-subshells and loops each broke it; `rable` parses as bash does, validated
-against bash, for 3 crates); the Read tool only (21% of reads missed,
-above);
-refusing `--track-reads` with `--prewarm content` (branches can say
-otherwise); line-level conflicts in `overlaps` (`git merge-tree` already says, for
-a merge someone actually asks about).
+**Rejected:** separate commands for stale reads and for workspaces changing
+the same paths (`stale`, `overlaps`), each a case of this one; reads from the
+filesystem, in each of the forms above; parsing every Bash command for the
+files it reads (pipelines, scripts and builds can't be told: simple viewers
+only); a hand-written shell lexer for those (heredocs, `$((...))`, subshells
+and loops each broke it; `rable` parses as bash does, for 3 crates); the Read
+tool only (94% of reads missed, above); line-level conflicts in `overlaps`
+(`git merge-tree` already says, for a merge someone actually asks about).
 
 ### The task folder: a virtual link to plain files
 
@@ -1241,7 +1237,7 @@ nudge` drives tmux): tied to tmux and to how each harness reads input;
 | gitoxide caches | ~1.9 GB, no speedup | [memory](#memory-hygiene) |
 | LRU content cache | no measured benefit | [memory](#memory-hygiene) |
 | Holding `creating` across a fork | every open waited for a copy | [forks](#forks-commands-on-a-workspaces-stored-state) |
-| Read tracking on by default | a whole-tree grep records every file; 6% slower first reads | [overlaps](#overlaps-reads-seen-by-the-filesystem-writes-from-stored-state) |
+| Read tracking on by default | `R` lines are for several agents on one repository | [overlaps](#overlaps-reads-from-claude-codes-hook-writes-from-stored-state) |
 
 ## Known limitations
 

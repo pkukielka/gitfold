@@ -56,8 +56,8 @@ impl Workspaces {
         }
     }
 
-    /// Records reads the kernel served from its cache, reported by a Claude
-    /// Code hook (`gitfold track-reads --claude-hook`): the files at `paths`,
+    /// Records the reads Claude Code's hook reports (`gitfold track-reads
+    /// --claude-hook`): the files at `paths`,
     /// relative to the mount point, in the open workspaces they are in (the
     /// longest branch name that leads a path: branches may hold a `/`), if
     /// tracked.
@@ -73,7 +73,7 @@ impl Workspaces {
                 at += 1;
             }
             if let Some((ws, at)) = found {
-                ws.note_reads([path.as_bytes()[at + 1..].to_vec()]);
+                ws.note_read(path.as_bytes()[at + 1..].to_vec());
             }
         }
         "recorded".to_string()
@@ -86,19 +86,9 @@ impl Workspaces {
         let Some(ws) = self.get_open(branch) else {
             return Ok(format!("{branch} isn't open: applied when it opens"));
         };
-        let settings = self.branch_settings(branch);
-        let on = settings.track_reads;
+        let on = self.tracks_reads(branch);
         ws.track_reads(on)?;
-        // A content walk running would be recorded as the agent's reads: walked
-        // again as meta (see `branch_mode`).
-        let path = self.mount_point.join(branch);
-        let content = settings.prewarm == Prewarm::Content;
-        if on && content && self.prewarm != Prewarm::None && prewarm::stop_under(&path) {
-            prewarm::spawn(path, Prewarm::Meta, self.prewarm_threads);
-        }
         Ok(match on {
-            // Files already read are cached by the kernel: their next reads
-            // aren't seen.
             true => format!("recording reads in {branch} from now on"),
             false => format!("stopped recording reads in {branch}"),
         })

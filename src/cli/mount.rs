@@ -52,8 +52,9 @@ pub struct MountArgs {
     /// FUSE worker threads (default: number of CPUs).
     #[arg(long)]
     pub threads: Option<usize>,
-    /// Have the kernel send open/release for every file (slower; for comparison).
-    #[arg(long)]
+    /// Have the kernel send open/release for every file (slower; for
+    /// benchmarks: bench/opens.sh).
+    #[arg(long, hide = true)]
     pub kernel_open: bool,
     /// Populate kernel caches in the background after a snapshot or workspace is opened.
     #[arg(long, value_enum, default_value = "meta")]
@@ -64,10 +65,9 @@ pub struct MountArgs {
     /// Walks running at once; the others wait.
     #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..))]
     pub prewarm_walks: u64,
-    /// Record the files agents read in workspaces, for `gitfold overlaps`
-    /// (branches can say otherwise: `gitfold track-reads`). A tracked
-    /// workspace's prewarm `content` walks as `meta`: its walk would read
-    /// every file before the agent.
+    /// Record the files Claude Code reads in workspaces, as its hook reports
+    /// them, for `gitfold overlaps` (branches can say otherwise: `gitfold
+    /// track-reads`).
     #[arg(long)]
     pub track_reads: bool,
 }

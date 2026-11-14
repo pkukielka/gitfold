@@ -52,12 +52,6 @@ pub enum Slot {
     Namespace(String),
 }
 
-/// A workspace's settings (see `Workspaces::branch_settings`).
-struct BranchSettings {
-    prewarm: Prewarm,
-    track_reads: bool,
-}
-
 /// What is registered in a slot.
 enum Registered {
     Workspace(Arc<Workspace>),
@@ -218,32 +212,17 @@ impl Workspaces {
     }
 
     /// The prewarm mode of the workspace of `branch`: its own if set, else the
-    /// mount's. With reads tracked, `content` walks as `meta`: a walk reading
-    /// every file first would leave the agent's reads to the kernel's cache,
-    /// unseen.
+    /// mount's.
     fn branch_mode(&self, branch: &str) -> Prewarm {
-        let settings = self.branch_settings(branch);
-        match settings.prewarm {
-            Prewarm::Content if settings.track_reads => {
-                warn!("workspace {branch}: prewarm content walks as meta while reads are tracked");
-                Prewarm::Meta
-            }
-            mode => mode,
-        }
-    }
-
-    /// The settings of the workspace of `branch`, the mount's where it has
-    /// none; read at once.
-    fn branch_settings(&self, branch: &str) -> BranchSettings {
         let local = settings::Local::read(&self.common_dir);
-        BranchSettings {
-            prewarm: local.prewarm(branch).unwrap_or(self.prewarm),
-            track_reads: local.track_reads(branch).unwrap_or(self.track_reads),
-        }
+        local.prewarm(branch).unwrap_or(self.prewarm)
     }
 
+    /// Whether the workspace of `branch` records reads: its own setting if
+    /// set, else the mount's.
     fn tracks_reads(&self, branch: &str) -> bool {
-        self.branch_settings(branch).track_reads
+        let local = settings::Local::read(&self.common_dir);
+        local.track_reads(branch).unwrap_or(self.track_reads)
     }
 
     /// The open workspace of `branch`.

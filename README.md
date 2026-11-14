@@ -218,9 +218,8 @@ Options:
 | `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.16 s for a workspace). |
 | `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
-| `--track-reads` | off | Record the files agents read in workspaces, for `gitfold overlaps` (a first full read of Apache Spark took 6% longer). A workspace's own setting wins (`gitfold track-reads`). |
+| `--track-reads` | off | Record the files Claude Code reads in workspaces, as its hook reports them, for `gitfold overlaps`. A workspace's own setting wins (`gitfold track-reads`). |
 | `--threads N` | number of CPUs | FUSE worker threads. |
-| `--kernel-open` | off | Let the kernel send every open (and release) to gitfold, so read tracking sees every read-only open, cached or not. Each costs a round trip, about 4.5 µs: a warm whole-tree `rg` takes 146 ms instead of 37 on Apache Spark (28k files), 510 ms instead of 84 on Linux (97k), 2.7 s instead of 0.4 on Chromium (512k); see [bench/RESULTS.md](bench/RESULTS.md). |
 
 A workspace can have its own prewarm mode, kept across remounts in the branch's
 git config: `gitfold branch <BRANCH> --prewarm none`, or `git config
@@ -334,28 +333,21 @@ file) a path below it. It exits 6 if anything overlaps, 0 if not. `W` is about
 paths, not lines: two agents editing different parts of one file usually merge
 cleanly (`git merge-tree --write-tree` tells for sure).
 
-`R` lines need read tracking, off by default (a first full read takes
-longer): `gitfold mount --track-reads` turns it on for the mount,
-`gitfold branch --track-reads on|off` or `gitfold track-reads <BRANCH> on|off`
-for one workspace, whatever the mount says (in git config,
-`branch.<BRANCH>.gitfoldTrackReads`; applied at once while mounted). Reads by
-file searchers (`rg`, `grep`, `ugrep`, `ag`, `ack`, `git grep`: by process
-name or `argv[0]`, which covers Claude Code's Grep tool and `grep`) aren't
-recorded: a search reads every file it passes, and its matches aren't what
-the agent built on. Only a file's first read from its start reaches gitfold
-(the kernel caches contents), so reads that start mid-file (`tail -c`) are
-missed, files read before tracking started aren't seen, and nor is a file
-read after a search read it. For the same reason, a tracked workspace's
-`content` prewarm walks as `meta`. With the Claude Code plugin, its hook
-fills in the last case for the Read tool and for simple viewers in Bash
-(`cat`, `head`, `tail`, `sed`, `less`, `nl` with file arguments): `gitfold
-track-reads --claude-hook pre-tool-use`: before the tool runs, so a
-command's own `cd` counts once (and a call then denied is recorded too).
-With `--kernel-open` every read-only open is seen, cached or not, at its
-cost (see Options). `.gitignore` and `.gitattributes` files
-are left out of `R` lines: `git status` reads one in every directory. Without tracking, `overlaps` shows `W` lines
-and says so; `--reads` then fails (exit 3). A fork inherits what its source
-read, and its setting; turning tracking off keeps what was recorded.
+`R` lines need read tracking, off by default: `gitfold mount --track-reads`
+turns it on for the mount, `gitfold branch --track-reads on|off` or
+`gitfold track-reads <BRANCH> on|off` for one workspace, whatever the mount
+says (in git config, `branch.<BRANCH>.gitfoldTrackReads`; applied at once
+while mounted). Reads are what Claude Code's hook reports (the plugin's
+`gitfold track-reads --claude-hook pre-tool-use`): its Read tool's files, and
+the files simple viewers in its Bash commands show (`cat`, `head`, `tail`,
+`sed`, `less`, `nl` with file arguments), before the tool runs (so a
+command's own `cd` counts once, and a call then denied is recorded too). The
+filesystem records none (why: ARCHITECTURE, "Overlaps"). Other harnesses get
+`W` lines only (`overlaps` notes when a tracked workspace has nothing
+recorded). Without
+tracking, `overlaps` shows `W` lines and says so; `--reads` then fails
+(exit 3). A fork inherits what its source read, and its setting; turning
+tracking off keeps what was recorded.
 
 **The task folder.** Every workspace has a `.task` link to a directory for
 what belongs to the task but not to its commits: a spec, drafts, notes, a

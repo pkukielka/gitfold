@@ -31,7 +31,7 @@ const AFTER_GIT: &str = "branch from it once that is done";
 
 /// Files of a state directory a fork copies (`upper` is copied as a tree;
 /// `branch` is written for the fork; `tmp` holds only interrupted copy-ups).
-/// `reads` too: the changes copied were built on those reads.
+/// The read log too: the changes copied were built on those reads.
 const COPIED: [&str; 4] = [state::BASE, state::MARKERS, state::TIMES, state::READS];
 
 /// The source's git index, copied into the new state directory with the rest

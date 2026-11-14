@@ -128,12 +128,13 @@ enum Command {
     /// As `branch --prewarm`, kept in git config; while mounted also applied at
     /// once: the workspace is walked if open, or its walk stopped (none).
     Prewarm(cli::branch::PrewarmArgs),
-    /// Record the files read in a workspace, for `gitfold overlaps`, or stop.
+    /// Record the files Claude Code reads in a workspace (its hook reports
+    /// them), for `gitfold overlaps`, or stop.
     ///
     /// As `branch --track-reads`, kept in git config, whatever the mount's
     /// --track-reads says; while mounted also applied at once. Files read
-    /// before tracking starts aren't seen (the kernel caches them). Stopping
-    /// keeps what was recorded.
+    /// before tracking starts aren't recorded. Stopping keeps what was
+    /// recorded.
     TrackReads(cli::branch::TrackReadsArgs),
     /// Walk a freshly opened snapshot or workspace (started by the daemon).
     #[command(hide = true)]

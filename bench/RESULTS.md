@@ -623,7 +623,6 @@ still cached: `FOPEN_KEEP_CACHE`), "no-open" the default.
 
 `find` and Claude Code's `git status` open no files (git: 6-224 opens) and are
 unchanged. An open costs about 4.5 µs; it is seconds per search only on large
-trees, but agents search often. So read tracking doesn't turn opens on: reads
-served from the cache come from Claude Code's hook instead (README,
-"Overlaps"). `claude-grep` hides most of it (ugrep is slow on its own); Claude
+trees, but agents search often. So read tracking doesn't use opens
+(ARCHITECTURE, "Overlaps"). `claude-grep` hides most of it (ugrep is slow on its own); Claude
 Code's Grep tool runs `rg`.
