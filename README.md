@@ -137,6 +137,8 @@ gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
 gitfold prune                                 # delete snapshot registrations
 gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
 gitfold track-reads <BRANCH> on|off           # record a workspace's reads
+gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
+gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
 ```
 
 Commands other than `mount` work on the repository the current directory is
@@ -523,6 +525,12 @@ So do a workspace's base following a branch that moved, and the checks of
   `ln -s "$PWD/skills/gitfold" ~/.claude/skills/gitfold` (or into a project's
   `.claude/skills/`). It is plain markdown, so other agents can be pointed at
   it from their instructions (`AGENTS.md`).
+- The gitfold Claude Code plugin bundles the skill and hooks that make Claude
+  Code's worktrees (`claude -w`, subagents with `isolation: worktree`)
+  gitfold workspaces and deliver inbox messages into the session; with
+  `gitfold` on `PATH`:
+  `/plugin marketplace add pkukielka/gitfold`, then
+  `/plugin install gitfold@gitfold` (details in the skill, "Claude Code").
 - Workspaces an agent only reads a few files in are cheaper without the prewarm
   walk: give their branch prewarm mode `none` (see [Usage](#usage)).
 - **Claude Code's git scans** (measured with Claude Code 2.1.322 and a git

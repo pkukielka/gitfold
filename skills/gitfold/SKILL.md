@@ -89,8 +89,10 @@ Each message is taken once. Messages are files in `.task/inbox/`, so anything
 can send one: an orchestrator, a script, a person (`gitfold send <BRANCH>
 <TEXT>` from the repository, as `user`).
 
-**Delivery without polling, in Claude Code:** add to `~/.claude/settings.json`
-(the commands do nothing outside a gitfold workspace):
+**Delivery without polling, in Claude Code:** the gitfold plugin's hooks
+deliver them (see [Claude Code](#claude-code) below). Without the plugin, add
+to `~/.claude/settings.json` (the commands do nothing outside a gitfold
+workspace):
 
 ```json
 {
@@ -111,6 +113,33 @@ prompt, after the agent's next tool call, or, when the session is idle, by
 waking it (the `Stop` hook waits for a message and wakes the session when one
 comes; one waiter per inbox). Other harnesses: run `gitfold inbox --wait`
 between tasks, or as a background command that ends when a message arrives.
+
+## Claude Code
+
+The gitfold plugin bundles this skill and the hooks:
+
+```
+/plugin marketplace add pkukielka/gitfold
+/plugin install gitfold@gitfold
+```
+
+With it (and `gitfold` on `PATH`):
+
+- **Claude Code's worktrees are workspaces** (`claude -w <name>`,
+  `EnterWorktree`, subagents with `isolation: worktree`): branch
+  `worktree-<name>`, at `<mountpoint>/worktree-<name>`, from the session's
+  HEAD, opened in about a second. Removing one (`ExitWorktree`, or choosing
+  removal when the session ends) discards its uncommitted changes, as Claude
+  Code does; the branch stays. In a repository not used with gitfold, a git
+  worktree in `.claude/worktrees/<name>`, as without the plugin; in one used
+  with gitfold but not mounted, creating one fails, saying so: mount it.
+  Subagents' worktrees are kept when they finish: `gitfold remove` them.
+- **Inbox messages arrive in the session** (see [Messages](#messages-between-agents)).
+
+The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove
+--claude-hook worktree-remove` and the `inbox --claude-hook` ones above. A
+plugin's `WorktreeCreate` hook doesn't run for `claude --worktree --tmux`; for
+that, put the two worktree hooks in `settings.json` instead.
 
 ## Starting work
 

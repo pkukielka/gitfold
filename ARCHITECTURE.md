@@ -151,7 +151,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, fusermount |
 | `src/procs.rs` | processes using a mount (from `/proc`) |
-| `src/mount_table.rs` | the mount table: where a gitfold mount is, its source name (the repository) |
+| `src/mount_table.rs` | the mount table: where a gitfold mount is (or a repository's), its source name (the repository) |
 | `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm` and `track-reads` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/serve.rs` | the daemon in the foreground: mounting with FUSE, the control requests it answers, until unmounted |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process; the prewarm modes |
@@ -159,6 +159,7 @@ Then, per request (`fs/workspace/`):
 | `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
 | `src/cli/list.rs` | `list` and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
+| `src/cli/claude.rs` | Claude Code's `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount, found in the mount table; a git worktree where the repository isn't used with gitfold |
 | `src/cli/inbox/mod.rs` | `inbox` (and its Claude Code hook outputs) and `send` |
 | `src/cli/inbox/message.rs` | the message format: listing, taking and parsing message files |
 | `src/cli/inbox/watch.rs` | `watch`: waiting for a change in a task folder |
@@ -172,7 +173,7 @@ Then, per request (`fs/workspace/`):
 | `tests/manage.sh` | end-to-end test of branch and its forks, list, changes, remove and prune |
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
-| `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send and watch |
+| `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch and the Claude Code worktree hooks |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |

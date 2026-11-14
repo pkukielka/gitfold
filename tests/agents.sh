@@ -232,7 +232,37 @@ R config gitfold.inbox mail
 check "gitfold.inbox names it" test -n "$(ls "$IB/mail")"
 }
 
+claude_code_worktree_hooks() {
+create() { printf '{"session_id":"s","cwd":"%s","hook_event_name":"WorktreeCreate","name":"%s"}' "$1" "$2" | "$BIN" branch --claude-hook worktree-create; }
+# As Claude Code runs it: the hook itself is the process in the worktree (exec,
+# no timeout wrapper, which would stay in it).
+remove() { exec "$REAL_BIN" remove --claude-hook worktree-remove <<<"{\"session_id\":\"s\",\"hook_event_name\":\"WorktreeRemove\",\"worktree_path\":\"$1\"}"; }
+check "--claude-hook takes no branch" fails "$BIN" -C "$REPO" branch x --claude-hook worktree-create
+out=$(cd / && create "$REPO/d" w1 2>"$T/err")
+eq "not used with gitfold: a git worktree, as Claude Code makes, its path alone on stdout" "$REPO/.claude/worktrees/w1 worktree-w1" "$out $(G "$out" rev-parse --abbrev-ref HEAD 2>&1)"
+eq "  again: the same one" "$out" "$(create "$REPO" w1 2>/dev/null)"
+check "  not left as a gitfold repository" test ! -e "$COMMON/gitfold"
+(cd "$out/d" && remove "$out" >/dev/null 2>&1)
+eq "  removed from inside it, its branch kept" "no yes" "$([ -e "$out" ] && echo yes || echo no) $(R rev-parse -q --verify worktree-w1 >/dev/null && echo yes)"
+R branch st
+mount_fs
+out=$(create "$REPO" w2 2>"$T/err"); rc=$?
+eq "mounted: a workspace of worktree-w2, its path alone on stdout" "0 $MNT/worktree-w2 worktree-w2" "$rc $out $(G "$out" rev-parse --abbrev-ref HEAD 2>&1)"
+eq "  again: the same one" "$out" "$(create "$REPO" w2 2>/dev/null)"
+eq "named like a branch: still its own (worktree-main)" "$MNT/worktree-main" "$(create "$REPO" main 2>/dev/null)"
+echo s >"$MNT/st/s.txt"; G "$MNT/st" add s.txt; G "$MNT/st" commit -qm s
+eq "from a session in a workspace: from its HEAD" "$(R rev-parse st)" "$(G "$(create "$MNT/st/d" w3 2>/dev/null)" rev-parse HEAD)"
+echo x >"$MNT/worktree-w2/x.txt"
+(cd "$MNT/worktree-w2/d" && remove "$MNT/worktree-w2" >/dev/null 2>"$T/err"); rc=$?
+eq "removed from inside it, changes discarded, its branch kept" "0 no yes" "$rc $(R worktree list | grep -q worktree-w2 && echo yes || echo no) $(R rev-parse -q --verify worktree-w2 >/dev/null && echo yes)"
+eq "  a worktree already gone: done" "0" "$( (remove "$MNT/worktree-w2" >/dev/null 2>&1); echo $?)"
+unmount_fs
+out=$(create "$REPO" w4 2>"$T/err"); rc=$?
+eq "used with gitfold, not mounted: refused, nothing made" "1  yes no" "$rc $out $(grep -q 'not mounted' "$T/err" && echo yes) $(R rev-parse -q --verify worktree-w4 >/dev/null && echo yes || echo no)"
+}
+
 section "overlaps: reads and writes changed elsewhere" overlaps_reads_and_writes_changed_elsewh
+section "Claude Code worktree hooks" claude_code_worktree_hooks
 section "the task folder" the_task_folder
 section "inbox, send, watch" inbox_send_watch
 finish

@@ -37,19 +37,25 @@ fn exclusive(common_dir: &Path) -> Result<crate::lock::Lock> {
 /// `--check`, only checks what would be refused. Retries for up to `--wait`
 /// seconds while it is in use.
 pub fn remove(repo: &Path, args: RemoveArgs) -> Result<()> {
+    remove_in(&git::init(repo)?, args)
+}
+
+/// `remove` in the repository of `common_dir`, opened (`git::init`).
+pub fn remove_in(common_dir: &Path, args: RemoveArgs) -> Result<()> {
     let RemoveArgs {
         name,
         force,
         check,
         wait,
+        claude_hook: _,
     } = args;
-    let (name, wait) = (name.as_str(), Duration::from_secs(wait));
+    let name = name.as_deref().context("name the workspace")?;
+    let wait = Duration::from_secs(wait);
     check_name(name)?;
-    let common_dir = git::init(repo)?;
     let started = Instant::now();
     let mut told = false;
     let done = loop {
-        match remove_once(&common_dir, name, force, check) {
+        match remove_once(common_dir, name, force, check) {
             Err(e) if Refusal::of(&e) == Some(Refusal::InUse) && started.elapsed() < wait => {
                 if !told {
                     eprintln!("{e:#}\nwaiting (up to {} s)...", wait.as_secs());
@@ -115,8 +121,8 @@ pub fn prune(repo: &Path) -> Result<()> {
 #[derive(clap::Args)]
 pub struct RemoveArgs {
     /// A workspace's branch, or @<rev> for a snapshot.
-    #[arg(value_name = "BRANCH|@REV")]
-    pub name: String,
+    #[arg(value_name = "BRANCH|@REV", required_unless_present = "claude_hook")]
+    pub name: Option<String>,
     /// Discard uncommitted changes.
     #[arg(long)]
     pub force: bool,
@@ -126,4 +132,15 @@ pub struct RemoveArgs {
     /// While in use, retry for up to this many seconds.
     #[arg(long, value_name = "SECS", default_value_t = 0)]
     pub wait: u64,
+    /// As Claude Code's `WorktreeRemove` hook (`worktree-remove`): removes
+    /// the worktree it names, its changes discarded (Claude Code asks first),
+    /// its branch kept. See skills/gitfold/SKILL.md.
+    #[arg(long, value_enum, value_name = "EVENT", exclusive = true)]
+    pub claude_hook: Option<RemoveHook>,
+}
+
+/// The Claude Code hook `gitfold remove` serves.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RemoveHook {
+    WorktreeRemove,
 }
