@@ -42,6 +42,10 @@ build.
    cargo install --locked --path .        # or: nix develop -c cargo install ...
    ```
 
+   Or download `gitfold-x86_64-linux` (or `-aarch64-`) from the
+   [releases](https://github.com/pkukielka/gitfold/releases) (glibc 2.28 or
+   newer), check it against `SHA256SUMS`, and put it on `PATH` as `gitfold`.
+
 2. **Mount** your existing clone (it runs in the background until you unmount
    it):
 
@@ -70,6 +74,19 @@ build.
    gitfold remove my-task
    gitfold unmount ~/mnt/repo
    ```
+
+**With Claude Code**, the plugin does steps 1 and 3: it downloads gitfold (or
+uses yours), and makes Claude Code's worktrees (`claude -w <name>`, subagents
+with `isolation: worktree`) gitfold workspaces of a mounted repository,
+mounting it again where it last was if it isn't:
+
+```
+/plugin marketplace add pkukielka/gitfold
+/plugin install gitfold@gitfold
+```
+
+Mount the repository once (step 2), then `claude -w my-task` from it. See the
+skill's "Claude Code" section ([skills/gitfold/SKILL.md](skills/gitfold/SKILL.md)).
 
 The rest of this page is reference: [How it works](#how-it-works) ·
 [Requirements](#requirements) · [Usage](#usage) · [Snapshots](#snapshots) ·
@@ -527,10 +544,11 @@ So do a workspace's base following a branch that moved, and the checks of
   it from their instructions (`AGENTS.md`).
 - The gitfold Claude Code plugin bundles the skill and hooks that make Claude
   Code's worktrees (`claude -w`, subagents with `isolation: worktree`)
-  gitfold workspaces and deliver inbox messages into the session; with
-  `gitfold` on `PATH`:
-  `/plugin marketplace add pkukielka/gitfold`, then
-  `/plugin install gitfold@gitfold` (details in the skill, "Claude Code").
+  gitfold workspaces and deliver inbox messages into the session, and
+  downloads gitfold if it isn't on `PATH` (see [Quick start](#quick-start);
+  details in the skill, "Claude Code"). `gitfold mount` records its mount
+  point in the repository's git config (`gitfold.mountpoint`) for the plugin
+  to mount it there again.
 - Workspaces an agent only reads a few files in are cheaper without the prewarm
   walk: give their branch prewarm mode `none` (see [Usage](#usage)).
 - **Claude Code's git scans** (measured with Claude Code 2.1.322 and a git

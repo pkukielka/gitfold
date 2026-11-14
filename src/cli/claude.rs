@@ -6,11 +6,14 @@
 //! The hooks run for every repository the session is in (a plugin's hooks
 //! wherever it is installed), so for one not used with gitfold they do what
 //! Claude Code would: a git worktree in `.claude/worktrees/<name>`. One used
-//! with gitfold but not mounted fails instead: a full checkout of it is what
-//! gitfold is there to avoid.
+//! with gitfold but not mounted is mounted again where `gitfold mount` last
+//! mounted it, or else refused: a full checkout of it is what gitfold is there
+//! to avoid.
 
 use std::fs;
-use std::path::PathBuf;
+use std::os::fd::AsFd;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -29,7 +32,7 @@ fn branch_of(name: &str) -> String {
 /// `WorktreeCreate`: makes worktree `name` of the repository of the session's
 /// directory and prints its path, the only thing on stdout, which Claude Code
 /// reads. A workspace of branch `worktree-<name>` (created from the session's
-/// HEAD if new) when the repository is mounted.
+/// HEAD if new) when the repository is mounted, or was.
 pub fn worktree_create() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     let name = field(&input, "name").context("no \"name\" in the hook's input")?;
@@ -43,22 +46,16 @@ pub fn worktree_create() -> Result<()> {
     let exists = git::branch_exists(&branch);
     let path = match mount_table::mount_of(&common_dir)? {
         Some(mount) => {
-            if !exists {
-                super::branch::check_new(&common_dir, &branch)?;
-                super::branch::create(&repo, &branch, None)?;
-            }
             let path = mount.join(&branch);
-            // Looking it up opens it.
-            let meta = fs::metadata(&path)
-                .with_context(|| format!("opening workspace {}", path.display()))?;
-            ensure!(meta.is_dir(), "{} is not a workspace", path.display());
+            open_workspace(&repo, &common_dir, &branch, exists, &path)?;
             path
         }
-        None if state_root(&common_dir).exists() => bail!(
-            "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a \
-             workspace, rather than a full checkout",
-            common_dir.display()
-        ),
+        None if state_root(&common_dir).exists() => {
+            let mount = mount_again(&common_dir)?;
+            let path = mount.join(&branch);
+            open_workspace(&repo, &common_dir, &branch, exists, &path)?;
+            path
+        }
         None => {
             // As Claude Code: below the top of the worktree the session is in.
             let top = git::work_tree().context("the session is in no worktree")?;
@@ -76,6 +73,58 @@ pub fn worktree_create() -> Result<()> {
     };
     println!("{}", path.display());
     Ok(())
+}
+
+/// Opens the workspace of `branch` at `path`, the branch created first unless
+/// it `exists`.
+fn open_workspace(
+    repo: &Path,
+    common_dir: &Path,
+    branch: &str,
+    exists: bool,
+    path: &Path,
+) -> Result<()> {
+    if !exists {
+        super::branch::check_new(common_dir, branch)?;
+        super::branch::create(repo, branch, None)?;
+    }
+    // Looking it up opens it.
+    let meta =
+        fs::metadata(path).with_context(|| format!("opening workspace {}", path.display()))?;
+    ensure!(meta.is_dir(), "{} is not a workspace", path.display());
+    Ok(())
+}
+
+/// Mounts the repository of `common_dir` again where it last was
+/// (`gitfold.mountpoint`, recorded by `gitfold mount`), with the default
+/// options: `gitfold mount` in the background, its messages on stderr.
+fn mount_again(common_dir: &Path) -> Result<PathBuf> {
+    let recorded = git::cmd::output(common_dir, &["config", "--get", "gitfold.mountpoint"]);
+    let Ok(recorded) = recorded else {
+        bail!(
+            "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a \
+             workspace, rather than a full checkout",
+            common_dir.display()
+        );
+    };
+    let mountpoint = PathBuf::from(String::from_utf8_lossy(&recorded).trim_end());
+    let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
+    let status = Command::new(std::env::current_exe()?)
+        .arg("mount")
+        .arg(common_dir)
+        .arg(&mountpoint)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stderr))
+        .status()?;
+    // Another hook may have mounted it meanwhile, its mount refused.
+    match mount_table::mount_of(common_dir)? {
+        Some(mount) => Ok(mount),
+        None => bail!(
+            "{} isn't mounted, and mounting it at {} failed ({status})",
+            common_dir.display(),
+            mountpoint.display()
+        ),
+    }
 }
 
 /// `WorktreeRemove`: removes the worktree at `worktree_path` (Claude Code asks

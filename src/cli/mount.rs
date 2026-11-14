@@ -77,6 +77,7 @@ pub struct MountArgs {
 pub fn mount(args: MountArgs) -> Result<()> {
     let mountpoint = daemon::check(&args.mountpoint)?;
     if args.foreground {
+        remember(&args.repo, &mountpoint);
         return serve::run(serve::Options {
             repo: args.repo,
             mountpoint,
@@ -100,6 +101,21 @@ pub fn mount(args: MountArgs) -> Result<()> {
     );
     println!("unmount with: gitfold unmount {}", mountpoint.display());
     Ok(())
+}
+
+/// Records `mountpoint` as where the repository at `repo` is mounted
+/// (`gitfold.mountpoint` in its git config), for Claude Code's worktree hook
+/// to mount it there again (`cli::claude`). Only warns if it can't.
+fn remember(repo: &Path, mountpoint: &Path) {
+    let set = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["config", "gitfold.mountpoint"])
+        .arg(mountpoint)
+        .status();
+    if !set.is_ok_and(|s| s.success()) {
+        log::warn!("couldn't record the mount point in {}'s git config", repo.display());
+    }
 }
 
 /// Runs this command again with `--foreground`, detached and logging to `log`,

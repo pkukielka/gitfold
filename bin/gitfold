@@ -1,0 +1,147 @@
+#!/bin/sh
+# gitfold for the Claude Code plugin: its hooks run this, and Claude Code puts
+# this directory on the PATH of the commands it runs. It runs, in order:
+#
+# 1. $GITFOLD_BIN, if set;
+# 2. a gitfold on PATH (one you built or installed);
+# 3. the release of this plugin's version (Cargo.toml), downloaded once from
+#    GitHub to ~/.local/share/gitfold/bin, checked against the release's
+#    SHA256SUMS, and run once to see that it runs here
+#    ($GITFOLD_RELEASE_URL instead of GitHub's: a mirror, or tests).
+#
+# With none (not Linux x86_64 or aarch64, offline, a system that can't run it
+# such as NixOS without nix-ld), the hooks do what Claude Code does without
+# them: the inbox hooks nothing, the worktree hooks git worktrees (in a
+# repository used with gitfold, creating one fails: mount it). A failed
+# download is retried after a day, not on every hook.
+
+set -u
+self_dir=$(cd "$(dirname "$0")" && pwd -P)
+root=$(dirname "$self_dir")
+
+on_path() {
+    old_ifs=$IFS
+    IFS=:
+    set -f
+    found=1
+    for dir in $PATH; do
+        [ -n "$dir" ] && [ -x "$dir/gitfold" ] || continue
+        [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$self_dir" ] && continue
+        echo "$dir/gitfold"
+        found=0
+        break
+    done
+    IFS=$old_ifs
+    set +f
+    return $found
+}
+
+# Prints the path of the release binary, downloading it if needed.
+release() {
+    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)
+    case "$(uname -s)/$(uname -m)" in
+        Linux/x86_64) arch=x86_64 ;;
+        Linux/aarch64 | Linux/arm64) arch=aarch64 ;;
+        *) return 1 ;;
+    esac
+    [ -n "$version" ] || return 1
+    data=${XDG_DATA_HOME:-$HOME/.local/share}/gitfold/bin
+    bin=$data/gitfold-$version-$arch
+    [ -x "$bin" ] && { echo "$bin"; return 0; }
+    failed=$data/.failed-$version-$arch
+    [ -f "$failed" ] && [ -z "$(find "$failed" -mmin +1440 2>/dev/null)" ] && return 1
+    mkdir -p "$data" || return 1
+    if fetch "$version" "$arch" "$data" "$bin" >"$failed" 2>&1; then
+        rm -f "$failed"
+        echo "$bin"
+        return 0
+    fi
+    echo "gitfold: no release binary ($(tail -n 1 "$failed")); retried after a day" >&2
+    return 1
+}
+
+# Downloads release $1's binary for $2 into directory $3 as $4, checked.
+fetch() {
+    base=${GITFOLD_RELEASE_URL:-https://github.com/pkukielka/gitfold/releases/download}/v$1
+    name=gitfold-$2-linux
+    tmp=$(mktemp "$3/.download-XXXXXX") || return 1
+    if ! get "$base/$name" >"$tmp" || ! sums=$(get "$base/SHA256SUMS"); then
+        rm -f "$tmp"
+        echo "downloading $base/$name failed"
+        return 1
+    fi
+    want=$(echo "$sums" | awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }')
+    have=$(sha256sum "$tmp" | cut -d ' ' -f 1)
+    if [ -z "$want" ] || [ "$want" != "$have" ]; then
+        rm -f "$tmp"
+        echo "$name doesn't match the release's SHA256SUMS"
+        return 1
+    fi
+    chmod +x "$tmp"
+    if ! "$tmp" --version >/dev/null 2>&1; then
+        rm -f "$tmp"
+        echo "the release binary doesn't run on this system"
+        return 1
+    fi
+    mv -f "$tmp" "$4"
+}
+
+get() {
+    if command -v curl >/dev/null; then
+        curl -fsSL "$1"
+    elif command -v wget >/dev/null; then
+        wget -qO- "$1"
+    else
+        echo "neither curl nor wget" >&2
+        return 1
+    fi
+}
+
+# The string $1 holds in the JSON on stdin (no escapes: enough for the names
+# and paths Claude Code passes, else empty).
+field() {
+    sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' | head -n 1
+}
+
+# Without gitfold: what Claude Code does without the hooks.
+without() {
+    case "$*" in
+        "inbox --claude-hook "*) exit 0 ;;
+        "branch --claude-hook worktree-create")
+            input=$(cat)
+            name=$(echo "$input" | field name)
+            cwd=$(echo "$input" | field cwd)
+            [ -n "$name" ] && [ -n "$cwd" ] || { echo "gitfold: can't read the hook's input" >&2; exit 1; }
+            if [ -d "$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir)/gitfold" ]; then
+                echo "gitfold: this repository is used with gitfold, but gitfold can't run here" >&2
+                exit 1
+            fi
+            top=$(git -C "$cwd" rev-parse --show-toplevel) || exit 1
+            path=$top/.claude/worktrees/$name
+            if [ ! -e "$path/.git" ]; then
+                if git -C "$top" rev-parse -q --verify "refs/heads/worktree-$name" >/dev/null; then
+                    git -C "$top" worktree add "$path" "worktree-$name" >&2 || exit 1
+                else
+                    git -C "$top" worktree add -b "worktree-$name" "$path" >&2 || exit 1
+                fi
+            fi
+            echo "$path"
+            exit 0 ;;
+        "remove --claude-hook worktree-remove")
+            path=$(field worktree_path)
+            cd / || exit 1
+            [ -e "$path" ] || exit 0
+            common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir) || exit 1
+            exec git --git-dir="$common" worktree remove --force "$path" ;;
+    esac
+    echo "gitfold: not found, and no release binary for this system; see https://github.com/pkukielka/gitfold#quick-start" >&2
+    exit 1
+}
+
+if [ -n "${GITFOLD_BIN:-}" ]; then
+    exec "$GITFOLD_BIN" "$@"
+fi
+if bin=$(on_path) || bin=$(release); then
+    exec "$bin" "$@"
+fi
+without "$@"

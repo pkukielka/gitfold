@@ -123,17 +123,27 @@ The gitfold plugin bundles this skill and the hooks:
 /plugin install gitfold@gitfold
 ```
 
-With it (and `gitfold` on `PATH`):
+It runs the `gitfold` on `PATH`, or else downloads the release matching the
+plugin (Linux x86_64 and aarch64, glibc 2.28 or newer) to
+`~/.local/share/gitfold/bin`; in its sessions, `gitfold` works in Bash either
+way. With it:
 
 - **Claude Code's worktrees are workspaces** (`claude -w <name>`,
   `EnterWorktree`, subagents with `isolation: worktree`): branch
   `worktree-<name>`, at `<mountpoint>/worktree-<name>`, from the session's
   HEAD, opened in about a second. Removing one (`ExitWorktree`, or choosing
   removal when the session ends) discards its uncommitted changes, as Claude
-  Code does; the branch stays. In a repository not used with gitfold, a git
-  worktree in `.claude/worktrees/<name>`, as without the plugin; in one used
-  with gitfold but not mounted, creating one fails, saying so: mount it.
-  Subagents' worktrees are kept when they finish: `gitfold remove` them.
+  Code does; the branch stays. Subagents' worktrees are kept when they finish:
+  `gitfold remove` them.
+- **The mount comes back by itself.** A repository used with gitfold but not
+  mounted (after a reboot, say) is mounted again where `gitfold mount` last
+  mounted it (`gitfold.mountpoint` in its git config), with default options;
+  if none is recorded, creating a worktree fails, saying so: mount it.
+- **Other repositories are left alone:** a git worktree in
+  `.claude/worktrees/<name>`, as without the plugin. The same where gitfold
+  can't run (not Linux, no release binary that runs, as on NixOS without
+  `nix-ld`: build gitfold and put it on `PATH`), except in a repository used
+  with gitfold, where creating a worktree fails, saying why.
 - **Inbox messages arrive in the session** (see [Messages](#messages-between-agents)).
 
 The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove

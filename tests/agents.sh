@@ -257,11 +257,47 @@ echo x >"$MNT/worktree-w2/x.txt"
 eq "removed from inside it, changes discarded, its branch kept" "0 no yes" "$rc $(R worktree list | grep -q worktree-w2 && echo yes || echo no) $(R rev-parse -q --verify worktree-w2 >/dev/null && echo yes)"
 eq "  a worktree already gone: done" "0" "$( (remove "$MNT/worktree-w2" >/dev/null 2>&1); echo $?)"
 unmount_fs
+eq "gitfold mount recorded where" "$MNT" "$(R config gitfold.mountpoint)"
 out=$(create "$REPO" w4 2>"$T/err"); rc=$?
-eq "used with gitfold, not mounted: refused, nothing made" "1  yes no" "$rc $out $(grep -q 'not mounted' "$T/err" && echo yes) $(R rev-parse -q --verify worktree-w4 >/dev/null && echo yes || echo no)"
+eq "not mounted: mounted again there, then a workspace" "0 $MNT/worktree-w4 yes" "$rc $out $(mountpoint -q "$MNT" && echo yes)"
+"$BIN" unmount "$MNT" >/dev/null
+R config --unset gitfold.mountpoint
+out=$(create "$REPO" w5 2>"$T/err"); rc=$?
+eq "  where no mount was recorded: refused, nothing made" "1  yes no" "$rc $out $(grep -q 'not mounted' "$T/err" && echo yes) $(R rev-parse -q --verify worktree-w5 >/dev/null && echo yes || echo no)"
+}
+
+the_plugins_launcher() {
+L=$(realpath "$(dirname "$0")/../bin/gitfold")
+export XDG_DATA_HOME=$T/data
+nogf=$(echo "$PATH" | tr ':' '\n' | while read -r d; do [ -x "$d/gitfold" ] || printf '%s:' "$d"; done)
+want=$("$REAL_BIN" --version)
+mkdir "$T/pbin"; ln -s "$REAL_BIN" "$T/pbin/gitfold"
+eq "a gitfold on PATH" "$want" "$(PATH=$T/pbin:$nogf "$L" --version 2>&1)"
+eq "GITFOLD_BIN first" "$want" "$(GITFOLD_BIN=$REAL_BIN PATH=$nogf "$L" --version 2>&1)"
+v=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$(dirname "$L")/../Cargo.toml" | head -n 1)
+case "$(uname -m)" in aarch64 | arm64) a=aarch64 ;; *) a=x86_64 ;; esac
+mkdir -p "$T/rel/v$v"; cp "$REAL_BIN" "$T/rel/v$v/gitfold-$a-linux"
+(cd "$T/rel/v$v" && sha256sum "gitfold-$a-linux" >SHA256SUMS)
+export GITFOLD_RELEASE_URL=file://$T/rel
+eq "none on PATH (itself skipped): the release, downloaded" "$want yes" "$(PATH=$(dirname "$L"):$nogf "$L" --version 2>&1) $([ -x "$T/data/gitfold/bin/gitfold-$v-$a" ] && echo yes)"
+rm -rf "$T/data"; echo "0000  gitfold-$a-linux" >"$T/rel/v$v/SHA256SUMS"
+out=$(PATH=$nogf "$L" --version 2>&1); rc=$?
+eq "a checksum that doesn't match: no binary, saying why" "1 yes yes" "$rc $(grep -q "doesn't match" <<<"$out" && echo yes) $([ -e "$T/data/gitfold/bin/gitfold-$v-$a" ] && echo no || echo yes)"
+(cd "$T/rel/v$v" && sha256sum "gitfold-$a-linux" >SHA256SUMS)
+eq "  not tried again within a day" "1" "$(PATH=$nogf "$L" --version >/dev/null 2>&1; echo $?)"
+eq "  without gitfold, the inbox hooks: nothing" "0 " "$(echo '{}' | PATH=$nogf "$L" inbox --claude-hook post-tool-use 2>&1; echo $? "$(echo '{}' | PATH=$nogf "$L" inbox --claude-hook post-tool-use 2>&1)")"
+G "$T" init -q plain; G "$T/plain" commit -q --allow-empty -m init
+out=$(printf '{"hook_event_name":"WorktreeCreate","cwd":"%s","name":"p1"}' "$T/plain" | PATH=$nogf "$L" branch --claude-hook worktree-create 2>/dev/null)
+eq "  the worktree hooks: a git worktree, as Claude Code makes" "$T/plain/.claude/worktrees/p1 worktree-p1" "$out $(G "$out" rev-parse --abbrev-ref HEAD 2>&1)"
+(cd "$out" && exec env PATH="$nogf" "$L" remove --claude-hook worktree-remove <<<"{\"worktree_path\":\"$out\"}" >/dev/null 2>&1)
+eq "    and removed" "no" "$([ -e "$out" ] && echo yes || echo no)"
+mkdir -p "$COMMON/gitfold"
+out=$(printf '{"hook_event_name":"WorktreeCreate","cwd":"%s","name":"p2"}' "$REPO" | PATH=$nogf "$L" branch --claude-hook worktree-create 2>&1); rc=$?
+eq "    in a repository used with gitfold: refused" "1 yes" "$rc $(grep -q "used with gitfold" <<<"$out" && echo yes)"
 }
 
 section "overlaps: reads and writes changed elsewhere" overlaps_reads_and_writes_changed_elsewh
+section "the plugin's launcher" the_plugins_launcher
 section "Claude Code worktree hooks" claude_code_worktree_hooks
 section "the task folder" the_task_folder
 section "inbox, send, watch" inbox_send_watch
