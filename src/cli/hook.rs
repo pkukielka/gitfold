@@ -14,11 +14,9 @@ pub fn field_at(json: &str, path: &[&str]) -> Option<String> {
         s: json.as_bytes(),
         i: 0,
     };
-    let (last, objects) = path.split_last()?;
-    for key in objects {
+    for key in path {
         p.find(key)?;
     }
-    p.find(last)?;
     p.string()
 }
 

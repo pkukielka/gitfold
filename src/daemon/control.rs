@@ -78,10 +78,10 @@ pub enum Request {
     Fork { from: String, to: String },
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
-    /// Record that `paths` (relative to the workspace root) were read in the
-    /// workspace of `branch`, if it is open and tracked: reads served from the
-    /// kernel's cache, reported by a Claude Code hook.
-    RecordReads { branch: String, paths: Vec<String> },
+    /// Record that the files at `paths` (relative to the mount point) were
+    /// read, in the open, tracked workspaces they are in: reads served from
+    /// the kernel's cache, reported by a Claude Code hook.
+    RecordReads { paths: Vec<String> },
 }
 
 impl Request {
@@ -105,24 +105,17 @@ impl Request {
             Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
             Request::Version => "version\n".to_string(),
             // NUL-separated: a path may hold a newline.
-            Request::RecordReads { branch, paths } => {
-                format!("record-reads\n{branch}\n{}", paths.join("\0"))
-            }
+            Request::RecordReads { paths } => format!("record-reads\n{}", paths.join("\0")),
         }
         .into_bytes()
     }
 
     fn decode(bytes: &[u8]) -> Result<Request> {
         let text = std::str::from_utf8(bytes).context("request not UTF-8")?;
-        if let Some(rest) = text.strip_prefix("record-reads\n") {
-            let (branch, paths) = rest.split_once('\n').context("record-reads: no branch")?;
+        if let Some(paths) = text.strip_prefix("record-reads\n") {
+            let paths = paths.split('\0').filter(|p| !p.is_empty());
             return Ok(Request::RecordReads {
-                branch: branch.to_string(),
-                paths: paths
-                    .split('\0')
-                    .filter(|p| !p.is_empty())
-                    .map(String::from)
-                    .collect(),
+                paths: paths.map(String::from).collect(),
             });
         }
         match text.split('\n').collect::<Vec<_>>()[..] {
@@ -312,6 +305,7 @@ mod tests {
             Request::StopPrewarm,
             Request::ResumePrewarm,
             Request::Version,
+            Request::RecordReads { paths: vec![] },
         ];
         for n in names {
             for (force, check) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -332,12 +326,7 @@ mod tests {
                 to: format!("{n}-2"),
             });
             requests.push(Request::RecordReads {
-                branch: n.to_string(),
-                paths: vec!["a.txt".into(), "d/new\nline".into(), "zażółć".into()],
-            });
-            requests.push(Request::RecordReads {
-                branch: n.to_string(),
-                paths: vec![],
+                paths: vec![format!("{n}/a.txt"), "d/new\nline".into(), "zażółć".into()],
             });
         }
         for r in requests {

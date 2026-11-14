@@ -113,7 +113,7 @@ pub fn run(options: Options) -> Result<()> {
             }
             Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
             Request::TrackReads { branch } => workspaces.track_reads_now(&branch),
-            Request::RecordReads { branch, paths } => Ok(workspaces.record_reads(&branch, paths)),
+            Request::RecordReads { paths } => Ok(workspaces.record_reads(paths)),
             Request::Fork { from, to } => workspaces
                 .fork(&from, &to)
                 .inspect(|done| log::info!("{done}")),

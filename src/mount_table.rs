@@ -27,6 +27,18 @@ pub fn mount_of(common_dir: &Path) -> Result<Option<PathBuf>> {
         .map(|(mount, _)| PathBuf::from(std::ffi::OsString::from_vec(mount))))
 }
 
+/// Every gitfold mount: its mount point and the git common directory of its
+/// repository.
+pub fn mounts() -> Result<Vec<(PathBuf, PathBuf)>> {
+    let mountinfo = fs::read("/proc/self/mountinfo")?;
+    Ok(mounts_in(&mountinfo)
+        .map(|(mount, source)| {
+            let mount = PathBuf::from(std::ffi::OsString::from_vec(mount));
+            (mount, common_dir_of_source(&source))
+        })
+        .collect())
+}
+
 /// The source of the gitfold mount at `path` in mount table `mountinfo`.
 fn source_in(mountinfo: &[u8], path: &[u8]) -> Option<String> {
     mounts_in(mountinfo)

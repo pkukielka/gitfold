@@ -1089,12 +1089,13 @@ its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
   `Bun Pool N`), Bash's `cat` as `cat` (measured with Claude Code 2.1.308).
 - **Cached reads from the hook, not from opens:** with opens on
   (`--kernel-open`, `FOPEN_KEEP_CACHE`) every `open()` reaches the daemon with
-  its pid, cached or not, but each costs a round trip (~4.5 µs): a warm
-  whole-tree `rg` 37 → 146 ms on Spark (28k files), 84 → 510 ms on Linux
-  (97k), 0.40 → 2.68 s on Chromium (512k), a `tar` of Chromium 4.8 → 9.7 s;
-  `find` and `git status` open no files. Agents search often; the hook costs
-  nothing per file. inotify `IN_ACCESS` sees cached reads but not who read;
-  fanotify gives the pid only to root.
+  its pid, cached or not, but each costs a round trip (~4.5 µs): seconds per
+  whole-tree search on Chromium ([bench/RESULTS.md](bench/RESULTS.md),
+  "opens"). Agents search often; the hook costs nothing per file. Evicting a
+  file from the cache after a search read it (so the next reader reaches the
+  daemon) costs the same round trip on every later search. inotify
+  `IN_ACCESS` sees cached reads but not who read; fanotify gives the pid
+  only to root.
 - **Content prewarm walks as meta** in a tracked workspace: the walk would read
   every file first, and the agent's reads would come from the kernel's cache,
   unseen. A per-workspace downgrade, not a refusal of the mount option: a

@@ -38,10 +38,7 @@ fn branch_of(name: &str) -> String {
 pub fn worktree_create() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     let name = field(&input, "name").context("no \"name\" in the hook's input")?;
-    let cwd = match field(&input, "cwd") {
-        Some(cwd) => PathBuf::from(cwd),
-        None => std::env::current_dir()?,
-    };
+    let cwd = cwd(&input)?;
     let repo = git::discover(&cwd)?;
     let common_dir = git::init(&repo)?;
     let branch = branch_of(&name);
@@ -158,12 +155,12 @@ pub fn worktree_remove() -> Result<()> {
 }
 
 /// `PostToolUse` on Read and Bash (`gitfold track-reads --claude-hook
-/// post-tool-use`): records the files the tool read in the gitfold workspace
-/// they are in, which the daemon may not have seen (the kernel serves a file
-/// read before, by a search say, from its cache; the daemon doesn't record a
-/// search's reads). Read: its `file_path`; Bash: the files simple viewers
-/// name (`viewed`). It runs after every such tool call, so errors are only
-/// logged.
+/// post-tool-use`): reports the files the tool read to the daemon of the
+/// gitfold mount they are in, which records them in tracked workspaces: reads
+/// it may not have seen (the kernel serves a file read before, by a search
+/// say, from its cache; searches' reads aren't recorded). Read: its
+/// `file_path`; Bash: the files simple viewers name (`viewed`). It runs after
+/// every such tool call (async), so errors are only logged.
 pub fn reads_hook() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     if let Err(e) = report_reads(&input) {
@@ -173,7 +170,7 @@ pub fn reads_hook() -> Result<()> {
 }
 
 fn report_reads(input: &str) -> Result<()> {
-    let named: Vec<String> = match field(input, "tool_name").as_deref() {
+    let named = match field(input, "tool_name").as_deref() {
         Some("Read") => field_at(input, &["tool_input", "file_path"])
             .into_iter()
             .collect(),
@@ -183,44 +180,39 @@ fn report_reads(input: &str) -> Result<()> {
     if named.is_empty() {
         return Ok(());
     }
-    let cwd = match field(input, "cwd") {
-        Some(cwd) => PathBuf::from(cwd),
-        None => std::env::current_dir()?,
-    };
-    // The workspace of the first file in one; files in other repositories are
-    // left out (one repository per process: `git::init`).
-    let mut found: Option<(PathBuf, String, PathBuf)> = None;
-    let mut paths = Vec::new();
+    let cwd = cwd(input)?;
+    let mounts = mount_table::mounts()?;
+    // Per mount (its git common dir), the paths below it.
+    let mut reads: Vec<(&Path, Vec<String>)> = Vec::new();
     for path in named.iter().map(|p| normalized(&cwd.join(p))) {
-        if !path.is_file() {
+        let below = mounts
+            .iter()
+            .filter_map(|(mount, common_dir)| Some((path.strip_prefix(mount).ok()?, common_dir)))
+            .min_by_key(|(rel, _)| rel.as_os_str().len());
+        let Some((rel, common_dir)) = below else {
             continue;
-        }
-        if found.is_none() {
-            let Some(dir) = path.parent() else { continue };
-            let Ok(repo) = git::discover(dir) else {
-                continue;
-            };
-            let Ok(branch) = super::branch_or_current(None, &repo) else {
-                continue;
-            };
-            let common_dir = git::init(&repo)?;
-            let mount = mount_table::mount_of(&common_dir)?.context("not mounted")?;
-            let root = mount.join(&branch);
-            found = Some((common_dir, branch, root));
-        }
-        let Some((_, _, root)) = &found else { continue };
-        if let Some(rel) = path.strip_prefix(root).ok().and_then(Path::to_str) {
-            paths.push(rel.to_string());
+        };
+        let Some(rel) = rel.to_str().filter(|_| path.is_file()) else {
+            continue;
+        };
+        match reads.iter_mut().find(|(c, _)| *c == common_dir.as_path()) {
+            Some((_, paths)) => paths.push(rel.to_string()),
+            None => reads.push((common_dir, vec![rel.to_string()])),
         }
     }
-    let Some((common_dir, branch, _)) = found else {
-        return Ok(());
-    };
-    if !paths.is_empty() {
-        let request = crate::daemon::control::Request::RecordReads { branch, paths };
-        crate::daemon::control::request(&common_dir, &request, None)?;
+    for (common_dir, paths) in reads {
+        let request = crate::daemon::control::Request::RecordReads { paths };
+        crate::daemon::control::request(common_dir, &request, None)?;
     }
     Ok(())
+}
+
+/// The hook's working directory: `cwd` in its input, else this process's.
+fn cwd(input: &str) -> Result<PathBuf> {
+    match field(input, "cwd") {
+        Some(cwd) => Ok(PathBuf::from(cwd)),
+        None => Ok(std::env::current_dir()?),
+    }
 }
 
 /// `path` with `.` and `..` resolved lexically (as the shell's `cd` does).
@@ -242,8 +234,11 @@ fn normalized(path: &Path) -> PathBuf {
 /// `head`, `tail`, `less`, `more`, `nl`, `tac`, `bat` and `sed` with file
 /// arguments (or `<` a file), in each command of its pipelines and lists. A
 /// guess, not a parse: quotes are handled, expansions aren't (what isn't a
-/// file in a workspace is dropped later).
+/// file in a workspace is dropped later). Keeping this small is the point: a
+/// file read by anything else is seen unless a search read it first.
 fn viewed(command: &str) -> Vec<String> {
+    // sed's options that give its script; then its first operand isn't one.
+    const SED_SCRIPT: &[&str] = &["-e", "--expression", "-f", "--file"];
     let mut files = Vec::new();
     for words in commands(command) {
         let mut words = words.into_iter().peekable();
@@ -257,43 +252,36 @@ fn viewed(command: &str) -> Vec<String> {
         let Some(program) = words.next() else {
             continue;
         };
-        let program = program
-            .word
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        let mut args = Vec::new();
-        for w in words {
-            match w.redirect {
-                Some('<') => files.push(w.word),
-                Some(_) => {}
-                None => args.push(w.word),
-            }
-        }
-        // Options that take the next word as their value, per program.
-        let valued: &[&str] = match program.as_str() {
-            "cat" | "less" | "more" | "nl" | "tac" | "bat" | "batcat" => &[],
-            "head" | "tail" => &["-n", "-c", "--lines", "--bytes"],
-            "sed" => &["-e", "--expression", "-f", "--file", "-l"],
-            _ => continue,
+        let program = program.word.rsplit('/').next().unwrap_or_default();
+        // Options that take the next word as their value; `None`: not a
+        // viewer (only what `<` gives it is read).
+        let valued: Option<&[&str]> = match program {
+            "cat" | "less" | "more" | "nl" | "tac" | "bat" | "batcat" => Some(&[]),
+            "head" | "tail" => Some(&["-n", "-c", "--lines", "--bytes"]),
+            "sed" => Some(&["-e", "--expression", "-f", "--file", "-l"]),
+            _ => None,
         };
         let mut operands = Vec::new();
         let mut script_given = false;
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            if arg == "--" {
-                operands.extend(args.by_ref());
-            } else if valued.contains(&arg.as_str()) {
-                script_given |= ["-e", "--expression", "-f", "--file"].contains(&arg.as_str());
-                args.next();
-            } else if arg.starts_with("--expression=") || arg.starts_with("--file=") {
-                script_given = true;
-            } else if !arg.starts_with('-') || arg == "-" {
-                operands.push(arg);
+        let mut options_end = false;
+        let mut words = words.peekable();
+        while let Some(w) = words.next() {
+            let arg = w.word;
+            match w.redirect {
+                Some('<') => files.push(arg),
+                Some(_) => {}
+                None if valued.is_none() => {}
+                None if options_end || !arg.starts_with('-') || arg == "-" => operands.push(arg),
+                None if arg == "--" => options_end = true,
+                None => {
+                    let name = arg.split('=').next().unwrap_or_default();
+                    script_given |= SED_SCRIPT.contains(&name);
+                    if valued.is_some_and(|v| v.contains(&arg.as_str())) {
+                        words.next();
+                    }
+                }
             }
         }
-        // sed's first operand is its script, unless -e or -f gave it.
         let skip = usize::from(program == "sed" && !script_given);
         files.extend(operands.into_iter().skip(skip).filter(|f| f != "-"));
     }
@@ -310,32 +298,29 @@ struct Word {
 /// The simple commands of `command` (split at `|`, `;`, `&` and newlines),
 /// each as its words, quotes removed.
 fn commands(command: &str) -> Vec<Vec<Word>> {
-    let mut commands = vec![Vec::new()];
+    let mut commands = Vec::new();
+    let mut current: Vec<Word> = Vec::new();
     let mut word: Option<String> = None;
     let mut redirect = None;
     let mut chars = command.chars().peekable();
-    let end_word =
-        |commands: &mut Vec<Vec<Word>>, word: &mut Option<String>, redirect: &mut Option<char>| {
-            if let Some(w) = word.take() {
-                let r = redirect.take();
-                commands.last_mut().expect("never empty").push(Word {
-                    word: w,
-                    redirect: r,
-                });
-            }
-        };
-    while let Some(c) = chars.next() {
+    loop {
+        let c = chars.next();
+        // A word ends at whitespace, an operator or the end.
+        if c.is_none_or(|c| c.is_whitespace() || "|;&\n<>".contains(c))
+            && let Some(w) = word.take()
+        {
+            current.push(Word {
+                word: w,
+                redirect: redirect.take(),
+            });
+        }
         match c {
-            '\'' => {
+            None => break,
+            Some('\'') => {
                 let w = word.get_or_insert_default();
-                for c in chars.by_ref() {
-                    if c == '\'' {
-                        break;
-                    }
-                    w.push(c);
-                }
+                w.extend(chars.by_ref().take_while(|c| *c != '\''));
             }
-            '"' => {
+            Some('"') => {
                 let w = word.get_or_insert_default();
                 while let Some(c) = chars.next() {
                     match c {
@@ -345,32 +330,28 @@ fn commands(command: &str) -> Vec<Vec<Word>> {
                     }
                 }
             }
-            '\\' => word.get_or_insert_default().extend(chars.next()),
-            '|' | ';' | '&' | '\n' => {
-                end_word(&mut commands, &mut word, &mut redirect);
+            Some('\\') => word.get_or_insert_default().extend(chars.next()),
+            Some('|' | ';' | '&' | '\n') => {
                 redirect = None;
-                commands.push(Vec::new());
+                commands.push(std::mem::take(&mut current));
             }
-            '<' | '>' => {
-                end_word(&mut commands, &mut word, &mut redirect);
-                // `2>`: the digit was a word of its own; it isn't one.
-                if let Some(last) = commands.last_mut()
-                    && last.last().is_some_and(|w| {
-                        w.redirect.is_none() && w.word.chars().all(|c| c.is_ascii_digit())
-                    })
-                {
-                    last.pop();
+            Some(c @ ('<' | '>')) => {
+                // `2>`: the digit was taken for a word; it is the redirection's.
+                if current.last().is_some_and(|w| {
+                    w.redirect.is_none() && w.word.chars().all(|c| c.is_ascii_digit())
+                }) {
+                    current.pop();
                 }
                 redirect = Some(c);
                 while chars.peek().is_some_and(|c| matches!(c, '<' | '>' | '&')) {
                     chars.next();
                 }
             }
-            c if c.is_whitespace() => end_word(&mut commands, &mut word, &mut redirect),
-            c => word.get_or_insert_default().push(c),
+            Some(c) if c.is_whitespace() => {}
+            Some(c) => word.get_or_insert_default().push(c),
         }
     }
-    end_word(&mut commands, &mut word, &mut redirect);
+    commands.push(current);
     commands
 }
 
@@ -381,23 +362,25 @@ mod tests {
     /// The files simple viewers show, wherever they are in the command.
     #[test]
     fn viewed_files() {
-        let v = |c: &str| viewed(c);
-        assert_eq!(v("cat a.txt"), ["a.txt"]);
+        assert_eq!(viewed("cat a.txt"), ["a.txt"]);
         assert_eq!(
-            v("cat -n a.txt 'b c.txt' | head -n 20"),
+            viewed("cat -n a.txt 'b c.txt' | head -n 20"),
             ["a.txt", "b c.txt"]
         );
-        assert_eq!(v("head -n 50 src/x.rs && tail -c 10 y"), ["src/x.rs", "y"]);
-        assert_eq!(v("sed -n '1,80p' src/main.rs"), ["src/main.rs"]);
-        assert_eq!(v("sed -e s/a/b/ -n f1 f2"), ["f1", "f2"]);
-        assert_eq!(v("LC_ALL=C /usr/bin/cat x; ls y"), ["x"]);
-        assert_eq!(v("wc -l < input.txt 2>/dev/null"), ["input.txt"]);
-        assert_eq!(v("cat a > out.txt"), ["a"]);
-        assert_eq!(v("cat -- -dash"), ["-dash"]);
-        assert_eq!(v("echo cat x | grep y"), Vec::<String>::new());
-        assert_eq!(v("rg foo src; cargo test"), Vec::<String>::new());
-        assert_eq!(v("cat \"a \\\"q\\\".txt\""), ["a \"q\".txt"]);
-        assert_eq!(v("cat -"), Vec::<String>::new());
+        assert_eq!(
+            viewed("head -n 50 src/x.rs && tail -c 10 y"),
+            ["src/x.rs", "y"]
+        );
+        assert_eq!(viewed("sed -n '1,80p' src/main.rs"), ["src/main.rs"]);
+        assert_eq!(viewed("sed -e s/a/b/ -n f1 f2"), ["f1", "f2"]);
+        assert_eq!(viewed("LC_ALL=C /usr/bin/cat x; ls y"), ["x"]);
+        assert_eq!(viewed("wc -l < input.txt 2>/dev/null"), ["input.txt"]);
+        assert_eq!(viewed("cat a > out.txt"), ["a"]);
+        assert_eq!(viewed("cat -- -dash"), ["-dash"]);
+        assert_eq!(viewed("echo cat x | grep y"), Vec::<String>::new());
+        assert_eq!(viewed("rg foo src; cargo test"), Vec::<String>::new());
+        assert_eq!(viewed("cat \"a \\\"q\\\".txt\""), ["a \"q\".txt"]);
+        assert_eq!(viewed("cat -"), Vec::<String>::new());
     }
 
     #[test]

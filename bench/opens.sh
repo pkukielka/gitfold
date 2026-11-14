@@ -10,8 +10,7 @@ BIN=$(dirname "$0")/../target/release/gitfold
 MNT=/tmp/gf-measure/mnt
 CLAUDE_BIN=${CLAUDE_CODE_EXECPATH:?}
 PATTERN=gitfoldmeasureneedle
-cgrep() { (exec -a ugrep "$CLAUDE_BIN" -G --ignore-files --hidden -I --exclude-dir=.git "$@"); }
-cstatus() { git -c core.fsmonitor= status --porcelain=v2 -z --untracked-files=normal --ignored=matching --no-renames --ignore-submodules=all; }
+. "$(dirname "$0")/claude.sh"
 declare -A CMDS=(
     [find]='find . -type f | wc -l'
     [rg]="rg -l $PATTERN . | wc -l"

@@ -334,22 +334,23 @@ file) a path below it. It exits 6 if anything overlaps, 0 if not. `W` is about
 paths, not lines: two agents editing different parts of one file usually merge
 cleanly (`git merge-tree --write-tree` tells for sure).
 
-`R` lines need read tracking, off by default (an agent grepping the whole tree
-reads every file): `gitfold mount --track-reads` turns it on for the mount,
+`R` lines need read tracking, off by default (a first full read takes
+longer): `gitfold mount --track-reads` turns it on for the mount,
 `gitfold branch --track-reads on|off` or `gitfold track-reads <BRANCH> on|off`
 for one workspace, whatever the mount says (in git config,
 `branch.<BRANCH>.gitfoldTrackReads`; applied at once while mounted). Reads by
-file searchers (`rg`, `grep`, `ugrep`, `ag`, `ack`: by process name or
-`argv[0]`, which covers Claude Code's Grep tool and `grep`) aren't recorded:
-a search reads every file it passes, and its matches aren't what the agent
-built on. Only a file's first read from its start reaches gitfold (the kernel
-caches contents), so reads that start mid-file (`tail -c`) are missed, files
-read before tracking started aren't seen, and nor is a file read after a
-search read it. With the Claude Code plugin, its hook fills that in for the
-Read tool and for simple viewers in Bash (`cat`, `head`, `tail`, `sed`, `less`,
-`nl` with file arguments): `gitfold track-reads --claude-hook post-tool-use`.
-Every read is seen with `--kernel-open`, at its cost. For the same reason, a tracked workspace's
-`content` prewarm walks as `meta`. `.gitignore` and `.gitattributes` files
+file searchers (`rg`, `grep`, `ugrep`, `ag`, `ack`, `git grep`: by process
+name or `argv[0]`, which covers Claude Code's Grep tool and `grep`) aren't
+recorded: a search reads every file it passes, and its matches aren't what
+the agent built on. Only a file's first read from its start reaches gitfold
+(the kernel caches contents), so reads that start mid-file (`tail -c`) are
+missed, files read before tracking started aren't seen, and nor is a file
+read after a search read it. For the same reason, a tracked workspace's
+`content` prewarm walks as `meta`. With the Claude Code plugin, its hook
+fills in the last case for the Read tool and for simple viewers in Bash
+(`cat`, `head`, `tail`, `sed`, `less`, `nl` with file arguments): `gitfold
+track-reads --claude-hook post-tool-use`. Every read is seen with
+`--kernel-open`, at its cost (see Options). `.gitignore` and `.gitattributes` files
 are left out of `R` lines: `git status` reads one in every directory. Without tracking, `overlaps` shows `W` lines
 and says so; `--reads` then fails (exit 3). A fork inherits what its source
 read, and its setting; turning tracking off keeps what was recorded.
