@@ -18,7 +18,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Context, Result};
 use gix::ObjectId;
-use gix::bstr::{BStr, ByteSlice};
+use gix::bstr::BStr;
 use gix::objs::tree::EntryKind;
 
 use super::{StateDir, status, upper_path};
@@ -237,24 +237,6 @@ fn own_lines(tmp: &std::path::Path, upper: &[u8], blend: &[u8], before: &[u8]) -
     if let Some(own) = git::merge_file(tmp, blend, upper, before)? {
         return Ok(own);
     }
-    let mut left: HashMap<&[u8], usize> = HashMap::new();
-    for l in before.lines() {
-        *left.entry(l).or_default() += 1;
-    }
-    let mut theirs: HashMap<&[u8], usize> = HashMap::new();
-    for l in blend.lines() {
-        match left.get_mut(l) {
-            Some(n) if *n > 0 => *n -= 1,
-            _ => *theirs.entry(l).or_default() += 1,
-        }
-    }
-    let mut out = Vec::new();
-    for line in upper.split_inclusive(|&b| b == b'\n') {
-        let key = line.strip_suffix(b"\n").unwrap_or(line);
-        match theirs.get_mut(key) {
-            Some(n) if *n > 0 => *n -= 1,
-            _ => out.extend_from_slice(line),
-        }
-    }
-    Ok(out)
+    let theirs = git::lens::added_lines(before, blend);
+    Ok(git::lens::without_lines(upper, &theirs))
 }

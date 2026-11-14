@@ -43,7 +43,7 @@
 //! in a file whose layer version L holds conflicts too: it depends on that
 //! layer. Merge commits made on L are flattened (one parent, the tip).
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -434,7 +434,7 @@ fn read_blob(repo: &gix::Repository, item: Option<Item>) -> Result<Vec<u8>> {
 }
 
 /// As git decides it: a NUL byte in the first 8000.
-fn is_binary(data: &[u8]) -> bool {
+pub(crate) fn is_binary(data: &[u8]) -> bool {
     data[..data.len().min(8000)].contains(&0)
 }
 
@@ -462,18 +462,23 @@ fn merge3(base: &[u8], ours: &[u8], theirs: &[u8], conflict: text::Conflict) -> 
     }
 }
 
+// The line-set rule's helpers, shared by blending, extraction, carrying own
+// lines over a switch (`fs::workspace::lens`) and sealing them
+// (`state::seal`). Lines are compared whole but for the `\n`: two registry
+// lines differing in a `\r` are two lines.
+
 /// The lines of `data`, each with its newline (the last may have none).
-fn lines(data: &[u8]) -> impl Iterator<Item = &[u8]> {
+pub(crate) fn lines(data: &[u8]) -> impl Iterator<Item = &[u8]> {
     data.split_inclusive(|b| *b == b'\n')
 }
 
 /// A line without its newline, to compare lines by.
-fn key(line: &[u8]) -> &[u8] {
+pub(crate) fn key(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\n").unwrap_or(line)
 }
 
 /// Whether `side` is `base` with lines added and none removed or changed.
-fn only_adds(base: &[u8], side: &[u8]) -> bool {
+pub(crate) fn only_adds(base: &[u8], side: &[u8]) -> bool {
     let mut base = lines(base).map(key).peekable();
     for line in lines(side) {
         if base.peek() == Some(&key(line)) {
@@ -481,6 +486,61 @@ fn only_adds(base: &[u8], side: &[u8]) -> bool {
         }
     }
     base.peek().is_none()
+}
+
+/// The lines of `side` that `base` doesn't have, a repeated line counted
+/// once per time it is there: what `side` added, if it only added.
+pub(crate) fn added_lines<'a>(base: &[u8], side: &'a [u8]) -> Vec<&'a [u8]> {
+    let mut left: HashMap<&[u8], usize> = HashMap::new();
+    for line in lines(base) {
+        *left.entry(key(line)).or_default() += 1;
+    }
+    lines(side)
+        .filter(|line| match left.get_mut(key(line)) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                false
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+/// `data` without `remove`'s lines, each taken out once per time it is
+/// there.
+pub(crate) fn without_lines(data: &[u8], remove: &[&[u8]]) -> Vec<u8> {
+    let mut left: HashMap<&[u8], usize> = HashMap::new();
+    for line in remove {
+        *left.entry(key(line)).or_default() += 1;
+    }
+    let mut out = Vec::new();
+    for line in lines(data) {
+        match left.get_mut(key(line)) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => out.extend_from_slice(line),
+        }
+    }
+    out
+}
+
+/// The line-set rule for carrying `ours`' lines from blend `old` onto blend
+/// `new` where their merge conflicts, if `ours` only added lines (next to a
+/// layer's, which are then their context): `new`'s lines, then the lines
+/// `ours` added, in its order, each ending in a newline. `None` if it
+/// changed or removed any line (that conflict is real), or for anything but
+/// text.
+pub(crate) fn line_set(old: &[u8], ours: &[u8], new: &[u8]) -> Option<Vec<u8>> {
+    if [old, ours, new].iter().any(|d| is_binary(d)) || !only_adds(old, ours) {
+        return None;
+    }
+    let mut out = Vec::new();
+    for line in lines(new).chain(added_lines(old, ours)) {
+        out.extend_from_slice(line);
+        if !line.ends_with(b"\n") {
+            out.push(b'\n');
+        }
+    }
+    Some(out)
 }
 
 /// Appends `line` to `out`, ending the line before it if it had no newline.
@@ -1487,6 +1547,27 @@ mod tests {
         let expected = lines(8, "util").replace("util8", "util8 MINE");
         assert_eq!(r.show(out.tip, "src/util.c"), expected.trim_end());
         assert_eq!(r.merge_tree(l, base, away), Some(tree_of(&r, out.tip)));
+    }
+
+    /// The line-set helpers: repeats counted, `\r` part of a line, own lines
+    /// carried over only where they were added.
+    #[test]
+    fn line_sets() {
+        let (old, ours) = (&b"a\nb\nb\n"[..], &b"a\nb\nmine\nb\nb\nlast"[..]);
+        assert!(only_adds(old, ours));
+        assert_eq!(added_lines(old, ours), [&b"mine\n"[..], b"b\n", b"last"]);
+        assert_eq!(without_lines(b"a\r\na\nb\n", &[b"a"]), b"a\r\nb\n");
+        assert_eq!(
+            line_set(old, ours, b"a\nb\nb\nnew").unwrap(),
+            b"a\nb\nb\nnew\nmine\nb\nlast\n"
+        );
+        assert_eq!(line_set(old, b"a\nmine\n", b"a\n"), None, "removed a line");
+        assert_eq!(
+            line_set(old, b"a\r\nb\nb\n", b"a\n"),
+            None,
+            "changed a line"
+        );
+        assert_eq!(line_set(b"\0", b"\0x", b""), None, "not text");
     }
 
     /// gix's tree merge against `git merge-tree`, with a rename on one side

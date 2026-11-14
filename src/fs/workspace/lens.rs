@@ -202,41 +202,6 @@ fn content_at(tree: ObjectId, path: &[u8]) -> Result<Vec<u8>> {
     }
 }
 
-/// The line-set rule (`git::lens`) for carrying the workspace's own lines
-/// over in a blended file whose merge conflicts, where it only added lines
-/// (next to a layer's, which are then their context): `new`'s lines, then
-/// the lines `ours` added, in its order. `None` if it changed or removed any
-/// line (that conflict is real), or for anything but text.
-fn line_set(old: &[u8], ours: &[u8], new: &[u8]) -> Option<Vec<u8>> {
-    if [old, ours, new].iter().any(|d| d.contains(&0)) {
-        return None;
-    }
-    let lines = |d: &[u8]| -> Vec<Vec<u8>> { d.lines().map(<[u8]>::to_vec).collect() };
-    let (old, ours, new) = (lines(old), lines(ours), lines(new));
-    // Every old line still there, in order: ours only added.
-    let mut rest = ours.iter();
-    if !old.iter().all(|l| rest.by_ref().any(|o| o == l)) {
-        return None;
-    }
-    let mut left: HashMap<&Vec<u8>, usize> = HashMap::new();
-    for l in &old {
-        *left.entry(l).or_default() += 1;
-    }
-    let mut added = Vec::new();
-    for l in &ours {
-        match left.get_mut(l) {
-            Some(n) if *n > 0 => *n -= 1,
-            _ => added.push(l),
-        }
-    }
-    let mut out = Vec::new();
-    for line in new.iter().chain(added) {
-        out.extend_from_slice(line);
-        out.push(b'\n');
-    }
-    Some(out)
-}
-
 impl Workspace {
     /// Whether layers are shown.
     pub fn lensed(&self) -> bool {
@@ -445,7 +410,7 @@ impl Workspace {
             }
             let ours = fs::read(&upper)?;
             let merged = git::merge_file(&self.tmp, &old, &ours, &new)?;
-            match merged.or_else(|| line_set(&old, &ours, &new)) {
+            match merged.or_else(|| git::lens::line_set(&old, &ours, &new)) {
                 Some(merged) if merged != ours => out.push((path.clone(), merged)),
                 Some(_) => {}
                 None => {
