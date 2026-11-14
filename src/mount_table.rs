@@ -17,22 +17,38 @@ pub fn gitfold_source(path: &Path) -> Result<Option<String>> {
     Ok(source_in(&mountinfo, path.as_os_str().as_bytes()))
 }
 
+/// Where the repository of git common directory `common_dir` (as `git::init`
+/// returns it, as the daemon's was) is mounted by gitfold, if it is.
+pub fn mount_of(common_dir: &Path) -> Result<Option<PathBuf>> {
+    let mountinfo = fs::read("/proc/self/mountinfo")?;
+    let ours = fs_name(common_dir);
+    Ok(mounts_in(&mountinfo)
+        .find(|(_, source)| *source == ours)
+        .map(|(mount, _)| PathBuf::from(std::ffi::OsString::from_vec(mount))))
+}
+
 /// The source of the gitfold mount at `path` in mount table `mountinfo`.
 fn source_in(mountinfo: &[u8], path: &[u8]) -> Option<String> {
-    for line in mountinfo.split(|b| *b == b'\n') {
+    mounts_in(mountinfo)
+        .find(|(mount, _)| mount == path)
+        .map(|(_, source)| source)
+}
+
+/// The gitfold mounts in mount table `mountinfo`: mount point and source.
+fn mounts_in(mountinfo: &[u8]) -> impl Iterator<Item = (Vec<u8>, String)> + '_ {
+    mountinfo.split(|b| *b == b'\n').filter_map(|line| {
         // id parent dev root mount-point options ... - fstype source super-options
         let fields: Vec<&[u8]> = line.split(|b| *b == b' ').collect();
-        let Some(dash) = fields.iter().position(|f| *f == b"-") else {
-            continue;
-        };
-        if fields.get(dash + 1) == Some(&b"fuse.gitfold".as_slice())
-            && fields.get(4).is_some_and(|m| unescape(m) == path)
-        {
-            let source = fields.get(dash + 2).map(|s| unescape(s))?;
-            return Some(String::from_utf8_lossy(&source).into_owned());
+        let dash = fields.iter().position(|f| *f == b"-")?;
+        if fields.get(dash + 1) != Some(&b"fuse.gitfold".as_slice()) {
+            return None;
         }
-    }
-    None
+        let source = unescape(fields.get(dash + 2)?);
+        Some((
+            unescape(fields.get(4)?),
+            String::from_utf8_lossy(&source).into_owned(),
+        ))
+    })
 }
 
 /// Undoes the mount table's escapes: the kernel octal-escapes space, tab,

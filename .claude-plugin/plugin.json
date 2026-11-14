@@ -1,0 +1,7 @@
+{
+  "name": "gitfold",
+  "description": "Work in gitfold mounts: the gitfold skill, Claude Code worktrees as gitfold workspaces, and inbox messages delivered into the session",
+  "author": { "name": "Piotr Kukielka" },
+  "homepage": "https://github.com/pkukielka/gitfold",
+  "repository": "https://github.com/pkukielka/gitfold"
+}

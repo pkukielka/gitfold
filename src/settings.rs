@@ -4,7 +4,8 @@
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
 //!   mode) and `gitfoldTrackReads` (whether it records reads);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
-//!   task folder and its inbox).
+//!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
+//!   mounted it, for Claude Code's worktree hook to mount it there again).
 //!
 //! They are read from the repository's own config file, where `git config`
 //! writes them (not included files), at the moment they are needed: the
@@ -12,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 use log::warn;
 
@@ -30,6 +31,8 @@ const TASK_DIR: &str = "taskDir";
 const TASKS_DIR: &str = "tasksDir";
 /// `gitfold.inbox`: the inbox's name in a task folder.
 const INBOX: &str = "inbox";
+/// `gitfold.mountpoint`: where `gitfold mount` last mounted the repository.
+const MOUNTPOINT: &str = "mountpoint";
 /// The task folder's name unless `gitfold.taskDir` says otherwise.
 const DEFAULT_TASK_DIR: &str = ".task";
 /// The inbox's name unless `gitfold.inbox` says otherwise.
@@ -79,6 +82,12 @@ impl Local {
             return None;
         }
         Some(dir)
+    }
+
+    /// Where `gitfold mount` last mounted the repository
+    /// (`gitfold.mountpoint`), if recorded.
+    pub fn mountpoint(&self) -> Option<PathBuf> {
+        self.repository(MOUNTPOINT).map(PathBuf::from)
     }
 
     /// The name of a task folder's inbox: `gitfold.inbox` if it is one plain
@@ -164,6 +173,14 @@ pub fn set_prewarm(git_dir: &Path, branch: &str, mode: Prewarm) -> Result<()> {
 /// `set_branch`).
 pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
+}
+
+/// Records `mountpoint` as where the repository is mounted
+/// (`gitfold.mountpoint`), given its git directory or one of its worktrees'.
+pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path) -> Result<()> {
+    let key = format!("gitfold.{MOUNTPOINT}");
+    let value = mountpoint.to_str().context("a mount point that isn't UTF-8")?;
+    git::cmd::run(git_dir, &["config", "--local", &key, value])
 }
 
 /// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's

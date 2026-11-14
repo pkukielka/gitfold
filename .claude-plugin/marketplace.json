@@ -1,0 +1,12 @@
+{
+  "name": "gitfold",
+  "description": "gitfold: git revisions and per-branch workspaces as a filesystem, for running coding agents in parallel",
+  "owner": { "name": "Piotr Kukielka" },
+  "plugins": [
+    {
+      "name": "gitfold",
+      "source": "./",
+      "description": "The gitfold skill, Claude Code worktrees as gitfold workspaces, and inbox messages delivered into the session"
+    }
+  ]
+}

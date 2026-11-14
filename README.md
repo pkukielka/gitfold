@@ -32,10 +32,39 @@ own branch and every reviewer any revision, side by side, without
 
 ## Quick start
 
-Needs Linux with FUSE 3 (`fusermount3`, kernel 5.1+), git, and Rust 1.88+ to
-build.
+Needs Linux with FUSE 3 (`fusermount3`, kernel 5.1+) and git.
 
-1. **Install:**
+### With Claude Code
+
+1. **Install the plugin**, in Claude Code:
+
+   ```
+   /plugin marketplace add pkukielka/gitfold
+   /plugin install gitfold@gitfold
+   ```
+
+   It downloads gitfold when first needed (Linux x86_64 or aarch64, glibc
+   2.28 or newer; on NixOS, [build it](#by-hand) and put it on `PATH`).
+
+2. **Mount** your repository, once: in a Claude Code session in it, ask Claude
+   to "mount this repository with gitfold" (at `~/mnt/<name>` unless you say
+   where). It stays mounted after the session, and is mounted again by itself
+   after a reboot.
+
+3. **Work**: `claude -w my-task` from the repository (subagents with
+   `isolation: worktree` too) gets a gitfold workspace, opened in about a
+   second, at `<mount point>/worktree-my-task`. Removing it when the session
+   ends discards its uncommitted changes; the branch stays.
+
+The skill's "Claude Code" section has the details
+([skills/gitfold/SKILL.md](skills/gitfold/SKILL.md)).
+
+### By hand
+
+1. **Install**: download `gitfold-x86_64-linux` (or `-aarch64-`) from the
+   [releases](https://github.com/pkukielka/gitfold/releases) (glibc 2.28 or
+   newer), check it against `SHA256SUMS`, and put it on `PATH` as `gitfold`;
+   or build it (Rust 1.88+):
 
    ```
    git clone https://github.com/pkukielka/gitfold && cd gitfold
@@ -137,6 +166,8 @@ gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
 gitfold prune                                 # delete snapshot registrations
 gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
 gitfold track-reads <BRANCH> on|off           # record a workspace's reads
+gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
+gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
 ```
 
 Commands other than `mount` work on the repository the current directory is
@@ -523,6 +554,8 @@ So do a workspace's base following a branch that moved, and the checks of
   `ln -s "$PWD/skills/gitfold" ~/.claude/skills/gitfold` (or into a project's
   `.claude/skills/`). It is plain markdown, so other agents can be pointed at
   it from their instructions (`AGENTS.md`).
+- The gitfold Claude Code plugin: see [Quick start](#quick-start) and the
+  skill's "Claude Code" section.
 - Workspaces an agent only reads a few files in are cheaper without the prewarm
   walk: give their branch prewarm mode `none` (see [Usage](#usage)).
 - **Claude Code's git scans** (measured with Claude Code 2.1.322 and a git

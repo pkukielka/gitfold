@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::LocalKey;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 
@@ -46,6 +46,8 @@ thread_local! {
 }
 
 /// Opens the repository at `path` and returns its common git dir (`.git`).
+/// Once per process: again for the same repository returns that, another is
+/// an error.
 pub fn init(path: &Path) -> Result<PathBuf> {
     // Trees are decoded once per snapshot and file content is cached by the kernel,
     // so gitoxide's per-thread delta-base cache (96 MB by default) only costs memory
@@ -60,9 +62,20 @@ pub fn init(path: &Path) -> Result<PathBuf> {
     let repo = gix::open_opts(path, opts)
         .with_context(|| format!("opening repository {}", path.display()))?;
     let common = repo.common_dir().canonicalize()?;
-    REPO.set(repo.into_sync())
-        .map_err(|_| anyhow!("repository already initialized"))?;
+    if REPO.set(repo.into_sync()).is_err() {
+        let open = REPO
+            .get()
+            .map(|r| r.to_thread_local().common_dir().canonicalize());
+        if !open.is_some_and(|c| c.is_ok_and(|c| c == common)) {
+            bail!("another repository is already open");
+        }
+    }
     Ok(common)
+}
+
+/// The top of the work tree of the repository `init` opened, if it has one.
+pub fn work_tree() -> Option<PathBuf> {
+    with_repo(|repo| repo.workdir().map(Path::to_path_buf))
 }
 
 pub fn with_repo<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {

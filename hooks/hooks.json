@@ -1,0 +1,16 @@
+{
+  "description": "gitfold: worktrees as workspaces where the repository is mounted (a git worktree where it isn't used with gitfold); inbox messages into the session (nothing outside a workspace). bin/gitfold runs gitfold: one on PATH, or the release, downloaded.",
+  "hooks": {
+    "WorktreeCreate": [{ "hooks": [{ "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" branch --claude-hook worktree-create" }] }],
+    "WorktreeRemove": [{ "hooks": [{ "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" remove --claude-hook worktree-remove" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" inbox --claude-hook user-prompt-submit" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" inbox --claude-hook post-tool-use" }] }],
+    "Stop": [{ "hooks": [{ "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" inbox --claude-hook rewake",
+      "async": true, "asyncRewake": true, "timeout": 86400 }] }]
+  }
+}

@@ -91,6 +91,10 @@ pub fn run(options: Options) -> Result<()> {
     let workspaces = fs.workspaces();
     let mounted = mountpoint.clone();
     let session = fuser::Session::new(fs, &mountpoint, &config)?;
+    // Mounted: where Claude Code's worktree hook mounts it again (`cli::claude`).
+    if let Err(e) = crate::settings::set_mountpoint(&common_dir, &mountpoint) {
+        log::warn!("recording the mount point in the git config: {e:#}");
+    }
     names.set_notifier(session.notifier());
     // After the notifier is set: a removal tells the kernel.
     if let Some(listener) = listener {

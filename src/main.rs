@@ -192,6 +192,8 @@ fn run() -> Result<i32> {
         Command::Mount(args) => cli::mount::mount(args)?,
         Command::Unmount { mountpoint } => cli::mount::unmount(&mountpoint)?,
         Command::Version { mountpoint } => return cli::mount::version(mountpoint.as_deref()),
+        // As hooks, they find the repository from Claude Code's input.
+        Command::Branch(args) if args.claude_hook.is_some() => cli::claude::worktree_create()?,
         Command::Branch(args) => cli::branch::branch(&cli::repo()?, args)?,
         Command::List(args) => cli::list::list(&cli::repo()?, args)?,
         Command::Changes(args) => cli::list::changes(&cli::repo()?, args)?,
@@ -200,6 +202,7 @@ fn run() -> Result<i32> {
         // Finds the repository itself: as a hook, none is no error.
         Command::Inbox(args) => return cli::inbox::inbox(args),
         Command::Send(args) => cli::inbox::send(&cli::repo()?, args)?,
+        Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
         Command::Prewarm(args) => cli::branch::prewarm(&cli::repo()?, args)?,

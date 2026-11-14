@@ -6,8 +6,12 @@
 //! - `remove`: `remove`, `prune`.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
+//! - `claude`: Claude Code's worktrees as workspaces (`branch` and `remove`
+//!   with `--claude-hook`).
 
 pub mod branch;
+pub mod claude;
+pub mod hook;
 pub mod inbox;
 pub mod list;
 pub mod mount;
