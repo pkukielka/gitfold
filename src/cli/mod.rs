@@ -11,6 +11,7 @@
 
 pub mod branch;
 pub mod claude;
+pub mod hook;
 pub mod inbox;
 pub mod list;
 pub mod mount;

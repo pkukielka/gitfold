@@ -17,16 +17,13 @@ pub fn gitfold_source(path: &Path) -> Result<Option<String>> {
     Ok(source_in(&mountinfo, path.as_os_str().as_bytes()))
 }
 
-/// Where the repository of git common directory `common_dir` is mounted by
-/// gitfold, if it is.
+/// Where the repository of git common directory `common_dir` (as `git::init`
+/// returns it, as the daemon's was) is mounted by gitfold, if it is.
 pub fn mount_of(common_dir: &Path) -> Result<Option<PathBuf>> {
     let mountinfo = fs::read("/proc/self/mountinfo")?;
-    let ours = fs::canonicalize(common_dir).ok();
+    let ours = fs_name(common_dir);
     Ok(mounts_in(&mountinfo)
-        .find(|(_, source)| {
-            let theirs = common_dir_of_source(source);
-            theirs == common_dir || ours.is_some() && fs::canonicalize(&theirs).ok() == ours
-        })
+        .find(|(_, source)| *source == ours)
         .map(|(mount, _)| PathBuf::from(std::ffi::OsString::from_vec(mount))))
 }
 

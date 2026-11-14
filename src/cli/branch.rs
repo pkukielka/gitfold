@@ -26,18 +26,8 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         claude_hook: _,
     } = args;
     let name = name.as_deref().context("name the branch")?;
-    // Mount names starting with `@` are snapshots; such a branch would be
-    // unreachable as a workspace.
-    ensure!(
-        !name.starts_with('@'),
-        "branch names starting with @ can't be opened as workspaces (@<rev> is a snapshot)"
-    );
-    // A workspace left from a deleted branch of that name would be resumed.
     let common_dir = git::init(repo)?;
-    ensure!(
-        git::branch_exists(name) || !StateDir::of(&common_dir, name).dir.exists(),
-        "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
-    );
+    check_new(&common_dir, name)?;
     if with_changes {
         // `git branch` checks names itself; `update-ref` would take `HEAD`, and
         // refuse other bad names only after the copy.
@@ -65,12 +55,33 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         println!("{done}; open it as <mountpoint>/{name}");
         return Ok(());
     }
-    let mut args = vec!["branch", "--", name];
-    args.extend(from.as_deref());
-    git::cmd::run(repo, &args)?;
+    create(repo, name, from.as_deref())?;
     set_branch_settings(repo, name, prewarm, track_reads)?;
     println!("created branch {name}; open it as <mountpoint>/{name}");
     Ok(())
+}
+
+/// Refuses branch name `name` for a new workspace in the repository of
+/// `common_dir` (opened): one starting with `@` (a snapshot's), or one whose
+/// earlier branch's workspace is still stored (it would be resumed).
+pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
+    ensure!(
+        !name.starts_with('@'),
+        "branch names starting with @ can't be opened as workspaces (@<rev> is a snapshot)"
+    );
+    ensure!(
+        git::branch_exists(name) || !StateDir::of(common_dir, name).dir.exists(),
+        "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
+    );
+    Ok(())
+}
+
+/// Creates branch `name` at `from`, or at HEAD of the worktree of `repo` (its
+/// git directory), as `git branch` does; `check_new` first.
+pub fn create(repo: &Path, name: &str, from: Option<&str>) -> Result<()> {
+    let mut args = vec!["branch", "--", name];
+    args.extend(from);
+    git::cmd::output(repo, &args).map(drop)
 }
 
 /// `gitfold prewarm`: sets the prewarm mode of workspace `name` (as `branch

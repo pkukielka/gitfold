@@ -17,7 +17,7 @@ mod watch;
 pub use watch::{WatchArgs, watch};
 
 use std::fs;
-use std::io::{ErrorKind, IsTerminal, Read};
+use std::io::{ErrorKind, IsTerminal};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -213,13 +213,12 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
 
 /// Whether the hook input on stdin is a subagent's (it names an `agent_id`).
 fn in_subagent() -> Result<bool> {
-    let mut stdin = std::io::stdin();
+    let stdin = std::io::stdin();
     if stdin.is_terminal() {
         return Ok(false);
     }
-    let mut input = String::new();
-    stdin.read_to_string(&mut input)?;
-    Ok(input.contains("\"agent_id\""))
+    let input = std::io::read_to_string(stdin)?;
+    Ok(super::hook::field(&input, "agent_id").is_some())
 }
 
 /// An exclusive lock on `dir`'s `.waiting` file, if no one else holds it.

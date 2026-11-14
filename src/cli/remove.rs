@@ -37,11 +37,6 @@ fn exclusive(common_dir: &Path) -> Result<crate::lock::Lock> {
 /// `--check`, only checks what would be refused. Retries for up to `--wait`
 /// seconds while it is in use.
 pub fn remove(repo: &Path, args: RemoveArgs) -> Result<()> {
-    remove_in(&git::init(repo)?, args)
-}
-
-/// `remove` in the repository of `common_dir`, opened (`git::init`).
-pub fn remove_in(common_dir: &Path, args: RemoveArgs) -> Result<()> {
     let RemoveArgs {
         name,
         force,
@@ -52,10 +47,11 @@ pub fn remove_in(common_dir: &Path, args: RemoveArgs) -> Result<()> {
     let name = name.as_deref().context("name the workspace")?;
     let wait = Duration::from_secs(wait);
     check_name(name)?;
+    let common_dir = git::init(repo)?;
     let started = Instant::now();
     let mut told = false;
     let done = loop {
-        match remove_once(common_dir, name, force, check) {
+        match remove_once(&common_dir, name, force, check) {
             Err(e) if Refusal::of(&e) == Some(Refusal::InUse) && started.elapsed() < wait => {
                 if !told {
                     eprintln!("{e:#}\nwaiting (up to {} s)...", wait.as_secs());
