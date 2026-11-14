@@ -21,7 +21,12 @@ use crate::store::Store;
 #[derive(Args)]
 pub struct LayerArgs {
     #[command(subcommand)]
-    pub op: LayerOp,
+    pub op: Option<LayerOp>,
+    /// As Claude Code's `UserPromptSubmit` hook (`user-prompt-submit`): move
+    /// the layers of the workspace the session is in to their workspaces'
+    /// newest seals (made when their sessions stopped), and say what changed.
+    #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit"])]
+    pub claude_hook: Option<String>,
     /// The workspace to show them in (default: the one you are in).
     #[arg(short = 'w', long, global = true, value_name = "BRANCH")]
     pub workspace: Option<String>,
@@ -70,12 +75,15 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     }
     let store = Store::default();
     let mut lens = Lens::read(&state)?;
-    let op_kind = match &args.op {
+    let Some(op) = args.op else {
+        bail!("name what to do: add, on, off, rm, update or list (see --help)");
+    };
+    let op_kind = match &op {
         LayerOp::On { .. } => Kind::On,
         LayerOp::Off { .. } => Kind::Off,
         _ => Kind::Rm,
     };
-    match args.op {
+    match op {
         LayerOp::List => {
             print!("{}", listing(&lens));
             return Ok(());
@@ -110,6 +118,65 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     }
     lens.write(&state)?;
     println!("{}", apply(&common_dir, &name)?);
+    Ok(())
+}
+
+/// `gitfold layer --claude-hook user-prompt-submit`: at the start of a turn,
+/// the layers of the workspace the session is in move to their workspaces'
+/// newest seals (`gitfold seal --claude-hook stop` makes one when a session
+/// stops), so what shows changes only between turns, never half-way through
+/// another's. What changed is printed, which becomes context. Does nothing
+/// outside a workspace with layers; errors are only logged.
+pub fn layer_hook() -> Result<()> {
+    if let Err(e) = (|| -> Result<()> {
+        let repo = super::repo()?;
+        let name = super::branch_or_current(None, &repo)?;
+        let common_dir = git::init(&repo)?;
+        let state = StateDir::of(&common_dir, &name);
+        let mut lens = Lens::read(&state)?;
+        let mut moved = Vec::new();
+        for layer in &mut lens.layers {
+            let id = crate::state::workspace_id(&layer.branch);
+            let Some(&(_, newest)) = seal::list(&common_dir, &id)?.last() else {
+                continue;
+            };
+            if newest == layer.seal {
+                continue;
+            }
+            let files = crate::state::lens::changes(&common_dir, &layer.seal, &newest)?.len();
+            let base = state.read_base()?.id;
+            let out = git::cmd::output(
+                &common_dir,
+                &["merge-base", &base.to_string(), &newest.to_string()],
+            )?;
+            layer.merge_base = ObjectId::from_hex(String::from_utf8_lossy(&out).trim().as_bytes())?;
+            layer.seal = newest;
+            if layer.on {
+                moved.push(format!(
+                    "{} ({files} {})",
+                    layer.branch,
+                    if files == 1 {
+                        "file changed"
+                    } else {
+                        "files changed"
+                    }
+                ));
+            }
+        }
+        if moved.is_empty() {
+            return Ok(());
+        }
+        lens.write(&state)?;
+        apply(&common_dir, &name)?;
+        println!(
+            "gitfold: the layers shown in this workspace moved to their workspaces' latest work: {}. \
+             Files you read from them may have changed.",
+            moved.join(", ")
+        );
+        Ok(())
+    })() {
+        log::warn!("gitfold layer --claude-hook: {e:#}");
+    }
     Ok(())
 }
 

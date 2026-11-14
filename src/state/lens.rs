@@ -106,6 +106,18 @@ impl Lens {
     }
 }
 
+/// Whether any workspace of the repository at `common_dir` has `branch`'s
+/// work as a layer.
+pub fn shown_anywhere(common_dir: &std::path::Path, branch: &str) -> Result<bool> {
+    let needle = format!("\nlayer {branch}\t");
+    let Ok(dirs) = fs::read_dir(super::state_root(common_dir)) else {
+        return Ok(false);
+    };
+    Ok(dirs
+        .flatten()
+        .any(|d| fs::read_to_string(d.path().join(LENS)).is_ok_and(|text| text.contains(&needle))))
+}
+
 /// What a workspace with layers shows below its own changes.
 pub struct View {
     pub tree: ObjectId,

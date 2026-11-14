@@ -234,8 +234,10 @@ fn run() -> Result<i32> {
         // Finds the repository itself: as a hook, none is no error.
         Command::Inbox(args) => return cli::inbox::inbox(args),
         Command::Send(args) => cli::inbox::send(&cli::repo()?, args)?,
+        Command::Seal(args) if args.claude_hook.is_some() => cli::mix::seal_hook()?,
         Command::Seal(args) => cli::mix::seal(&cli::repo()?, args)?,
         Command::Mix(args) => cli::mix::mix(&cli::repo()?, args)?,
+        Command::Layer(args) if args.claude_hook.is_some() => cli::layer::layer_hook()?,
         Command::Layer(args) => cli::layer::layer(&cli::repo()?, args)?,
         Command::Lens(args) => cli::layer::lens(&cli::repo()?, args)?,
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,

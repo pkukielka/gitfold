@@ -21,6 +21,10 @@ use crate::store::Store;
 pub struct SealArgs {
     /// The workspace's branch (default: the workspace you are in).
     pub branch: Option<String>,
+    /// As Claude Code's `Stop` hook (`stop`): seal the workspace the session
+    /// is in if another workspace shows it as a layer; print nothing.
+    #[arg(long, value_name = "EVENT", value_parser = ["stop"])]
+    pub claude_hook: Option<String>,
 }
 
 #[derive(Args)]
@@ -36,6 +40,26 @@ pub struct MixArgs {
     /// tips) or revisions, merged in this order.
     #[arg(required = true, value_name = "BRANCH|REV")]
     pub what: Vec<String>,
+}
+
+/// `gitfold seal --claude-hook stop`: when a session stops, seals its
+/// workspace if another workspace shows it as a layer, so layers move to the
+/// end of a turn, not into the middle of one (`gitfold layer --claude-hook`).
+/// Does nothing otherwise; errors are only logged.
+pub fn seal_hook() -> Result<()> {
+    if let Err(e) = (|| -> Result<()> {
+        let repo = super::repo()?;
+        let name = super::branch_or_current(None, &repo)?;
+        let common_dir = git::init(&repo)?;
+        if !crate::state::lens::shown_anywhere(&common_dir, &name)? {
+            return Ok(());
+        }
+        seal::seal(&Store::default(), &StateDir::of(&common_dir, &name))?;
+        Ok(())
+    })() {
+        log::debug!("gitfold seal --claude-hook: {e:#}");
+    }
+    Ok(())
 }
 
 /// `gitfold seal`: seals the workspace and prints the commit.
