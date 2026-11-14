@@ -601,3 +601,29 @@ The scan never writes the cache (`--no-optional-locks`). With
 Results matched uncached runs after additions and removals in lower and
 upper directories, `.gitignore` edits, commits, `stash -u`, `clean` and an
 invisible rebase.
+
+## 2026-11-14, opens: what seeing every read would cost
+
+`bench/opens.sh`: a fresh workspace (prewarm none) per repo, mode and command;
+cold = first run, warm = median of three; opens per run from the daemon's
+counters. "open" is `--kernel-open` (every `open()` a round trip, contents
+still cached: `FOPEN_KEEP_CACHE`), "no-open" the default.
+
+| repo (files)    | cmd         | no-open cold | open cold | no-open warm | open warm | opens/run |
+|-----------------|-------------|-------------:|----------:|-------------:|----------:|----------:|
+| spark (28k)     | rg          |       201 ms |    278 ms |        37 ms |    146 ms |    26,892 |
+| spark           | claude-grep |       419 ms |    457 ms |        97 ms |    151 ms |    27,605 |
+| spark           | tar         |      1585 ms |   1834 ms |       311 ms |    545 ms |    24,106 |
+| linux (97k)     | rg          |       906 ms |   1062 ms |        84 ms |    510 ms |    97,508 |
+| linux           | claude-grep |      1351 ms |   1487 ms |       357 ms |    689 ms |    97,506 |
+| linux           | tar         |      9753 ms |   6820 ms |       966 ms |   1684 ms |    97,055 |
+| chromium (512k) | rg          |      3757 ms |   5063 ms |       400 ms |   2680 ms |   509,973 |
+| chromium        | claude-grep |      9037 ms |   9866 ms |      4168 ms |   4326 ms |   511,600 |
+| chromium        | tar         |     29409 ms |  34593 ms |      4827 ms |   9743 ms |   510,674 |
+
+`find` and Claude Code's `git status` open no files (git: 6-224 opens) and are
+unchanged. An open costs about 4.5 µs; it is seconds per search only on large
+trees, but agents search often. So read tracking doesn't turn opens on: reads
+served from the cache come from Claude Code's hook instead (README,
+"Overlaps"). `claude-grep` hides most of it (ugrep is slow on its own); Claude
+Code's Grep tool runs `rg`.

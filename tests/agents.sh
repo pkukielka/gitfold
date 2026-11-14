@@ -10,6 +10,9 @@ NAME=agents
 . "$(dirname "$0")/lib.sh"
 . "$(dirname "$0")/fixture.sh"
 
+# The paths workspace $1 recorded as read, space-separated.
+reads_of() { tr '\0' ' ' <"$COMMON/gitfold/$1/reads" 2>/dev/null | sed 's/ $//'; }
+
 overlaps_reads_and_writes_changed_elsewh() {
 R branch st1; R branch st2; R branch st3
 check "track-reads needs a branch" fails "$BIN" -C "$REPO" track-reads nope on
@@ -19,7 +22,7 @@ cat "$MNT/st1/a.txt" "$MNT/st1/d/b.txt" >/dev/null
 echo w >>"$MNT/st1/d/c.txt"; echo x >"$MNT/st1/x.txt"; echo nd >"$MNT/st1/nd"
 echo n >"$MNT/st1/n.txt"; G "$MNT/st1" add n.txt; G "$MNT/st1" commit -qm n -- n.txt
 for _ in $(seq 50); do [ "$(cat "$COMMON/gitfold/st1/base")" = "$(R rev-parse st1)" ] && break; sleep 0.1; done
-eq "reads recorded once each, in order (git's read of n.txt too)" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/st1/reads" | sed 's/ $//')"
+eq "reads recorded once each, in order (git's read of n.txt too)" "a.txt d/b.txt n.txt" "$(reads_of st1)"
 echo x >"$MNT/st2/x.txt"; mkdir "$MNT/st2/nd"; echo y >"$MNT/st2/nd/y"
 R switch -q main; echo m >>"$REPO/a.txt"; echo m >>"$REPO/d/c.txt"; echo m >"$REPO/n.txt"; echo m >"$REPO/e.txt"
 R add -A; R commit -qm main-moves
@@ -67,7 +70,7 @@ printf '[branch "st3"]\n\tgitfoldTrackReads\n' >>"$COMMON/config"
 eq "a valueless gitfoldTrackReads (true, for git) is copied as true" true "$(R config --get branch.st3f.gitfoldTrackReads)"
 eq "track-reads off, applied at once" "stopped recording reads in st1" "$("$BIN" -C "$REPO" track-reads st1 off 2>&1)"
 cat "$MNT/st1/d/c.txt" >/dev/null
-eq "nothing more recorded; what was recorded stays" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/st1/reads" | sed 's/ $//')"
+eq "nothing more recorded; what was recorded stays" "a.txt d/b.txt n.txt" "$(reads_of st1)"
 unmount_fs
 eq "unmounted, the same" "R	main	a.txt
 W	main	d/c.txt
@@ -76,7 +79,7 @@ eq "an unknown branch: exit 3" 3 "$("$BIN" -C "$REPO" overlaps nope >/dev/null 2
 mount_fs --track-reads --prewarm content
 cat "$MNT/st2/a.txt" "$MNT/st1/a.txt" >/dev/null
 eq "the mount's --track-reads: st2 records" "R	main	a.txt" "$("$BIN" -C "$REPO" overlaps st2 --reads 2>&1)"
-eq "a branch's off wins" "a.txt d/b.txt n.txt" "$(tr '\0' ' ' <"$COMMON/gitfold/st1/reads" | sed 's/ $//')"
+eq "a branch's off wins" "a.txt d/b.txt n.txt" "$(reads_of st1)"
 for _ in $(seq 50); do grep -q 'st2: prewarm content walks as meta' "$LOG" && break; sleep 0.1; done
 check "a tracked workspace's content prewarm walks as meta" grep -q 'st2: prewarm content walks as meta' "$LOG"
 unmount_fs
@@ -305,7 +308,43 @@ out=$(printf '{"hook_event_name":"WorktreeCreate","cwd":"%s","name":"p2"}' "$REP
 eq "    in a repository used with gitfold: refused" "1 yes" "$rc $(grep -q "used with gitfold" <<<"$out" && echo yes)"
 }
 
+reads_searches_left_out_cached_ones_hook() {
+R branch rd
+mount_fs
+"$BIN" -C "$REPO" track-reads rd on >/dev/null
+W=$MNT/rd
+cat "$W/a.txt" >/dev/null
+eq "a program's reads are recorded" "a.txt" "$(reads_of rd)"
+grep -rq needle "$W" 2>/dev/null; (cd "$W" && exec -a ugrep awk 'NR < 0' d/c.txt)
+if command -v rg >/dev/null; then rg -q needle "$W"; fi
+eq "  a search's aren't (grep, rg; a program run as ugrep)" "a.txt" "$(reads_of rd)"
+cat "$W/d/b.txt" >/dev/null
+eq "  nor, the kernel serving it from its cache, a read after one" "a.txt" "$(reads_of rd)"
+hook() { printf '%s' "$1" | "$BIN" track-reads --claude-hook pre-tool-use; }
+hook "{\"tool_name\":\"Read\",\"cwd\":\"$REPO\",\"tool_input\":{\"file_path\":\"$W/d/b.txt\"}}"
+eq "Claude Code's Read, of a file the kernel had cached (grep read it): recorded by the hook" "a.txt d/b.txt" "$(reads_of rd)"
+hook "{\"tool_name\":\"Bash\",\"cwd\":\"$W/d\",\"tool_input\":{\"command\":\"sed -n 1,2p c.txt | head -n 1; cat ../nope\"}}"
+eq "  its Bash: the files simple viewers show (relative to cwd), not missing ones" "a.txt d/b.txt d/c.txt" "$(reads_of rd)"
+eq "  silent, exit 0, wherever it runs" "0 " "$(hook '{"tool_name":"Read","tool_input":{"file_path":"/etc/hostname"}}' 2>&1; echo "$?" "$(hook 'not json' 2>&1)")"
+ln -s "$MNT" "$T/link"; echo e >"$W/d/e.txt"; grep -rq needle "$W/d"
+hook "{\"tool_name\":\"Bash\",\"cwd\":\"$T/link/rd\",\"tool_input\":{\"command\":\"cd d && head -n 1 < e.txt\"}}"
+eq "  through a symlink to the mount, after a cd in the command" "a.txt d/b.txt d/c.txt d/e.txt" "$(reads_of rd)"
+"$BIN" -C "$REPO" track-reads rd off >/dev/null
+hook "{\"tool_name\":\"Read\",\"cwd\":\"$REPO\",\"tool_input\":{\"file_path\":\"$W/d/c.txt\"}}"
+eq "  untracked: nothing" "a.txt d/b.txt d/c.txt d/e.txt" "$(reads_of rd)"
+unmount_fs
+R branch ko
+mount_fs --kernel-open
+"$BIN" -C "$REPO" track-reads ko on >/dev/null
+grep -rq needle "$MNT/ko"; cat "$MNT/ko/a.txt" >/dev/null
+eq "with every open seen (--kernel-open): a read after a search too, not the search" "a.txt" "$(reads_of ko)"
+(exec 3<>"$MNT/ko/d/b.txt"; cat <&3 >/dev/null)
+eq "  not a read-write open (it may only write), the file cached" "a.txt" "$(reads_of ko)"
+unmount_fs
+}
+
 section "overlaps: reads and writes changed elsewhere" overlaps_reads_and_writes_changed_elsewh
+section "reads: searches left out, cached ones from the hook" reads_searches_left_out_cached_ones_hook
 section "the plugin's launcher" the_plugins_launcher
 section "Claude Code worktree hooks" claude_code_worktree_hooks
 section "the task folder" the_task_folder

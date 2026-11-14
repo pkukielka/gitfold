@@ -78,6 +78,10 @@ pub enum Request {
     Fork { from: String, to: String },
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
+    /// Record that the files at `paths` (relative to the mount point) were
+    /// read, in the open, tracked workspaces they are in: reads served from
+    /// the kernel's cache, reported by a Claude Code hook.
+    RecordReads { paths: Vec<String> },
 }
 
 impl Request {
@@ -100,12 +104,20 @@ impl Request {
             Request::TrackReads { branch } => format!("track-reads\n{branch}\n"),
             Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
             Request::Version => "version\n".to_string(),
+            // NUL-separated: a path may hold a newline.
+            Request::RecordReads { paths } => format!("record-reads\n{}", paths.join("\0")),
         }
         .into_bytes()
     }
 
     fn decode(bytes: &[u8]) -> Result<Request> {
         let text = std::str::from_utf8(bytes).context("request not UTF-8")?;
+        if let Some(paths) = text.strip_prefix("record-reads\n") {
+            let paths = paths.split('\0').filter(|p| !p.is_empty());
+            return Ok(Request::RecordReads {
+                paths: paths.map(String::from).collect(),
+            });
+        }
         match text.split('\n').collect::<Vec<_>>()[..] {
             [verb @ ("remove" | "check-remove"), force, name, ""] => Ok(Request::Remove {
                 name: name.to_string(),
@@ -293,6 +305,7 @@ mod tests {
             Request::StopPrewarm,
             Request::ResumePrewarm,
             Request::Version,
+            Request::RecordReads { paths: vec![] },
         ];
         for n in names {
             for (force, check) in [(false, false), (true, false), (false, true), (true, true)] {
@@ -311,6 +324,9 @@ mod tests {
             requests.push(Request::Fork {
                 from: n.to_string(),
                 to: format!("{n}-2"),
+            });
+            requests.push(Request::RecordReads {
+                paths: vec![format!("{n}/a.txt"), "d/new\nline".into(), "zażółć".into()],
             });
         }
         for r in requests {

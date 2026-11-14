@@ -160,7 +160,10 @@ Then, per request (`fs/workspace/`):
 | `src/cli/list.rs` | `list` and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
-| `src/cli/claude.rs` | Claude Code's `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
+| `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
+| `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
+| `src/cli/claude/reads.rs` | its `PreToolUse` hook (`track-reads --claude-hook`): the files its Read tool and Bash commands read, sent to the mount's daemon |
+| `src/shell.rs` | what a shell command reads: the files simple viewers and `<` name, from its syntax tree (`rable`) |
 | `bin/gitfold`, `hooks/hooks.json`, `.claude-plugin/` | the Claude Code plugin (with `skills/`): its hooks, and the launcher they run, which uses a gitfold on `PATH` or downloads the release |
 | `.github/workflows/release.yml` | on a version tag, the Linux release binaries (glibc 2.28) the launcher downloads |
 | `src/cli/inbox/mod.rs` | `inbox` (and its Claude Code hook outputs) and `send` |
@@ -1066,8 +1069,14 @@ diverged from the target and its stored uncommitted changes. Reads are the one
 thing only the filesystem sees: with tracking on, the daemon appends each
 file's path to `.git/gitfold/<id>/reads` at its first read from offset 0
 (NUL-terminated, once per path; a partial last path, from a crash or an append
-in progress, is dropped). The kernel caches contents, so that read is the only
-one the daemon gets; later reads cost nothing.
+in progress, is dropped), unless the reader is a file searcher (`rg`, `grep`,
+`ugrep`, `ag`, `ack`, `git grep`), told by `/proc/<pid>/comm` or `argv[0]` (FUSE gives
+the reading thread; `procs::Scanners` remembers each for 1 s, and is asked
+before the path is built: a search's reads build none). The kernel caches contents, so that read is
+the only one the daemon gets; later reads cost nothing, and aren't seen:
+Claude Code's `PreToolUse` hook (`gitfold track-reads --claude-hook`; before the tool, so a command's `cd` counts once) reports
+its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
+...), and the daemon records them (a `record-reads` control request).
 
 **Why:**
 
@@ -1076,6 +1085,20 @@ one the daemon gets; later reads cost nothing.
   `--track-reads` is the default; a branch's `gitfoldTrackReads` wins either
   way, like its prewarm mode, and `gitfold track-reads` applies it to an open
   workspace (a control request).
+- **Searches aren't reads:** a whole-tree `rg` records thousands of files, and
+  an `R` line for each says nothing about what the agent built on. Told by
+  the process: Claude Code's Grep tool runs `rg`, its `grep` is its own binary
+  as `ugrep` (argv[0]); its Read tool reads in its own process (threads named
+  `Bun Pool N`), Bash's `cat` as `cat` (measured with Claude Code 2.1.308).
+- **Cached reads from the hook, not from opens:** with opens on
+  (`--kernel-open`, `FOPEN_KEEP_CACHE`) every `open()` reaches the daemon with
+  its pid, cached or not, but each costs a round trip (~4.5 µs): seconds per
+  whole-tree search on Chromium ([bench/RESULTS.md](bench/RESULTS.md),
+  "opens"). Agents search often; the hook costs nothing per file. Evicting a
+  file from the cache after a search read it (so the next reader reaches the
+  daemon) costs the same round trip on every later search. inotify
+  `IN_ACCESS` sees cached reads but not who read; fanotify gives the pid
+  only to root.
 - **Content prewarm walks as meta** in a tracked workspace: the walk would read
   every file first, and the agent's reads would come from the kernel's cache,
   unseen. A per-workspace downgrade, not a refusal of the mount option: a
@@ -1096,6 +1119,12 @@ one the daemon gets; later reads cost nothing.
   name).
 
 **Rejected:** separate commands for stale reads and for workspaces changing the same paths (`stale`, `overlaps`), each a case of this one;
+recording searches' reads (noise); opens on by default to see cached reads
+(seconds per search on large trees, above); parsing every Bash command for
+the files it reads (pipelines, scripts and builds can't be told: simple
+viewers only); a hand-written shell lexer for those (heredocs, `$((...))`,
+subshells and loops each broke it; `rable` parses as bash does, validated
+against bash, for 3 crates);
 refusing `--track-reads` with `--prewarm content` (branches can say
 otherwise); line-level conflicts in `overlaps` (`git merge-tree` already says, for
 a merge someone actually asks about).

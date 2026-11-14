@@ -3,12 +3,10 @@
 //! `gitfold remove --claude-hook worktree-remove`), which replace its own
 //! `git worktree` logic.
 //!
-//! The hooks run for every repository the session is in (a plugin's hooks
-//! wherever it is installed), so for one not used with gitfold they do what
-//! Claude Code would: a git worktree in `.claude/worktrees/<name>`. One used
-//! with gitfold but not mounted is mounted again where `gitfold mount` last
-//! mounted it, or else refused: a full checkout of it is what gitfold is there
-//! to avoid.
+//! For a repository not used with gitfold they do what Claude Code would: a
+//! git worktree in `.claude/worktrees/<name>`. One used with gitfold but not
+//! mounted is mounted again where `gitfold mount` last mounted it, or else
+//! refused: a full checkout of it is what gitfold is there to avoid.
 
 use std::fs;
 use std::os::fd::AsFd;
@@ -17,7 +15,8 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
 
-use super::hook::field;
+use super::cwd;
+use crate::cli::hook::field;
 use crate::git;
 use crate::mount_table;
 use crate::settings;
@@ -38,10 +37,7 @@ fn branch_of(name: &str) -> String {
 pub fn worktree_create() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     let name = field(&input, "name").context("no \"name\" in the hook's input")?;
-    let cwd = match field(&input, "cwd") {
-        Some(cwd) => PathBuf::from(cwd),
-        None => std::env::current_dir()?,
-    };
+    let cwd = cwd(&input)?;
     let repo = git::discover(&cwd)?;
     let common_dir = git::init(&repo)?;
     let branch = branch_of(&name);
@@ -62,8 +58,8 @@ pub fn worktree_create() -> Result<()> {
             })?;
             let path = mount.join(&branch);
             if !exists {
-                super::branch::check_new(&common_dir, &branch)?;
-                super::branch::create(&repo, &branch, None)?;
+                crate::cli::branch::check_new(&common_dir, &branch)?;
+                crate::cli::branch::create(&repo, &branch, None)?;
             }
             // Looking it up opens it.
             let meta = fs::metadata(&path)
@@ -95,13 +91,15 @@ pub fn worktree_create() -> Result<()> {
 /// (`gitfold.mountpoint`, recorded by `gitfold mount`), with the default
 /// options: `gitfold mount` in the background, its messages on stderr.
 fn mount_again(common_dir: &Path) -> Result<PathBuf> {
-    let mountpoint = settings::Local::read(common_dir).mountpoint().with_context(|| {
-        format!(
-            "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a \
+    let mountpoint = settings::Local::read(common_dir)
+        .mountpoint()
+        .with_context(|| {
+            format!(
+                "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a \
              workspace, rather than a full checkout",
-            common_dir.display()
-        )
-    })?;
+                common_dir.display()
+            )
+        })?;
     // Gone with a reboot if it was on a tmpfs (/tmp, /run/user).
     fs::create_dir_all(&mountpoint)
         .with_context(|| format!("creating mount point {}", mountpoint.display()))?;
@@ -142,14 +140,14 @@ pub fn worktree_remove() -> Result<()> {
     let common_dir = git::init(&repo)?;
     let mount = mount_table::mount_of(&common_dir)?;
     if mount.is_some_and(|m| path.starts_with(m)) {
-        let args = super::remove::RemoveArgs {
-            name: Some(super::branch_or_current(None, &repo)?),
+        let args = crate::cli::remove::RemoveArgs {
+            name: Some(crate::cli::branch_or_current(None, &repo)?),
             force: true,
             check: false,
             wait: 10,
             claude_hook: None,
         };
-        return super::remove::remove(&repo, args);
+        return crate::cli::remove::remove(&repo, args);
     }
     let path = path.to_str().context("a worktree path that isn't UTF-8")?;
     git::cmd::output(&common_dir, &["worktree", "remove", "--force", path]).map(drop)

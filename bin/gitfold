@@ -106,12 +106,12 @@ field() {
 }
 
 # Without gitfold, the hooks do what Claude Code does without them, as
-# src/cli/claude.rs does where gitfold isn't used (keep the two alike): the
+# src/cli/claude/worktree.rs does where gitfold isn't used (keep the two alike): the
 # inbox hooks nothing, the worktree hooks git worktrees; but in a repository
 # used with gitfold (state in <git common dir>/gitfold), creating one fails.
 without() {
     case "$*" in
-        "inbox --claude-hook "*) exit 0 ;;
+        "inbox --claude-hook "* | "track-reads --claude-hook "*) exit 0 ;;
         "branch --claude-hook worktree-create")
             input=$(cat)
             name=$(echo "$input" | field name)

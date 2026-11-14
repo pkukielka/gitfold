@@ -56,6 +56,29 @@ impl Workspaces {
         }
     }
 
+    /// Records reads the kernel served from its cache, reported by a Claude
+    /// Code hook (`gitfold track-reads --claude-hook`): the files at `paths`,
+    /// relative to the mount point, in the open workspaces they are in (the
+    /// longest branch name that leads a path: branches may hold a `/`), if
+    /// tracked.
+    pub fn record_reads(&self, paths: Vec<String>) -> String {
+        for path in paths {
+            let mut at = 0;
+            let mut found = None;
+            while let Some(slash) = path[at..].find('/') {
+                at += slash;
+                if let Some(ws) = self.get_open(&path[..at]) {
+                    found = Some((ws, at));
+                }
+                at += 1;
+            }
+            if let Some((ws, at)) = found {
+                ws.note_reads([path.as_bytes()[at + 1..].to_vec()]);
+            }
+        }
+        "recorded".to_string()
+    }
+
     /// `gitfold track-reads`: starts or stops recording reads in the workspace
     /// of `branch` as its setting (just set) says, if it is open. Says what it
     /// did.

@@ -1,5 +1,5 @@
 {
-  "description": "gitfold: worktrees as workspaces where the repository is mounted (a git worktree where it isn't used with gitfold); inbox messages into the session (nothing outside a workspace). bin/gitfold runs gitfold: one on PATH, or the release, downloaded.",
+  "description": "gitfold: worktrees as workspaces where the repository is mounted (a git worktree where it isn't used with gitfold); inbox messages into the session (nothing outside a workspace); reads by Read and simple Bash viewers recorded in workspaces tracking reads. bin/gitfold runs gitfold: one on PATH, or the release, downloaded.",
   "hooks": {
     "WorktreeCreate": [{ "hooks": [{ "type": "command",
       "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" branch --claude-hook worktree-create" }] }],
@@ -7,6 +7,9 @@
       "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" remove --claude-hook worktree-remove" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command",
       "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" inbox --claude-hook user-prompt-submit" }] }],
+    "PreToolUse": [{ "matcher": "Read|Bash", "hooks": [{ "type": "command",
+      "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" track-reads --claude-hook pre-tool-use",
+      "async": true }] }],
     "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command",
       "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/gitfold\" inbox --claude-hook post-tool-use" }] }],
     "Stop": [{ "hooks": [{ "type": "command",
