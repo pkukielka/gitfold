@@ -4,22 +4,29 @@
 # on PATH, else the release of this plugin's version (Cargo.toml), downloaded
 # once to ~/.local/share/gitfold/bin from GitHub ($GITFOLD_RELEASE_URL: a
 # mirror, or tests), checked against SHA256SUMS and tried once. Without one,
-# `without` below. Every hook runs it: no subprocess on the way to gitfold.
+# `without` below. Every hook runs it: one subprocess (uname) at most on the
+# way to gitfold.
 
 set -u
 case $0 in */*) here=${0%/*} ;; *) here=. ;; esac
+# The launchers run so far: another copy on PATH (a checkout's bin/, a second
+# install) is skipped, not run in turn.
+GITFOLD_LAUNCHERS=${GITFOLD_LAUNCHERS:-}:$0
+export GITFOLD_LAUNCHERS
 
-# The first gitfold on PATH other than this one, in $bin.
+# The first gitfold on PATH that isn't a launcher run so far, in $bin.
 on_path() {
     IFS=:
     set -f
     for dir in $PATH; do
-        # -ef: not POSIX, but in dash, bash and busybox.
-        # shellcheck disable=SC3013
-        if [ -n "$dir" ] && [ -x "$dir/gitfold" ] && ! [ "$dir/gitfold" -ef "$0" ]; then
-            bin=$dir/gitfold
-            return 0
-        fi
+        [ -n "$dir" ] && [ -x "$dir/gitfold" ] || continue
+        for launcher in $GITFOLD_LAUNCHERS; do
+            # -ef: not POSIX, but in dash, bash and busybox.
+            # shellcheck disable=SC3013
+            [ -n "$launcher" ] && [ "$dir/gitfold" -ef "$launcher" ] && continue 2
+        done
+        bin=$dir/gitfold
+        return 0
     done
     return 1
 }
@@ -36,26 +43,26 @@ release() {
             break
         fi
     done <"$here/../Cargo.toml"
-    data=${XDG_DATA_HOME:-$HOME/.local/share}/gitfold/bin
-    for arch in x86_64 aarch64; do
-        bin=$data/gitfold-$version-$arch
-        [ -x "$bin" ] && return 0
-    done
     case $(uname -sm) in
         "Linux x86_64") arch=x86_64 ;;
         "Linux aarch64" | "Linux arm64") arch=aarch64 ;;
         *) return 1 ;;
     esac
+    data=${XDG_DATA_HOME:-$HOME/.local/share}/gitfold/bin
     bin=$data/gitfold-$version-$arch
+    [ -x "$bin" ] && return 0
     failed=$data/.failed-$version-$arch
     if [ -f "$failed" ] && [ -z "$(find "$failed" -mmin +1440)" ]; then
         return 1
     fi
     mkdir -p "$data" || return 1
-    if fetch >"$failed" 2>&1; then
-        rm -f "$failed"
+    log=$(mktemp "$data/.log-XXXXXX") || return 1
+    if fetch >"$log" 2>&1; then
+        rm -f "$log"
         return 0
     fi
+    # Only now: a download under way isn't a failed one.
+    mv -f "$log" "$failed"
     echo "gitfold: no release binary ($(tail -n 1 "$failed")); retried after a day" >&2
     return 1
 }
@@ -130,6 +137,10 @@ without() {
             exit 0 ;;
         "remove --claude-hook worktree-remove")
             path=$(field worktree_path)
+            if [ -z "$path" ]; then
+                echo "gitfold: can't read the hook's input" >&2
+                exit 1
+            fi
             cd / || exit 1
             [ -e "$path" ] || exit 0
             common=$(git -C "$path" rev-parse --path-format=absolute --git-common-dir) || exit 1

@@ -258,9 +258,14 @@ eq "removed from inside it, changes discarded, its branch kept" "0 no yes" "$rc 
 eq "  a worktree already gone: done" "0" "$( (remove "$MNT/worktree-w2" >/dev/null 2>&1); echo $?)"
 unmount_fs
 eq "gitfold mount recorded where" "$MNT" "$(R config gitfold.mountpoint)"
+rmdir "$MNT"
 out=$(create "$REPO" w4 2>"$T/err"); rc=$?
-eq "not mounted: mounted again there, then a workspace" "0 $MNT/worktree-w4 yes" "$rc $out $(mountpoint -q "$MNT" && echo yes)"
+eq "not mounted: mounted again there (made again, as a tmpfs after a reboot), then a workspace" "0 $MNT/worktree-w4 yes" "$rc $out $(mountpoint -q "$MNT" && echo yes)"
 "$BIN" unmount "$MNT" >/dev/null
+mount_fs; kill -9 "$PID"; wait "$PID" 2>/dev/null
+out=$(create "$REPO" w6 2>"$T/err"); rc=$?
+eq "a mount whose daemon is gone: refused, saying so, no branch made" "1 yes no" "$rc $(grep -q "doesn't answer" "$T/err" && echo yes) $(R rev-parse -q --verify worktree-w6 >/dev/null && echo yes || echo no)"
+fusermount3 -u -z "$MNT"
 R config --unset gitfold.mountpoint
 out=$(create "$REPO" w5 2>"$T/err"); rc=$?
 eq "  where no mount was recorded: refused, nothing made" "1  yes no" "$rc $out $(grep -q 'not mounted' "$T/err" && echo yes) $(R rev-parse -q --verify worktree-w5 >/dev/null && echo yes || echo no)"
@@ -274,6 +279,8 @@ want=$("$REAL_BIN" --version)
 mkdir "$T/pbin"; ln -s "$REAL_BIN" "$T/pbin/gitfold"
 eq "a gitfold on PATH" "$want" "$(PATH=$T/pbin:$nogf "$L" --version 2>&1)"
 eq "GITFOLD_BIN first" "$want" "$(GITFOLD_BIN=$REAL_BIN PATH=$nogf "$L" --version 2>&1)"
+mkdir -p "$T/l2/bin"; cp "$L" "$T/l2/bin/"; cp "$(dirname "$L")/../Cargo.toml" "$T/l2/"
+eq "another launcher on PATH: skipped by both, not run in turn" "$want" "$(PATH=$T/l2/bin:$(dirname "$L"):$T/pbin:$nogf timeout 10 "$L" --version 2>&1)"
 v=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$(dirname "$L")/../Cargo.toml" | head -n 1)
 case "$(uname -m)" in aarch64 | arm64) a=aarch64 ;; *) a=x86_64 ;; esac
 mkdir -p "$T/rel/v$v"; cp "$REAL_BIN" "$T/rel/v$v/gitfold-$a-linux"
@@ -292,6 +299,7 @@ out=$(printf '{"hook_event_name":"WorktreeCreate","cwd":"%s","name":"p1"}' "$T/p
 eq "  the worktree hooks: a git worktree, as Claude Code makes" "$T/plain/.claude/worktrees/p1 worktree-p1" "$out $(G "$out" rev-parse --abbrev-ref HEAD 2>&1)"
 (cd "$out" && exec env PATH="$nogf" "$L" remove --claude-hook worktree-remove <<<"{\"worktree_path\":\"$out\"}" >/dev/null 2>&1)
 eq "    and removed" "no" "$([ -e "$out" ] && echo yes || echo no)"
+eq "    an unreadable path: an error, not done" "1" "$( (echo '{}' | PATH=$nogf "$L" remove --claude-hook worktree-remove) >/dev/null 2>&1; echo $?)"
 mkdir -p "$COMMON/gitfold"
 out=$(printf '{"hook_event_name":"WorktreeCreate","cwd":"%s","name":"p2"}' "$REPO" | PATH=$nogf "$L" branch --claude-hook worktree-create 2>&1); rc=$?
 eq "    in a repository used with gitfold: refused" "1 yes" "$rc $(grep -q "used with gitfold" <<<"$out" && echo yes)"

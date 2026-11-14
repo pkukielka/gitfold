@@ -53,6 +53,13 @@ pub fn worktree_create() -> Result<()> {
     };
     let path = match mount {
         Some(mount) => {
+            fs::metadata(&mount).with_context(|| {
+                format!(
+                    "the gitfold mount at {} doesn't answer (its daemon gone?); `gitfold \
+                     unmount` it",
+                    mount.display()
+                )
+            })?;
             let path = mount.join(&branch);
             if !exists {
                 super::branch::check_new(&common_dir, &branch)?;
@@ -95,6 +102,9 @@ fn mount_again(common_dir: &Path) -> Result<PathBuf> {
             common_dir.display()
         )
     })?;
+    // Gone with a reboot if it was on a tmpfs (/tmp, /run/user).
+    fs::create_dir_all(&mountpoint)
+        .with_context(|| format!("creating mount point {}", mountpoint.display()))?;
     let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
     let status = Command::new(std::env::current_exe()?)
         .arg("mount")
