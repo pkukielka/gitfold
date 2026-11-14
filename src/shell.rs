@@ -1,245 +1,12 @@
-//! Claude Code's worktrees as gitfold workspaces: its `WorktreeCreate` and
-//! `WorktreeRemove` hooks (`gitfold branch --claude-hook worktree-create`,
-//! `gitfold remove --claude-hook worktree-remove`), which replace its own
-//! `git worktree` logic.
-//!
-//! The hooks run for every repository the session is in (a plugin's hooks
-//! wherever it is installed), so for one not used with gitfold they do what
-//! Claude Code would: a git worktree in `.claude/worktrees/<name>`. One used
-//! with gitfold but not mounted is mounted again where `gitfold mount` last
-//! mounted it, or else refused: a full checkout of it is what gitfold is there
-//! to avoid.
+//! What a shell command reads: the files simple viewers (`cat`, `head`,
+//! `sed` ...) and `<` redirections in it name, found by walking its syntax
+//! tree as bash parses it (`rable`), for Claude Code's read-tracking hook
+//! (`cli::claude::reads`).
 
-use std::fs;
-use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-
-use anyhow::{Context, Result, bail, ensure};
-
-use super::hook::{field, field_at};
-use crate::git;
-use crate::mount_table;
-use crate::settings;
-use crate::state::state_root;
-
-/// Claude Code's branch name for its worktree `name` (as bin/gitfold's
-/// fallback names it too), kept so a worktree
-/// named like a branch of the repository (`main`) is never that branch's
-/// workspace.
-fn branch_of(name: &str) -> String {
-    format!("worktree-{name}")
-}
-
-/// `WorktreeCreate`: makes worktree `name` of the repository of the session's
-/// directory and prints its path, the only thing on stdout, which Claude Code
-/// reads. A workspace of branch `worktree-<name>` (created from the session's
-/// HEAD if new) when the repository is mounted, or was.
-pub fn worktree_create() -> Result<()> {
-    let input = std::io::read_to_string(std::io::stdin())?;
-    let name = field(&input, "name").context("no \"name\" in the hook's input")?;
-    let cwd = cwd(&input)?;
-    let repo = git::discover(&cwd)?;
-    let common_dir = git::init(&repo)?;
-    let branch = branch_of(&name);
-    let exists = git::branch_exists(&branch);
-    let mount = match mount_table::mount_of(&common_dir)? {
-        Some(mount) => Some(mount),
-        None if state_root(&common_dir).exists() => Some(mount_again(&common_dir)?),
-        None => None,
-    };
-    let path = match mount {
-        Some(mount) => {
-            fs::metadata(&mount).with_context(|| {
-                format!(
-                    "the gitfold mount at {} doesn't answer (its daemon gone?); `gitfold \
-                     unmount` it",
-                    mount.display()
-                )
-            })?;
-            let path = mount.join(&branch);
-            if !exists {
-                super::branch::check_new(&common_dir, &branch)?;
-                super::branch::create(&repo, &branch, None)?;
-            }
-            // Looking it up opens it.
-            let meta = fs::metadata(&path)
-                .with_context(|| format!("opening workspace {}", path.display()))?;
-            ensure!(meta.is_dir(), "{} is not a workspace", path.display());
-            path
-        }
-        // Kept as bin/gitfold's fallback does it, for when gitfold can't run.
-        None => {
-            // As Claude Code: below the top of the worktree the session is in.
-            let top = git::work_tree().context("the session is in no worktree")?;
-            let path = top.join(".claude/worktrees").join(&name);
-            if !path.join(".git").exists() {
-                let at = path.to_str().context("a worktree path that isn't UTF-8")?;
-                let args: &[&str] = match exists {
-                    true => &["worktree", "add", at, &branch],
-                    false => &["worktree", "add", "-b", &branch, at],
-                };
-                git::cmd::output(&repo, args)?;
-            }
-            path
-        }
-    };
-    println!("{}", path.display());
-    Ok(())
-}
-
-/// Mounts the repository of `common_dir` again where it last was
-/// (`gitfold.mountpoint`, recorded by `gitfold mount`), with the default
-/// options: `gitfold mount` in the background, its messages on stderr.
-fn mount_again(common_dir: &Path) -> Result<PathBuf> {
-    let mountpoint = settings::Local::read(common_dir)
-        .mountpoint()
-        .with_context(|| {
-            format!(
-                "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a \
-             workspace, rather than a full checkout",
-                common_dir.display()
-            )
-        })?;
-    // Gone with a reboot if it was on a tmpfs (/tmp, /run/user).
-    fs::create_dir_all(&mountpoint)
-        .with_context(|| format!("creating mount point {}", mountpoint.display()))?;
-    let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
-    let status = Command::new(std::env::current_exe()?)
-        .arg("mount")
-        .arg(common_dir)
-        .arg(&mountpoint)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stderr))
-        .status()?;
-    // Another hook may have mounted it meanwhile, its mount refused.
-    match mount_table::mount_of(common_dir)? {
-        Some(mount) => Ok(mount),
-        None => bail!(
-            "{} isn't mounted, and mounting it at {} failed ({status})",
-            common_dir.display(),
-            mountpoint.display()
-        ),
-    }
-}
-
-/// `WorktreeRemove`: removes the worktree at `worktree_path` (Claude Code asks
-/// once the user chose to, or the worktree is clean), discarding its changes
-/// as Claude Code does; its branch stays. A workspace in use (the session's
-/// shell still in it) is waited for briefly.
-pub fn worktree_remove() -> Result<()> {
-    let input = std::io::read_to_string(std::io::stdin())?;
-    let path = PathBuf::from(
-        field(&input, "worktree_path").context("no \"worktree_path\" in the hook's input")?,
-    );
-    // The hook starts in the worktree; from in there, it is in use.
-    std::env::set_current_dir("/")?;
-    if !path.exists() {
-        return Ok(());
-    }
-    let repo = git::discover(&path)?;
-    let common_dir = git::init(&repo)?;
-    let mount = mount_table::mount_of(&common_dir)?;
-    if mount.is_some_and(|m| path.starts_with(m)) {
-        let args = super::remove::RemoveArgs {
-            name: Some(super::branch_or_current(None, &repo)?),
-            force: true,
-            check: false,
-            wait: 10,
-            claude_hook: None,
-        };
-        return super::remove::remove(&repo, args);
-    }
-    let path = path.to_str().context("a worktree path that isn't UTF-8")?;
-    git::cmd::output(&common_dir, &["worktree", "remove", "--force", path]).map(drop)
-}
-
-/// `PreToolUse` on Read and Bash (`gitfold track-reads --claude-hook
-/// pre-tool-use`): reports the files the tool is about to read to the daemon
-/// of the gitfold mount they are in, which records them in tracked
-/// workspaces: reads it may not see (the kernel serves a file read before, by
-/// a search say, from its cache; searches' reads aren't recorded). Read: its
-/// `file_path`; Bash: the files simple viewers name (`named`). Before the tool
-/// runs, for the directory a command starts in; so a call the user then
-/// denies is recorded too. Async, on every such call: errors are only logged.
-pub fn reads_hook() -> Result<()> {
-    let input = std::io::read_to_string(std::io::stdin())?;
-    if let Err(e) = report_reads(&input) {
-        log::debug!("gitfold track-reads --claude-hook: {e:#}");
-    }
-    Ok(())
-}
-
-fn report_reads(input: &str) -> Result<()> {
-    let named = named(input, &cwd(input)?);
-    if named.is_empty() {
-        return Ok(());
-    }
-    let mounts = mount_table::mounts()?;
-    // Per mount (its git common dir), the paths below it.
-    let mut reads: std::collections::BTreeMap<&Path, Vec<String>> = Default::default();
-    for path in named {
-        // Its directory as the mount table has it (a symlink on the way
-        // resolved), the file itself as named.
-        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
-            continue;
-        };
-        let Ok(path) = fs::canonicalize(dir).map(|d| d.join(name)) else {
-            continue;
-        };
-        let below = mounts
-            .iter()
-            .filter_map(|(mount, common_dir)| Some((path.strip_prefix(mount).ok()?, common_dir)))
-            .min_by_key(|(rel, _)| rel.as_os_str().len());
-        let Some((rel, common_dir)) = below else {
-            continue;
-        };
-        let Some(rel) = rel.to_str().filter(|_| path.is_file()) else {
-            continue;
-        };
-        reads.entry(common_dir).or_default().push(rel.to_string());
-    }
-    for (common_dir, paths) in reads {
-        let request = crate::daemon::control::Request::RecordReads { paths };
-        // Not held up long behind a slow request (a removal); one mount's
-        // failure doesn't lose the others' reads.
-        let wait = Some(std::time::Duration::from_secs(5));
-        if let Err(e) = crate::daemon::control::request(common_dir, &request, wait) {
-            log::debug!("recording reads in {}: {e:#}", common_dir.display());
-        }
-    }
-    Ok(())
-}
-
-/// The files the tool in hook input `input` reads, from `cwd` (before the
-/// tool runs: `PreToolUse`; after, a Bash command's own `cd` would count
-/// twice). The Read tool resolves `..` in its path lexically (it is Node's
-/// `path.resolve`); a Bash command's files are as `cat` gets them, `..`
-/// resolved by the filesystem (`report_reads`).
-fn named(input: &str, cwd: &Path) -> Vec<PathBuf> {
-    match field(input, "tool_name").as_deref() {
-        Some("Read") => field_at(input, &["tool_input", "file_path"])
-            .into_iter()
-            .map(|p| normalized(&cwd.join(p)))
-            .collect(),
-        Some("Bash") => viewed(
-            &field_at(input, &["tool_input", "command"]).unwrap_or_default(),
-            cwd,
-        ),
-        _ => Vec::new(),
-    }
-}
-
-/// The hook's working directory: `cwd` in its input, else this process's.
-fn cwd(input: &str) -> Result<PathBuf> {
-    match field(input, "cwd") {
-        Some(cwd) => Ok(PathBuf::from(cwd)),
-        None => Ok(std::env::current_dir()?),
-    }
-}
 
 /// `path` with `.` and `..` resolved lexically (as the shell's `cd` does).
-fn normalized(path: &Path) -> PathBuf {
+pub fn normalized(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for c in path.components() {
         match c {
@@ -262,7 +29,7 @@ fn normalized(path: &Path) -> PathBuf {
 /// left out (its value isn't known), and what isn't a file in a workspace is
 /// dropped later. Small on purpose: a file read by anything else is seen,
 /// unless a search read it first.
-fn viewed(command: &str, cwd: &Path) -> Vec<PathBuf> {
+pub fn files_read(command: &str, cwd: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut at = At {
         dir: Some(cwd.to_path_buf()),
@@ -335,7 +102,7 @@ fn substitutions(words: &[rable::Node], at: &At, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// `viewed` in `node`, from `at`.
+/// `files_read` in `node`, from `at`.
 fn walk(node: &rable::Node, at: &mut At, files: &mut Vec<PathBuf>) {
     use rable::NodeKind as K;
     // A subshell (and so its `cd`) is walked from a copy of `at`.
@@ -609,10 +376,10 @@ mod tests {
 
     /// The files simple viewers show, wherever they are in the command.
     #[test]
-    fn viewed_files() {
+    fn files_read() {
         // From /w, shown relative to it.
         let viewed = |c: &str| -> Vec<String> {
-            let files = super::viewed(c, Path::new("/w"));
+            let files = super::files_read(c, Path::new("/w"));
             let shown = |p: PathBuf| p.strip_prefix("/w").unwrap_or(&p).display().to_string();
             files.into_iter().map(shown).collect()
         };
@@ -717,7 +484,7 @@ mod tests {
         );
         assert_eq!(viewed("cd a/../b && cat x"), ["b/x"], "cd is logical");
         let from = |c: &str, cwd: &str| -> Vec<String> {
-            let files = super::viewed(c, Path::new(cwd));
+            let files = super::files_read(c, Path::new(cwd));
             files.into_iter().map(|p| p.display().to_string()).collect()
         };
         assert_eq!(
@@ -766,17 +533,17 @@ mod tests {
             "a continued line"
         );
         assert_eq!(
-            super::viewed("cd -P link && cd .. && cat x", Path::new("/w")),
+            super::files_read("cd -P link && cd .. && cat x", Path::new("/w")),
             [Path::new("/w/link/../x")],
             "after -P, cd .. is physical too"
         );
         assert_eq!(
-            super::viewed("cd -P -L link/.. && cat x", Path::new("/w")),
+            super::files_read("cd -P -L link/.. && cat x", Path::new("/w")),
             [Path::new("/w/x")],
             "the last of -L/-P"
         );
         assert_eq!(
-            super::viewed("cd -LP link/.. && cat x", Path::new("/w")),
+            super::files_read("cd -LP link/.. && cat x", Path::new("/w")),
             [Path::new("/w/link/../x")]
         );
         assert_eq!(viewed("pushd ünï && cat x"), ["ünï/x"], "no panic on UTF-8");
@@ -792,22 +559,11 @@ mod tests {
         );
         assert_eq!(viewed("cd +build && cat log"), ["+build/log"]);
         assert_eq!(
-            super::viewed("cd -P /m/ws/link/.. && cat x", Path::new("/w")),
+            super::files_read("cd -P /m/ws/link/.. && cat x", Path::new("/w")),
             [Path::new("/m/ws/link/../x")],
             "-P: physical"
         );
         assert_eq!(viewed("[[ -f x ]] < r; (( 1 )) < s"), ["r", "s"]);
-    }
-
-    /// Read: its path, `..` resolved lexically; Bash: from the directory
-    /// before the command.
-    #[test]
-    fn named_files() {
-        let read = r#"{"tool_name":"Read","tool_input":{"file_path":"/m/ws/link/../a.rs"}}"#;
-        assert_eq!(named(read, Path::new("/w")), [Path::new("/m/ws/a.rs")]);
-        let bash = r#"{"tool_name":"Bash","tool_input":{"command":"cd sub && cat x"}}"#;
-        assert_eq!(named(bash, Path::new("/w")), [Path::new("/w/sub/x")]);
-        assert!(named(r#"{"tool_name":"Grep"}"#, Path::new("/w")).is_empty());
     }
 
     #[test]

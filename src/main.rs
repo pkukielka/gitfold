@@ -12,6 +12,7 @@ mod prewarm;
 mod procs;
 mod refusal;
 mod settings;
+mod shell;
 mod state;
 mod store;
 

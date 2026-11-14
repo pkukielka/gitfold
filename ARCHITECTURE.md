@@ -160,7 +160,10 @@ Then, per request (`fs/workspace/`):
 | `src/cli/list.rs` | `list` and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
-| `src/cli/claude.rs` | Claude Code's `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
+| `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
+| `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
+| `src/cli/claude/reads.rs` | its `PreToolUse` hook (`track-reads --claude-hook`): the files its Read tool and Bash commands read, sent to the mount's daemon |
+| `src/shell.rs` | what a shell command reads: the files simple viewers and `<` name, from its syntax tree (`rable`) |
 | `bin/gitfold`, `hooks/hooks.json`, `.claude-plugin/` | the Claude Code plugin (with `skills/`): its hooks, and the launcher they run, which uses a gitfold on `PATH` or downloads the release |
 | `.github/workflows/release.yml` | on a version tag, the Linux release binaries (glibc 2.28) the launcher downloads |
 | `src/cli/inbox/mod.rs` | `inbox` (and its Claude Code hook outputs) and `send` |
