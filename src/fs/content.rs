@@ -43,8 +43,11 @@ impl ContentCache {
                 let Some(blobs) = blobs.upgrade() else { return };
                 let now = activity.load(Ordering::Relaxed);
                 if now == seen && now != trimmed {
-                    // Freed after unlocking: reads don't wait on the frees.
-                    drop(std::mem::take(&mut *blobs.lock()));
+                    // Freed after unlocking: reads don't wait on the frees. Two
+                    // statements: in one, the guard (a temporary) would live
+                    // until after the drop.
+                    let old = std::mem::take(&mut *blobs.lock());
+                    drop(old);
                     unsafe { libc::malloc_trim(0) };
                     trimmed = now;
                 }
