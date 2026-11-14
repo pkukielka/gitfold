@@ -67,7 +67,7 @@ impl Workspace {
     /// a file searcher (`scan`, asked only for a path not yet recorded).
     pub fn note_read(&self, local: u64, scan: impl FnOnce() -> bool) {
         // Asked first and unlocked: a search reads thousands of files, none
-        // recorded, and `/proc` is read once per process.
+        // recorded, and `/proc` is read about once a second per thread.
         if self.reads.lock().is_none() || scan() {
             return;
         }

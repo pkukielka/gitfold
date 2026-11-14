@@ -185,7 +185,9 @@ fn report_reads(input: &str) -> Result<()> {
     let mounts = mount_table::mounts()?;
     // Per mount (its git common dir), the paths below it.
     let mut reads: std::collections::BTreeMap<&Path, Vec<String>> = Default::default();
-    for path in named.iter().map(|p| normalized(&cwd.join(p))) {
+    // `..` in a file operand is resolved by the filesystem, as cat does: only
+    // `cd` is logical (normalized in `simple_command`).
+    for path in named.iter().map(|p| cwd.join(p)) {
         // Its directory as the mount table has it (a symlink on the way
         // resolved), the file itself as named.
         let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
@@ -252,105 +254,200 @@ fn normalized(path: &Path) -> PathBuf {
 /// unless a search read it first.
 fn viewed(command: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    if let Ok(nodes) = rable::parse(command, false) {
-        let mut dir = Some(PathBuf::new());
+    let walk_all = |nodes: Vec<rable::Node>, files: &mut Vec<PathBuf>| {
+        let mut at = At::default();
         for node in &nodes {
-            walk(node, &mut dir, &mut files);
+            walk(node, &mut at, files);
+        }
+    };
+    match rable::parse(command, true) {
+        Ok(nodes) => walk_all(nodes, &mut files),
+        // Something it can't parse: the lines it can, on their own.
+        Err(_) => {
+            for line in command.lines() {
+                if let Ok(nodes) = rable::parse(line, true) {
+                    walk_all(nodes, &mut files);
+                }
+            }
         }
     }
     files
 }
 
-/// `viewed` in `node`. `dir`: where relative paths are, relative to the
-/// hook's directory; `None` once unknown (`cd ~`, `cd -`, `cd $X`).
-fn walk(node: &rable::Node, dir: &mut Option<PathBuf>, files: &mut Vec<PathBuf>) {
+/// Where relative paths are while walking a command: `dir` relative to the
+/// hook's directory (`None` once unknown: `cd ~`, `cd -`, `cd $X`), and the
+/// `pushd` stack.
+#[derive(Clone)]
+struct At {
+    dir: Option<PathBuf>,
+    pushed: Vec<Option<PathBuf>>,
+}
+
+impl Default for At {
+    fn default() -> At {
+        At {
+            dir: Some(PathBuf::new()),
+            pushed: Vec::new(),
+        }
+    }
+}
+
+/// `viewed` in `node`, from `at`.
+fn walk(node: &rable::Node, at: &mut At, files: &mut Vec<PathBuf>) {
     use rable::NodeKind as K;
-    // A subshell's `cd` stays in it.
-    let inner = |node: &rable::Node, files: &mut Vec<PathBuf>| {
-        walk(node, &mut dir.clone(), files);
+    // A subshell (and so its `cd`) is walked from a copy of `at`.
+    let inner = |node: &rable::Node, at: &At, files: &mut Vec<PathBuf>| {
+        walk(node, &mut at.clone(), files);
+    };
+    // Command substitutions in words, run before the command.
+    let substitutions = |words: &[rable::Node], at: &At, files: &mut Vec<PathBuf>| {
+        for word in words {
+            if let K::Word { parts, .. } = &word.kind {
+                parts.iter().for_each(|part| inner(part, at, files));
+            }
+        }
     };
     match &node.kind {
         K::Command {
-            words, redirects, ..
+            assignments,
+            words,
+            redirects,
         } => {
-            for word in words {
-                if let K::Word { parts, .. } = &word.kind {
-                    parts.iter().for_each(|part| inner(part, files));
-                }
-            }
-            simple_command(words, dir, files);
-            input_redirects(redirects, dir, files);
+            substitutions(assignments, at, files);
+            substitutions(words, at, files);
+            redirections(redirects, at, files);
+            simple_command(words, at, files);
         }
         // Each of a pipeline's commands runs in a subshell of its own.
         K::Pipeline { commands, .. } if commands.len() > 1 => {
-            commands.iter().for_each(|c| inner(c, files));
+            commands.iter().for_each(|c| inner(c, at, files));
         }
-        K::Pipeline { commands, .. } => commands.iter().for_each(|c| walk(c, dir, files)),
-        K::List { items } => items.iter().for_each(|i| walk(&i.command, dir, files)),
+        K::Pipeline { commands, .. } => commands.iter().for_each(|c| walk(c, at, files)),
+        // A command run in the background (`&`) is a subshell too.
+        K::List { items } => {
+            for item in items {
+                match item.operator {
+                    Some(rable::ListOperator::Background) => inner(&item.command, at, files),
+                    _ => walk(&item.command, at, files),
+                }
+            }
+        }
         K::If {
             condition,
             then_body,
             else_body,
-            ..
+            redirects,
         } => {
-            walk(condition, dir, files);
-            walk(then_body, dir, files);
+            redirections(redirects, at, files);
+            walk(condition, at, files);
+            walk(then_body, at, files);
             if let Some(e) = else_body {
-                walk(e, dir, files);
+                walk(e, at, files);
             }
         }
         K::While {
-            condition, body, ..
+            condition,
+            body,
+            redirects,
         }
         | K::Until {
-            condition, body, ..
+            condition,
+            body,
+            redirects,
         } => {
-            walk(condition, dir, files);
-            walk(body, dir, files);
+            redirections(redirects, at, files);
+            walk(condition, at, files);
+            walk(body, at, files);
         }
-        K::For { body, .. } | K::Select { body, .. } | K::ForArith { body, .. } => {
-            walk(body, dir, files);
+        K::For {
+            words,
+            body,
+            redirects,
+            ..
         }
-        K::Case { patterns, .. } => {
+        | K::Select {
+            words,
+            body,
+            redirects,
+            ..
+        } => {
+            substitutions(words.as_deref().unwrap_or_default(), at, files);
+            redirections(redirects, at, files);
+            walk(body, at, files);
+        }
+        K::ForArith {
+            body, redirects, ..
+        } => {
+            redirections(redirects, at, files);
+            walk(body, at, files);
+        }
+        K::Case {
+            word,
+            patterns,
+            redirects,
+        } => {
+            substitutions(std::slice::from_ref(word), at, files);
+            redirections(redirects, at, files);
             for body in patterns.iter().filter_map(|p| p.body.as_ref()) {
-                walk(body, dir, files);
+                walk(body, at, files);
             }
         }
         K::Subshell { body, redirects } => {
-            inner(body, files);
-            input_redirects(redirects, dir, files);
+            redirections(redirects, at, files);
+            inner(body, at, files);
         }
         K::BraceGroup { body, redirects } => {
-            walk(body, dir, files);
-            input_redirects(redirects, dir, files);
+            redirections(redirects, at, files);
+            walk(body, at, files);
         }
-        K::Negation { pipeline } | K::Time { pipeline, .. } => walk(pipeline, dir, files),
+        K::Negation { pipeline } | K::Time { pipeline, .. } => walk(pipeline, at, files),
         K::Coproc { command, .. }
         | K::CommandSubstitution { command, .. }
-        | K::ProcessSubstitution { command, .. } => inner(command, files),
+        | K::ProcessSubstitution { command, .. } => inner(command, at, files),
         _ => {}
     }
 }
 
-/// A simple command's words: a `cd` moves `dir`; a viewer's file operands
-/// are recorded.
-fn simple_command(words: &[rable::Node], dir: &mut Option<PathBuf>, files: &mut Vec<PathBuf>) {
+/// A simple command's words: a `cd`, `pushd` or `popd` moves `at`; a
+/// viewer's file operands are recorded.
+fn simple_command(words: &[rable::Node], at: &mut At, files: &mut Vec<PathBuf>) {
     let words: Vec<Option<String>> = words.iter().map(literal).collect();
-    let Some(Some(program)) = words.first() else {
+    // `builtin cd`, `command cat`: the command after them.
+    let start = words
+        .iter()
+        .position(|w| !matches!(w.as_deref(), Some("builtin" | "command")))
+        .unwrap_or(words.len());
+    let Some(Some(program)) = words.get(start) else {
         return;
     };
-    let args = &words[1..];
-    if program == "cd" {
-        // The first operand, past -L, -P, -e, -@ and --.
-        let operand = args
-            .iter()
-            .find(|a| !a.as_deref().is_some_and(|a| a.starts_with('-') && a != "-"));
-        *dir = match operand {
-            Some(Some(to)) if !to.starts_with('~') && to != "-" => dir.as_ref().map(|d| d.join(to)),
-            // Home, the previous directory, or an expansion: unknown.
-            _ => None,
-        };
-        return;
+    let args = &words[start + 1..];
+    // The first operand, past options (-L, -P, -n ...) and --.
+    let operand = || {
+        args.iter()
+            .find(|a| !a.as_deref().is_some_and(|a| a.starts_with('-') && a != "-"))
+    };
+    match program.as_str() {
+        "cd" | "pushd" => {
+            let to = match operand() {
+                // Somewhere known: absolute, or relative to a known `dir`.
+                Some(Some(to)) if to.starts_with('/') => Some(PathBuf::from(to)),
+                Some(Some(to)) if !to.starts_with('~') && to != "-" && !to.starts_with('+') => {
+                    at.dir.as_ref().map(|d| normalized(&d.join(to)))
+                }
+                // Home, the previous directory, a stack entry, an expansion.
+                _ => None,
+            };
+            if program == "pushd" {
+                at.pushed.push(at.dir.take());
+            }
+            at.dir = to;
+            return;
+        }
+        "popd" => {
+            at.dir = at.pushed.pop().flatten();
+            return;
+        }
+        _ => {}
     }
     let program = program.rsplit('/').next().unwrap_or_default();
     // Options that take the next word as their value.
@@ -383,19 +480,25 @@ fn simple_command(words: &[rable::Node], dir: &mut Option<PathBuf>, files: &mut 
         }
     }
     let skip = usize::from(program == "sed" && !script_given);
-    if let Some(dir) = dir {
+    if let Some(dir) = &at.dir {
         let operands = operands.into_iter().skip(skip).flatten();
         files.extend(operands.filter(|f| *f != "-").map(|f| dir.join(f)));
     }
 }
 
-/// The files of `redirects` that are read: `<` (not heredocs or
-/// here-strings, which are text).
-fn input_redirects(redirects: &[rable::Node], dir: &Option<PathBuf>, files: &mut Vec<PathBuf>) {
+/// The files of `redirects` that are read: `<` and `<>` (not heredocs or
+/// here-strings, which are text); and command substitutions in their targets
+/// (`< <(cat f)`).
+fn redirections(redirects: &[rable::Node], at: &At, files: &mut Vec<PathBuf>) {
     for redirect in redirects {
-        if let rable::NodeKind::Redirect { op, target, .. } = &redirect.kind
-            && matches!(op.as_str(), "<" | "<>")
-            && let (Some(dir), Some(file)) = (dir, literal(target))
+        let rable::NodeKind::Redirect { op, target, .. } = &redirect.kind else {
+            continue;
+        };
+        if let rable::NodeKind::Word { parts, .. } = &target.kind {
+            parts.iter().for_each(|p| walk(p, &mut at.clone(), files));
+        }
+        if matches!(op.as_str(), "<" | "<>")
+            && let (Some(dir), Some(file)) = (&at.dir, literal(target))
         {
             files.push(dir.join(file));
         }
@@ -465,6 +568,7 @@ mod tests {
             viewed("cd src/fs && cat view.rs ../x"),
             ["src/fs/view.rs", "src/fs/../x"]
         );
+        assert_eq!(viewed("cd a/../b && cat x"), ["b/x"], "cd is logical");
         assert_eq!(
             viewed("head -n 3 < notes.txt"),
             ["notes.txt"],

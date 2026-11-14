@@ -428,7 +428,8 @@ impl GitFold {
                 WsNode::GitFile(ws) => Ok(Content::Whole(ws.gitfile.clone())),
                 WsNode::Entry(ws, local) => {
                     // The kernel caches contents: this is the first read of it.
-                    if offset == 0 {
+                    // With opens on, the open noted it (`note_open`).
+                    if offset == 0 && self.no_open {
                         ws.note_read(local, || self.scanners.is(pid));
                     }
                     match ws.read(&self.store, local, offset, size)? {
