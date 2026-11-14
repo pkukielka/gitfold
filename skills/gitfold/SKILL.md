@@ -307,18 +307,58 @@ gitfold lens off                  # hide every layer
     and why>"`; it shows here once they have made it (next turn);
   - or **`gitfold layer off <BRANCH>`**, then edit your own version (a file
     of yours at a layer's path always wins over the layer, and stays yours).
-- **Whole files:** a file both you and a layer changed shows your version.
+- **Whole files:** a file both you and a layer changed shows your version,
+  unless it is blended (below).
 - **`git status` shows only your work.** The layers' files are hidden from
   git (skip-worktree, and excluded if new): `status`, `diff`, `add -A`,
   `commit -a` see and commit only your changes, as do `gitfold changes` and
-  `list`. Commit and push normally. If git refuses to touch a file you
-  didn't change (a merge or rebase over a layer's file), run `gitfold lens
-  off` and retry.
+  `list`. Commit and push normally (with blended files, see below). If git
+  refuses to touch a file you didn't change (a merge or rebase over a
+  layer's file), run `gitfold lens off` and retry.
+- **Blended files: a file several agents add to.** For a registry, a
+  manifest or a module list that you and a layer both append to, mark it in
+  the base's attributes so it shows everyone's lines instead of one whole
+  file: add `<path> gitfold-blend=hunk` (e.g. `registry.txt
+  gitfold-blend=hunk`) to `.gitattributes` and commit it before adding the
+  layers (your base doesn't move while layers show), or, uncommitted, to
+  `$(git rev-parse --git-common-dir)/info/attributes`, then `gitfold layer
+  update`. Only files your base has are blended. A blended file shows the
+  base's version with every layer's lines and stays writable: add your
+  lines anywhere (lines both sides add at one place are all kept). A
+  `note:` after `gitfold layer` says if a layer's change to it couldn't be
+  blended in.
+- **With blended files, git shows and commits only your lines.** HEAD is
+  then detached at a lens commit (`git log -1`: `gitfold lens: <you> +
+  <layers> (commits go to <you>; never push this commit)`), and `git
+  status`/`git diff` show only your lines in a blended file. **Commit
+  normally**: within about a second gitfold puts each commit onto your
+  branch with only your changes and moves HEAD to a new lens commit, so
+  the commit id you saw changes (`git log <your-branch>` has the real one).
+  `git log -1` showing `gitfold lens:` again means it is on your branch.
+- **Never push HEAD from a lens** (`git push origin HEAD:<branch>`, or
+  `--no-verify`): the lens commit holds other agents' uncommitted work, and
+  a push guard refuses it. **`git push origin <your-branch>` is fine.**
+- **A commit that waits: it depends on a layer's lines.** If `git log -1`
+  still shows your commit (not `gitfold lens:`) after a few seconds, or
+  `gitfold layer`/`gitfold lens off` exit 4 with `commit <id> can't go onto
+  the branch alone (it changes lines of a layer's)`, that commit removed or
+  changed another agent's lines in a blended file. It can't go onto your
+  branch without their uncommitted work, so it and any later commit stay
+  off your branch. Put their lines back as the file showed them (`git diff
+  HEAD~1 -- <file>` shows what you changed), keep only your own additions,
+  and `git commit -a --amend` (if it is your last commit; if not, stop and
+  tell the user). To change their lines, ask their agent with `gitfold send`.
+- **Don't `git switch`, `checkout <branch>`, `reset --soft` or `rebase`
+  while lensed**, nor `--amend` once `git log -1` shows `gitfold lens:`
+  (that amends the lens commit): HEAD leaving the lens commit's
+  line turns git off (below). Run **`gitfold lens off`** first (HEAD goes
+  back on your branch; your uncommitted lines stay as changes).
 - **`fatal: not a git repository: /LENS ON (<layers>): git is off here
   (<why>)`** means gitfold couldn't hide the layers from git here (sparse
-  checkout, a split or sparse index), so it turned git off rather than let
-  you commit others' work. The files still show. Run `gitfold lens off` to
-  use git again; `gitfold` commands keep working meanwhile.
+  checkout, a split or sparse index, HEAD taken off the lens commit), so it
+  turned git off rather than let you commit others' work. The files still
+  show. Run `gitfold lens off` to use git again; `gitfold` commands keep
+  working meanwhile.
 - **Layers move between turns, not during them.** With the gitfold plugin, a
   workspace shown as a layer is sealed when its session stops, and your
   layers move to the newest seals when your next prompt starts; you are

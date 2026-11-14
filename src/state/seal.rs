@@ -50,8 +50,11 @@ pub fn ref_prefix(id: &str) -> String {
 }
 
 /// Seals the work of the workspace stored in `state` (see the module doc).
-/// Upper must not change meanwhile: an open workspace is sealed by its daemon
-/// under its write lock, a closed one under the repository lock.
+/// Called by the commands themselves (`seal`, `mix`, `layer`, the `Stop`
+/// hook), mounted or not, without the daemon or a lock: it reads the stored
+/// state (upper, markers, base) as it is, so a write in progress meanwhile
+/// may be half-seen. That is why the hooks seal at turn ends, when the
+/// workspace's agent isn't writing.
 pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;

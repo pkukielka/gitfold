@@ -63,6 +63,7 @@ Non-goals for now: macOS and Windows; applying checkout filters
            .git/gitfold/.control             the daemon's control socket
            refs/gitfold/<id>                 keeps the workspace base from git gc
            refs/gitfold-seal/<id>/<n>        keeps a workspace's seals (the newest 16)
+           refs/gitfold-lens/<id>            keeps a lensed workspace's view commit (and its lens commit)
 ```
 
 Names below the root are resolved by `Workspaces::resolve`, one component at a
@@ -126,7 +127,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/workspace/lens.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told, git told (skip-worktree, excludes) or surrendered |
+| `src/fs/workspace/lens.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told (and own lines in blended files carried over), git told (skip-worktree, excludes, the blends in the index, HEAD at the lens commit, the push guard) or surrendered; extracting commits made on the lens commit onto the branch (`sync_lens`) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
@@ -140,7 +141,7 @@ Then, per request (`fs/workspace/`):
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/state/seal.rs` | seals: a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>` |
-| `src/state/lens.rs` | a workspace's layers: the `lens` file, each layer's changes, the view tree and its mixed paths |
+| `src/state/lens.rs` | a workspace's layers: the `lens` file, each layer's changes, the view (view and hunk trees, mixed and blended paths, notes) and which files are blended (`gitfold-blend`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
@@ -152,9 +153,9 @@ Then, per request (`fs/workspace/`):
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check |
 | `src/git/index_edit.rs` | editing an index git wrote (v2, v3, v4): skip-worktree bits, stat data and ids of given paths, under git's `index.lock` protocol |
-| `src/git/worktree_config.rs` | a linked worktree's own config: the excludes file for layers' new files (keeping the user's global ignore file); the push guard hooks for the next phase (not installed yet) |
+| `src/git/worktree_config.rs` | a linked worktree's own config: the excludes file for layers' new files (keeping the user's global ignore file); the push guard hooks, installed while HEAD is a lens commit |
 | `src/git/hooks/` | the push guard's `pre-push` and the shell library the worktree's hooks share (embedded) |
-| `src/git/lens.rs` | the next phase's git side, not used yet: blended (hunk) trees, the lens commit, extracting commits made on it |
+| `src/git/lens.rs` | layers' git side: the view and hunk trees (blending), the lens and view commits, extracting commits made on the lens commit and moving the branch and HEAD in one transaction |
 | `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, fusermount |
@@ -190,7 +191,7 @@ Then, per request (`fs/workspace/`):
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
-| `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts) |
+| `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard) |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
@@ -214,7 +215,9 @@ Then, per request (`fs/workspace/`):
 - **Idle** (git in a workspace): HEAD on the branch, no operation stopped
   half-way (merge conflict, rebase, cherry-pick, revert, sequencer, bisect) in
   the worktree's admin directory, and no lock on the index, HEAD, the branch
-  ref or `packed-refs` (`worktree::git_busy`).
+  ref or `packed-refs` (`worktree::git_busy`). With files blended, HEAD is
+  detached at the lens commit instead, and the rest is checked
+  (`worktree::git_running`).
 - **Lower**: the base tree, from the shared store (with layers shown, the
   view tree).
 - **Upper**: every file that differs from the base, as real files in
@@ -225,15 +228,31 @@ Then, per request (`fs/workspace/`):
   of its seals, as the changes since a pinned merge base. The layers of a
   workspace, bottom first, each shown or not, are its **lens** (also the
   name of the file storing them); "lensed" means at least one is shown.
-- **View tree**: the base's tree with the shown layers' changes on top,
-  whole files, the higher layer winning; the lower layer while lensed.
-- **Mixed path**: a path a shown layer changed (or deleted): the layer's,
-  read-only, unless upper has it.
+- **View tree** (M): the hunk tree with the shown layers' other changes on
+  top, whole files, the higher layer winning; the lower layer while lensed.
+- **Blended path** (hunk path): a file `gitfold-blend=hunk` marks in the
+  base's attributes, which the base has, a shown layer changed and none
+  deletes: every layer's change merged into the base's version. Writable;
+  upper holds it with the workspace's own lines on top.
+- **Hunk tree** (H): the base's tree with only the blended paths blended.
+- **Mixed path**: a path a shown layer changed (or deleted) that isn't
+  blended: the layer's whole file, read-only, unless upper has it.
+- **Lens commit** (L): HEAD, detached, while files are blended: tree H over
+  the branch tip, parents the tip and the blended layers' seals, a
+  `gitfold-lens` header. The **view commit** (V, tree M, first parent L)
+  is what `refs/gitfold-lens/<id>` points at, keeping both.
+- **Extraction**: copying the commits made on L onto the branch with only
+  the workspace's changes (the line-set rule on blended paths), then
+  moving HEAD to a new L with the last one's tree. A commit that changes a
+  layer's lines **waits**.
+- **Push guard**: the per-worktree `pre-push` hook that refuses to publish
+  a lens commit while HEAD is one.
 - **Switch**: changing what the layers show (a layer added, shown, hidden,
-  removed or moved to a newer seal), telling the kernel and git.
+  removed or moved to a newer seal), telling the kernel and git, and
+  carrying the workspace's own lines in blended files over.
 - **Surrender**: turning git off in a lensed workspace whose index can't be
-  edited: its `.git` names a nonexistent `/LENS ON (...)` directory saying
-  why.
+  edited, or whose HEAD left the lens commit's line: its `.git` names a
+  nonexistent `/LENS ON (...)` directory saying why.
 - **Whiteout**: a recorded deleted lower path, so it stays hidden.
 - **Opaque**: a directory recreated over a whiteout, or a lower directory
   copied into upper by a rename; its lower children stay hidden.
@@ -293,7 +312,9 @@ decision that creates them.
   rebases keep what git recorded true (stamps). Layers' paths are
   skip-worktree, which git doesn't compare; those a switch gives back carry
   the switch's stamp, which the index doesn't record yet, so git re-reads
-  them once (a layer's changed files, not the tree).
+  them once (a layer's changed files, not the tree). Blended paths' entries
+  get the blend's id and size with zero times, so git reads each once
+  rather than taking a size change as a change unread.
   ([rebases](#workspaces-follow-their-branch-invisible-rebases),
   [index](#a-synthesized-git-index-whose-stat-data-matches-the-filesystem))
 - **Snapshot file attributes depend only on (blob, mode).** A snapshot file inode
@@ -342,7 +363,9 @@ decision that creates them.
   `reads` and `lens` record formats, `lens-git-off`, `upper/`), task folders
   in `.git/gitfold/.tasks/<id>/` and the message format of their inboxes
   (README, "Messages"), the base-pinning ref `refs/gitfold/<id>`, the seal
-  refs `refs/gitfold-seal/<id>/<n>`, the
+  refs `refs/gitfold-seal/<id>/<n>`, the lens ref `refs/gitfold-lens/<id>`
+  and the lens commit's `gitfold-lens 1` header (the push guard and a
+  remount look for it), the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
@@ -1251,9 +1274,14 @@ one **seal** of the other workspace (`state::seal`: a commit of the tree it
 shows, ignored files left out, on its base, kept by
 `refs/gitfold-seal/<id>/<n>`) with the merge base of the two workspaces,
 pinned when the layer is added or moved. The shown layers' changes
-(`diff-tree <merge base> <seal>`, bottom first, whole files) applied to the
-base's tree make the **view tree** (`state::lens::view`), loaded into the
-shared store and used as the workspace's lower layer. The stack is stored
+(`diff-tree <merge base> <seal>`, bottom first) applied to the base's tree
+make the **view tree** (`state::lens::view`, `git::lens::build_view`),
+loaded into the shared store and used as the workspace's lower layer: whole
+files, except files marked `gitfold-blend=hunk`, which are **blended**
+(every layer's change merged into the base's version) and stay writable.
+While any file is blended, HEAD is detached at a **lens commit** holding
+the blends, and commits made on it are **extracted** onto the branch with
+only the workspace's changes. The stack is stored
 in `lens` in the state directory; `gitfold layer` writes it and asks the
 daemon to switch (a `lens` control request). `gitfold mix` is the
 read-only form: seals merged with `git merge-tree` into a commit opened as
@@ -1284,7 +1312,8 @@ a snapshot, with no change to any workspace.
   switch's time as their stamp, so incremental builds rebuild them, and
   everything else keeps its time. The cost is the layers' changes, not the
   tree. A switch is refused while git is busy in the workspace: it changes
-  what the index describes.
+  what the index describes. With a lens commit, it first extracts what was
+  committed on it (`sync_lens`), and is refused while a commit waits.
 - **Writes refused:** a mixed path's file has no write bits, and copy-up
   (writes, truncation, `chmod`), removal, renames from or onto it (or of a
   directory holding one) and creating a path a layer deleted are `EACCES`.
@@ -1306,9 +1335,78 @@ a snapshot, with no change to any workspace.
   `info/exclude` is shared by every worktree, and the per-worktree setting
   replaces the user's global ignore file, so the generated file starts with
   its patterns. Hiding the layers clears both.
+- **Blended files, for files several agents append to** (a registry, a
+  manifest): whole files would show either theirs or mine. A file is
+  blended if `git check-attr --source=<base> gitfold-blend` says `hunk`
+  (the base's `.gitattributes`, or `info/attributes`), the base has it and
+  no shown layer deletes it. Each layer's change is folded in as
+  `merge3(base = merge base, ours = the blend so far, theirs = seal)`; two
+  appends at one place conflict in every 3-way merge, so where both sides
+  only add lines both are kept, ours first (`merge=union`, but only there).
+  Any other conflict leaves that layer's change out, as a note on the
+  switch's reply, as does a whole-file layer version hiding a change the
+  base made since the merge base. The base's tree with only the blends is
+  the **hunk tree** H; the view tree M is H with the whole files on top.
+  Blended files have no `mixed` entry, so they are writable: a copy-up
+  takes the blend, and the workspace's own lines go on top.
+- **HEAD detached at a lens commit L** (`tell_git`): the index alone can't
+  split a file into theirs and mine; only a HEAD whose tree has their lines
+  can. L has tree H (over the branch tip, if commits moved it past the
+  base), parents the tip and the blended layers' seals, and a
+  `gitfold-lens 1` header, so hooks and a remount recognise it without a
+  list of ids; its subject says `commits go to <branch>; never push this
+  commit`. The index has the blends' ids and sizes (zero times: git reads
+  each file once), not skip-worktree, so `git diff` shows only the
+  workspace's lines. Detached rather than symbolic to a per-worktree ref:
+  measured on git 2.49, `gc` from another worktree pruned commits held only
+  by other worktrees' `refs/worktree/*` (and a HEAD symbolic to one), but
+  not one held by a detached HEAD. `refs/gitfold-lens/<id>` (common) pins
+  the view commit V (tree M, parents L and every shown seal), keeping M, L
+  and the seals. Turning the last blend off writes HEAD back as a symbolic
+  ref to the branch and drops the ref and the guard; the files keep the
+  workspace's lines, now changes against the branch's version.
+- **Extraction on the sync thread** (`sync_lens`, `git::lens::extract`):
+  when HEAD has moved from L by a first-parent chain of commits and git is
+  otherwise idle (`git_running`), each commit C is copied onto the branch
+  tip T as `merge(base = its parent P, ours = T, theirs = C)` with C's
+  author, committer and message, except on blended paths, where P has the
+  layers' lines and T doesn't: there the line-set rule decides. C may not
+  remove or change a layer's line (one in P but not in T): it depends on
+  that layer, and it and every later commit wait (logged), with nothing
+  moved. Otherwise a 3-way merge of P, T and C, dropping the layers' lines;
+  if that conflicts (a line appended after a layer's, its context), T's
+  lines less those C removed, then C's new lines (a registry's lines are
+  unique, their order doesn't matter). Then one `update-ref` transaction
+  (`git::lens::advance`) moves the branch to the last copy and HEAD to a
+  new L' with the agent's last commit's tree: what the index describes
+  doesn't change, so git sees nothing happen. Either both move or, if git
+  moved either meanwhile, neither, retried on the next pass. Merge commits
+  made on L are flattened. A plain merge with `merge=union` would put the
+  layers' lines into the commit, and one without it conflicts on every
+  append.
+- **The push guard** (`git::worktree_config::install_push_guard`): `git
+  push` from a detached HEAD fails by itself, but `git push origin
+  HEAD:main` would publish L, other agents' uncommitted work. While HEAD is
+  a lens commit, the worktree's own `core.hooksPath` is
+  `<admin>/gitfold-hooks`, whose `pre-push` refuses any pushed range (less
+  what the remotes have) holding a commit with the header, then runs the
+  user's `pre-push`; every other hook name is a shim running the user's (the
+  path found from config without the worktree scope, at run time).
+  `--no-verify` bypasses it.
+- **Own lines carried over on a switch** (`carry_over`): when the blend
+  under a file the workspace has written changes, upper becomes
+  `merge-file(base = old blend, ours = upper, theirs = new blend)`, or, if
+  that conflicts, the line-set rule (new blend less the lines upper
+  removed, then upper's new lines). A conflicting file the rule can't take
+  (not text) refuses the whole switch before anything changes (`your
+  changes to it depend on lines the layers would no longer show`). The
+  rewritten files are invalidated with the rest of the switch.
 - **Surrender as the fallback:** where the index can't be edited (sparse
   checkout, whose re-application rewrites skip-worktree bits; a split or
-  sparse index; an unknown required extension; the index locked), the layers
+  sparse index; an unknown required extension; the index locked), or HEAD
+  left L's line while files are blended (`git switch`, `reset`, `rebase`,
+  an amend of L itself: the index and files hold the layers' lines, which
+  would be committed on the branch), the layers
   still show, but the virtual `.git` (now swappable) names a directory that
   doesn't exist: `gitdir: /LENS ON (a+b): git is off here (<why>). Run
   gitfold lens off to use git`. Every git command then fails with that text
@@ -1319,8 +1417,9 @@ a snapshot, with no change to any workspace.
 - **The base isn't rebased while lensed** (`sync` waits): a rebase drops
   upper files identical to the new base and copies up files it changes, and
   with a view tree as lower either could turn a layer's content into this
-  workspace's own. Commits still move the branch; the base catches up once
-  no layer shows.
+  workspace's own. Commits still move the branch (with a lens commit, by
+  extraction, L then built over the tip rather than the base); the base
+  catches up once no layer shows.
 - **Moves at turn boundaries, by hooks:** a workspace shown as a layer is
   sealed when its Claude Code session stops (`seal --claude-hook stop`), and
   a reader's layers move to the newest seals when its next prompt is sent
@@ -1328,11 +1427,6 @@ a snapshot, with no change to any workspace.
   changed. Neither agent sees the other's half-done turn, and nothing the
   reader read changes mid-turn. The agent's own `gitfold layer` commands
   switch at once: a boundary it chose.
-
-Blending changes within one file (a registry both agents append to), with a
-synthesized HEAD (the lens commit) whose commits are extracted onto the
-branch, is the next phase, not built: `git::lens` and the push guard in
-`git::worktree_config` are its groundwork, not wired in.
 
 **Rejected:**
 
@@ -1354,6 +1448,10 @@ branch, is the next phase, not built: `git::lens` and the push guard in
   the reader's index while its git may run, and a view changing in the
   middle of its turn.
 - Rebasing the base under the layers: see above; it waits instead.
+- HEAD symbolic to a per-worktree `refs/worktree/lens`, or a
+  `refs/worktree/*` ref keeping L: `gc` from another worktree prunes them.
+- Extraction as a plain merge, with or without `merge=union`: it commits
+  the layers' lines, or conflicts on every append.
 
 ## Rejected ideas (index)
 
@@ -1389,6 +1487,8 @@ branch, is the next phase, not built: `git::lens` and the push guard in
 | `info/exclude` for layers' new files | shared by every worktree | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | Broken index or no `.git` as the surrender | repaired away; git finds the enclosing repository | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | Live layers | index rewritten under a running git; views change mid-turn | [layers](#layers-other-workspaces-work-as-a-view-tree) |
+| HEAD symbolic to `refs/worktree/lens` | `gc` from another worktree prunes L | [layers](#layers-other-workspaces-work-as-a-view-tree) |
+| Extraction as a plain merge (`merge=union` or not) | commits the layers' lines, or conflicts on every append | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 
 ## Known limitations
 
@@ -1504,14 +1604,23 @@ checkout" and "Running it"); this is the why and what it would take.
   to be detached (it lists the processes using it, from `/proc`, first),
   except when it or a process it runs under (its shell, `make`, ...) is
   inside the mount: it would wait for itself.
-- **Layers combine whole files.** A file both workspaces changed shows this
-  workspace's version only (blending within a file is the next phase). A
-  layer pins a seal that only the newest 16 seal refs keep: one not moved
-  while its workspace sealed 16 times more can be pruned by `git gc`. Lost
-  skip-worktree bits (`update-index --no-skip-worktree`, an index rebuilt by
-  hand) aren't re-derived until the next switch, and the excludes file isn't
-  regenerated when the user's global ignore file changes
-  (`refresh_excludes` exists, unused). A fork doesn't copy the layers.
+- **Layers combine whole files, except blended ones.** A file both
+  workspaces changed shows this workspace's version only, unless marked
+  `gitfold-blend=hunk`. Blending and extraction assume a blended file's
+  lines are unique and their order doesn't matter where both sides append.
+  A commit that changes a layer's lines waits until it is rewritten
+  (`--amend`, if it is the last: a later commit can't undo it, and a
+  rebase takes HEAD off L's line, turning git off); only the daemon log
+  and the next switch (exit 4) say so, and nothing retries it against a
+  newer seal of the layer. The push guard is a client hook: `--no-verify`
+  skips it. A layer pins a seal that only the newest 16 seal refs keep: one
+  not moved while its workspace sealed 16 times more can be pruned by `git
+  gc`. Lost skip-worktree bits (`update-index --no-skip-worktree`, an index
+  rebuilt by hand) aren't re-derived until the next switch, and the
+  excludes file isn't regenerated when the user's global ignore file
+  changes (`refresh_excludes` exists, unused). A fork doesn't copy the
+  layers, but copies the index and upper as they are (skip-worktree bits,
+  and in blended files the layers' lines, which become the fork's own).
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
   resolution uses the kernel's own parent links, so this only affects tools that
@@ -1544,8 +1653,7 @@ compact node table and write measurements. Next:
   [Limitations](#known-limitations).
 - **Parallel creates.** Creating an entry takes the workspace lock
   exclusively; per-directory locking would let parallel writers proceed.
-- **Layers, next phases.** Blending changes within a file through a
-  synthesized HEAD (the lens commit), with commits extracted onto the branch
-  and a push guard (groundwork in `git::lens` and `git::worktree_config`);
-  then proposals (a change to a layer's file made in a fork of its
-  workspace) and layers built on committed work (stacked branches).
+- **Layers, next phases.** Telling the agent about a waiting commit (in the
+  hook context, not only the daemon log) and retrying it when the layer
+  moves; proposals (a change to a layer's file made in a fork of its
+  workspace); and layers built on committed work (stacked branches).

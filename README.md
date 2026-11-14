@@ -123,8 +123,9 @@ as in a normal checkout.
 gitfold writes into the repository: worktree registrations under
 `.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
-[Cleaning up](#cleaning-up)), and `refs/gitfold-seal/*` that keep seals
-(see [Layers](#layers)).
+[Cleaning up](#cleaning-up)), and `refs/gitfold-seal/*` and
+`refs/gitfold-lens/*` that keep seals and lens commits (see
+[Layers](#layers)).
 
 ## Requirements
 
@@ -435,7 +436,8 @@ stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
 `lens` its layers, if any (see [Layers](#layers)). Seals are kept by refs
-`refs/gitfold-seal/<id>/<n>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
+`refs/gitfold-seal/<id>/<n>`, a lensed workspace's lens commit by
+`refs/gitfold-lens/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
 **Limitations.**
@@ -520,13 +522,20 @@ so it shows the same files whatever happens to either branch until it is
 updated. Layers combine whole files: a path a shown layer changed (or
 deleted) shows that layer's version, the higher layer's (added later) if
 several changed it; a file of the workspace's own at that path wins over
-all of them and stays writable. `list` prints one line per layer, bottom
-first: `on` or `off`, the branch and its seal. While mounted, the daemon
-shows the change at once; unmounted, it is stored and shown when the
-workspace opens. Exit codes: 3 no such workspace or layer, 4 git busy in the
-workspace (a commit in progress, a stopped rebase: the change is stored but
-not shown yet; `gitfold layer update` once git is done shows it), 2 usage
-errors, 1 other errors (a workspace as its own layer, adding one twice).
+all of them and stays writable. Files marked for blending are the
+exception (below): they show every layer's lines and the workspace's own.
+`list` prints one line per layer, bottom first: `on` or `off`, the branch
+and its seal. While mounted, the daemon shows the change at once, printing
+notes about the new view after its summary (`note: <path>: <layer>'s change
+conflicts with what is below it, so it isn't blended in`, or `...'s version
+hides a change on your base since it diverged`); unmounted, it is stored
+and shown when the workspace opens. Exit codes: 3 no such workspace or
+layer, 4 the change is stored but not shown yet (`gitfold layer update`
+shows it once the cause is gone): git busy in the workspace (a commit in
+progress, a stopped rebase), a commit made on the lens commit that can't go
+onto the branch yet, or the workspace's own lines in a blended file that
+depend on lines that would go (see below); 2 usage errors, 1 other errors
+(a workspace as its own layer, adding one twice).
 
 - **A layer's files are read-only.** They have no write bits; writing,
   truncating, removing, renaming them (or a directory holding one) and
@@ -542,8 +551,8 @@ errors, 1 other errors (a workspace as its own layer, adding one twice).
   Changed files get the switch's time, so incremental builds rebuild them;
   everything else keeps its times.
 - **Git sees only the workspace's own work.** While layers show, the
-  layers' files git tracks are marked skip-worktree in the worktree's index
-  (git neither shows nor commits them, and keeps the base's version), and
+  layers' whole files git tracks are marked skip-worktree in the worktree's
+  index (git neither shows nor commits them, and keeps the base's version), and
   the files they add are excluded in a per-worktree excludes file
   (`core.excludesFile` in the worktree's own config, with
   `extensions.worktreeConfig`; since it replaces your global ignore file
@@ -552,18 +561,72 @@ errors, 1 other errors (a workspace as its own layer, adding one twice).
   `gitfold changes`, `list` and `remove`. Hiding the layers gives the paths
   back to git. If git refuses to touch a file you didn't change (a merge or
   rebase over a layer's path), run `gitfold lens off` and retry.
+- **Blended files: everyone's lines in one file.** A file several agents
+  add to (a registry, a manifest, a list of modules) can be blended rather
+  than shown whole: mark it `gitfold-blend=hunk` in `.gitattributes`, e.g.
+  `registry.txt gitfold-blend=hunk` or `**/Cargo.toml gitfold-blend=hunk`.
+  The attributes are read from the workspace's base (which waits while
+  layers show, so commit them first) and from `info/attributes` in the
+  repository's git directory (applied at the next switch, such as `gitfold
+  layer update`). A marked file the base has and no shown layer deletes shows the base's
+  version with every shown layer's change merged in, lines both sides add
+  kept both; a layer's change that conflicts with what is below it isn't
+  blended in (a note says so). The file stays writable: the workspace's own
+  lines go on top of the layers'.
+- **The lens commit.** While any file is blended, HEAD is detached at a
+  lens commit gitfold makes: the blends over the branch tip, its parents
+  the tip and the blended layers' seals, a `gitfold-lens` header, and the
+  subject `gitfold lens: agent/client + agent/api (commits go to
+  agent/client; never push this commit)`. The index has the blends too, so
+  `git status` and `git diff` show only the workspace's own lines in a
+  blended file. `git status` says `HEAD detached at <id>`.
+- **Commits made on the lens commit go onto the branch.** Commit normally:
+  within about a second (once git is idle), gitfold copies each commit
+  onto the branch with only the workspace's changes (same author, committer
+  and message; the layers' lines left out), and moves HEAD to a new lens
+  commit with the same tree, so nothing git shows changes. The commit's id
+  on the branch differs from the one `git commit` printed; `git log
+  <branch>` shows it. Once moved, `git commit --amend` would amend the lens
+  commit, taking HEAD off its line (below). A commit that removes or
+  changes a layer's line in a blended file depends on that layer's
+  uncommitted work and can't go onto the branch alone: it waits on HEAD,
+  above the lens commit, with every later commit (the daemon log says
+  which paths), and nothing goes onto the branch meanwhile; layer switches
+  exit 4 (`commit <id> can't go onto the branch alone (it changes lines of
+  a layer's)`) until it is amended to leave the layer's lines as they are.
+- **The push guard.** A lens commit holds other workspaces' uncommitted
+  work, so the worktree gets its own `core.hooksPath` (per-worktree config)
+  while one is HEAD, whose `pre-push` refuses a push that would publish a
+  commit with a `gitfold-lens` header (`git push origin HEAD:main`), then
+  runs your own `pre-push`; every other hook runs yours. `git push origin
+  <branch>` pushes the copied commits and is fine. `--no-verify` skips the
+  guard. Turning the last blend off puts HEAD back on the branch and
+  removes the guard; uncommitted own lines stay, as changes to the branch's
+  version.
+- **Switches carry own lines over.** When a switch changes a blended file
+  the workspace has written, its own lines are merged onto the new blend (a
+  3-way merge; where that conflicts, the new blend's lines less those the
+  workspace removed, then its own new lines). A conflicting file that isn't
+  text refuses the switch (exit 4: `<path>: your changes to it depend on
+  lines the layers would no longer show; commit them first, or keep the
+  layers as they are`). A switch first moves the commits made on the lens
+  commit to the branch, and is refused while one can't.
 - **`LENS ON`: where git can't be kept right, it is turned off.** If the
   index can't be edited (sparse checkout, a split or sparse index, the index
-  locked meanwhile), the layers still show, but the workspace's `.git` names
-  a directory that doesn't exist, so every git command fails (exit 128)
-  saying why: `fatal: not a git repository: /LENS ON (agent/api): git is off
+  locked meanwhile), or HEAD left the lens commit's line while files are
+  blended (`git switch`, `checkout <branch>`, `reset --soft`, `rebase`: the
+  index holds the layers' lines, which mustn't be committed on the branch),
+  the layers still show, but the workspace's `.git` names a directory that
+  doesn't exist, so every git command fails (exit 128) saying why:
+  `fatal: not a git repository: /LENS ON (agent/api): git is off
   here (sparse checkout is on). Run gitfold lens off to use git`. It is kept
   across remounts, until `gitfold lens off` (or a switch that can edit the
   index). gitfold commands still find the workspace there.
 - **The base waits.** While a layer shows, the workspace's base doesn't
-  follow its branch: commits work and move the branch as usual, and the base
-  catches up once no layer shows (moving it meanwhile could copy the layers'
-  files into the workspace's own).
+  follow its branch: commits work and move the branch as usual (with blended
+  files, as copied from the lens commit), and the base catches up once no
+  layer shows (moving it meanwhile could copy the layers' files into the
+  workspace's own).
 - **Between turns, in Claude Code.** The plugin's hooks seal a session's
   workspace when the session stops (`gitfold seal --claude-hook stop`, only
   if some workspace has it as a layer), and when a prompt is sent, move the
@@ -578,12 +641,15 @@ errors, 1 other errors (a workspace as its own layer, adding one twice).
 - **Stored** in the workspace's state directory: `lens`, rewritten whole,
   `version 1` and then one line per layer, bottom first: `layer <branch> TAB
   <on|off> TAB <seal> TAB <merge base>`; `lens-git-off`, while git is turned
-  off, holds why. A fork (`branch -w`) starts without layers.
-- **Limitations.** Whole files only: a file both workspaces changed shows
-  this workspace's version (blending changes within a file is the next
-  phase). A layer not updated while its workspace made 16 newer seals holds
-  a seal no ref keeps any more, which `git gc` may prune: `gitfold layer
-  update` it.
+  off, holds why. While files are blended, the worktree's HEAD is the lens
+  commit (found again on a remount), and `refs/gitfold-lens/<id>` keeps it
+  and the view from `git gc`. A fork (`branch -w`) starts without layers.
+- **Limitations.** A file both workspaces changed shows this workspace's
+  version, unless it is marked for blending. Blending assumes a blended
+  file's lines are unique and their order doesn't matter where two sides
+  append at the same place. `--no-verify` skips the push guard. A layer not
+  updated while its workspace made 16 newer seals holds a seal no ref
+  keeps any more, which `git gc` may prune: `gitfold layer update` it.
 
 ### Partial clones
 
@@ -886,8 +952,8 @@ mount and real git (build with `--release` first):
   Suites running side by side load the machine like `PARALLEL=1`: if a timing
   check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
-- `tests/layers.sh`: seal, mix, and layers shown in a workspace (sections as
-  above).
+- `tests/layers.sh`: seal, mix, and layers shown in a workspace, blended
+  files and the lens commit included (sections as above).
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
 
