@@ -5,6 +5,7 @@
 //! - `list`: `list`, `changes`.
 //! - `remove`: `remove`, `prune`.
 //! - `mix`: `seal`, `mix`: workspaces' uncommitted work as commits, merged.
+//! - `layer`: `layer`, `lens`: other workspaces' work shown in one.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
 //! - `claude`: Claude Code's hooks: its worktrees as workspaces (`branch` and
@@ -15,6 +16,7 @@ pub mod branch;
 pub mod claude;
 pub mod hook;
 pub mod inbox;
+pub mod layer;
 pub mod list;
 pub mod mix;
 pub mod mount;
@@ -26,9 +28,34 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 /// The repository commands work on: the one the current directory is in (its
-/// git directory).
+/// git directory). In a workspace showing layers, whose `.git` turns git away
+/// (see `fs::workspace::lens`), its registration, found from the mount.
 pub fn repo() -> Result<PathBuf> {
-    crate::git::discover(Path::new("."))
+    crate::git::discover(Path::new(".")).or_else(|e| in_lensed_workspace().ok_or(e))
+}
+
+/// The registration of the workspace the current directory is in, below a
+/// gitfold mount: the longest leading path below the mount point that is a
+/// workspace (branches may hold a `/`).
+fn in_lensed_workspace() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let (mount, common_dir) = (crate::mount_table::mounts().ok()?)
+        .into_iter()
+        .find(|(mount, _)| cwd.starts_with(mount))?;
+    let rest = cwd.strip_prefix(&mount).ok()?.to_str()?;
+    let mut found = None;
+    let mut at = 0;
+    loop {
+        let end = rest[at..].find('/').map_or(rest.len(), |i| at + i);
+        let state = crate::state::StateDir::of(&common_dir, &rest[..end]);
+        if state.opened() {
+            found = Some(state.admin);
+        }
+        if end == rest.len() {
+            return found;
+        }
+        at = end + 1;
+    }
 }
 
 /// `branch` if given, else the branch of the workspace the current directory is

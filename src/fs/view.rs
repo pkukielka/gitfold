@@ -106,8 +106,13 @@ impl GitFold {
             Obj::LowerDir => {
                 Ok(self.make_attr(ino, FileType::Directory, 0o755, 0, inode::file_time()))
             }
-            Obj::LowerFile { file_id, stamp } => {
-                let mut attr = self.file_attr(ino, *file_id, true)?;
+            Obj::LowerFile {
+                file_id,
+                stamp,
+                mixed,
+            } => {
+                // A layer's file: no write bits, as it can't be written here.
+                let mut attr = self.file_attr(ino, *file_id, !mixed)?;
                 if let Some(stamp) = stamp {
                     (attr.atime, attr.mtime, attr.ctime) = (stamp.mtime, stamp.mtime, stamp.ctime);
                 }
@@ -182,7 +187,7 @@ impl GitFold {
                     Ok(self.make_attr(ino, FileType::Directory, 0o555, 0, self.names_mtime()))
                 }
                 WsNode::GitFile(ws) => {
-                    let size = ws.gitfile.len() as u64;
+                    let size = ws.gitfile().len() as u64;
                     Ok(self.make_attr(ino, FileType::RegularFile, 0o444, size, time))
                 }
                 WsNode::TaskLink(ws) => {
@@ -407,7 +412,7 @@ impl GitFold {
             Ino::File(id) => cached(ino.0, &|| self.blob(id)),
             Ino::GitFile { slot } => Ok(Content::Whole(self.snapshots.get(slot)?.gitfile.clone())),
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {
-                WsNode::GitFile(ws) => Ok(Content::Whole(ws.gitfile.clone())),
+                WsNode::GitFile(ws) => Ok(Content::Whole(ws.gitfile())),
                 WsNode::Entry(ws, local) => {
                     match ws.read(&self.store, local, offset, size)? {
                         Read::Upper(data) => Ok(Content::Range(data)),

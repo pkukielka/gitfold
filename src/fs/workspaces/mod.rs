@@ -92,6 +92,8 @@ pub struct Workspaces {
     requests: RwLock<bool>,
     /// Bumped whenever an entry is added, invalidating cached namespace listings.
     mtime: Mutex<SystemTime>,
+    /// The session's, to tell the kernel what a layer switch changed.
+    notifier: std::sync::OnceLock<fuser::Notifier>,
 }
 
 impl Workspaces {
@@ -116,7 +118,13 @@ impl Workspaces {
             busy: Mutex::new(HashMap::new()),
             requests: RwLock::new(false),
             mtime: Mutex::new(SystemTime::now()),
+            notifier: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The session's notifier: it exists once mounted, before any request.
+    pub fn set_notifier(&self, notifier: fuser::Notifier) {
+        let _ = self.notifier.set(notifier);
     }
 
     /// How many workspaces and namespace directories were added; only grows

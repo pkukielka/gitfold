@@ -129,6 +129,10 @@ impl GitFold {
 
     /// The workspaces, for the control requests on them (`prewarm`,
     /// `track-reads`, a fork).
+    pub fn store(&self) -> Arc<Store> {
+        self.store.clone()
+    }
+
     pub fn workspaces(&self) -> Arc<Workspaces> {
         self.workspaces.clone()
     }

@@ -89,6 +89,7 @@ pub fn run(options: Options) -> Result<()> {
         .ok();
     let removal = fs.removal();
     let workspaces = fs.workspaces();
+    let store = fs.store();
     let mounted = mountpoint.clone();
     let session = fuser::Session::new(fs, &mountpoint, &config)?;
     // Mounted: where Claude Code's worktree hook mounts it again (`cli::claude`).
@@ -96,6 +97,7 @@ pub fn run(options: Options) -> Result<()> {
         log::warn!("recording the mount point in the git config: {e:#}");
     }
     names.set_notifier(session.notifier());
+    workspaces.set_notifier(session.notifier());
     // After the notifier is set: a removal tells the kernel.
     if let Some(listener) = listener {
         control::serve(listener, move |request| match request {
@@ -114,6 +116,9 @@ pub fn run(options: Options) -> Result<()> {
             Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
             Request::TrackReads { branch } => workspaces.track_reads_now(&branch),
             Request::RecordReads { paths } => Ok(workspaces.record_reads(paths)),
+            Request::Lens { branch } => workspaces
+                .switch_lens(&store, &branch)
+                .inspect(|done| log::info!("{done}")),
             Request::Fork { from, to } => workspaces
                 .fork(&from, &to)
                 .inspect(|done| log::info!("{done}")),

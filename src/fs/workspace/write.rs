@@ -151,6 +151,8 @@ impl Workspace {
         let _copying = self.copy_lock.lock();
         let file_id = match self.resolve_in(store, layers, path)? {
             Obj::Upper(_) => return Ok(false),
+            // A layer's file (see `lens`).
+            Obj::LowerFile { mixed: true, .. } => return Err(Errno::EACCES),
             Obj::LowerFile { file_id, .. } => file_id,
             Obj::LowerDir => return self.ensure_upper_dir(path).map(|()| true),
         };
@@ -389,6 +391,9 @@ impl Workspace {
         if obj.is_dir() != dir {
             return Err(if dir { Errno::ENOTDIR } else { Errno::EISDIR });
         }
+        if let Obj::LowerFile { mixed: true, .. } = obj {
+            return Err(Errno::EACCES);
+        }
         // Checked under the same exclusive lock as the removal, so nothing can be
         // created in between.
         if dir && !self.entries(store, &layers, &path)?.is_empty() {
@@ -568,6 +573,21 @@ impl Workspace {
         }
         let src_obj = self.resolve_in(store, &layers, &src)?;
         let src_has_lower = self.has_lower(store, &layers, &src);
+        // A layer's file, or a directory holding one (see `lens`), stays put:
+        // renaming would copy the layer's content into the workspace's own.
+        let layer_owned = |obj: &Obj, path: &[u8]| match obj {
+            Obj::LowerFile { mixed, .. } => *mixed,
+            Obj::Upper(m) if !m.is_dir() => false,
+            _ => Self::has_mixed_below(&layers, path),
+        };
+        if layer_owned(&src_obj, &src) {
+            return Err(Errno::EACCES);
+        }
+        if let Ok(dst_obj) = self.resolve_in(store, &layers, &dst)
+            && layer_owned(&dst_obj, &dst)
+        {
+            return Err(Errno::EACCES);
+        }
         // Every check on the destination before copying anything.
         let mut replace_lower_dir = false;
         match self.resolve_in(store, &layers, &dst) {

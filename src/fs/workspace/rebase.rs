@@ -139,7 +139,9 @@ impl Workspace {
     }
 
     fn sync_with(&self, store: &Store, fetch: bool) -> Result<()> {
-        if !self.git_idle() {
+        // With layers shown, git is surrendered (see `lens`), and an upper file
+        // identical to a layer's mustn't be dropped as unchanged: both wait.
+        if !self.git_idle() || self.lensed() {
             self.limit_touched();
             return Ok(());
         }
@@ -323,6 +325,8 @@ impl Workspace {
         self.state.write_base(&new.id)?;
         layers.base = new.id;
         layers.base_tree = new_tree;
+        // Not rebased while layers are shown (`sync`): the view is the base.
+        (layers.view_tree, layers.view) = (new_tree, new.tree);
         // Before anything below can fail: cached listings hold the old base's files.
         self.changed();
 

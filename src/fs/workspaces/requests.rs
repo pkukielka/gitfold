@@ -4,14 +4,20 @@
 //! applying a branch's prewarm mode or read tracking (`gitfold prewarm`,
 //! `gitfold track-reads`) to its open workspace.
 
+use std::os::unix::ffi::OsStrExt;
 use std::time::Duration;
+
+use anyhow::Context;
+use fuser::INodeNo;
 
 use log::warn;
 
 use super::Workspaces;
 use super::busy::Mark;
+use crate::inode;
 use crate::prewarm::{self, Prewarm, Spawned};
 use crate::state::fork;
+use crate::store::Store;
 
 /// How long unmounting waits for long requests in progress.
 const CLOSE_WAIT: Duration = Duration::from_secs(60);
@@ -77,6 +83,37 @@ impl Workspaces {
             }
         }
         "recorded".to_string()
+    }
+
+    /// `gitfold layer`: shows the layers stored for the workspace of `branch`
+    /// (just changed) if it is open, and tells the kernel what changed. Says
+    /// what it did.
+    pub fn switch_lens(&self, store: &Store, branch: &str) -> anyhow::Result<String> {
+        let Some(ws) = self.get_open(branch) else {
+            return Ok(format!(
+                "{branch} isn't open: its layers show when it opens"
+            ));
+        };
+        let slot = *self.by_path.lock().get(branch).context("not registered")?;
+        let stale = ws.switch(store)?;
+        if let Some(notifier) = self.notifier.get() {
+            // After the switch released the workspace's lock: invalidating an
+            // entry waits for lookups in its directory, which wait for the lock.
+            for (dir, name) in &stale.entries {
+                let name = std::ffi::OsStr::from_bytes(name);
+                let _ = notifier.inval_entry(INodeNo(inode::ws(slot, *dir)), name);
+            }
+            for &local in &stale.inodes {
+                let _ = notifier.inval_inode(INodeNo(inode::ws(slot, local)), 0, 0);
+            }
+        }
+        Ok(match ws.lensed() {
+            true => format!(
+                "{branch}: layers shown ({} entries changed)",
+                stale.inodes.len() - 1
+            ),
+            false => format!("{branch}: no layers shown"),
+        })
     }
 
     /// `gitfold track-reads`: starts or stops recording reads in the workspace

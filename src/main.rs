@@ -128,6 +128,18 @@ enum Command {
     /// or branch changes. Exit codes: 4 conflicts (the paths listed), 1 other
     /// errors, 2 usage errors.
     Mix(cli::mix::MixArgs),
+    /// Show other workspaces' work in a workspace, read-only: layers.
+    ///
+    /// Each layer is a workspace's work (uncommitted included) as it was when
+    /// added or updated, shown over the workspace's base and under its own
+    /// changes; higher layers win a path. A layer's files can't be written
+    /// there, and while any layer is shown, git is off in the workspace (its
+    /// commands say why): `gitfold lens off` turns it back on. Stored with the
+    /// workspace; while mounted, shown at once. Exit codes: 3 no such
+    /// workspace or layer, 1 other errors, 2 usage errors.
+    Layer(cli::layer::LayerArgs),
+    /// Hide every layer of a workspace (see `gitfold layer`).
+    Lens(cli::layer::LensArgs),
     /// Delete a workspace, or a snapshot's registration.
     ///
     /// A workspace: its registration, stored changes and base ref (its commits
@@ -224,6 +236,8 @@ fn run() -> Result<i32> {
         Command::Send(args) => cli::inbox::send(&cli::repo()?, args)?,
         Command::Seal(args) => cli::mix::seal(&cli::repo()?, args)?,
         Command::Mix(args) => cli::mix::mix(&cli::repo()?, args)?,
+        Command::Layer(args) => cli::layer::layer(&cli::repo()?, args)?,
+        Command::Lens(args) => cli::layer::lens(&cli::repo()?, args)?,
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,

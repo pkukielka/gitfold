@@ -7,6 +7,7 @@
 //!   registration.
 //! - `fork`: a new branch with a copy of a workspace (`branch --with-changes`).
 //! - `seal`: a workspace's uncommitted work as a commit (`gitfold seal`).
+//! - `lens`: other workspaces' work shown in one (layers), and its storage.
 //! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //!
 //! The state of the workspace of branch `b` is `.git/gitfold/<id>/`, `<id>`
@@ -17,6 +18,7 @@
 //! with its index and HEAD) is `.git/worktrees/gitfold-ws-<id>/`.
 
 pub mod fork;
+pub mod lens;
 pub mod markers;
 pub mod reads;
 pub mod retire;

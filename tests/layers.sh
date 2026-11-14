@@ -69,6 +69,67 @@ eq "nothing changed in the workspaces" "M	a.txt
 A	n1.txt" "$("$BIN" -C "$REPO" changes m1)"
 }
 
+layers_shown_in_a_workspace() {
+R branch me; R branch la; R branch lb
+mount_fs
+W=$MNT/me
+echo "la" >>"$MNT/la/a.txt"; echo nla >"$MNT/la/nla.txt"; rm "$MNT/la/d/b.txt"
+mkdir "$MNT/la/nd"; echo f >"$MNT/la/nd/f"
+echo "lb" >>"$MNT/lb/a.txt"; echo lb >"$MNT/lb/d/c.txt"
+echo mine >>"$W/d/c.txt"
+cat "$W/a.txt" "$W/d/b.txt" >/dev/null   # cached by the kernel before the switch
+check "add a layer" "$BIN" -C "$W" layer add la
+eq "its changes show" "a
+la|nla|f" "$(cat "$W/a.txt")|$(cat "$W/nla.txt")|$(cat "$W/nd/f")"
+check "its deletions too" test ! -e "$W/d/b.txt"
+eq "own changes win" "c
+mine" "$(cat "$W/d/c.txt")"
+eq "listed" "a.txt d nd nla.txt" "$(ls "$W" | tr '\n' ' ' | sed 's/ $//')"
+check "a layer's file has no write bits" test ! -w "$W/a.txt"
+check "writing it is refused" fails sh -c "echo x >>'$W/a.txt'"
+check "removing it is refused" fails rm -f "$W/nla.txt"
+check "renaming it is refused" fails mv "$W/a.txt" "$W/z.txt"
+check "renaming a directory holding one is refused" fails mv "$W/nd" "$W/nd2"
+check "chmod is refused" fails chmod +x "$W/nla.txt"
+check "own files stay writable" sh -c "echo more >>'$W/d/c.txt' && echo n >'$W/own.txt'"
+out=$(git -C "$W" status 2>&1); rc=$?
+eq "git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LENS ON (la)' && echo yes)"
+eq "gitfold still finds the workspace" "on 	la" "$("$BIN" -C "$W/d" layer list | cut -c1-6)"
+check "a second layer on top" "$BIN" -C "$W" layer add lb
+eq "the higher layer wins a path" "a
+lb" "$(cat "$W/a.txt")"
+check "hide it" "$BIN" -C "$W" layer off lb
+eq "the lower one shows again" "a
+la" "$(cat "$W/a.txt")"
+check "lens off" "$BIN" -C "$W" lens off
+eq "the base again, own changes kept" "a|b|c
+mine
+more|n" "$(cat "$W/a.txt")|$(cat "$W/d/b.txt")|$(cat "$W/d/c.txt")|$(cat "$W/own.txt")"
+check "the layer's new files gone" test ! -e "$W/nla.txt" -a ! -e "$W/nd"
+eq "git back, seeing only own changes" " M d/c.txt
+?? own.txt" "$(git -C "$W" status --short)"
+echo again >>"$MNT/la/a.txt"
+check "layer on again" "$BIN" -C "$W" layer on la
+eq "still the layer's work as added" "a
+la" "$(cat "$W/a.txt")"
+check "update: the layer's work as now" "$BIN" -C "$W" layer update
+eq "the newer work shows" "a
+la
+again" "$(cat "$W/a.txt")"
+"$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
+mount_fs
+eq "shown again after a remount" "a
+la
+again" "$(cat "$W/a.txt")"
+check "and git still off" fails git -C "$W" status
+check "rm the layer" "$BIN" -C "$W" layer rm la
+check "rm the other" "$BIN" -C "$W" layer rm lb
+eq "no layers: git back" " M d/c.txt
+?? own.txt" "$(git -C "$W" status --short)"
+check "an unknown layer (exit 3)" sh -c "'$BIN' -C '$W' layer off nope; [ \$? = 3 ]"
+}
+
+section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "seal: uncommitted work as a commit" seal_uncommitted_work_as_a_commit
 section "mix: workspaces merged into a snapshot" mix_workspaces_into_a_snapshot
 finish

@@ -15,6 +15,7 @@
 //!
 //! The base follows the branch tip (`rebase`), without visible effect.
 //!
+//! - `lens`: other workspaces' work shown over the base (layers).
 //! - `nodes`: local id ↔ (parent, name) table.
 //! - `rebase`: moving the base to the branch tip.
 //! - `reads`: recording the files read in it (`gitfold overlaps`).
@@ -24,6 +25,7 @@
 //! What a workspace stores, and what commands read from it without a mount
 //! (its changes, the removal rules, forks, the task folder), is `state`.
 
+mod lens;
 mod nodes;
 mod reads;
 mod rebase;
@@ -72,6 +74,8 @@ pub enum Obj {
     LowerFile {
         file_id: u32,
         stamp: Option<Stamp>,
+        /// A layer's (see `lens`): not writable here.
+        mixed: bool,
     },
 }
 
@@ -98,8 +102,10 @@ pub struct Workspace {
     /// The last rebase failed, maybe after copying files up, or none ran yet in
     /// this process (a killed one may have left unsynced copies; see `rebase`).
     rebase_failed: AtomicBool,
-    /// Content of the virtual `.git` file in the workspace root.
-    pub gitfile: Arc<Vec<u8>>,
+    /// Content of the virtual `.git` file in the workspace root: the worktree
+    /// registration, or while layers are shown, a message git prints (see
+    /// `lens`).
+    gitfile: RwLock<Arc<Vec<u8>>>,
     /// Everything the merged view is computed from but upper; also the lock
     /// every mutation takes exclusively and every read shared.
     layers: RwLock<Layers>,
@@ -129,6 +135,12 @@ pub struct Workspace {
 struct Layers {
     base: ObjectId,
     base_tree: u32,
+    /// What lookups and listings show below upper: the base's tree, or with
+    /// layers shown, the view tree (see `lens`), with its id.
+    view_tree: u32,
+    view: ObjectId,
+    /// The paths shown layers changed, with the layer's index (see `lens`).
+    mixed: std::collections::HashMap<Vec<u8>, usize>,
     /// Whiteouts and opaque markers.
     markers: Markers,
     times: Times,
@@ -192,6 +204,11 @@ impl Page<'_> {
                 stamp: (!self.layers.times.is_empty())
                     .then(|| self.layers.times.get(&join(&self.listing.dir, name)))
                     .flatten(),
+                mixed: !self.layers.mixed.is_empty()
+                    && self
+                        .layers
+                        .mixed
+                        .contains_key(&join(&self.listing.dir, name)),
             },
         })
     }
@@ -233,26 +250,33 @@ impl Workspace {
             // Written last: its presence means "workspace exists".
             state.write_base(&base.id)?;
         }
-        let layers = Layers {
+        let mut layers = Layers {
             base: base.id,
             base_tree,
+            view_tree: base_tree,
+            view: base.tree,
+            mixed: Default::default(),
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,
         };
+        let lensed = lens::open_view(store, &state, &mut layers)?;
         // Copy-ups a crash interrupted; their target was never replaced.
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
         // The registration's directory name is deterministic, so the `.git`
         // file can be written before the workspace exists.
-        let gitfile = format!("gitdir: {}\n", state.admin.display()).into_bytes();
+        let gitfile = match &lensed {
+            Some(message) => message.clone(),
+            None => format!("gitdir: {}\n", state.admin.display()).into_bytes(),
+        };
         Ok(Workspace {
             upper,
             task: None,
             state,
             pinned: Mutex::new(None),
             rebase_failed: AtomicBool::new(true),
-            gitfile: Arc::new(gitfile),
+            gitfile: RwLock::new(Arc::new(gitfile)),
             layers: RwLock::new(layers),
             nodes: Mutex::new(Nodes::default()),
             copy_lock: Mutex::new(()),
@@ -307,7 +331,12 @@ impl Workspace {
     }
 
     fn lower(store: &Store, layers: &Layers, path: &[u8]) -> Option<Lower> {
-        store.entry_at(layers.base_tree, path)
+        store.entry_at(layers.view_tree, path)
+    }
+
+    /// The content of the virtual `.git` file.
+    pub fn gitfile(&self) -> Arc<Vec<u8>> {
+        self.gitfile.read().clone()
     }
 
     /// Whether the lower entry at `path` is hidden by a whiteout or an opaque
@@ -342,6 +371,7 @@ impl Workspace {
             Some(Lower::File(file_id)) => Ok(Obj::LowerFile {
                 file_id,
                 stamp: layers.times.get(path),
+                mixed: !layers.mixed.is_empty() && layers.mixed.contains_key(path),
             }),
             None => Err(Errno::ENOENT),
         }

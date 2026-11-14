@@ -90,6 +90,15 @@ impl Nodes {
         Some(parts.join(&b'/'))
     }
 
+    /// The node of `path` (local 0 for ""), if the kernel holds it, and so
+    /// every directory on the way.
+    pub(super) fn held(&self, path: &[u8]) -> Option<u64> {
+        if path.is_empty() {
+            return Some(0);
+        }
+        (path.split(|&b| b == b'/')).try_fold(0, |parent, name| self.existing(parent, name))
+    }
+
     fn existing(&self, parent: u64, name: &[u8]) -> Option<u64> {
         let is = |&local: &u64| {
             self.get(local)

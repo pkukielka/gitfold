@@ -82,6 +82,9 @@ pub enum Request {
     /// read, in the open, tracked workspaces they are in, as Claude Code's
     /// hook reports them.
     RecordReads { paths: Vec<String> },
+    /// Show the layers stored for the workspace of `branch` (just changed),
+    /// if it is open.
+    Lens { branch: String },
 }
 
 impl Request {
@@ -103,6 +106,7 @@ impl Request {
             Request::Prewarm { branch } => format!("prewarm\n{branch}\n"),
             Request::TrackReads { branch } => format!("track-reads\n{branch}\n"),
             Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
+            Request::Lens { branch } => format!("lens\n{branch}\n"),
             Request::Version => "version\n".to_string(),
             // NUL-separated: a path may hold a newline.
             Request::RecordReads { paths } => format!("record-reads\n{}", paths.join("\0")),
@@ -137,6 +141,9 @@ impl Request {
                 to: to.to_string(),
             }),
             ["version", ""] => Ok(Request::Version),
+            ["lens", branch, ""] => Ok(Request::Lens {
+                branch: branch.to_string(),
+            }),
             _ => bail!(UNKNOWN),
         }
     }
@@ -319,6 +326,9 @@ mod tests {
                 branch: n.to_string(),
             });
             requests.push(Request::TrackReads {
+                branch: n.to_string(),
+            });
+            requests.push(Request::Lens {
                 branch: n.to_string(),
             });
             requests.push(Request::Fork {
