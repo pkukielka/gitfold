@@ -360,7 +360,8 @@ decision that creates them.
   ([workspaces](#writable-workspaces-copy-on-write-inside-gitfold))
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
   the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times`,
-  `reads` and `lens` record formats, `lens-git-off`, `upper/`), task folders
+  `reads`, `lens` and `lens-applied` record formats, `lens-git-off`,
+  `upper/`), task folders
   in `.git/gitfold/.tasks/<id>/` and the message format of their inboxes
   (README, "Messages"), the base-pinning ref `refs/gitfold/<id>`, the seal
   refs `refs/gitfold-seal/<id>/<n>`, the lens ref `refs/gitfold-lens/<id>`
@@ -1289,6 +1290,17 @@ a snapshot, with no change to any workspace.
 
 **Why:**
 
+- **What was applied, apart from what is stored:** `lens` is what the user
+  (or a hook) asked for; `lens-applied` is what the daemon last applied: the
+  layers file then, the paths git was told to skip, the blended paths, the
+  lens commit. A workspace opens showing what was applied, so the view and
+  the index, excludes and HEAD always describe the same layers, and the sync
+  thread then switches to the stored layers if they differ (changed while
+  the workspace was closed, or a switch that failed half-way). A switch the
+  daemon refuses puts the stored layers back. Without the split, a layer
+  added while unmounted showed at the next mount with git never told: `git
+  commit -a` committed its files. Switches and the sync thread (extraction,
+  rebases) take one lock per workspace, so they never interleave.
 - **The view tree as the lower layer:** `Workspace::lower` already reads one
   stored tree, so lookups, listings, `getattr` and reads needed no new code
   (only `mixed` on lower files, for their write bits). Upper still wins over

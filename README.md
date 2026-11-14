@@ -640,8 +640,11 @@ depend on lines that would go (see below); 2 usage errors, 1 other errors
   reason above.
 - **Stored** in the workspace's state directory: `lens`, rewritten whole,
   `version 1` and then one line per layer, bottom first: `layer <branch> TAB
-  <on|off> TAB <seal> TAB <merge base>`; `lens-git-off`, while git is turned
-  off, holds why. While files are blended, the worktree's HEAD is the lens
+  <on|off> TAB <seal> TAB <merge base>`; `lens-applied`, what the daemon
+  last applied (the layers file then, the paths git was told to skip, the
+  blended paths, the lens commit), so a workspace opens as git was told and
+  then catches up with the stored layers; `lens-git-off`, while git is
+  turned off, holds why. While files are blended, the worktree's HEAD is the lens
   commit (found again on a remount), and `refs/gitfold-lens/<id>` keeps it
   and the view from `git gc`. A fork (`branch -w`) starts without layers.
 - **Limitations.** A file both workspaces changed shows this workspace's
