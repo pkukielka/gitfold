@@ -84,19 +84,15 @@ impl Lens {
 
     /// Stores them (no file when there are none).
     pub fn write(&self, state: &StateDir) -> Result<()> {
-        let path = state.dir.join(LENS);
-        if self.layers.is_empty() {
-            return match fs::remove_file(&path) {
-                Err(e) if !not_found(&e) => Err(e.into()),
-                _ => Ok(()),
-            };
+        let mut text = String::new();
+        if !self.layers.is_empty() {
+            text += "version 1\n";
         }
-        let mut text = String::from("version 1\n");
         for l in &self.layers {
             let on = if l.on { "on" } else { "off" };
             text += &format!("layer {}\t{on}\t{}\t{}\n", l.branch, l.seal, l.merge_base);
         }
-        Ok(write_atomic(&path, text.as_bytes())?)
+        store_bytes(state, text.as_bytes())
     }
 
     /// Whether any layer is shown.
@@ -104,44 +100,52 @@ impl Lens {
         self.layers.iter().any(|l| l.on)
     }
 
+    /// The layers shown, bottom first.
+    pub fn shown(&self) -> impl Iterator<Item = &Layer> {
+        self.layers.iter().filter(|l| l.on)
+    }
+
+    /// The subject of the lens commit of workspace `branch` showing them.
+    pub fn subject(&self, branch: &str) -> String {
+        let names: Vec<&str> = self.shown().map(|l| l.branch.as_str()).collect();
+        git::lens::lens_subject(branch, &names)
+    }
+
     pub fn find(&self, branch: &str) -> Option<usize> {
         self.layers.iter().position(|l| l.branch == branch)
     }
 }
 
-/// Whether any workspace of the repository at `common_dir` has `branch`'s
-/// work as a layer.
-pub fn shown_anywhere(common_dir: &std::path::Path, branch: &str) -> Result<bool> {
-    let needle = format!("\nlayer {branch}\t");
-    let Ok(dirs) = fs::read_dir(super::state_root(common_dir)) else {
-        return Ok(false);
-    };
-    Ok(dirs
-        .flatten()
-        .any(|d| fs::read_to_string(d.path().join(LENS)).is_ok_and(|text| text.contains(&needle))))
+/// Every workspace's layers stored in the repository at `common_dir`, and
+/// with `applied`, those applied too; files that can't be read are left out.
+fn every_lens(common_dir: &std::path::Path, applied: bool) -> impl Iterator<Item = Lens> {
+    let dirs = fs::read_dir(super::state_root(common_dir))
+        .into_iter()
+        .flatten();
+    dirs.flatten().flat_map(move |dir| {
+        let stored = fs::read(dir.path().join(LENS)).ok();
+        let stored = stored.and_then(|data| Lens::parse(&data).ok());
+        let applied = (applied
+            .then(|| fs::read(dir.path().join(APPLIED)).ok())
+            .flatten())
+        .and_then(|data| Applied::parse(&data).ok())
+        .and_then(|a| a.layers().ok());
+        stored.into_iter().chain(applied)
+    })
 }
 
-/// Every seal a workspace's layers name, stored or applied (hex ids): their
-/// refs are kept (`seal`).
-pub fn named_seals(common_dir: &std::path::Path) -> std::collections::HashSet<String> {
-    let mut named = std::collections::HashSet::new();
-    let Ok(dirs) = fs::read_dir(super::state_root(common_dir)) else {
-        return named;
-    };
-    for dir in dirs.flatten() {
-        for file in [LENS, APPLIED] {
-            let Ok(data) = fs::read(dir.path().join(file)) else {
-                continue;
-            };
-            let text = String::from_utf8_lossy(&data);
-            for line in text.lines().filter_map(|l| l.strip_prefix("layer ")) {
-                if let Some(seal) = line.split('\t').nth(2) {
-                    named.insert(seal.to_string());
-                }
-            }
-        }
-    }
-    named
+/// Whether any workspace of the repository at `common_dir` has `branch`'s
+/// work as a layer.
+pub fn shown_anywhere(common_dir: &std::path::Path, branch: &str) -> bool {
+    every_lens(common_dir, false).any(|lens| lens.find(branch).is_some())
+}
+
+/// Every seal a workspace's layers name, stored or applied: their refs are
+/// kept (`seal`).
+pub fn named_seals(common_dir: &std::path::Path) -> HashSet<ObjectId> {
+    every_lens(common_dir, true)
+        .flat_map(|lens| lens.layers.into_iter().map(|l| l.seal))
+        .collect()
 }
 
 /// What a workspace with layers shows below its own changes.
@@ -259,7 +263,12 @@ impl Applied {
             Err(e) if not_found(&e) => return Ok(Applied::default()),
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
-        let bad = || anyhow::anyhow!("{}: not a file this gitfold knows", path.display());
+        Applied::parse(&data).with_context(|| format!("reading {}", path.display()))
+    }
+
+    /// A `lens-applied` file's content.
+    pub fn parse(data: &[u8]) -> Result<Applied> {
+        let bad = || anyhow::anyhow!("not a file this gitfold knows");
         let mut rest = data.strip_prefix(b"version 1\n").ok_or_else(bad)?;
         let mut oid = |key: &[u8]| -> Result<Option<ObjectId>> {
             rest = rest.strip_prefix(key).ok_or_else(bad)?;
@@ -328,15 +337,16 @@ pub fn stored_bytes(state: &StateDir) -> Result<Vec<u8>> {
     }
 }
 
-/// Puts back the layers file content `before` (empty: none), after the daemon
-/// refused to apply a change.
-pub fn restore(state: &StateDir, before: &[u8]) -> Result<()> {
+/// Stores `data` as the layers file of the workspace in `state` (empty: no
+/// file). Also puts back what `stored_bytes` read, after the daemon refused
+/// to apply a change.
+pub fn store_bytes(state: &StateDir, data: &[u8]) -> Result<()> {
     let path = state.dir.join(LENS);
-    if before.is_empty() {
+    if data.is_empty() {
         return match fs::remove_file(&path) {
             Err(e) if !not_found(&e) => Err(e.into()),
             _ => Ok(()),
         };
     }
-    Ok(write_atomic(&path, before)?)
+    Ok(write_atomic(&path, data)?)
 }

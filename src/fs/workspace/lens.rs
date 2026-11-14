@@ -105,10 +105,7 @@ struct GitPlan {
 
 /// The `.git` content while git is surrendered: git prints the path it names.
 fn surrendered(lens: &Lens, why: &str) -> Vec<u8> {
-    let shown: Vec<&str> = (lens.layers.iter())
-        .filter(|l| l.on)
-        .map(|l| l.branch.as_str())
-        .collect();
+    let shown: Vec<&str> = lens.shown().map(|l| l.branch.as_str()).collect();
     format!(
         "gitdir: /LENS ON ({}): git is off here ({why}). Run gitfold lens off to use git\n",
         shown.join("+")
@@ -573,15 +570,8 @@ impl Workspace {
         tip: ObjectId,
     ) -> Result<()> {
         let (admin, branch) = (&self.state.admin, &self.state.branch);
-        let names: Vec<&str> = (stored.layers.iter())
-            .filter(|l| l.on)
-            .map(|l| l.branch.as_str())
-            .collect();
-        let subject = git::lens::lens_subject(branch, &names);
-        let all_seals: Vec<ObjectId> = (stored.layers.iter())
-            .filter(|l| l.on)
-            .map(|l| l.seal)
-            .collect();
+        let subject = stored.subject(branch);
+        let all_seals: Vec<ObjectId> = stored.shown().map(|l| l.seal).collect();
         let (l, vc) = git::with_repo(|repo| -> Result<(ObjectId, ObjectId)> {
             let l = git::lens::lens_commit(repo, hunk, tip, &view.hunk_seals, &subject)?;
             let vc = git::lens::view_commit(repo, view.tree, l, &all_seals, &subject)?;
@@ -729,16 +719,12 @@ impl Workspace {
         if head == l || *self.lens_blocked.lock() == Some(head) {
             return Ok(());
         }
-        let stored = Lens::parse(&self.layers.read().applied.lens)?;
+        let stored = self.layers.read().applied.layers()?;
         let tip = git::branch_tip(branch)?;
         let Some(view) = lens::view(&self.state.common_dir, &tip.id, &stored)? else {
             return Ok(());
         };
-        let names: Vec<&str> = (stored.layers.iter())
-            .filter(|l| l.on)
-            .map(|l| l.branch.as_str())
-            .collect();
-        let subject = git::lens::lens_subject(branch, &names);
+        let subject = stored.subject(branch);
         let blended = &view.blended;
         let owners =
             |p: &BStr| -> Vec<usize> { blended.get(p.as_bytes()).cloned().unwrap_or_default() };
@@ -791,7 +777,7 @@ impl Workspace {
 
     /// Turns git off in it, saying why, and tells the kernel.
     fn surrender(&self, why: &str) -> Result<()> {
-        let stored = Lens::parse(&self.layers.read().applied.lens)?;
+        let stored = self.layers.read().applied.layers()?;
         if self.gitfile.read().starts_with(&surrendered(&stored, why)) {
             return Ok(());
         }

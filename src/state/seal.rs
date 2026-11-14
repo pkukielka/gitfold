@@ -78,7 +78,7 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
     // The oldest go, unless a workspace's layers name them.
     let named = super::lens::named_seals(&state.common_dir);
     let old = seals.iter().take((seals.len() + 1).saturating_sub(KEPT));
-    for (old, _) in old.filter(|(_, c)| !named.contains(&c.to_string())) {
+    for (old, _) in old.filter(|(_, c)| !named.contains(c)) {
         let name = format!("{}{old}", ref_prefix(&state.id));
         git::cmd::run(&state.common_dir, &["update-ref", "-d", &name])?;
     }

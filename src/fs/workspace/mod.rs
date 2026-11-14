@@ -224,11 +224,9 @@ impl Page<'_> {
                 stamp: (!self.layers.times.is_empty())
                     .then(|| self.layers.times.get(&join(&self.listing.dir, name)))
                     .flatten(),
+                // The path joined only while layers show.
                 mixed: !self.layers.mixed.is_empty()
-                    && self
-                        .layers
-                        .mixed
-                        .contains_key(&join(&self.listing.dir, name)),
+                    && Workspace::is_mixed(self.layers, &join(&self.listing.dir, name)),
             },
         })
     }
@@ -399,7 +397,7 @@ impl Workspace {
             Some(Lower::File(file_id)) => Ok(Obj::LowerFile {
                 file_id,
                 stamp: layers.times.get(path),
-                mixed: !layers.mixed.is_empty() && layers.mixed.contains_key(path),
+                mixed: Self::is_mixed(layers, path),
             }),
             None => Err(Errno::ENOENT),
         }

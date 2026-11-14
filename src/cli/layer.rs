@@ -59,12 +59,6 @@ pub struct LensArgs {
     pub workspace: Option<String>,
 }
 
-enum Kind {
-    On,
-    Off,
-    Rm,
-}
-
 /// `gitfold layer`.
 pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     let name = super::branch_or_current(args.workspace, repo)?;
@@ -80,10 +74,9 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     let Some(op) = args.op else {
         bail!("name what to do: add, on, off, rm, update or list (see --help)");
     };
-    let op_kind = match &op {
-        LayerOp::On { .. } => Kind::On,
-        LayerOp::Off { .. } => Kind::Off,
-        _ => Kind::Rm,
+    let find = |lens: &Lens, branch: &str| {
+        lens.find(branch)
+            .ok_or_else(|| Refusal::NotFound.error(format!("{branch} isn't a layer of {name}")))
     };
     match op {
         LayerOp::List => {
@@ -98,17 +91,17 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             let layer = layer_of(&store, &common_dir, &state, &branch)?;
             lens.layers.push(layer);
         }
-        LayerOp::On { branch } | LayerOp::Off { branch } | LayerOp::Rm { branch } => {
-            let i = lens.find(&branch).ok_or_else(|| {
-                Refusal::NotFound.error(format!("{branch} isn't a layer of {name}"))
-            })?;
-            match op_kind {
-                Kind::On => lens.layers[i].on = true,
-                Kind::Off => lens.layers[i].on = false,
-                Kind::Rm => {
-                    lens.layers.remove(i);
-                }
-            }
+        LayerOp::On { branch } => {
+            let i = find(&lens, &branch)?;
+            lens.layers[i].on = true;
+        }
+        LayerOp::Off { branch } => {
+            let i = find(&lens, &branch)?;
+            lens.layers[i].on = false;
+        }
+        LayerOp::Rm { branch } => {
+            let i = find(&lens, &branch)?;
+            lens.layers.remove(i);
         }
         LayerOp::Update => {
             for layer in &mut lens.layers {
@@ -199,7 +192,7 @@ fn deny_hook() -> Result<()> {
             return Ok(None);
         };
         // What is shown, which a pending switch may not have changed yet.
-        let lens = Lens::parse(&crate::state::lens::Applied::read(&state)?.lens)?;
+        let lens = crate::state::lens::Applied::read(&state)?.layers()?;
         if !lens.is_on() {
             return Ok(None);
         }
@@ -249,7 +242,7 @@ fn changed_by_any(lens: &Lens, path: &[u8]) -> Result<bool> {
             let tree = repo.find_commit(commit)?.tree_id()?.detach();
             git::lens::lookup(repo, tree, path.into())
         };
-        for layer in lens.layers.iter().filter(|l| l.on) {
+        for layer in lens.shown() {
             if at(layer.merge_base)? != at(layer.seal)? {
                 return Ok(true);
             }
@@ -296,7 +289,7 @@ fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<S
     let before = crate::state::lens::stored_bytes(state)?;
     lens.write(state)?;
     apply(common_dir, &state.branch).inspect_err(|_| {
-        if let Err(e) = crate::state::lens::restore(state, &before) {
+        if let Err(e) = crate::state::lens::store_bytes(state, &before) {
             log::warn!("putting the layers back: {e:#}");
         }
     })

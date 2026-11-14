@@ -51,7 +51,7 @@ pub fn seal_hook() -> Result<()> {
         let repo = super::repo()?;
         let name = super::branch_or_current(None, &repo)?;
         let common_dir = git::init(&repo)?;
-        if !crate::state::lens::shown_anywhere(&common_dir, &name)? {
+        if !crate::state::lens::shown_anywhere(&common_dir, &name) {
             return Ok(());
         }
         seal::seal(&Store::default(), &StateDir::of(&common_dir, &name))?;

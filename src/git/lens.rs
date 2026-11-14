@@ -240,15 +240,6 @@ impl View {
         let set: BTreeSet<usize> = self.blended.values().flatten().copied().collect();
         set.into_iter().collect()
     }
-
-    /// The layers whose content is at `path` in M.
-    #[cfg(test)]
-    pub fn owners(&self, path: &BStr) -> Vec<usize> {
-        match self.mixed.get(path) {
-            Some(layer) => vec![*layer],
-            None => self.blended.get(path).cloned().unwrap_or_default(),
-        }
-    }
 }
 
 /// Something about a view the agent should hear.
@@ -708,7 +699,7 @@ pub struct Lens<'a> {
     /// The subject of L' (see `lens_subject`).
     pub subject: &'a str,
     pub is_hunk: &'a dyn Fn(&BStr) -> bool,
-    /// The layers whose content is at a path, for conflicts (`View::owners`).
+    /// The layers whose content is at a path, for conflicts.
     pub owners: &'a dyn Fn(&BStr) -> Vec<usize>,
 }
 
@@ -1129,6 +1120,14 @@ mod tests {
         path == "registry.txt"
     }
 
+    /// The layers whose content is at `path` in M (`Lens::owners`).
+    fn owners_of(view: &View, path: &BStr) -> Vec<usize> {
+        match view.mixed.get(path) {
+            Some(layer) => vec![*layer],
+            None => view.blended.get(path).cloned().unwrap_or_default(),
+        }
+    }
+
     fn registries(paths: &[BString]) -> Result<HashSet<BString>> {
         Ok(paths
             .iter()
@@ -1219,9 +1218,9 @@ mod tests {
              docs/guide.md:1 docs/manual.md:1 lib/legacy.c:2 src/core.c:2 src/feature_a.c:1 \
              src/feature_b.c:2 src/old.c:1 src/util.c:1"
         );
-        assert_eq!(view.owners("src/util.c".into()), [1]);
-        assert_eq!(view.owners("registry.txt".into()), [1]);
-        assert_eq!(view.owners("README.md".into()), Vec::<usize>::new());
+        assert_eq!(owners_of(&view, "src/util.c".into()), [1]);
+        assert_eq!(owners_of(&view, "registry.txt".into()), [1]);
+        assert_eq!(owners_of(&view, "README.md".into()), Vec::<usize>::new());
 
         // Git merges the three branches into the same tree.
         let ab = r.merge_tree(base, r.id("contracts"), r.id("a")).unwrap();
@@ -1423,7 +1422,7 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert_eq!(chain(&repo, base, l, 10).unwrap(), Some(vec![l]));
         assert_eq!(chain(&repo, seals[0], head, 10).unwrap(), None);
-        let owners = |p: &BStr| view.owners(p);
+        let owners = |p: &BStr| owners_of(&view, p);
         let lens = Lens {
             seals: &seals,
             subject: &subject,
@@ -1502,7 +1501,7 @@ mod tests {
         let promoted = [(BStr::new("src/util.c"), Change::Set(util.unwrap().unwrap()))];
         let hunk_tree = edit_tree(&repo, view.hunk_tree, promoted).unwrap();
         let l = lens_commit(&repo, hunk_tree, base, &seals, "lens").unwrap();
-        let owners = |p: &BStr| view.owners(p);
+        let owners = |p: &BStr| owners_of(&view, p);
         let lens = Lens {
             seals: &seals,
             subject: "lens",
