@@ -46,7 +46,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use gix::ObjectId;
 use gix::bstr::{BStr, BString, ByteSlice};
 use gix::merge::blob::Resolution;
@@ -924,37 +924,19 @@ pub fn advance(
     tip: (ObjectId, ObjectId),
     head: (ObjectId, ObjectId),
 ) -> Result<()> {
-    use std::io::Write;
     let mut script = String::new();
     if tip.0 != tip.1 {
         script += &format!("update refs/heads/{branch} {} {}\n", tip.1, tip.0);
     }
     script += &format!("update HEAD {} {}\n", head.1, head.0);
-    let mut child = super::cmd::command(admin)
-        .args([
-            "update-ref",
-            "--no-deref",
-            "-m",
-            "gitfold: extract",
-            "--stdin",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .context("stdin")?
-        .write_all(script.as_bytes())?;
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!(
-            "git update-ref failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+    let args = [
+        "update-ref",
+        "--no-deref",
+        "-m",
+        "gitfold: extract",
+        "--stdin",
+    ];
+    super::cmd::output_with_input(admin, &args, script.into_bytes())?;
     Ok(())
 }
 

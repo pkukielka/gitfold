@@ -21,7 +21,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
@@ -301,32 +300,23 @@ pub fn set_skip_worktree_by_git(
     } else {
         "--no-skip-worktree"
     };
-    let mut child = cmd::command(git_dir)
-        .arg("--work-tree")
-        .arg(work_tree)
-        .args(["update-index", "-z", flag, "--stdin"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("running git update-index")?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
     let mut input = Vec::with_capacity(paths.iter().map(|p| p.len() + 1).sum());
     for path in paths {
         input.extend_from_slice(path);
         input.push(0);
     }
-    // A write error means git exited early; its status says why.
-    let _ = stdin.write_all(&input);
-    drop(stdin);
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        bail!(
-            "git update-index {flag} failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+    let work_tree = work_tree
+        .to_str()
+        .context("the work tree's path isn't UTF-8")?;
+    let args = [
+        "--work-tree",
+        work_tree,
+        "update-index",
+        "-z",
+        flag,
+        "--stdin",
+    ];
+    cmd::output_with_input(git_dir, &args, input)?;
     Ok(())
 }
 

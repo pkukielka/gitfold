@@ -3,6 +3,7 @@
 //! `gix::Repository` is not `Sync`, so each thread lazily gets its own handle
 //! derived from one shared `ThreadSafeRepository`.
 //!
+//! - `attr`: attributes as git reads them for a commit.
 //! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
 //! - `index_edit`: editing an index git wrote (skip-worktree bits).
@@ -11,6 +12,7 @@
 //! - `promisor`: partial clones, fetching what loads miss.
 //! - `worktree_config`: a worktree's own excludes and hooks (layers).
 
+pub mod attr;
 pub mod cmd;
 pub mod index;
 // Parts are for later layers phases (blended files, the push guard).
@@ -264,6 +266,16 @@ pub fn require_branch(name: &str) -> Result<()> {
         true => Ok(()),
         false => Err(crate::refusal::Refusal::NotFound.error(format!("no branch {name}"))),
     }
+}
+
+/// The best common ancestor of commits `a` and `b`, as `git merge-base`
+/// picks it.
+pub fn merge_base(a: ObjectId, b: ObjectId) -> Result<ObjectId> {
+    let common_dir = with_repo(|repo| repo.common_dir().to_path_buf());
+    let out = cmd::output(&common_dir, &["merge-base", &a.to_string(), &b.to_string()])?;
+    Ok(ObjectId::from_hex(
+        String::from_utf8_lossy(&out).trim().as_bytes(),
+    )?)
 }
 
 /// The commit branch `name` points at.

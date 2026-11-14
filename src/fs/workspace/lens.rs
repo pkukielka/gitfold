@@ -55,7 +55,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result};
 use fuser::INodeNo;
 use gix::ObjectId;
-use gix::bstr::{BStr, ByteSlice};
+use gix::bstr::{BStr, BString, ByteSlice};
 use gix::objs::tree::EntryKind;
 
 use super::times::Stamp;
@@ -278,7 +278,7 @@ impl Workspace {
             // Under the write lock: no write to a blended file can land
             // between reading it and replacing it.
             let carried = self.carry_over(&layers, layers.hunk, new_hunk, &blended)?;
-            let changes = lens::changes(&self.state.common_dir, &layers.view, &new_view)
+            let changes = git::with_repo(|repo| git::lens::delta(repo, layers.view, new_view))
                 .context("comparing the views")?;
             // Past here the view changes: every failure is reported after the
             // kernel is told what changed.
@@ -769,7 +769,7 @@ impl Workspace {
         layers: &mut Layers,
         old: u32,
         new: u32,
-        changes: &[lens::Change],
+        changes: &[(BString, git::lens::Change)],
     ) -> Stale {
         let stamp = {
             let now = SystemTime::now();
@@ -791,14 +791,15 @@ impl Workspace {
         let mut stale = Stale::default();
         let mut entries = HashSet::new();
         let mut nodes = self.nodes.lock();
-        for c in changes {
-            if self.shadowed(layers, &c.path) {
+        for (path, _) in changes {
+            let path: &[u8] = path.as_ref();
+            if self.shadowed(layers, path) {
                 continue;
             }
             // The highest path that appeared, vanished or changed type is an
             // entry change in its directory; below it, nothing was cached.
-            let changed_at = ancestors(&c.path)
-                .chain(std::iter::once(c.path.as_slice()))
+            let changed_at = ancestors(path)
+                .chain(std::iter::once(path))
                 .find(|p| kind(old, p) != kind(new, p));
             match changed_at {
                 Some(at) if self.shadowed(layers, at) => {}
@@ -816,8 +817,8 @@ impl Workspace {
                     }
                 }
                 None => {
-                    layers.times.set(&c.path, Some(stamp));
-                    if let Some(local) = nodes.held(&c.path) {
+                    layers.times.set(path, Some(stamp));
+                    if let Some(local) = nodes.held(path) {
                         stale.inodes.push(local);
                     }
                 }

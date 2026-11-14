@@ -147,13 +147,12 @@ pub fn layer_hook(event: &str) -> Result<()> {
             if newest == layer.seal {
                 continue;
             }
-            let files = crate::state::lens::changes(&common_dir, &layer.seal, &newest)?.len();
-            let base = state.read_base()?.id;
-            let out = git::cmd::output(
-                &common_dir,
-                &["merge-base", &base.to_string(), &newest.to_string()],
-            )?;
-            layer.merge_base = ObjectId::from_hex(String::from_utf8_lossy(&out).trim().as_bytes())?;
+            let (from, to) = (
+                git::resolve(&layer.seal.to_string())?,
+                git::resolve(&newest.to_string())?,
+            );
+            let files = git::with_repo(|repo| git::lens::delta(repo, from.tree, to.tree))?.len();
+            layer.merge_base = git::merge_base(state.read_base()?.id, newest)?;
             layer.seal = newest;
             if layer.on {
                 moved.push(format!(
@@ -282,17 +281,11 @@ fn layer_of(store: &Store, common_dir: &Path, state: &StateDir, branch: &str) ->
         true => seal::seal(store, &theirs)?.commit,
         false => git::branch_tip(branch)?.id,
     };
-    let base = state.read_base()?.id;
-    let out = git::cmd::output(
-        common_dir,
-        &["merge-base", &base.to_string(), &seal.to_string()],
-    )?;
-    let merge_base = ObjectId::from_hex(String::from_utf8_lossy(&out).trim().as_bytes())?;
     Ok(Layer {
         branch: branch.to_string(),
         on: true,
         seal,
-        merge_base,
+        merge_base: git::merge_base(state.read_base()?.id, seal)?,
     })
 }
 

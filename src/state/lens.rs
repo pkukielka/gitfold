@@ -14,13 +14,12 @@
 //! one line per layer, bottom first: `layer <branch> TAB <on|off> TAB <seal>
 //! TAB <merge base>` (branch names hold no control characters).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 use gix::bstr::BString;
-use gix::objs::tree::EntryKind;
 
 use super::StateDir;
 use crate::fsutil::{not_found, write_atomic};
@@ -163,64 +162,6 @@ pub struct View {
     pub notes: Vec<String>,
 }
 
-/// One changed path between two trees, as `git diff-tree -r` reports it.
-pub struct Change {
-    pub path: Vec<u8>,
-    /// The new mode and blob; `None` for a deletion.
-    pub new: Option<(EntryKind, ObjectId)>,
-}
-
-/// The changes from tree-ish `from` to `to` (files and symlinks, recursively;
-/// no rename detection), deletions first.
-pub fn changes(
-    common_dir: &std::path::Path,
-    from: &ObjectId,
-    to: &ObjectId,
-) -> Result<Vec<Change>> {
-    let out = git::cmd::output(
-        common_dir,
-        &[
-            "diff-tree",
-            "-r",
-            "-z",
-            "--no-renames",
-            "--no-commit-id",
-            &from.to_string(),
-            &to.to_string(),
-        ],
-    )?;
-    let mut fields = out.split(|&b| b == 0);
-    let mut changes = Vec::new();
-    while let Some(meta) = fields.next() {
-        if meta.is_empty() {
-            continue;
-        }
-        let path = fields.next().context("diff-tree: no path")?.to_vec();
-        // `:<old mode> <new mode> <old oid> <new oid> <status>`
-        let meta = String::from_utf8_lossy(meta.strip_prefix(b":").unwrap_or(meta)).into_owned();
-        let parts: Vec<&str> = meta.split(' ').collect();
-        let [_, new_mode, _, new_oid, status] = parts[..] else {
-            bail!("diff-tree: unexpected {meta:?}");
-        };
-        let new = match status {
-            "D" => None,
-            _ => {
-                let kind = match new_mode {
-                    "100755" => EntryKind::BlobExecutable,
-                    "120000" => EntryKind::Link,
-                    "160000" => EntryKind::Commit,
-                    _ => EntryKind::Blob,
-                };
-                Some((kind, ObjectId::from_hex(new_oid.as_bytes())?))
-            }
-        };
-        changes.push(Change { path, new });
-    }
-    // A file can replace a deleted directory, and the other way round.
-    changes.sort_by_key(|c| c.new.is_some());
-    Ok(changes)
-}
-
 /// The view of `lens` over base commit `base`, or `None` if no layer is
 /// shown.
 ///
@@ -242,7 +183,14 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
             merge_base: lens.layers[i].merge_base,
         })
         .collect();
-    let hunk_paths = |paths: &[BString]| blend_attr(common_dir, base, paths);
+    let hunk_paths = |paths: &[BString]| -> Result<HashSet<BString>> {
+        let rev = base.to_string();
+        let values = git::attr::values(common_dir, &rev, "gitfold-blend", paths)?;
+        Ok((values.into_iter())
+            .filter(|(_, value)| value == "hunk")
+            .map(|(path, _)| path)
+            .collect())
+    };
     let view = git::with_repo(|repo| git::lens::build_view(repo, *base, &stack, &hunk_paths))?;
     let layer = |ix: usize| shown[ix];
     let name = |ix: usize| lens.layers[shown[ix]].branch.clone();
@@ -274,42 +222,6 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
             .collect(),
         notes,
     }))
-}
-
-/// Those of `candidates` (paths the base has that layers change) that are
-/// blended: `gitfold-blend` is `hunk` for them in the base's attributes.
-fn blend_attr(
-    common_dir: &std::path::Path,
-    base: &ObjectId,
-    candidates: &[BString],
-) -> Result<std::collections::HashSet<BString>> {
-    let mut child = git::cmd::command(common_dir)
-        .args([
-            "check-attr",
-            "-z",
-            "--stdin",
-            &format!("--source={base}"),
-            "gitfold-blend",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
-    let mut input = Vec::new();
-    for p in candidates {
-        input.extend_from_slice(p);
-        input.push(0);
-    }
-    let mut stdin = child.stdin.take().context("stdin")?;
-    let writer = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &input));
-    let out = child.wait_with_output()?;
-    let _ = writer.join();
-    anyhow::ensure!(out.status.success(), "git check-attr failed");
-    // path NUL attribute NUL value NUL ...
-    let fields: Vec<&[u8]> = out.stdout.split(|&b| b == 0).collect();
-    Ok((fields.chunks(3))
-        .filter(|f| f.len() == 3 && f[2] == b"hunk")
-        .map(|f| f[0].into())
-        .collect())
 }
 
 /// The file recording what the daemon last applied of a workspace's layers

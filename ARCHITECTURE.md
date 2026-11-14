@@ -148,8 +148,9 @@ Then, per request (`fs/workspace/`):
 | `src/refusal.rs` | why a command refused (typed, with its own exit code), carried over the control socket; every command's exit codes |
 | `src/main.rs` | the commands (clap: their help; the arguments are a struct next to each command's code) and their dispatch, exit codes, `M_MMAP_THRESHOLD` |
 | `src/inotify.rs` | an inotify watch on one directory (`watch`, `inbox --wait`) |
-| `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access, `info/exclude` |
-| `src/git/cmd.rs` | running git itself (`command`, `run`, `output`) |
+| `src/git/mod.rs` | thread-local gitoxide handles, tree, blob and ref access, merge bases, `merge-file`, `info/exclude` |
+| `src/git/cmd.rs` | running git itself (`command`, `run`, `output`, `output_with_input`) |
+| `src/git/attr.rs` | attributes as git reads them for a commit (`git check-attr --source`) |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check |
 | `src/git/index_edit.rs` | editing an index git wrote (v2, v3, v4): skip-worktree bits, stat data and ids of given paths, under git's `index.lock` protocol |
