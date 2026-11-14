@@ -8,6 +8,7 @@
 //! - `index_edit`: editing an index git wrote (skip-worktree bits).
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
+//! - `worktree_config`: a worktree's own excludes and hooks (layers).
 
 pub mod cmd;
 pub mod index;
@@ -16,6 +17,8 @@ pub mod index;
 pub mod index_edit;
 pub mod promisor;
 pub mod worktree;
+#[allow(dead_code)] // TODO(layers): until layers use it.
+pub mod worktree_config;
 
 use std::cell::RefCell;
 use std::fs;
@@ -28,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::LocalKey;
 use std::time::Instant;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 
@@ -294,12 +297,44 @@ pub fn exclude(common_dir: &Path, pattern: &[u8], why: &str) -> Result<()> {
 /// Anything else is an error, not a reason to fall back: a fallback could
 /// ignore more than git does.
 pub fn excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
+    excludes_file_scoped(git_dir, true)
+}
+
+/// `excludes_file` without the worktree's own config (`config.worktree`):
+/// the user's global ignore file, which gitfold's per-worktree one
+/// (`worktree_config::set_excludes`) replaces for git, so has to include.
+#[allow(dead_code)] // TODO(layers): until layers use `worktree_config`.
+pub fn user_excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
+    excludes_file_scoped(git_dir, false)
+}
+
+fn excludes_file_scoped(git_dir: &Path, worktree_scope: bool) -> Result<Option<PathBuf>> {
     let out = cmd::command(git_dir)
-        .args(["config", "--path", "--get", "core.excludesFile"])
+        .args(["config", "-z", "--show-scope", "--type=path"])
+        .args(["--get-all", "core.excludesFile"])
         .output()?;
-    match out.status.code() {
-        Some(0) => {
-            let value = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+    let value = match out.status.code() {
+        // `<scope>\0<value>\0` per value, in the order git reads them: the
+        // last one wins.
+        Some(0) => out
+            .stdout
+            .split(|b| *b == 0)
+            .collect::<Vec<_>>()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|[scope, _]| worktree_scope || *scope != b"worktree")
+            .map(|[_, value]| *value)
+            .next_back(),
+        Some(1) => None,
+        _ => bail!(
+            "git config core.excludesFile in {}: {}",
+            git_dir.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    };
+    match value {
+        Some(value) => {
             let path = PathBuf::from(std::ffi::OsStr::from_bytes(value));
             // Git resolves a relative one in the work tree, which isn't there
             // unmounted.
@@ -311,15 +346,10 @@ pub fn excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
             Ok((!value.is_empty()).then_some(path))
         }
         // Unset. As for git, an empty environment variable counts as unset too.
-        Some(1) => {
+        None => {
             let mut env = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
             Ok(gix::path::env::xdg_config("ignore", &mut env))
         }
-        _ => Err(anyhow!(
-            "git config core.excludesFile in {}: {}",
-            git_dir.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        )),
     }
 }
 
