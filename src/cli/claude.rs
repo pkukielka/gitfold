@@ -170,24 +170,28 @@ pub fn reads_hook() -> Result<()> {
 }
 
 fn report_reads(input: &str) -> Result<()> {
+    let cwd = cwd(input)?;
+    // The Read tool resolves `..` in its path lexically (it is Node's
+    // `path.resolve`); a Bash command's files are as `cat` gets them, `..`
+    // resolved by the filesystem below.
     let named = match field(input, "tool_name").as_deref() {
         Some("Read") => field_at(input, &["tool_input", "file_path"])
             .into_iter()
-            .map(PathBuf::from)
+            .map(|p| normalized(&cwd.join(p)))
             .collect(),
-        Some("Bash") => viewed(&field_at(input, &["tool_input", "command"]).unwrap_or_default()),
+        Some("Bash") => viewed(
+            &field_at(input, &["tool_input", "command"]).unwrap_or_default(),
+            &cwd,
+        ),
         _ => return Ok(()),
     };
     if named.is_empty() {
         return Ok(());
     }
-    let cwd = cwd(input)?;
     let mounts = mount_table::mounts()?;
     // Per mount (its git common dir), the paths below it.
     let mut reads: std::collections::BTreeMap<&Path, Vec<String>> = Default::default();
-    // `..` in a file operand is resolved by the filesystem, as cat does: only
-    // `cd` is logical (normalized in `simple_command`).
-    for path in named.iter().map(|p| cwd.join(p)) {
+    for path in named {
         // Its directory as the mount table has it (a symlink on the way
         // resolved), the file itself as named.
         let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
@@ -252,42 +256,65 @@ fn normalized(path: &Path) -> PathBuf {
 /// left out (its value isn't known), and what isn't a file in a workspace is
 /// dropped later. Small on purpose: a file read by anything else is seen,
 /// unless a search read it first.
-fn viewed(command: &str) -> Vec<PathBuf> {
+fn viewed(command: &str, cwd: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    let walk_all = |nodes: Vec<rable::Node>, files: &mut Vec<PathBuf>| {
-        let mut at = At::default();
-        for node in &nodes {
-            walk(node, &mut at, files);
-        }
+    let mut at = At {
+        dir: Some(cwd.to_path_buf()),
+        pushed: Vec::new(),
     };
-    match rable::parse(command, true) {
-        Ok(nodes) => walk_all(nodes, &mut files),
-        // Something it can't parse: the lines it can, on their own.
-        Err(_) => {
-            for line in command.lines() {
-                if let Ok(nodes) = rable::parse(line, true) {
-                    walk_all(nodes, &mut files);
-                }
-            }
+    let lines: Vec<&str> = command.split_inclusive('\n').collect();
+    // What rable can't parse whole: the longest runs of lines it can, in
+    // order (a heredoc's body stays with its command), the rest skipped.
+    let mut i = 0;
+    while i < lines.len() {
+        let parsed = (i + 1..=lines.len())
+            .rev()
+            .find_map(|j| Some((j, rable::parse(&lines[i..j].concat(), true).ok()?)));
+        let Some((j, nodes)) = parsed else {
+            i += 1;
+            continue;
+        };
+        for node in &nodes {
+            walk(node, &mut at, &mut files);
         }
+        i = j;
     }
     files
 }
 
-/// Where relative paths are while walking a command: `dir` relative to the
-/// hook's directory (`None` once unknown: `cd ~`, `cd -`, `cd $X`), and the
-/// `pushd` stack.
+/// Where relative paths are while walking a command: `dir`, absolute
+/// (`None` once unknown: `cd ~`, `cd -`, `cd $X`), and the `pushd` stack.
 #[derive(Clone)]
 struct At {
     dir: Option<PathBuf>,
     pushed: Vec<Option<PathBuf>>,
 }
 
-impl Default for At {
-    fn default() -> At {
-        At {
-            dir: Some(PathBuf::new()),
-            pushed: Vec::new(),
+impl At {
+    /// Where file operand `file` is: absolute paths always, relative ones
+    /// while `dir` is known.
+    fn file(&self, file: &str) -> Option<PathBuf> {
+        match Path::new(file).is_absolute() {
+            true => Some(PathBuf::from(file)),
+            false => Some(self.dir.as_ref()?.join(file)),
+        }
+    }
+}
+
+/// Command substitutions in `words` (`$(...)`, `<(...)`), each walked as the
+/// subshell it is.
+fn substitutions(words: &[rable::Node], at: &At, files: &mut Vec<PathBuf>) {
+    use rable::NodeKind as K;
+    for word in words {
+        let K::Word { parts, .. } = &word.kind else {
+            continue;
+        };
+        for part in parts {
+            if let K::CommandSubstitution { command, .. } | K::ProcessSubstitution { command, .. } =
+                &part.kind
+            {
+                walk(command, &mut at.clone(), files);
+            }
         }
     }
 }
@@ -298,14 +325,6 @@ fn walk(node: &rable::Node, at: &mut At, files: &mut Vec<PathBuf>) {
     // A subshell (and so its `cd`) is walked from a copy of `at`.
     let inner = |node: &rable::Node, at: &At, files: &mut Vec<PathBuf>| {
         walk(node, &mut at.clone(), files);
-    };
-    // Command substitutions in words, run before the command.
-    let substitutions = |words: &[rable::Node], at: &At, files: &mut Vec<PathBuf>| {
-        for word in words {
-            if let K::Word { parts, .. } = &word.kind {
-                parts.iter().for_each(|part| inner(part, at, files));
-            }
-        }
     };
     match &node.kind {
         K::Command {
@@ -400,10 +419,12 @@ fn walk(node: &rable::Node, at: &mut At, files: &mut Vec<PathBuf>) {
             redirections(redirects, at, files);
             walk(body, at, files);
         }
+        // Their terms are text (substitutions in them unseen): redirections.
+        K::ConditionalExpr { redirects, .. } | K::ArithmeticCommand { redirects, .. } => {
+            redirections(redirects, at, files);
+        }
         K::Negation { pipeline } | K::Time { pipeline, .. } => walk(pipeline, at, files),
-        K::Coproc { command, .. }
-        | K::CommandSubstitution { command, .. }
-        | K::ProcessSubstitution { command, .. } => inner(command, at, files),
+        K::Coproc { command, .. } => inner(command, at, files),
         _ => {}
     }
 }
@@ -426,21 +447,41 @@ fn simple_command(words: &[rable::Node], at: &mut At, files: &mut Vec<PathBuf>) 
         args.iter()
             .find(|a| !a.as_deref().is_some_and(|a| a.starts_with('-') && a != "-"))
     };
+    // Where `cd` or `pushd` goes: absolute, or relative to a known `dir`;
+    // logical, as the shell's (`a/..` is `.` whatever `a` is).
+    let to = |to: &str| match to {
+        to if to.starts_with('/') => Some(normalized(Path::new(to))),
+        to if to.starts_with('~') || to == "-" => None,
+        to => at.dir.as_ref().map(|d| normalized(&d.join(to))),
+    };
     match program.as_str() {
-        "cd" | "pushd" => {
-            let to = match operand() {
-                // Somewhere known: absolute, or relative to a known `dir`.
-                Some(Some(to)) if to.starts_with('/') => Some(PathBuf::from(to)),
-                Some(Some(to)) if !to.starts_with('~') && to != "-" && !to.starts_with('+') => {
-                    at.dir.as_ref().map(|d| normalized(&d.join(to)))
-                }
-                // Home, the previous directory, a stack entry, an expansion.
-                _ => None,
-            };
-            if program == "pushd" {
-                at.pushed.push(at.dir.take());
+        "cd" => {
+            // Home, the previous directory, an expansion: unknown.
+            at.dir = operand().cloned().flatten().and_then(|t| to(&t));
+            return;
+        }
+        // `-n` (the stack only) and `+N`/`-N` (rotations): the stack is
+        // unknown, and with `+N`/`-N` where it leaves us too.
+        "pushd" | "popd"
+            if args.iter().any(|a| {
+                a.as_deref().is_none_or(|a| {
+                    a == "-n"
+                        || a.len() > 1
+                            && a[1..].bytes().all(|b| b.is_ascii_digit())
+                            && (a.starts_with('+') || a.starts_with('-'))
+                })
+            }) =>
+        {
+            at.pushed = vec![None];
+            if !args.iter().any(|a| a.as_deref() == Some("-n")) {
+                at.dir = None;
             }
-            at.dir = to;
+            return;
+        }
+        "pushd" => {
+            let dir = operand().cloned().flatten().and_then(|t| to(&t));
+            at.pushed.push(at.dir.take());
+            at.dir = dir;
             return;
         }
         "popd" => {
@@ -480,10 +521,8 @@ fn simple_command(words: &[rable::Node], at: &mut At, files: &mut Vec<PathBuf>) 
         }
     }
     let skip = usize::from(program == "sed" && !script_given);
-    if let Some(dir) = &at.dir {
-        let operands = operands.into_iter().skip(skip).flatten();
-        files.extend(operands.filter(|f| *f != "-").map(|f| dir.join(f)));
-    }
+    let operands = operands.into_iter().skip(skip).flatten();
+    files.extend(operands.filter(|f| *f != "-").filter_map(|f| at.file(f)));
 }
 
 /// The files of `redirects` that are read: `<` and `<>` (not heredocs or
@@ -494,13 +533,11 @@ fn redirections(redirects: &[rable::Node], at: &At, files: &mut Vec<PathBuf>) {
         let rable::NodeKind::Redirect { op, target, .. } = &redirect.kind else {
             continue;
         };
-        if let rable::NodeKind::Word { parts, .. } = &target.kind {
-            parts.iter().for_each(|p| walk(p, &mut at.clone(), files));
-        }
+        substitutions(std::slice::from_ref(target), at, files);
         if matches!(op.as_str(), "<" | "<>")
-            && let (Some(dir), Some(file)) = (&at.dir, literal(target))
+            && let Some(file) = literal(target).and_then(|t| at.file(&t))
         {
-            files.push(dir.join(file));
+            files.push(file);
         }
     }
 }
@@ -511,6 +548,10 @@ fn literal(node: &rable::Node) -> Option<String> {
     let rable::NodeKind::Word { value, .. } = &node.kind else {
         return None;
     };
+    // A process substitution: a pipe, not a file name.
+    if value.starts_with("<(") || value.starts_with(">(") {
+        return None;
+    }
     let mut out = String::new();
     let mut chars = value.chars();
     while let Some(c) = chars.next() {
@@ -539,11 +580,11 @@ mod tests {
     /// The files simple viewers show, wherever they are in the command.
     #[test]
     fn viewed_files() {
+        // From /w, shown relative to it.
         let viewed = |c: &str| -> Vec<String> {
-            super::viewed(c)
-                .into_iter()
-                .map(|p| p.display().to_string())
-                .collect()
+            let files = super::viewed(c, Path::new("/w"));
+            let shown = |p: PathBuf| p.strip_prefix("/w").unwrap_or(&p).display().to_string();
+            files.into_iter().map(shown).collect()
         };
         assert_eq!(viewed("cat a.txt"), ["a.txt"]);
         assert_eq!(
@@ -608,11 +649,82 @@ mod tests {
         assert_eq!(viewed("echo $(cat inner) | head -n1 < in"), ["inner", "in"]);
         assert_eq!(viewed("f() { cat defined; }"), Vec::<String>::new());
         assert_eq!(viewed("! cat w"), ["w"]);
+        assert_eq!(viewed("not ( valid"), Vec::<String>::new());
         assert_eq!(
-            viewed("not ( valid"),
-            Vec::<String>::new(),
-            "a syntax error: nothing"
+            viewed("cat a\nnot ( valid\ncat b"),
+            ["a", "b"],
+            "the lines it can parse"
         );
+        assert_eq!(
+            viewed("cd d\ncat x\nnot ( valid\ncat > f <<'E'\ncat body\nE\ncat y"),
+            ["d/x", "d/y"],
+            "around a bad line: the cd kept, a heredoc's body still text"
+        );
+        assert_eq!(viewed("while read l; do :; done < list.txt"), ["list.txt"]);
+        assert_eq!(
+            viewed("if true; then :; fi < f; case x in *) :;; esac < g"),
+            ["f", "g"]
+        );
+        assert_eq!(
+            viewed("x=$(cat README.md); for f in $(cat files); do :; done"),
+            ["README.md", "files"]
+        );
+        assert_eq!(viewed("while read l; do :; done < <(cat x)"), ["x"]);
+        assert_eq!(
+            viewed("cd sub & cat x"),
+            ["x"],
+            "a background cd stays in it"
+        );
+        assert_eq!(
+            viewed("pushd src/fs && cat view.rs && popd && cat y"),
+            ["src/fs/view.rs", "y"]
+        );
+        assert_eq!(viewed("builtin cd d; command cat e"), ["d/e"]);
+        assert_eq!(
+            viewed("cd ~ && cd /m/ws/src && cat main.rs"),
+            ["/m/ws/src/main.rs"]
+        );
+        assert_eq!(
+            viewed("cat docs/../README"),
+            ["docs/../README"],
+            "left to the filesystem"
+        );
+        assert_eq!(viewed("cd a/../b && cat x"), ["b/x"], "cd is logical");
+        let from = |c: &str, cwd: &str| -> Vec<String> {
+            let files = super::viewed(c, Path::new(cwd));
+            files.into_iter().map(|p| p.display().to_string()).collect()
+        };
+        assert_eq!(
+            from("cd .. && cat Cargo.toml", "/m/crates/foo"),
+            ["/m/crates/Cargo.toml"]
+        );
+        assert_eq!(
+            from("cd ../bar && cat x", "/m/crates/foo"),
+            ["/m/crates/bar/x"]
+        );
+        assert_eq!(
+            from("cd /m/ws/link/.. && cat x", "/w"),
+            ["/m/ws/x"],
+            "logical"
+        );
+        assert_eq!(
+            viewed("cd ~ && cat /m/ws/a.rs < /m/ws/b"),
+            ["/m/ws/b", "/m/ws/a.rs"],
+            "absolute: known"
+        );
+        assert_eq!(
+            viewed("pushd -n /other && cat f"),
+            ["f"],
+            "-n: the stack only"
+        );
+        assert_eq!(
+            viewed("pushd a; pushd b; popd -n; cat x; popd; cat y"),
+            ["a/b/x"],
+            "then unknown"
+        );
+        assert_eq!(viewed("pushd +1; cat z"), Vec::<String>::new());
+        assert_eq!(viewed("cd +build && cat log"), ["+build/log"]);
+        assert_eq!(viewed("[[ -f x ]] < r; (( 1 )) < s"), ["r", "s"]);
     }
 
     #[test]
