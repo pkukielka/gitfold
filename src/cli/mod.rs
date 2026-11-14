@@ -31,25 +31,28 @@ use anyhow::{Result, bail};
 /// git directory). In a workspace showing layers, whose `.git` turns git away
 /// (see `fs::workspace::lens`), its registration, found from the mount.
 pub fn repo() -> Result<PathBuf> {
-    crate::git::discover(Path::new(".")).or_else(|e| in_lensed_workspace().ok_or(e))
+    crate::git::discover(Path::new(".")).or_else(|e| {
+        let cwd = std::env::current_dir()?;
+        workspace_at(&cwd).map(|(state, _)| state.admin).ok_or(e)
+    })
 }
 
-/// The registration of the workspace the current directory is in, below a
-/// gitfold mount: the longest leading path below the mount point that is a
-/// workspace (branches may hold a `/`).
-fn in_lensed_workspace() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
+/// The workspace `path` (absolute) is in, below a gitfold mount, and the path
+/// in it: the longest leading path below the mount point that is a workspace
+/// (branches may hold a `/`).
+pub fn workspace_at(path: &Path) -> Option<(crate::state::StateDir, String)> {
     let (mount, common_dir) = (crate::mount_table::mounts().ok()?)
         .into_iter()
-        .find(|(mount, _)| cwd.starts_with(mount))?;
-    let rest = cwd.strip_prefix(&mount).ok()?.to_str()?;
+        .find(|(mount, _)| path.starts_with(mount))?;
+    let rest = path.strip_prefix(&mount).ok()?.to_str()?;
     let mut found = None;
     let mut at = 0;
     loop {
         let end = rest[at..].find('/').map_or(rest.len(), |i| at + i);
         let state = crate::state::StateDir::of(&common_dir, &rest[..end]);
         if state.opened() {
-            found = Some(state.admin);
+            let inside = rest.get(end + 1..).unwrap_or_default().to_string();
+            found = Some((state, inside));
         }
         if end == rest.len() {
             return found;

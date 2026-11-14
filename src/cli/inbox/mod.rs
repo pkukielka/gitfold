@@ -29,7 +29,8 @@ use crate::inotify::{self, Inotify};
 use crate::settings;
 use crate::state::task::TaskDir;
 use crate::state::workspace_id;
-use message::{Message, json_str, messages, rfc3339, take};
+pub use message::json_str;
+use message::{Message, messages, rfc3339, take};
 
 /// How often a rewake waiter checks that the session that started it is
 /// still there.

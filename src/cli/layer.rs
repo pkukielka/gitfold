@@ -25,7 +25,9 @@ pub struct LayerArgs {
     /// As Claude Code's `UserPromptSubmit` hook (`user-prompt-submit`): move
     /// the layers of the workspace the session is in to their workspaces'
     /// newest seals (made when their sessions stopped), and say what changed.
-    #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit"])]
+    /// As `PreToolUse` on Edit, Write, MultiEdit and NotebookEdit
+    /// (`pre-tool-use`): deny writing a layer's file, saying why.
+    #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit", "pre-tool-use"])]
     pub claude_hook: Option<String>,
     /// The workspace to show them in (default: the one you are in).
     #[arg(short = 'w', long, global = true, value_name = "BRANCH")]
@@ -127,7 +129,10 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
 /// stops), so what shows changes only between turns, never half-way through
 /// another's. What changed is printed, which becomes context. Does nothing
 /// outside a workspace with layers; errors are only logged.
-pub fn layer_hook() -> Result<()> {
+pub fn layer_hook(event: &str) -> Result<()> {
+    if event == "pre-tool-use" {
+        return deny_hook();
+    }
     if let Err(e) = (|| -> Result<()> {
         let repo = super::repo()?;
         let name = super::branch_or_current(None, &repo)?;
@@ -176,6 +181,59 @@ pub fn layer_hook() -> Result<()> {
         Ok(())
     })() {
         log::warn!("gitfold layer --claude-hook: {e:#}");
+    }
+    Ok(())
+}
+
+/// `gitfold layer --claude-hook pre-tool-use`: denies Claude Code's edit
+/// tools a file a layer shows (the filesystem would refuse it with a bare
+/// EACCES), saying whose it is and what to do instead. Allows everything
+/// else, and logs its errors.
+fn deny_hook() -> Result<()> {
+    let input = std::io::read_to_string(std::io::stdin())?;
+    let denied = (|| -> Result<Option<String>> {
+        let Some(file) = super::hook::field_at(&input, &["tool_input", "file_path"])
+            .or_else(|| super::hook::field_at(&input, &["tool_input", "notebook_path"]))
+        else {
+            return Ok(None);
+        };
+        let file = super::claude::cwd(&input)?.join(file);
+        let Some((state, path)) = super::workspace_at(&file) else {
+            return Ok(None);
+        };
+        let lens = Lens::read(&state)?;
+        if !lens.is_on() {
+            return Ok(None);
+        }
+        git::init(&state.common_dir)?;
+        let base = state.read_base()?;
+        let Some(view) = crate::state::lens::view(&state.common_dir, &base.tree, &lens)? else {
+            return Ok(None);
+        };
+        let Some(&i) = view.mixed.get(path.as_bytes()) else {
+            return Ok(None);
+        };
+        // Its own file at that path wins: writable.
+        if std::fs::symlink_metadata(crate::state::upper_path(&state.upper(), path.as_bytes()))
+            .is_ok()
+        {
+            return Ok(None);
+        }
+        let owner = &lens.layers[i].branch;
+        Ok(Some(format!(
+            "{path} shows workspace {owner}'s work (a layer, read-only here): it can't be \
+             changed in this workspace. Leave it to {owner}'s agent (`gitfold send {owner} \
+             <text>` asks it), or run `gitfold layer off {owner}` to hide the layer and edit \
+             your own version."
+        )))
+    })();
+    match denied {
+        Ok(Some(reason)) => println!(
+            "{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":{}}}}}",
+            super::inbox::json_str(&reason)
+        ),
+        Ok(None) => {}
+        Err(e) => log::warn!("gitfold layer --claude-hook pre-tool-use: {e:#}"),
     }
     Ok(())
 }

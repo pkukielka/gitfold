@@ -92,6 +92,12 @@ check "renaming it is refused" fails mv "$W/a.txt" "$W/z.txt"
 check "renaming a directory holding one is refused" fails mv "$W/nd" "$W/nd2"
 check "chmod is refused" fails chmod +x "$W/nla.txt"
 check "own files stay writable" sh -c "echo more >>'$W/d/c.txt' && echo n >'$W/own.txt'"
+edit_hook() { printf '{"tool_name":"Edit","cwd":"%s","tool_input":{"file_path":"%s"}}' "$W" "$1" |
+    "$BIN" layer --claude-hook pre-tool-use; }
+eq "Claude Code's Edit of a layer's file: denied, saying whose" "deny yes" \
+    "$(edit_hook a.txt | sed -n 's/.*"permissionDecision":"\([a-z]*\)".*/\1/p') $(edit_hook a.txt | grep -q "workspace la's work" && echo yes)"
+eq "of its own file: allowed" "" "$(edit_hook "$W/d/c.txt")"
+eq "outside a workspace: allowed" "" "$(edit_hook /tmp/x)"
 eq "git sees only own changes" " M d/c.txt
 ?? own.txt" "$(git -C "$W" status --short)"
 check "creating where a layer deleted is refused" fails sh -c "echo x >'$W/d/b.txt'"

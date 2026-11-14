@@ -21,6 +21,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use cli::layer::LayerArgs;
+
 #[derive(Parser)]
 #[command(about = "Git revisions as a filesystem", version = LONG_VERSION)]
 struct Cli {
@@ -237,7 +239,10 @@ fn run() -> Result<i32> {
         Command::Seal(args) if args.claude_hook.is_some() => cli::mix::seal_hook()?,
         Command::Seal(args) => cli::mix::seal(&cli::repo()?, args)?,
         Command::Mix(args) => cli::mix::mix(&cli::repo()?, args)?,
-        Command::Layer(args) if args.claude_hook.is_some() => cli::layer::layer_hook()?,
+        Command::Layer(LayerArgs {
+            claude_hook: Some(event),
+            ..
+        }) => cli::layer::layer_hook(&event)?,
         Command::Layer(args) => cli::layer::layer(&cli::repo()?, args)?,
         Command::Lens(args) => cli::layer::lens(&cli::repo()?, args)?,
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
