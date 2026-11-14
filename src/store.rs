@@ -466,7 +466,7 @@ impl<F: Fn(&[u8], &DirRec, &TEntry) -> u32> IndexWalk<'_, F> {
             } else {
                 // Submodules are index entries but empty directories in the mount.
                 let f = &self.files[e.id as usize];
-                w.push(path, e.kind, &f.oid, f.size, (self.ino)(path, &rec, e));
+                w.push(path, e.kind, &f.oid, f.size, (self.ino)(path, &rec, e), false);
             }
             path.truncate(len);
         }
