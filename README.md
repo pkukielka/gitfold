@@ -102,7 +102,7 @@ The skill's "Claude Code" section has the details
 
 The rest of this page is reference: [How it works](#how-it-works) ·
 [Requirements](#requirements) · [Usage](#usage) · [Snapshots](#snapshots) ·
-[Workspaces](#workspaces) · [Running it](#running-it) ·
+[Workspaces](#workspaces) · [Layers](#layers) · [Running it](#running-it) ·
 [Cleaning up](#cleaning-up) ·
 [Differences from a checkout](#differences-from-a-checkout) ·
 [Performance](#performance) · [Development](#development)
@@ -123,7 +123,8 @@ as in a normal checkout.
 gitfold writes into the repository: worktree registrations under
 `.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
-[Cleaning up](#cleaning-up)).
+[Cleaning up](#cleaning-up)), and `refs/gitfold-seal/*` that keep seals
+(see [Layers](#layers)).
 
 ## Requirements
 
@@ -166,6 +167,12 @@ gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
 gitfold prune                                 # delete snapshot registrations
 gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
 gitfold track-reads <BRANCH> on|off           # record a workspace's reads
+gitfold seal [<BRANCH>]                       # a workspace's uncommitted work as a commit
+gitfold mix [--onto <REV>] [--commit] <BRANCH|REV>...
+                                              # workspaces' work merged, as a snapshot
+gitfold layer [-w <BRANCH>] add|on|off|rm <BRANCH>
+gitfold layer [-w <BRANCH>] update|list       # other workspaces' work shown in one
+gitfold lens off [<BRANCH>]                   # hide all of a workspace's layers
 gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
 gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
 ```
@@ -183,9 +190,9 @@ would share, and corrupt, the stored workspace changes. The mount is read-write
 Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
 error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
-Three commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
-daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
-`inbox --claude-hook rewake` (2, to wake the session).
+Four commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
+daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
+`mix` (4 conflicts) and `inbox --claude-hook rewake` (2, to wake the session).
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise.
 
 Names below the mount point:
@@ -426,8 +433,9 @@ leading `.` escaped (`agent%2Ftask-17`). The worktree registration is
 last tip, see above), as real files; `markers` records deleted files so they
 stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
-`refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress.
-Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
+`refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
+`lens` its layers, if any (see [Layers](#layers)). Seals are kept by refs
+`refs/gitfold-seal/<id>/<n>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
 **Limitations.**
@@ -458,6 +466,124 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
   stash with `git stash drop`. `git clean -fdx` only warns about the link.
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
+
+### Layers
+
+Agents working on parts of one change often need each other's work before
+it is committed: an API one of them is writing, which another calls. Layers
+show it, uncommitted included, without merging anything.
+
+**Seal.** `gitfold seal [<BRANCH>]` prints a commit of a workspace's
+uncommitted work (a seal): its tree is what the workspace shows, ignored
+files left out (what `gitfold changes` lists), its parent the workspace's
+base. Nothing in the workspace changes. It is made with a fixed identity and
+date (`gitfold`, 2020-01-01), so the same work on the same base gives the
+same commit (`unchanged since its last seal`, on stderr); each new one is
+kept by a ref, `refs/gitfold-seal/<id>/<n>`, numbered from 1, the newest 16
+kept. Open it as a snapshot, `<mount>/@<sha>`. It works mounted or not; a
+branch without a workspace exits 3. An untracked nested repository isn't
+sealed (logged).
+
+**Mix: checking work together.** `gitfold mix <BRANCH|REV>...` merges, in
+order onto the first (or onto `--onto <REV>`), each named workspace's work,
+uncommitted included (sealed), or the commit of a branch without a
+workspace or of a revision, as `git merge-tree` does, and prints the result
+as a snapshot path (`@<sha>` unmounted; `--commit` prints only the commit):
+
+```
+cd $(gitfold mix main agent/api agent/client)   # build and test it there
+```
+
+No workspace, index or branch changes. The same work gives the same commit,
+so a repeated mix reuses its snapshot. It exits 4 on conflicts, listing the
+paths (`conflicts merging <BRANCH>:`), and 1 if a name is neither a
+workspace nor a revision.
+
+**Layers in a workspace.** `gitfold layer add <BRANCH>` shows another
+workspace's work in the workspace you are in (`-w <BRANCH>` names another
+one), read-only, over its base and under its own changes:
+
+```
+cd ~/mnt/repo/agent/client
+gitfold layer add agent/api     # agent/api's work, as now, on top of the others
+gitfold layer list              # on   agent/api   3f2a9c1d0e4b
+gitfold layer update            # every layer to its workspace's work as now
+gitfold layer off agent/api     # hidden, kept in the stack (`on` shows it again)
+gitfold layer rm agent/api      # dropped from the stack
+gitfold lens off                # every layer hidden
+```
+
+A layer is that workspace's work as sealed when it was added or updated
+(a branch without a workspace: its tip), taken as the changes the seal makes
+since the two branches diverged; that merge base is pinned with the layer,
+so it shows the same files whatever happens to either branch until it is
+updated. Layers combine whole files: a path a shown layer changed (or
+deleted) shows that layer's version, the higher layer's (added later) if
+several changed it; a file of the workspace's own at that path wins over
+all of them and stays writable. `list` prints one line per layer, bottom
+first: `on` or `off`, the branch and its seal. While mounted, the daemon
+shows the change at once; unmounted, it is stored and shown when the
+workspace opens. Exit codes: 3 no such workspace or layer, 4 git busy in the
+workspace (a commit in progress, a stopped rebase: the change is stored but
+not shown yet; `gitfold layer update` once git is done shows it), 2 usage
+errors, 1 other errors (a workspace as its own layer, adding one twice).
+
+- **A layer's files are read-only.** They have no write bits; writing,
+  truncating, removing, renaming them (or a directory holding one) and
+  `chmod` fail with `EACCES`, as does creating a path a layer deleted. They
+  are another agent's work in progress: a change made here would become this
+  workspace's own file, hiding theirs and committed with this branch. To
+  change one, ask its agent (`gitfold send <BRANCH> <TEXT>`), or hide the
+  layer and edit your own version. In Claude Code, the plugin denies its
+  edit tools such a file, saying this.
+- **A switch** (any of the commands above, or the hook below) tells the
+  kernel exactly what changed: the files whose content changed, the entries
+  added, removed or changed in type, and their directories' listings.
+  Changed files get the switch's time, so incremental builds rebuild them;
+  everything else keeps its times.
+- **Git sees only the workspace's own work.** While layers show, the
+  layers' files git tracks are marked skip-worktree in the worktree's index
+  (git neither shows nor commits them, and keeps the base's version), and
+  the files they add are excluded in a per-worktree excludes file
+  (`core.excludesFile` in the worktree's own config, with
+  `extensions.worktreeConfig`; since it replaces your global ignore file
+  there, it starts with that file's patterns). `git status`, `diff`, `add -A`
+  and `commit -a` show and commit only the workspace's own changes, as do
+  `gitfold changes`, `list` and `remove`. Hiding the layers gives the paths
+  back to git. If git refuses to touch a file you didn't change (a merge or
+  rebase over a layer's path), run `gitfold lens off` and retry.
+- **`LENS ON`: where git can't be kept right, it is turned off.** If the
+  index can't be edited (sparse checkout, a split or sparse index, the index
+  locked meanwhile), the layers still show, but the workspace's `.git` names
+  a directory that doesn't exist, so every git command fails (exit 128)
+  saying why: `fatal: not a git repository: /LENS ON (agent/api): git is off
+  here (sparse checkout is on). Run gitfold lens off to use git`. It is kept
+  across remounts, until `gitfold lens off` (or a switch that can edit the
+  index). gitfold commands still find the workspace there.
+- **The base waits.** While a layer shows, the workspace's base doesn't
+  follow its branch: commits work and move the branch as usual, and the base
+  catches up once no layer shows (moving it meanwhile could copy the layers'
+  files into the workspace's own).
+- **Between turns, in Claude Code.** The plugin's hooks seal a session's
+  workspace when the session stops (`gitfold seal --claude-hook stop`, only
+  if some workspace has it as a layer), and when a prompt is sent, move the
+  session's workspace's layers to their workspaces' newest seals, telling
+  the agent which layers changed and how many files (`gitfold layer
+  --claude-hook user-prompt-submit`). What a layer shows thus changes only
+  between turns, never half-way through one, its agent's or the reader's.
+  Layers of workspaces without such a session move with `gitfold layer
+  update`. A third hook, `gitfold layer --claude-hook pre-tool-use` on Edit,
+  Write, MultiEdit and NotebookEdit, denies writing a layer's file with the
+  reason above.
+- **Stored** in the workspace's state directory: `lens`, rewritten whole,
+  `version 1` and then one line per layer, bottom first: `layer <branch> TAB
+  <on|off> TAB <seal> TAB <merge base>`; `lens-git-off`, while git is turned
+  off, holds why. A fork (`branch -w`) starts without layers.
+- **Limitations.** Whole files only: a file both workspaces changed shows
+  this workspace's version (blending changes within a file is the next
+  phase). A layer not updated while its workspace made 16 newer seals holds
+  a seal no ref keeps any more, which `git gc` may prune: `gitfold layer
+  update` it.
 
 ### Partial clones
 
@@ -551,8 +677,8 @@ So do a workspace's base following a branch that moved, and the checks of
 ### With coding agents
 
 - [skills/gitfold/SKILL.md](skills/gitfold/SKILL.md) tells agents how to work
-  in a mount: workspaces and snapshots, forking a workspace, merge previews,
-  cleaning up, and what differs from a checkout. It is a Claude Code skill:
+  in a mount: workspaces and snapshots, forking a workspace, layers, merge
+  previews, cleaning up, and what differs from a checkout. It is a Claude Code skill:
   `ln -s "$PWD/skills/gitfold" ~/.claude/skills/gitfold` (or into a project's
   `.claude/skills/`). It is plain markdown, so other agents can be pointed at
   it from their instructions (`AGENTS.md`).
@@ -760,6 +886,8 @@ mount and real git (build with `--release` first):
   Suites running side by side load the machine like `PARALLEL=1`: if a timing
   check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
+- `tests/layers.sh`: seal, mix, and layers shown in a workspace (sections as
+  above).
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
 
