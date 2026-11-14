@@ -1346,9 +1346,9 @@ checkout" and "Running it"); this is the why and what it would take.
   so a repository has at most one daemon (two would share, and corrupt, the
   stored workspace state); `prune` and an offline `remove` take the same lock.
   Where directories can't be flocked (NFS without `local_lock=flock`), the
-  lock file `.git/gitfold/.lock` is used instead, as earlier builds did, and
-  an existing one is always locked too, so their daemons are still seen;
-  daemons of builds before any lock are not.
+  lock file `.git/gitfold/.lock` is used instead (tests force it with
+  `GITFOLD_TEST_LOCK_FILE`). Hosts sharing a repository over NFS with
+  different `local_lock` options don't see each other's lock.
   `gitfold unmount` waits for this lock, also when the mount was busy and had
   to be detached (it lists the processes using it, from `/proc`, first),
   except when it or a process it runs under (its shell, `make`, ...) is

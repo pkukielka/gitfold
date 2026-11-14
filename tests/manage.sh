@@ -210,13 +210,16 @@ the_lock_leaves_nothing_behind() {
 git init -q "$T/plain"; G "$T/plain" commit -q --allow-empty -m e
 check "prune of a repository without gitfold state" "$BIN" -C "$T/plain" prune
 check "creates nothing in it" test ! -e "$T/plain/.git/gitfold"
-
-mkdir -p "$T/plain/.git/gitfold"; touch "$T/plain/.git/gitfold/.lock"
-flock "$T/plain/.git/gitfold/.lock" sleep 3 & OLD=$!   # a daemon of an earlier build
+# Where directories can't be flocked (NFS): the lock file, made and locked.
+export GITFOLD_TEST_LOCK_FILE=1
+check "the lock file where directories can't be locked" "$BIN" -C "$T/plain" prune
+check "  made" test -e "$T/plain/.git/gitfold/.lock"
+flock "$T/plain/.git/gitfold/.lock" sleep 3 & HELD=$!
 sleep 0.3
-check "an earlier build's lock file is honoured" fails "$BIN" -C "$T/plain" prune
-wait $OLD
-check "free again" "$BIN" -C "$T/plain" prune
+check "  held by another: refused" fails "$BIN" -C "$T/plain" prune
+wait $HELD
+check "  free again" "$BIN" -C "$T/plain" prune
+unset GITFOLD_TEST_LOCK_FILE
 }
 
 remove_while_mounted() {

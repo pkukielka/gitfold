@@ -221,8 +221,8 @@ pub fn list(common_dir: &Path) -> Result<Vec<Stored>> {
     for entry in entries {
         let entry = entry?;
         let id = entry.file_name().to_string_lossy().into_owned();
-        // Not a workspace: `.tasks`, `.control`, the `.lock` of earlier builds
-        // (branch names, so ids, never start with a dot).
+        // Not a workspace: `.tasks`, `.control`, the fallback `.lock`
+        // (`lock::lock`; branch names, so ids, never start with a dot).
         if id.starts_with('.') {
             continue;
         }
