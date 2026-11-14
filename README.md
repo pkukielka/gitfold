@@ -32,19 +32,44 @@ own branch and every reviewer any revision, side by side, without
 
 ## Quick start
 
-Needs Linux with FUSE 3 (`fusermount3`, kernel 5.1+), git, and Rust 1.88+ to
-build.
+Needs Linux with FUSE 3 (`fusermount3`, kernel 5.1+) and git.
 
-1. **Install:**
+### With Claude Code
+
+1. **Install the plugin**, in Claude Code:
+
+   ```
+   /plugin marketplace add pkukielka/gitfold
+   /plugin install gitfold@gitfold
+   ```
+
+   It downloads gitfold when first needed (Linux x86_64 or aarch64, glibc
+   2.28 or newer; on NixOS, [build it](#by-hand) and put it on `PATH`).
+
+2. **Mount** your repository, once: in a Claude Code session in it, ask Claude
+   to "mount this repository with gitfold" (at `~/mnt/<name>` unless you say
+   where). It stays mounted after the session, and is mounted again by itself
+   after a reboot.
+
+3. **Work**: `claude -w my-task` from the repository (subagents with
+   `isolation: worktree` too) gets a gitfold workspace, opened in about a
+   second, at `<mount point>/worktree-my-task`. Removing it when the session
+   ends discards its uncommitted changes; the branch stays.
+
+The skill's "Claude Code" section has the details
+([skills/gitfold/SKILL.md](skills/gitfold/SKILL.md)).
+
+### By hand
+
+1. **Install**: download `gitfold-x86_64-linux` (or `-aarch64-`) from the
+   [releases](https://github.com/pkukielka/gitfold/releases) (glibc 2.28 or
+   newer), check it against `SHA256SUMS`, and put it on `PATH` as `gitfold`;
+   or build it (Rust 1.88+):
 
    ```
    git clone https://github.com/pkukielka/gitfold && cd gitfold
    cargo install --locked --path .        # or: nix develop -c cargo install ...
    ```
-
-   Or download `gitfold-x86_64-linux` (or `-aarch64-`) from the
-   [releases](https://github.com/pkukielka/gitfold/releases) (glibc 2.28 or
-   newer), check it against `SHA256SUMS`, and put it on `PATH` as `gitfold`.
 
 2. **Mount** your existing clone (it runs in the background until you unmount
    it):
@@ -74,19 +99,6 @@ build.
    gitfold remove my-task
    gitfold unmount ~/mnt/repo
    ```
-
-**With Claude Code**, the plugin does steps 1 and 3: it downloads gitfold (or
-uses yours), and makes Claude Code's worktrees (`claude -w <name>`, subagents
-with `isolation: worktree`) gitfold workspaces of a mounted repository,
-mounting it again where it last was if it isn't:
-
-```
-/plugin marketplace add pkukielka/gitfold
-/plugin install gitfold@gitfold
-```
-
-Mount the repository once (step 2), then `claude -w my-task` from it. See the
-skill's "Claude Code" section ([skills/gitfold/SKILL.md](skills/gitfold/SKILL.md)).
 
 The rest of this page is reference: [How it works](#how-it-works) ·
 [Requirements](#requirements) · [Usage](#usage) · [Snapshots](#snapshots) ·

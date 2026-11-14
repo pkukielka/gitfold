@@ -114,6 +114,31 @@ waking it (the `Stop` hook waits for a message and wakes the session when one
 comes; one waiter per inbox). Other harnesses: run `gitfold inbox --wait`
 between tasks, or as a background command that ends when a message arrives.
 
+## Getting gitfold, and mounting a repository
+
+With the gitfold Claude Code plugin, `gitfold` in your Bash is the plugin's
+launcher: the first run downloads the release binary (a few MB, checked
+against the release's checksums), and later runs use it. **Don't build
+gitfold from source, and don't install Rust or cargo for it.** If `gitfold`
+isn't found (no plugin), tell the user how to get it: the plugin (below), or
+a release binary from https://github.com/pkukielka/gitfold/releases. Build
+it only if they ask you to. If it says no release binary runs on this system
+(not Linux, or NixOS without `nix-ld`), tell the user; don't work around it.
+
+To mount a repository (the user asks you to, or a worktree couldn't be made
+because the repository was never mounted):
+
+```
+mkdir -p ~/mnt/<name>
+gitfold mount <the repository's top-level directory> ~/mnt/<name>
+```
+
+Use the mount point the user names, else `~/mnt/<repository name>`; it must
+be an empty directory of theirs. The mount runs in the background and
+outlives the session; with the plugin, it is mounted there again by itself
+after a reboot. Tell the user where it is, and that `gitfold unmount <mount
+point>` stops it.
+
 ## Claude Code
 
 The gitfold plugin bundles this skill and the hooks:
@@ -123,10 +148,9 @@ The gitfold plugin bundles this skill and the hooks:
 /plugin install gitfold@gitfold
 ```
 
-It runs the `gitfold` on `PATH`, or else downloads the release matching the
-plugin (Linux x86_64 and aarch64, glibc 2.28 or newer) to
-`~/.local/share/gitfold/bin`; in its sessions, `gitfold` works in Bash either
-way. With it:
+It runs the `gitfold` on `PATH`, or else the release matching the plugin
+(Linux x86_64 and aarch64, glibc 2.28 or newer), downloaded to
+`~/.local/share/gitfold/bin` (see above). With it:
 
 - **Claude Code's worktrees are workspaces** (`claude -w <name>`,
   `EnterWorktree`, subagents with `isolation: worktree`): branch
