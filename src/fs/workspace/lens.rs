@@ -318,6 +318,7 @@ impl Workspace {
         // Applied even where git couldn't be told: git off is how the layers
         // show then, and the sync thread doesn't retry every second. A switch
         // asked for again (`gitfold layer`, `lens off`) tells git again.
+        // Recorded last (see `tell_git`): until then the switch is pending.
         applied.lens = stored_bytes;
         let off = why.is_some()
             && (plan.lens_on || applied.head.is_some() || !applied.skipped.is_empty());
@@ -328,24 +329,17 @@ impl Workspace {
             }
             layers.applied = applied;
         }
-        if let Err(e) = self.set_gitfile(&stored, why.as_deref().filter(|_| off)) {
+        let git_off = why.as_deref().filter(|_| off);
+        if let Err(e) = self.set_gitfile(&stored, git_off) {
             failed.get_or_insert(e);
         }
-        let mut done = match plan.lens_on {
-            true => format!("{branch}: layers shown ({changed} paths changed)"),
-            false => format!("{branch}: no layers shown"),
-        };
-        match (&why, off) {
-            (Some(why), true) => done += &format!("\nnote: git is off in it: {why}"),
-            (Some(why), false) => log::warn!("{branch}: giving git back after the layers: {why}"),
-            _ => {}
+        if let (Some(why), false) = (&why, off) {
+            log::warn!("{branch}: giving git back after the layers: {why}");
         }
-        for note in view.iter().flat_map(|v| &v.notes) {
-            done += &format!("\nnote: {note}");
-        }
+        let notes = view.iter().flat_map(|v| &v.notes);
         match failed {
             Some(e) => Err(e),
-            None => Ok(done),
+            None => Ok(switched(branch, plan.lens_on, changed, git_off, notes)),
         }
     }
 
@@ -469,6 +463,12 @@ impl Workspace {
     /// HEAD at a lens commit and the blends in the index. What was applied
     /// before is given back where no longer shown. The errors' text is the
     /// reason the surrendered `.git` gives.
+    ///
+    /// The order is what a crash leaves right: the index edits are recorded
+    /// before HEAD moves (a next switch gives back what was skipped), the
+    /// lens commit is recorded as `next` before HEAD moves to it (adopted if
+    /// HEAD got there), and the caller records the layers file last, so a
+    /// switch cut short stays pending and is done again.
     fn tell_git(
         &self,
         plan: &GitPlan,
@@ -477,8 +477,6 @@ impl Workspace {
         view: Option<&lens::View>,
     ) -> Result<()> {
         let admin = &self.state.admin;
-        let common_dir = &self.state.common_dir;
-        let branch = &self.state.branch;
         if plan.lens_on {
             // Worktree config would make git apply the shared `core.bare`
             // to every worktree.
@@ -490,7 +488,42 @@ impl Workspace {
         }
         // What the branch tip has: the base, or past it by commits made with
         // layers shown (the base waits for the layers to go).
-        let tip = git::branch_tip(branch)?;
+        let tip = git::branch_tip(&self.state.branch)?;
+        // Blended files: the index has the blend over the tip (what L has),
+        // or the tip's version again.
+        let hunk = match (view, plan.blended.is_empty()) {
+            (Some(v), false) if tip.id != plan.base => {
+                let at_tip = lens::view(&self.state.common_dir, &tip.id, stored)?;
+                at_tip.map_or(v.hunk_tree, |t| t.hunk_tree)
+            }
+            (Some(v), false) => v.hunk_tree,
+            _ => tip.tree,
+        };
+        self.index_to_plan(plan, applied, hunk, tip.tree)?;
+        match plan.lens_on {
+            true => worktree_config::set_excludes(admin, &plan.added)?,
+            false => worktree_config::remove_excludes(admin)?,
+        }
+        // HEAD: at a lens commit while files are blended, else on the branch.
+        match (view, plan.blended.is_empty()) {
+            (Some(v), false) => self.head_to_lens(applied, stored, v, hunk, tip.id)?,
+            _ => self.head_to_branch(applied)?,
+        }
+        applied.write(&self.state)?;
+        Ok(())
+    }
+
+    /// `tell_git`'s index edits: skip-worktree on `plan`'s skipped paths (off
+    /// on those no longer skipped), and blended paths' entries the blend in
+    /// tree `hunk` (or `tip_tree`'s version, no longer blended). Recorded in
+    /// `applied` once done.
+    fn index_to_plan(
+        &self,
+        plan: &GitPlan,
+        applied: &mut Applied,
+        hunk: ObjectId,
+        tip_tree: ObjectId,
+    ) -> Result<()> {
         let mut edits: HashMap<Vec<u8>, Edit> = HashMap::new();
         for path in applied.skipped.iter().chain(&plan.skipped) {
             let edit = Edit {
@@ -499,19 +532,10 @@ impl Workspace {
             };
             edits.insert(path.clone(), edit);
         }
-        // Blended files: the index has the blend over the tip (what L has),
-        // or the tip's version again.
-        let hunk = match (view, plan.blended.is_empty()) {
-            (Some(v), false) if tip.id != plan.base => {
-                lens::view(common_dir, &tip.id, stored)?.map_or(v.hunk_tree, |t| t.hunk_tree)
-            }
-            (Some(v), false) => v.hunk_tree,
-            _ => tip.tree,
-        };
         for path in applied.blended.iter().chain(&plan.blended) {
             let tree = match plan.blended.contains(path) {
                 true => hunk,
-                false => tip.tree,
+                false => tip_tree,
             };
             let item = git::with_repo(|repo| git::lens::lookup(repo, tree, BStr::new(path)))?;
             if let Some(item) = item {
@@ -533,69 +557,83 @@ impl Workspace {
         self.edit_index(&edits)?;
         applied.skipped = plan.skipped.clone();
         applied.blended = plan.blended.clone();
+        applied.write(&self.state)
+    }
+
+    /// `tell_git`'s HEAD with blended files: detached at a new lens commit L
+    /// (tree `hunk`, over branch tip `tip`), with the view commit pinned and
+    /// the push guard installed. Moved only from where it was left
+    /// (compare-and-swap): the branch, or the lens commit `applied` has.
+    fn head_to_lens(
+        &self,
+        applied: &mut Applied,
+        stored: &Lens,
+        view: &lens::View,
+        hunk: ObjectId,
+        tip: ObjectId,
+    ) -> Result<()> {
+        let (admin, branch) = (&self.state.admin, &self.state.branch);
+        let names: Vec<&str> = (stored.layers.iter())
+            .filter(|l| l.on)
+            .map(|l| l.branch.as_str())
+            .collect();
+        let subject = git::lens::lens_subject(branch, &names);
+        let all_seals: Vec<ObjectId> = (stored.layers.iter())
+            .filter(|l| l.on)
+            .map(|l| l.seal)
+            .collect();
+        let (l, vc) = git::with_repo(|repo| -> Result<(ObjectId, ObjectId)> {
+            let l = git::lens::lens_commit(repo, hunk, tip, &view.hunk_seals, &subject)?;
+            let vc = git::lens::view_commit(repo, view.tree, l, &all_seals, &subject)?;
+            Ok((l, vc))
+        })?;
+        let pin = lens_ref(&self.state.id);
+        git::cmd::run(
+            &self.state.common_dir,
+            &["update-ref", &pin, &vc.to_string()],
+        )?;
+        let old = match (detached_head(admin), applied.head) {
+            (Some(h), Some(l)) if h == l => l.to_string(),
+            (None, _) if head_on(admin, branch) => tip.to_string(),
+            _ => anyhow::bail!("HEAD isn't where gitfold left it"),
+        };
+        // Recorded before HEAD moves: a crash in between leaves it adopted.
+        applied.next = Some(l);
         applied.write(&self.state)?;
-        match plan.lens_on {
-            true => worktree_config::set_excludes(admin, &plan.added)?,
-            false => worktree_config::remove_excludes(admin)?,
-        }
-        // HEAD: at a lens commit while files are blended, else on the branch.
-        // Moved only from where it was left (compare-and-swap).
+        let (msg, new) = ("gitfold: lens", l.to_string());
+        git::cmd::run(
+            admin,
+            &["update-ref", "--no-deref", "-m", msg, "HEAD", &new, &old],
+        )?;
+        worktree_config::install_push_guard(admin)?;
+        (applied.head, applied.next) = (Some(l), None);
+        Ok(())
+    }
+
+    /// `tell_git`'s HEAD without blended files: back on the branch if it was
+    /// at a lens commit (a commit it had moved to off L's line kept by a
+    /// ref), the push guard and the view commit's pin gone.
+    fn head_to_branch(&self, applied: &mut Applied) -> Result<()> {
+        let Some(l) = applied.head else {
+            return Ok(());
+        };
+        let (admin, branch) = (&self.state.admin, &self.state.branch);
+        let common_dir = &self.state.common_dir;
         let head = detached_head(admin);
-        match (view, plan.blended.is_empty()) {
-            (Some(v), false) => {
-                let names: Vec<&str> = (stored.layers.iter())
-                    .filter(|l| l.on)
-                    .map(|l| l.branch.as_str())
-                    .collect();
-                let subject = git::lens::lens_subject(branch, &names);
-                let all_seals: Vec<ObjectId> = (stored.layers.iter())
-                    .filter(|l| l.on)
-                    .map(|l| l.seal)
-                    .collect();
-                let (l, vc) = git::with_repo(|repo| -> Result<(ObjectId, ObjectId)> {
-                    let l = git::lens::lens_commit(repo, hunk, tip.id, &v.hunk_seals, &subject)?;
-                    let vc = git::lens::view_commit(repo, v.tree, l, &all_seals, &subject)?;
-                    Ok((l, vc))
-                })?;
-                let pin = lens_ref(&self.state.id);
-                git::cmd::run(common_dir, &["update-ref", &pin, &vc.to_string()])?;
-                let old = match (head, applied.head) {
-                    (Some(h), Some(l)) if h == l => l.to_string(),
-                    (None, _) if head_on(admin, branch) => tip.id.to_string(),
-                    _ => anyhow::bail!("HEAD isn't where gitfold left it"),
-                };
-                applied.next = Some(l);
-                applied.write(&self.state)?;
-                let (msg, new) = ("gitfold: lens", l.to_string());
-                git::cmd::run(
-                    admin,
-                    &["update-ref", "--no-deref", "-m", msg, "HEAD", &new, &old],
-                )?;
-                worktree_config::install_push_guard(admin)?;
-                (applied.head, applied.next) = (Some(l), None);
-            }
-            _ => {
-                if let Some(l) = applied.head {
-                    if let Some(h) = head.filter(|&h| h != l) {
-                        // Left L's line (amended, reset): kept, and said so.
-                        let left = left_ref(&self.state.id);
-                        git::cmd::run(common_dir, &["update-ref", &left, &h.to_string()])?;
-                        log::warn!(
-                            "{branch}: HEAD had left the lens commit; {h} is kept at {left}"
-                        );
-                    }
-                    if head.is_some() {
-                        let full = format!("refs/heads/{branch}");
-                        let msg = "gitfold: lens off";
-                        git::cmd::run(admin, &["symbolic-ref", "-m", msg, "HEAD", &full])?;
-                    }
-                    worktree_config::remove_push_guard(admin)?;
-                    git::cmd::run(common_dir, &["update-ref", "-d", &lens_ref(&self.state.id)])?;
-                    applied.head = None;
-                }
-            }
+        if let Some(h) = head.filter(|&h| h != l) {
+            // Left L's line (amended, reset): kept, and said so.
+            let left = left_ref(&self.state.id);
+            git::cmd::run(common_dir, &["update-ref", &left, &h.to_string()])?;
+            log::warn!("{branch}: HEAD had left the lens commit; {h} is kept at {left}");
         }
-        applied.write(&self.state)?;
+        if head.is_some() {
+            let full = format!("refs/heads/{branch}");
+            let msg = "gitfold: lens off";
+            git::cmd::run(admin, &["symbolic-ref", "-m", msg, "HEAD", &full])?;
+        }
+        worktree_config::remove_push_guard(admin)?;
+        git::cmd::run(common_dir, &["update-ref", "-d", &lens_ref(&self.state.id)])?;
+        applied.head = None;
         Ok(())
     }
 
@@ -857,6 +895,28 @@ impl Workspace {
         path.is_empty()
             || (layers.mixed.keys().chain(layers.blended.keys())).any(|p| p.starts_with(&prefix))
     }
+}
+
+/// What a switch of `branch`'s layers says it did: whether layers show (and
+/// how many paths changed), why git is off if it is, and the view's notes.
+fn switched<'a>(
+    branch: &str,
+    lens_on: bool,
+    changed: usize,
+    git_off: Option<&str>,
+    notes: impl Iterator<Item = &'a String>,
+) -> String {
+    let mut done = match lens_on {
+        true => format!("{branch}: layers shown ({changed} paths changed)"),
+        false => format!("{branch}: no layers shown"),
+    };
+    if let Some(why) = git_off {
+        done += &format!("\nnote: git is off in it: {why}");
+    }
+    for note in notes {
+        done += &format!("\nnote: {note}");
+    }
+    done
 }
 
 /// A commit's first parent, if any.
