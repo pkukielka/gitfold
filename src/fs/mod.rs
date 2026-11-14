@@ -436,7 +436,7 @@ impl Filesystem for GitFold {
         reply.error(self.writable(newparent).err().unwrap_or(Errno::EPERM));
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         bump(&self.counters.open);
         if flags.0 & libc::O_ACCMODE != libc::O_RDONLY
             && let Err(e) = self.writable(ino)
@@ -450,7 +450,13 @@ impl Filesystem for GitFold {
         match self.is_file(ino) {
             // Content is loaded lazily on the first read; with FOPEN_KEEP_CACHE later
             // opens of the same file are served from the kernel page cache.
-            Ok(true) => reply.opened(FileHandle(0), FopenFlags::FOPEN_KEEP_CACHE),
+            Ok(true) => {
+                // Every open reaches us, cached or not: a read is seen.
+                if flags.0 & libc::O_ACCMODE != libc::O_WRONLY {
+                    self.note_open(ino, req.pid());
+                }
+                reply.opened(FileHandle(0), FopenFlags::FOPEN_KEEP_CACHE)
+            }
             Ok(false) => reply.error(Errno::EISDIR),
             Err(e) => reply.error(e),
         }

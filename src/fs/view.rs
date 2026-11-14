@@ -397,6 +397,17 @@ impl GitFold {
         Ok(Arc::new(data))
     }
 
+    /// With opens on (`--kernel-open`): an open for reading of a workspace file
+    /// by process `pid` counts as its read (`Workspace::note_read`), which may
+    /// then come from the kernel's cache.
+    pub(super) fn note_open(&self, ino: INodeNo, pid: u32) {
+        if let Ok(Ino::Ws { slot, local }) = decode(ino.0)
+            && let Ok(WsNode::Entry(ws, local)) = self.ws_node(slot, local)
+        {
+            ws.note_read(local, || self.scanners.is(pid));
+        }
+    }
+
     /// Content for reading `size` bytes at `offset`, for process `pid`.
     /// Immutable content is cached whole by inode; upper workspace files are
     /// read directly.

@@ -124,14 +124,28 @@ fn scanner_named(comm: &str, cmdline: Option<&[u8]>) -> Option<bool> {
     let argv0 = args.next().unwrap_or_default();
     let name = argv0.rsplit(|b| *b == b'/').next().unwrap_or_default();
     let scanner = SCANNERS.iter().any(|s| name == s.as_bytes())
-        || (name == b"git" && args.find(|a| !a.starts_with(b"-")) == Some(b"grep"));
+        || (name == b"git" && git_command(args) == Some(b"grep"));
     Some(scanner)
 }
 
-/// How long `Scanners` trusts what it found for a pid: long enough that a
-/// search's threads look once, short enough that a reused pid isn't
-/// mistaken (pids wrap only after millions).
-const SCANNER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+/// git's command among its arguments `args`: the first that isn't one of
+/// git's own options (`git -C <dir> -c <key=value> grep`).
+fn git_command<'a>(mut args: impl Iterator<Item = &'a [u8]>) -> Option<&'a [u8]> {
+    const VALUED: &[&[u8]] = &[b"-C", b"-c", b"--git-dir", b"--work-tree", b"--namespace"];
+    while let Some(arg) = args.next() {
+        if VALUED.contains(&arg) {
+            args.next();
+        } else if !arg.starts_with(b"-") {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+/// How long `Scanners` trusts what it found for a pid: a search's threads
+/// look about once a second; a pid reused sooner (pids can wrap at 32768, and
+/// builds start many) would be mistaken, and a read lost.
+const SCANNER_TTL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Which processes are file searchers (`scanner_named`), from `/proc`,
 /// remembered per pid (or thread id, as FUSE gives it) for `SCANNER_TTL`.
@@ -178,6 +192,14 @@ mod tests {
         assert!(
             named("git", b"/usr/bin/git\0--no-pager\0grep\0x"),
             "after options"
+        );
+        assert!(
+            named("git", b"git\0-C\0/m/ws\0-c\0a=b\0grep\0x"),
+            "valued ones"
+        );
+        assert!(
+            !named("git", b"git\0-C\0grep\0status"),
+            "a directory named grep"
         );
         assert!(!named("git", b"git\0status"));
         assert!(!named("git", b"git\0log\0--grep\0x"));

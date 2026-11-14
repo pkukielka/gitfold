@@ -326,9 +326,18 @@ eq "Claude Code's Read, of a file the kernel had cached (grep read it): recorded
 hook "{\"tool_name\":\"Bash\",\"cwd\":\"$W/d\",\"tool_input\":{\"command\":\"sed -n 1,2p c.txt | head -n 1; cat ../nope\"}}"
 eq "  its Bash: the files simple viewers show (relative to cwd), not missing ones" "a.txt d/b.txt d/c.txt" "$(reads_of rd)"
 eq "  silent, exit 0, wherever it runs" "0 " "$(hook '{"tool_name":"Read","tool_input":{"file_path":"/etc/hostname"}}' 2>&1; echo "$?" "$(hook 'not json' 2>&1)")"
+ln -s "$MNT" "$T/link"; echo e >"$W/d/e.txt"; grep -rq needle "$W/d"
+hook "{\"tool_name\":\"Bash\",\"cwd\":\"$T/link/rd\",\"tool_input\":{\"command\":\"cd d && head -n 1 < e.txt\"}}"
+eq "  through a symlink to the mount, after a cd in the command" "a.txt d/b.txt d/c.txt d/e.txt" "$(reads_of rd)"
 "$BIN" -C "$REPO" track-reads rd off >/dev/null
 hook "{\"tool_name\":\"Read\",\"cwd\":\"$REPO\",\"tool_input\":{\"file_path\":\"$W/d/c.txt\"}}"
-eq "  untracked: nothing" "a.txt d/b.txt d/c.txt" "$(reads_of rd)"
+eq "  untracked: nothing" "a.txt d/b.txt d/c.txt d/e.txt" "$(reads_of rd)"
+unmount_fs
+R branch ko
+mount_fs --kernel-open
+"$BIN" -C "$REPO" track-reads ko on >/dev/null
+grep -rq needle "$MNT/ko"; cat "$MNT/ko/a.txt" >/dev/null
+eq "with every open seen (--kernel-open): a read after a search too, not the search" "a.txt" "$(reads_of ko)"
 unmount_fs
 }
 

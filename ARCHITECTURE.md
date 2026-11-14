@@ -1067,9 +1067,9 @@ thing only the filesystem sees: with tracking on, the daemon appends each
 file's path to `.git/gitfold/<id>/reads` at its first read from offset 0
 (NUL-terminated, once per path; a partial last path, from a crash or an append
 in progress, is dropped), unless the reader is a file searcher (`rg`, `grep`,
-`ugrep`, `ag`, `ack`), told by `/proc/<pid>/comm` or `argv[0]` (FUSE gives
-the reading thread; `procs::Scanners` remembers each for 10 s, and is asked
-only for a path not yet recorded). The kernel caches contents, so that read is
+`ugrep`, `ag`, `ack`, `git grep`), told by `/proc/<pid>/comm` or `argv[0]` (FUSE gives
+the reading thread; `procs::Scanners` remembers each for 1 s, and is asked
+before the path is built: a search's reads build none). The kernel caches contents, so that read is
 the only one the daemon gets; later reads cost nothing, and aren't seen:
 Claude Code's `PostToolUse` hook (`gitfold track-reads --claude-hook`) reports
 its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`

@@ -183,8 +183,16 @@ fn report_reads(input: &str) -> Result<()> {
     let cwd = cwd(input)?;
     let mounts = mount_table::mounts()?;
     // Per mount (its git common dir), the paths below it.
-    let mut reads: Vec<(&Path, Vec<String>)> = Vec::new();
+    let mut reads: std::collections::BTreeMap<&Path, Vec<String>> = Default::default();
     for path in named.iter().map(|p| normalized(&cwd.join(p))) {
+        // Its directory as the mount table has it (a symlink on the way
+        // resolved), the file itself as named.
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            continue;
+        };
+        let Ok(path) = fs::canonicalize(dir).map(|d| d.join(name)) else {
+            continue;
+        };
         let below = mounts
             .iter()
             .filter_map(|(mount, common_dir)| Some((path.strip_prefix(mount).ok()?, common_dir)))
@@ -195,14 +203,13 @@ fn report_reads(input: &str) -> Result<()> {
         let Some(rel) = rel.to_str().filter(|_| path.is_file()) else {
             continue;
         };
-        match reads.iter_mut().find(|(c, _)| *c == common_dir.as_path()) {
-            Some((_, paths)) => paths.push(rel.to_string()),
-            None => reads.push((common_dir, vec![rel.to_string()])),
-        }
+        reads.entry(common_dir).or_default().push(rel.to_string());
     }
     for (common_dir, paths) in reads {
         let request = crate::daemon::control::Request::RecordReads { paths };
-        crate::daemon::control::request(common_dir, &request, None)?;
+        // Not held up long behind a slow request (a removal).
+        let wait = Some(std::time::Duration::from_secs(5));
+        crate::daemon::control::request(common_dir, &request, wait)?;
     }
     Ok(())
 }
@@ -240,6 +247,8 @@ fn viewed(command: &str) -> Vec<String> {
     // sed's options that give its script; then its first operand isn't one.
     const SED_SCRIPT: &[&str] = &["-e", "--expression", "-f", "--file"];
     let mut files = Vec::new();
+    // Where relative paths are, after the command's own `cd`s.
+    let mut dir = PathBuf::new();
     for words in commands(command) {
         let mut words = words.into_iter().peekable();
         // Assignments before the command (`LC_ALL=C cat x`).
@@ -252,6 +261,10 @@ fn viewed(command: &str) -> Vec<String> {
         let Some(program) = words.next() else {
             continue;
         };
+        if program.word == "cd" {
+            dir.push(words.next().map(|w| w.word).unwrap_or_default());
+            continue;
+        }
         let program = program.word.rsplit('/').next().unwrap_or_default();
         // Options that take the next word as their value; `None`: not a
         // viewer (only what `<` gives it is read).
@@ -268,7 +281,7 @@ fn viewed(command: &str) -> Vec<String> {
         while let Some(w) = words.next() {
             let arg = w.word;
             match w.redirect {
-                Some('<') => files.push(arg),
+                Some('<') => files.push(dir.join(arg)),
                 Some(_) => {}
                 None if valued.is_none() => {}
                 None if options_end || !arg.starts_with('-') || arg == "-" => operands.push(arg),
@@ -283,9 +296,13 @@ fn viewed(command: &str) -> Vec<String> {
             }
         }
         let skip = usize::from(program == "sed" && !script_given);
-        files.extend(operands.into_iter().skip(skip).filter(|f| f != "-"));
+        let operands = operands.into_iter().skip(skip).filter(|f| f != "-");
+        files.extend(operands.map(|f| dir.join(f)));
     }
     files
+        .into_iter()
+        .filter_map(|f| f.into_os_string().into_string().ok())
+        .collect()
 }
 
 /// A word of a shell command, and the redirection (`<`, `>`) it is the
@@ -302,9 +319,19 @@ fn commands(command: &str) -> Vec<Vec<Word>> {
     let mut current: Vec<Word> = Vec::new();
     let mut word: Option<String> = None;
     let mut redirect = None;
+    // Heredoc delimiters whose bodies start at the next newline.
+    let mut heredocs: Vec<String> = Vec::new();
     let mut chars = command.chars().peekable();
     loop {
         let c = chars.next();
+        // `2>`: digits right before a redirection are its descriptor.
+        if matches!(c, Some('<' | '>'))
+            && word
+                .as_ref()
+                .is_some_and(|w| w.chars().all(|c| c.is_ascii_digit()))
+        {
+            word = None;
+        }
         // A word ends at whitespace, an operator or the end.
         if c.is_none_or(|c| c.is_whitespace() || "|;&\n<>".contains(c))
             && let Some(w) = word.take()
@@ -331,21 +358,57 @@ fn commands(command: &str) -> Vec<Vec<Word>> {
                 }
             }
             Some('\\') => word.get_or_insert_default().extend(chars.next()),
-            Some('|' | ';' | '&' | '\n') => {
+            Some(c @ ('|' | ';' | '&' | '\n')) => {
                 redirect = None;
                 commands.push(std::mem::take(&mut current));
-            }
-            Some(c @ ('<' | '>')) => {
-                // `2>`: the digit was taken for a word; it is the redirection's.
-                if current.last().is_some_and(|w| {
-                    w.redirect.is_none() && w.word.chars().all(|c| c.is_ascii_digit())
-                }) {
-                    current.pop();
+                // A heredoc's body is text, not commands: skipped to its
+                // delimiter line.
+                if c == '\n' {
+                    for delimiter in heredocs.drain(..) {
+                        let mut line = String::new();
+                        for c in chars.by_ref() {
+                            if c != '\n' {
+                                line.push(c);
+                            } else if line.trim_start_matches('\t') == delimiter {
+                                break;
+                            } else {
+                                line.clear();
+                            }
+                        }
+                    }
                 }
-                redirect = Some(c);
-                while chars.peek().is_some_and(|c| matches!(c, '<' | '>' | '&')) {
+            }
+            Some('>') => {
+                redirect = Some('>');
+                while chars.peek().is_some_and(|c| matches!(c, '>' | '&' | '|')) {
                     chars.next();
                 }
+            }
+            Some('<') => {
+                let mut n = 1;
+                while chars.next_if_eq(&'<').is_some() {
+                    n += 1;
+                }
+                match n {
+                    // `<<` (or `<<-`): a heredoc; its delimiter, unquoted.
+                    2 => {
+                        chars.next_if_eq(&'-');
+                        while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
+                        let mut delimiter = String::new();
+                        while let Some(c) =
+                            chars.next_if(|c| !c.is_whitespace() && !"|;&<>".contains(*c))
+                        {
+                            if !matches!(c, '\'' | '"' | '\\') {
+                                delimiter.push(c);
+                            }
+                        }
+                        heredocs.push(delimiter);
+                    }
+                    // `<<<`: a here-string, text not a file.
+                    n if n > 2 => redirect = Some('h'),
+                    _ => redirect = Some('<'),
+                }
+                chars.next_if_eq(&'&');
             }
             Some(c) if c.is_whitespace() => {}
             Some(c) => word.get_or_insert_default().push(c),
@@ -381,6 +444,23 @@ mod tests {
         assert_eq!(viewed("rg foo src; cargo test"), Vec::<String>::new());
         assert_eq!(viewed("cat \"a \\\"q\\\".txt\""), ["a \"q\".txt"]);
         assert_eq!(viewed("cat -"), Vec::<String>::new());
+        assert_eq!(
+            viewed("cd src/fs && cat view.rs ../x"),
+            ["src/fs/view.rs", "src/fs/../x"]
+        );
+        assert_eq!(
+            viewed("head -n 3 < notes.txt"),
+            ["notes.txt"],
+            "3 isn't a descriptor"
+        );
+        assert_eq!(viewed("cat 2>/dev/null f"), ["f"]);
+        assert_eq!(
+            viewed("cat > run.sh <<'EOF'\nhead -n 5 data.csv\ndon't sed x y\nEOF\ncat z"),
+            ["z"],
+            "a heredoc's body isn't commands"
+        );
+        assert_eq!(viewed("cat <<-END\n\tcat q\n\tEND\nnl r"), ["r"]);
+        assert_eq!(viewed("cat <<< 'not a file'"), Vec::<String>::new());
     }
 
     #[test]
