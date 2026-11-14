@@ -20,11 +20,22 @@ pub fn gitfold_source(path: &Path) -> Result<Option<String>> {
 /// Where the repository of git common directory `common_dir` (as `git::init`
 /// returns it, as the daemon's was) is mounted by gitfold, if it is.
 pub fn mount_of(common_dir: &Path) -> Result<Option<PathBuf>> {
+    Ok(mounts()?
+        .into_iter()
+        .find(|(_, theirs)| theirs == common_dir)
+        .map(|(mount, _)| mount))
+}
+
+/// Every gitfold mount: its mount point and the git common directory of its
+/// repository.
+pub fn mounts() -> Result<Vec<(PathBuf, PathBuf)>> {
     let mountinfo = fs::read("/proc/self/mountinfo")?;
-    let ours = fs_name(common_dir);
     Ok(mounts_in(&mountinfo)
-        .find(|(_, source)| *source == ours)
-        .map(|(mount, _)| PathBuf::from(std::ffi::OsString::from_vec(mount))))
+        .map(|(mount, source)| {
+            let mount = PathBuf::from(std::ffi::OsString::from_vec(mount));
+            (mount, common_dir_of_source(&source))
+        })
+        .collect())
 }
 
 /// The source of the gitfold mount at `path` in mount table `mountinfo`.

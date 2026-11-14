@@ -8,9 +8,12 @@
 //! the first read of each file in a workspace; that is what is recorded (reads
 //! at offset 0), once per path, in an append-only `reads` log (NUL-terminated
 //! paths) in the state directory, which `gitfold overlaps` reads mounted or not.
+//! Not a file searcher's (`procs::Scanners`): a search reads all it passes.
+//! Reads the kernel served from its cache are reported by Claude Code's hook
+//! (`note_reads`).
 //! A content prewarm would read every file before the agent, leaving its reads
-//! unseen: a tracked workspace's `content` walks as `meta`. Off by default: an
-//! agent grepping the whole tree reads every file. A fork inherits the log:
+//! unseen: a tracked workspace's `content` walks as `meta`. Off by default: a
+//! first full read of a tree takes longer. A fork inherits the log:
 //! its changes were built on those reads. Turning tracking off keeps the log.
 
 use std::collections::HashSet;
@@ -60,24 +63,43 @@ impl Workspace {
         Ok(())
     }
 
-    /// Records that `local` was read from its start, if tracked.
-    pub fn note_read(&self, local: u64) {
-        let mut reads = self.reads.lock();
-        let Some(reads) = reads.as_mut() else {
+    /// Records that `local` was read from its start, if tracked and not by
+    /// a file searcher (`scan`, asked only for a path not yet recorded).
+    pub fn note_read(&self, local: u64, scan: impl FnOnce() -> bool) {
+        // Asked first and unlocked: a search reads thousands of files, none
+        // recorded, and `/proc` is read about once a second per thread.
+        if self.reads.lock().is_none() || scan() {
             return;
-        };
+        }
         let Ok(path) = self.path(local) else {
             return;
         };
+        if let Some(reads) = self.reads.lock().as_mut() {
+            self.record(reads, path);
+        }
+    }
+
+    /// Records that the files at `paths` (relative to the workspace root) were
+    /// read, if tracked: reads the daemon didn't see, the kernel having
+    /// served them from its cache (`gitfold track-reads --claude-hook`).
+    pub fn note_reads(&self, paths: impl IntoIterator<Item = Vec<u8>>) {
+        if let Some(reads) = self.reads.lock().as_mut() {
+            for path in paths {
+                self.record(reads, path);
+            }
+        }
+    }
+
+    /// Appends `path` to the log, unless recorded already.
+    fn record(&self, reads: &mut Reads, path: Vec<u8>) {
         if reads.seen.contains(&path) {
             return;
         }
         let mut line = path.clone();
         line.push(0);
-        if let Err(e) = reads.log.write_all(&line) {
-            warn!("recording a read in workspace {}: {e}", self.state.branch);
-            return;
+        match reads.log.write_all(&line) {
+            Ok(()) => drop(reads.seen.insert(path)),
+            Err(e) => warn!("recording a read in workspace {}: {e}", self.state.branch),
         }
-        reads.seen.insert(path);
     }
 }

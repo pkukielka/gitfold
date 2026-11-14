@@ -179,7 +179,9 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 /// (`gitfold.mountpoint`), given its git directory or one of its worktrees'.
 pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path) -> Result<()> {
     let key = format!("gitfold.{MOUNTPOINT}");
-    let value = mountpoint.to_str().context("a mount point that isn't UTF-8")?;
+    let value = mountpoint
+        .to_str()
+        .context("a mount point that isn't UTF-8")?;
     git::cmd::run(git_dir, &["config", "--local", &key, value])
 }
 

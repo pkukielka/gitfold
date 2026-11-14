@@ -12,6 +12,7 @@ mod prewarm;
 mod procs;
 mod refusal;
 mod settings;
+mod shell;
 mod state;
 mod store;
 
@@ -206,6 +207,7 @@ fn run() -> Result<i32> {
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
         Command::Prewarm(args) => cli::branch::prewarm(&cli::repo()?, args)?,
+        Command::TrackReads(args) if args.claude_hook.is_some() => cli::claude::reads_hook()?,
         Command::TrackReads(args) => cli::branch::track_reads(&cli::repo()?, args)?,
         Command::PrewarmWalk {
             root,
