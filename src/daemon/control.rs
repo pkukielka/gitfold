@@ -78,6 +78,10 @@ pub enum Request {
     Fork { from: String, to: String },
     /// Which gitfold build the daemon runs (`crate::VERSION`).
     Version,
+    /// Record that `paths` (relative to the workspace root) were read in the
+    /// workspace of `branch`, if it is open and tracked: reads served from the
+    /// kernel's cache, reported by a Claude Code hook.
+    RecordReads { branch: String, paths: Vec<String> },
 }
 
 impl Request {
@@ -100,12 +104,27 @@ impl Request {
             Request::TrackReads { branch } => format!("track-reads\n{branch}\n"),
             Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
             Request::Version => "version\n".to_string(),
+            // NUL-separated: a path may hold a newline.
+            Request::RecordReads { branch, paths } => {
+                format!("record-reads\n{branch}\n{}", paths.join("\0"))
+            }
         }
         .into_bytes()
     }
 
     fn decode(bytes: &[u8]) -> Result<Request> {
         let text = std::str::from_utf8(bytes).context("request not UTF-8")?;
+        if let Some(rest) = text.strip_prefix("record-reads\n") {
+            let (branch, paths) = rest.split_once('\n').context("record-reads: no branch")?;
+            return Ok(Request::RecordReads {
+                branch: branch.to_string(),
+                paths: paths
+                    .split('\0')
+                    .filter(|p| !p.is_empty())
+                    .map(String::from)
+                    .collect(),
+            });
+        }
         match text.split('\n').collect::<Vec<_>>()[..] {
             [verb @ ("remove" | "check-remove"), force, name, ""] => Ok(Request::Remove {
                 name: name.to_string(),
@@ -311,6 +330,14 @@ mod tests {
             requests.push(Request::Fork {
                 from: n.to_string(),
                 to: format!("{n}-2"),
+            });
+            requests.push(Request::RecordReads {
+                branch: n.to_string(),
+                paths: vec!["a.txt".into(), "d/new\nline".into(), "zażółć".into()],
+            });
+            requests.push(Request::RecordReads {
+                branch: n.to_string(),
+                paths: vec![],
             });
         }
         for r in requests {

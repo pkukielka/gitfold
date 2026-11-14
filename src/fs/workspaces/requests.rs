@@ -56,6 +56,18 @@ impl Workspaces {
         }
     }
 
+    /// Records reads the kernel served from its cache, reported by a Claude
+    /// Code hook (`gitfold track-reads --claude-hook`): `paths`, relative to
+    /// the root of the workspace of `branch`, if it is open and tracked. Says
+    /// how many were new.
+    pub fn record_reads(&self, branch: &str, paths: Vec<String>) -> String {
+        let new = match self.get_open(branch) {
+            Some(ws) => ws.note_reads(paths.into_iter().map(String::into_bytes)),
+            None => 0,
+        };
+        format!("{new} reads recorded")
+    }
+
     /// `gitfold track-reads`: starts or stops recording reads in the workspace
     /// of `branch` as its setting (just set) says, if it is open. Says what it
     /// did.

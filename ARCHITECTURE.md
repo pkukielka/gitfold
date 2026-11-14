@@ -1066,8 +1066,14 @@ diverged from the target and its stored uncommitted changes. Reads are the one
 thing only the filesystem sees: with tracking on, the daemon appends each
 file's path to `.git/gitfold/<id>/reads` at its first read from offset 0
 (NUL-terminated, once per path; a partial last path, from a crash or an append
-in progress, is dropped). The kernel caches contents, so that read is the only
-one the daemon gets; later reads cost nothing.
+in progress, is dropped), unless the reader is a file searcher (`rg`, `grep`,
+`ugrep`, `ag`, `ack`), told by `/proc/<pid>/comm` or `argv[0]` (FUSE gives
+the reading thread; `procs::Scanners` remembers each for 10 s, and is asked
+only for a path not yet recorded). The kernel caches contents, so that read is
+the only one the daemon gets; later reads cost nothing, and aren't seen:
+Claude Code's `PostToolUse` hook (`gitfold track-reads --claude-hook`) reports
+its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
+...), and the daemon records them (a `record-reads` control request).
 
 **Why:**
 
@@ -1076,6 +1082,19 @@ one the daemon gets; later reads cost nothing.
   `--track-reads` is the default; a branch's `gitfoldTrackReads` wins either
   way, like its prewarm mode, and `gitfold track-reads` applies it to an open
   workspace (a control request).
+- **Searches aren't reads:** a whole-tree `rg` records thousands of files, and
+  an `R` line for each says nothing about what the agent built on. Told by
+  the process: Claude Code's Grep tool runs `rg`, its `grep` is its own binary
+  as `ugrep` (argv[0]); its Read tool reads in its own process (threads named
+  `Bun Pool N`), Bash's `cat` as `cat` (measured with Claude Code 2.1.308).
+- **Cached reads from the hook, not from opens:** with opens on
+  (`--kernel-open`, `FOPEN_KEEP_CACHE`) every `open()` reaches the daemon with
+  its pid, cached or not, but each costs a round trip (~4.5 µs): a warm
+  whole-tree `rg` 37 → 146 ms on Spark (28k files), 84 → 510 ms on Linux
+  (97k), 0.40 → 2.68 s on Chromium (512k), a `tar` of Chromium 4.8 → 9.7 s;
+  `find` and `git status` open no files. Agents search often; the hook costs
+  nothing per file. inotify `IN_ACCESS` sees cached reads but not who read;
+  fanotify gives the pid only to root.
 - **Content prewarm walks as meta** in a tracked workspace: the walk would read
   every file first, and the agent's reads would come from the kernel's cache,
   unseen. A per-workspace downgrade, not a refusal of the mount option: a
@@ -1096,6 +1115,10 @@ one the daemon gets; later reads cost nothing.
   name).
 
 **Rejected:** separate commands for stale reads and for workspaces changing the same paths (`stale`, `overlaps`), each a case of this one;
+recording searches' reads (noise); opens on by default to see cached reads
+(seconds per search on large trees, above); parsing every Bash command for
+the files it reads (pipelines, scripts and builds can't be told: simple
+viewers only);
 refusing `--track-reads` with `--prewarm content` (branches can say
 otherwise); line-level conflicts in `overlaps` (`git merge-tree` already says, for
 a merge someone actually asks about).

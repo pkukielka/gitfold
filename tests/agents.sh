@@ -305,7 +305,33 @@ out=$(printf '{"hook_event_name":"WorktreeCreate","cwd":"%s","name":"p2"}' "$REP
 eq "    in a repository used with gitfold: refused" "1 yes" "$rc $(grep -q "used with gitfold" <<<"$out" && echo yes)"
 }
 
+reads_searches_left_out_cached_ones_hook() {
+R branch rd
+mount_fs
+"$BIN" -C "$REPO" track-reads rd on >/dev/null
+W=$MNT/rd
+log() { tr '\0' ' ' <"$COMMON/gitfold/rd/reads" 2>/dev/null | sed 's/ $//'; }
+cat "$W/a.txt" >/dev/null
+eq "a program's reads are recorded" "a.txt" "$(log)"
+grep -rq needle "$W" 2>/dev/null; (cd "$W" && exec -a ugrep awk 'NR < 0' d/c.txt)
+if command -v rg >/dev/null; then rg -q needle "$W"; fi
+eq "  a search's aren't (grep, rg; a program run as ugrep)" "a.txt" "$(log)"
+cat "$W/d/b.txt" >/dev/null
+eq "  nor, the kernel serving it from its cache, a read after one" "a.txt" "$(log)"
+hook() { printf '%s' "$1" | "$BIN" track-reads --claude-hook post-tool-use; }
+hook "{\"tool_name\":\"Read\",\"cwd\":\"$REPO\",\"tool_input\":{\"file_path\":\"$W/d/b.txt\"}}"
+eq "Claude Code's Read, of a file the kernel had cached (grep read it): recorded by the hook" "a.txt d/b.txt" "$(log)"
+hook "{\"tool_name\":\"Bash\",\"cwd\":\"$W/d\",\"tool_input\":{\"command\":\"sed -n 1,2p c.txt | head -n 1; cat ../nope\"}}"
+eq "  its Bash: the files simple viewers show (relative to cwd), not missing ones" "a.txt d/b.txt d/c.txt" "$(log)"
+eq "  silent, exit 0, wherever it runs" "0 " "$(hook '{"tool_name":"Read","tool_input":{"file_path":"/etc/hostname"}}' 2>&1; echo "$?" "$(hook 'not json' 2>&1)")"
+"$BIN" -C "$REPO" track-reads rd off >/dev/null
+hook "{\"tool_name\":\"Read\",\"cwd\":\"$REPO\",\"tool_input\":{\"file_path\":\"$W/d/c.txt\"}}"
+eq "  untracked: nothing" "a.txt d/b.txt d/c.txt" "$(log)"
+unmount_fs
+}
+
 section "overlaps: reads and writes changed elsewhere" overlaps_reads_and_writes_changed_elsewh
+section "reads: searches left out, cached ones from the hook" reads_searches_left_out_cached_ones_hook
 section "the plugin's launcher" the_plugins_launcher
 section "Claude Code worktree hooks" claude_code_worktree_hooks
 section "the task folder" the_task_folder

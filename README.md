@@ -220,7 +220,7 @@ Options:
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--track-reads` | off | Record the files agents read in workspaces, for `gitfold overlaps` (a first full read of Apache Spark took 6% longer). A workspace's own setting wins (`gitfold track-reads`). |
 | `--threads N` | number of CPUs | FUSE worker threads. |
-| `--kernel-open` | off | Debug/benchmark only: let the kernel send open/release for every file. Slower. |
+| `--kernel-open` | off | Let the kernel send every open (and release) to gitfold, so read tracking sees every read, cached or not. Each costs a round trip, about 4.5 µs: a warm whole-tree `rg` takes 146 ms instead of 37 on Apache Spark (28k files), 510 ms instead of 84 on Linux (97k), 2.7 s instead of 0.4 on Chromium (512k); see [bench/RESULTS.md](bench/RESULTS.md). |
 
 A workspace can have its own prewarm mode, kept across remounts in the branch's
 git config: `gitfold branch <BRANCH> --prewarm none`, or `git config
@@ -338,10 +338,17 @@ cleanly (`git merge-tree --write-tree` tells for sure).
 reads every file): `gitfold mount --track-reads` turns it on for the mount,
 `gitfold branch --track-reads on|off` or `gitfold track-reads <BRANCH> on|off`
 for one workspace, whatever the mount says (in git config,
-`branch.<BRANCH>.gitfoldTrackReads`; applied at once while mounted). Only a
-file's first read from its start reaches gitfold (the kernel caches contents),
-so reads that start mid-file (`tail -c`) are missed, and files read before
-tracking started aren't seen. For the same reason, a tracked workspace's
+`branch.<BRANCH>.gitfoldTrackReads`; applied at once while mounted). Reads by
+file searchers (`rg`, `grep`, `ugrep`, `ag`, `ack`: by process name or
+`argv[0]`, which covers Claude Code's Grep tool and `grep`) aren't recorded:
+a search reads every file it passes, and its matches aren't what the agent
+built on. Only a file's first read from its start reaches gitfold (the kernel
+caches contents), so reads that start mid-file (`tail -c`) are missed, files
+read before tracking started aren't seen, and nor is a file read after a
+search read it. With the Claude Code plugin, its hook fills that in for the
+Read tool and for simple viewers in Bash (`cat`, `head`, `tail`, `sed`, `less`,
+`nl` with file arguments): `gitfold track-reads --claude-hook post-tool-use`.
+Every read is seen with `--kernel-open`, at its cost. For the same reason, a tracked workspace's
 `content` prewarm walks as `meta`. `.gitignore` and `.gitattributes` files
 are left out of `R` lines: `git status` reads one in every directory. Without tracking, `overlaps` shows `W` lines
 and says so; `--reads` then fails (exit 3). A fork inherits what its source

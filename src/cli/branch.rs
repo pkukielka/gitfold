@@ -136,7 +136,14 @@ fn set_branch_settings(
 /// `gitfold track-reads`: stores whether branch `name`'s workspace records
 /// reads, and applies it at once if mounted.
 pub fn track_reads(repo: &Path, args: TrackReadsArgs) -> Result<()> {
-    let TrackReadsArgs { branch: name, on } = args;
+    let TrackReadsArgs {
+        branch: name,
+        on,
+        claude_hook: _,
+    } = args;
+    let (Some(name), Some(on)) = (name, on) else {
+        anyhow::bail!("name the branch, and on or off");
+    };
     let common_dir = git::init(repo)?;
     git::require_branch(&name)?;
     settings::set_track_reads(repo, &name, on)?;
@@ -198,7 +205,20 @@ pub struct PrewarmArgs {
 /// The arguments of `gitfold track-reads`.
 #[derive(clap::Args)]
 pub struct TrackReadsArgs {
-    pub branch: String,
-    #[arg(value_name = "on|off", value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set)]
-    pub on: bool,
+    #[arg(required_unless_present = "claude_hook")]
+    pub branch: Option<String>,
+    #[arg(value_name = "on|off", value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set, required_unless_present = "claude_hook")]
+    pub on: Option<bool>,
+    /// As Claude Code's `PostToolUse` hook on Read and Bash (`post-tool-use`):
+    /// records the files they read in a tracked workspace, which gitfold
+    /// can't see when the kernel serves them from its cache. See
+    /// skills/gitfold/SKILL.md.
+    #[arg(long, value_enum, value_name = "EVENT", exclusive = true)]
+    pub claude_hook: Option<ReadsHook>,
+}
+
+/// The Claude Code hook `gitfold track-reads` serves.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ReadsHook {
+    PostToolUse,
 }

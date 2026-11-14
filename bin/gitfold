@@ -111,7 +111,7 @@ field() {
 # used with gitfold (state in <git common dir>/gitfold), creating one fails.
 without() {
     case "$*" in
-        "inbox --claude-hook "*) exit 0 ;;
+        "inbox --claude-hook "* | "track-reads --claude-hook "*) exit 0 ;;
         "branch --claude-hook worktree-create")
             input=$(cat)
             name=$(echo "$input" | field name)

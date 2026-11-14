@@ -397,9 +397,16 @@ impl GitFold {
         Ok(Arc::new(data))
     }
 
-    /// Content for reading `size` bytes at `offset`. Immutable content is cached
-    /// whole by inode; upper workspace files are read directly.
-    pub(super) fn content(&self, ino: INodeNo, offset: u64, size: u32) -> Result<Content, Errno> {
+    /// Content for reading `size` bytes at `offset`, for process `pid`.
+    /// Immutable content is cached whole by inode; upper workspace files are
+    /// read directly.
+    pub(super) fn content(
+        &self,
+        ino: INodeNo,
+        offset: u64,
+        size: u32,
+        pid: u32,
+    ) -> Result<Content, Errno> {
         let cached = |key: u64, load: &dyn Fn() -> Result<Arc<Vec<u8>>, Errno>| {
             self.content.get_or_load(key, load).map(Content::Whole)
         };
@@ -411,7 +418,7 @@ impl GitFold {
                 WsNode::Entry(ws, local) => {
                     // The kernel caches contents: this is the first read of it.
                     if offset == 0 {
-                        ws.note_read(local);
+                        ws.note_read(local, || self.scanners.is(pid));
                     }
                     match ws.read(&self.store, local, offset, size)? {
                         Read::Upper(data) => Ok(Content::Range(data)),

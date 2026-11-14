@@ -8,6 +8,9 @@
 //! the first read of each file in a workspace; that is what is recorded (reads
 //! at offset 0), once per path, in an append-only `reads` log (NUL-terminated
 //! paths) in the state directory, which `gitfold overlaps` reads mounted or not.
+//! Not a file searcher's (`procs::Scanners`): a search reads all it passes.
+//! Reads the kernel served from its cache are reported by Claude Code's hook
+//! (`note_reads`).
 //! A content prewarm would read every file before the agent, leaving its reads
 //! unseen: a tracked workspace's `content` walks as `meta`. Off by default: an
 //! agent grepping the whole tree reads every file. A fork inherits the log:
@@ -60,8 +63,9 @@ impl Workspace {
         Ok(())
     }
 
-    /// Records that `local` was read from its start, if tracked.
-    pub fn note_read(&self, local: u64) {
+    /// Records that `local` was read from its start, if tracked and not by
+    /// a file searcher (`scan`, asked only for a path not yet recorded).
+    pub fn note_read(&self, local: u64, scan: impl FnOnce() -> bool) {
         let mut reads = self.reads.lock();
         let Some(reads) = reads.as_mut() else {
             return;
@@ -69,15 +73,37 @@ impl Workspace {
         let Ok(path) = self.path(local) else {
             return;
         };
-        if reads.seen.contains(&path) {
-            return;
+        if !reads.seen.contains(&path) && !scan() {
+            self.record(reads, path);
         }
+    }
+
+    /// Records that the files at `paths` (relative to the workspace root) were
+    /// read, if tracked: reads the daemon didn't see, the kernel having
+    /// served them from its cache (`gitfold track-reads --claude-hook`).
+    /// Returns how many were new.
+    pub fn note_reads(&self, paths: impl IntoIterator<Item = Vec<u8>>) -> usize {
+        let mut reads = self.reads.lock();
+        let Some(reads) = reads.as_mut() else {
+            return 0;
+        };
+        let mut new = 0;
+        for path in paths {
+            if !reads.seen.contains(&path) && self.record(reads, path) {
+                new += 1;
+            }
+        }
+        new
+    }
+
+    /// Appends `path` to the log; whether it was.
+    fn record(&self, reads: &mut Reads, path: Vec<u8>) -> bool {
         let mut line = path.clone();
         line.push(0);
         if let Err(e) = reads.log.write_all(&line) {
             warn!("recording a read in workspace {}: {e}", self.state.branch);
-            return;
+            return false;
         }
-        reads.seen.insert(path);
+        reads.seen.insert(path)
     }
 }

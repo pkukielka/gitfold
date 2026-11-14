@@ -85,6 +85,8 @@ pub struct GitFold {
     workspaces: Arc<Workspaces>,
     content: ContentCache,
     counters: Counters,
+    /// Who reads: a file searcher's reads aren't recorded (`workspace::reads`).
+    scanners: crate::procs::Scanners,
     names: Arc<NameChanges>,
     /// See `Removal::closed`.
     removals_closed: Arc<parking_lot::Mutex<bool>>,
@@ -124,6 +126,7 @@ impl GitFold {
             names,
             removals_closed: Arc::default(),
             counters: Counters::default(),
+            scanners: crate::procs::Scanners::default(),
         }
     }
 
@@ -482,7 +485,7 @@ impl Filesystem for GitFold {
 
     fn read(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         _fh: FileHandle,
         offset: u64,
@@ -493,7 +496,7 @@ impl Filesystem for GitFold {
     ) {
         bump(&self.counters.read);
         let _t = IoTimer::start(&self.counters);
-        match self.content(ino, offset, size) {
+        match self.content(ino, offset, size, req.pid()) {
             Ok(Content::Whole(data)) => {
                 let start = (offset as usize).min(data.len());
                 let end = start.saturating_add(size as usize).min(data.len());

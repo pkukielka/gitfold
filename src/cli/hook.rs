@@ -1,23 +1,25 @@
 //! Claude Code hooks' input: a JSON object on stdin, of which the hooks need
-//! only top-level strings (`field`).
+//! only strings (`field`, `field_at`).
 
 /// The string `key` holds at the top level of JSON object `json`, if it is
 /// one.
 pub fn field(json: &str, key: &str) -> Option<String> {
+    field_at(json, &[key])
+}
+
+/// The string at `path` in JSON object `json`: `["tool_input", "file_path"]`
+/// is `json.tool_input.file_path`.
+pub fn field_at(json: &str, path: &[&str]) -> Option<String> {
     let mut p = Json {
         s: json.as_bytes(),
         i: 0,
     };
-    p.expect(b'{')?;
-    loop {
-        let k = p.string()?; // `}`: none left
-        p.expect(b':')?;
-        if k == key {
-            return p.string();
-        }
-        p.skip_value()?;
-        p.expect(b',')?;
+    let (last, objects) = path.split_last()?;
+    for key in objects {
+        p.find(key)?;
     }
+    p.find(last)?;
+    p.string()
 }
 
 /// A cursor over JSON text; `peek`, `next` and `expect` skip whitespace first.
@@ -27,6 +29,20 @@ struct Json<'a> {
 }
 
 impl Json<'_> {
+    /// In the object that starts here, moves to the value of `key`.
+    fn find(&mut self, key: &str) -> Option<()> {
+        self.expect(b'{')?;
+        loop {
+            let k = self.string()?; // `}`: none left
+            self.expect(b':')?;
+            if k == key {
+                return Some(());
+            }
+            self.skip_value()?;
+            self.expect(b',')?;
+        }
+    }
+
     fn peek(&mut self) -> Option<u8> {
         while self.s.get(self.i).is_some_and(u8::is_ascii_whitespace) {
             self.i += 1;
@@ -180,5 +196,14 @@ mod tests {
             None,
             "only keys count"
         );
+        let post =
+            r#"{"tool_name":"Read","tool_input":{"limit":5,"file_path":"/m/ws/a.txt"},"cwd":"/m"}"#;
+        assert_eq!(
+            field_at(post, &["tool_input", "file_path"]).as_deref(),
+            Some("/m/ws/a.txt")
+        );
+        assert_eq!(field_at(post, &["cwd"]).as_deref(), Some("/m"));
+        assert_eq!(field_at(post, &["tool_input", "command"]), None);
+        assert_eq!(field_at(post, &["tool_name", "x"]), None, "not an object");
     }
 }

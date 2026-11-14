@@ -105,3 +105,64 @@ pub fn parent(pid: u32) -> Option<u32> {
     let ppid = stat[at + 1..].split_whitespace().nth(1)?.parse().ok()?;
     (ppid > 0).then_some(ppid)
 }
+
+/// Programs that search files: what they read is a scan, not a read an agent
+/// acted on, and isn't recorded (`fs::workspace::reads`).
+const SCANNERS: &[&str] = &[
+    "rg", "grep", "egrep", "fgrep", "ugrep", "ag", "ack", "ack-grep", "pt", "sift",
+];
+
+/// Whether a process named `comm`, run as `argv0`, is a file searcher: by
+/// either (Claude Code's `grep` is its own binary run as `ugrep`).
+fn scanner_named(comm: &str, argv0: &[u8]) -> bool {
+    let argv0 = argv0.rsplit(|b| *b == b'/').next().unwrap_or_default();
+    SCANNERS.iter().any(|s| comm == *s || argv0 == s.as_bytes())
+}
+
+/// How long `Scanners` trusts what it found for a pid: long enough that a
+/// search's threads look once, short enough that a reused pid isn't
+/// mistaken (pids wrap only after millions).
+const SCANNER_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Which processes are file searchers (`scanner_named`), from `/proc`,
+/// remembered per pid (or thread id, as FUSE gives it) for `SCANNER_TTL`.
+#[derive(Default)]
+pub struct Scanners(parking_lot::Mutex<std::collections::HashMap<u32, (std::time::Instant, bool)>>);
+
+impl Scanners {
+    pub fn is(&self, pid: u32) -> bool {
+        let now = std::time::Instant::now();
+        if let Some((at, scanner)) = self.0.lock().get(&pid)
+            && now.duration_since(*at) < SCANNER_TTL
+        {
+            return *scanner;
+        }
+        let comm = fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
+        let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        let argv0 = cmdline.split(|b| *b == 0).next().unwrap_or_default();
+        let scanner = scanner_named(comm.trim_end(), argv0);
+        let mut known = self.0.lock();
+        if known.len() > 4096 {
+            known.retain(|_, (at, _)| now.duration_since(*at) < SCANNER_TTL);
+        }
+        known.insert(pid, (now, scanner));
+        scanner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// By the process name or argv[0]'s file name.
+    #[test]
+    fn scanners_by_name() {
+        assert!(scanner_named("rg", b"/nix/store/x-ripgrep/bin/rg"));
+        assert!(scanner_named(".claude-wrapped", b"ugrep"));
+        assert!(scanner_named("grep", b"grep"));
+        assert!(!scanner_named("cat", b"/usr/bin/cat"));
+        assert!(!scanner_named("Bun Pool 3", b"claude"));
+        assert!(!scanner_named("cargo", b"/usr/bin/cargo"));
+        assert!(!scanner_named("rgx", b"rgx"), "the whole name");
+    }
+}
