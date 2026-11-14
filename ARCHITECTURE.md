@@ -58,10 +58,11 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, lens, upper/, tmp/
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
            refs/gitfold/<id>                 keeps the workspace base from git gc
+           refs/gitfold-seal/<id>/<n>        keeps a workspace's seals (the newest 16)
 ```
 
 Names below the root are resolved by `Workspaces::resolve`, one component at a
@@ -118,13 +119,14 @@ Then, per request (`fs/workspace/`):
 | `src/fs/snapshots.rs` | `@<rev>` registry: creating snapshots, listing them per namespace |
 | `src/fs/workspaces/mod.rs` | name resolution below the root; workspace and namespace registry; opening workspaces; the sync thread |
 | `src/fs/workspaces/busy.rs` | busy marks: branches a request works on, not opened, removed or worked on meanwhile |
-| `src/fs/workspaces/requests.rs` | the control requests served on workspaces: forks (with the request lock), applying prewarm and read-tracking settings |
+| `src/fs/workspaces/requests.rs` | the control requests served on workspaces: forks (with the request lock), applying prewarm and read-tracking settings, layer switches (telling the kernel what changed) |
 | `src/fs/workspace/mod.rs` | one workspace: merged lower/upper view, lookups, cached listings, reads |
 | `src/fs/workspace/write.rs` | copy-up and mutations |
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
+| `src/fs/workspace/lens.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told, git told (skip-worktree, excludes) or surrendered |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
@@ -137,6 +139,8 @@ Then, per request (`fs/workspace/`):
 | `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
+| `src/state/seal.rs` | seals: a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>` |
+| `src/state/lens.rs` | a workspace's layers: the `lens` file, each layer's changes, the view tree and its mixed paths |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
@@ -147,18 +151,24 @@ Then, per request (`fs/workspace/`):
 | `src/git/cmd.rs` | running git itself (`command`, `run`, `output`) |
 | `src/git/index.rs` | streaming index v4 writer (with cache tree), stat info |
 | `src/git/worktree.rs` | worktree registrations (snapshots, workspaces), base pin refs, git idle check |
+| `src/git/index_edit.rs` | editing an index git wrote (v2, v3, v4): skip-worktree bits, stat data and ids of given paths, under git's `index.lock` protocol |
+| `src/git/worktree_config.rs` | a linked worktree's own config: the excludes file for layers' new files (keeping the user's global ignore file); the push guard hooks for the next phase (not installed yet) |
+| `src/git/hooks/` | the push guard's `pre-push` and the shell library the worktree's hooks share (embedded) |
+| `src/git/lens.rs` | the next phase's git side, not used yet: blended (hunk) trees, the lens commit, extracting commits made on it |
 | `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, fusermount |
 | `src/procs.rs` | processes using a mount (from `/proc`) |
 | `src/mount_table.rs` | the mount table: where a gitfold mount is (or a repository's), its source name (the repository) |
-| `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm` and `track-reads` while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm`, `track-reads` and layer switches (`lens`) while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/serve.rs` | the daemon in the foreground: mounting with FUSE, the control requests it answers, until unmounted |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process; the prewarm modes |
-| `src/cli/mod.rs` | what commands share: the repository (`repo`), the workspace the current directory is in (`branch_or_current`), printing paths as git quotes them (`quote`, `write_path`), the repository lock or a daemon request (`local_or_daemon`) |
+| `src/cli/mod.rs` | what commands share: the repository (`repo`), the workspace the current directory is in (`branch_or_current`; `workspace_at` from the mount, where `.git` turns git away), printing paths as git quotes them (`quote`, `write_path`), the repository lock or a daemon request (`local_or_daemon`) |
 | `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
 | `src/cli/list.rs` | `list` and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
+| `src/cli/mix.rs` | `seal` and `mix` (and the `Stop` hook that seals) |
+| `src/cli/layer.rs` | `layer` and `lens` (and the hooks that move layers and deny edits of their files) |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
 | `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
@@ -180,6 +190,7 @@ Then, per request (`fs/workspace/`):
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
+| `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts) |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
@@ -198,14 +209,31 @@ Then, per request (`fs/workspace/`):
 - **Rebase** (of a workspace, not `git rebase`): moving the base to the branch's
   new tip without changing what the workspace shows.
 - **Stamp**: the mtime and ctime a lower file shows because a rebase or the
-  unchanged-file cleanup dropped its upper copy (`times`).
+  unchanged-file cleanup dropped its upper copy, or a layer switch changed
+  it (`times`).
 - **Idle** (git in a workspace): HEAD on the branch, no operation stopped
   half-way (merge conflict, rebase, cherry-pick, revert, sequencer, bisect) in
   the worktree's admin directory, and no lock on the index, HEAD, the branch
   ref or `packed-refs` (`worktree::git_busy`).
-- **Lower**: the base tree, from the shared store.
+- **Lower**: the base tree, from the shared store (with layers shown, the
+  view tree).
 - **Upper**: every file that differs from the base, as real files in
   `.git/gitfold/<id>/upper`.
+- **Seal**: a commit of a workspace's uncommitted work: the tree it shows,
+  ignored files left out, on its base, made with a fixed identity and date.
+- **Layer**: another workspace's work shown in a workspace, read-only: one
+  of its seals, as the changes since a pinned merge base. The layers of a
+  workspace, bottom first, each shown or not, are its **lens** (also the
+  name of the file storing them); "lensed" means at least one is shown.
+- **View tree**: the base's tree with the shown layers' changes on top,
+  whole files, the higher layer winning; the lower layer while lensed.
+- **Mixed path**: a path a shown layer changed (or deleted): the layer's,
+  read-only, unless upper has it.
+- **Switch**: changing what the layers show (a layer added, shown, hidden,
+  removed or moved to a newer seal), telling the kernel and git.
+- **Surrender**: turning git off in a lensed workspace whose index can't be
+  edited: its `.git` names a nonexistent `/LENS ON (...)` directory saying
+  why.
 - **Whiteout**: a recorded deleted lower path, so it stays hidden.
 - **Opaque**: a directory recreated over a whiteout, or a lower directory
   copied into upper by a rename; its lower children stay hidden.
@@ -262,14 +290,17 @@ decision that creates them.
   uid) must change `write_index` too, or `git status` reads every file. For a
   workspace this applies to the index gitfold writes when the registration is
   created (path-hash inodes, constant times); git maintains it afterwards, and
-  rebases keep what git recorded true (stamps).
+  rebases keep what git recorded true (stamps). Layers' paths are
+  skip-worktree, which git doesn't compare; those a switch gives back carry
+  the switch's stamp, which the index doesn't record yet, so git re-reads
+  them once (a layer's changed files, not the tree).
   ([rebases](#workspaces-follow-their-branch-invisible-rebases),
   [index](#a-synthesized-git-index-whose-stat-data-matches-the-filesystem))
 - **Snapshot file attributes depend only on (blob, mode).** A snapshot file inode
   is shared by every snapshot that contains it, so nothing per snapshot or per
   path may show in its attributes: one timestamp, link count 1. Unchanged
-  workspace files report the same attributes except the inode, the write bits,
-  and their stamp once committed.
+  workspace files report the same attributes except the inode, the write bits
+  (none on a layer's file), and their stamp once committed or switched.
   ([inodes](#inode-numbers-computed-for-snapshots-path-derived-for-workspaces),
   [timestamps](#constant-timestamps))
 - **Every directory inode has exactly one parent.** Directory inodes are per
@@ -287,9 +318,12 @@ decision that creates them.
   size, mode, mtime, inode, the set of names. Only the ctime of a file copied up
   by a rebase, the atime of a dropped file, and the times (and, for a directory
   that becomes an upper one, the size) of directories a rebase creates in upper
-  or adds files to or removes them from change; git ignores all three.
+  or adds files to or removes them from change; git ignores all three. The
+  one visible change made outside a request, a layer switch, tells the kernel
+  about every cached node, entry and listing it changes.
   ([rebases](#workspaces-follow-their-branch-invisible-rebases),
-  [caching](#kernel-caching-does-the-heavy-lifting))
+  [caching](#kernel-caching-does-the-heavy-lifting),
+  [layers](#layers-other-workspaces-work-as-a-view-tree))
 - **Names disappear only through `gitfold remove`**, so their entries can be
   cached long; otherwise listings only grow. A removal tells the kernel to drop
   the entry (`Notifier::inval_entry`) and its directory's listing. When a
@@ -304,10 +338,11 @@ decision that creates them.
   re-hash of that file.
   ([workspaces](#writable-workspaces-copy-on-write-inside-gitfold))
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
-  the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times` and
-  `reads` record formats, `upper/`), task folders in `.git/gitfold/.tasks/<id>/`
-  and the message format of their inboxes (README, "Messages"), the
-  base-pinning ref `refs/gitfold/<id>`, the
+  the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times`,
+  `reads` and `lens` record formats, `lens-git-off`, `upper/`), task folders
+  in `.git/gitfold/.tasks/<id>/` and the message format of their inboxes
+  (README, "Messages"), the base-pinning ref `refs/gitfold/<id>`, the seal
+  refs `refs/gitfold-seal/<id>/<n>`, the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
@@ -1208,6 +1243,118 @@ nudge` drives tmux): tied to tmux and to how each harness reads input;
 `asyncRewake` does it inside the harness. Messages through the daemon's socket
 (would need it mounted, and a protocol instead of files).
 
+### Layers: other workspaces' work as a view tree
+
+**What:** a workspace can show other workspaces' work, uncommitted
+included, read-only, over its base and under its own changes. Each layer is
+one **seal** of the other workspace (`state::seal`: a commit of the tree it
+shows, ignored files left out, on its base, kept by
+`refs/gitfold-seal/<id>/<n>`) with the merge base of the two workspaces,
+pinned when the layer is added or moved. The shown layers' changes
+(`diff-tree <merge base> <seal>`, bottom first, whole files) applied to the
+base's tree make the **view tree** (`state::lens::view`), loaded into the
+shared store and used as the workspace's lower layer. The stack is stored
+in `lens` in the state directory; `gitfold layer` writes it and asks the
+daemon to switch (a `lens` control request). `gitfold mix` is the
+read-only form: seals merged with `git merge-tree` into a commit opened as
+a snapshot, with no change to any workspace.
+
+**Why:**
+
+- **The view tree as the lower layer:** `Workspace::lower` already reads one
+  stored tree, so lookups, listings, `getattr` and reads needed no new code
+  (only `mixed` on lower files, for their write bits). Upper still wins over
+  it, so the workspace's own files are never touched by a layer.
+- **Seals, not live files:** a seal is immutable, so the other agent's
+  writes change nothing a reader has cached, and need no invalidation. Made
+  with a fixed identity and date, the same work gives the same commit, so
+  sealing an unchanged workspace makes nothing new and moves no layer.
+- **A pinned merge base:** a layer is what its workspace has that this one
+  doesn't (its commits since they diverged, plus its uncommitted work). The
+  merge base is pinned with the seal, so what a layer shows changes only at a
+  switch, not when either branch moves.
+- **Switches tell the kernel exactly what changed** (`Workspace::switch`):
+  the old and new view trees are diffed; paths upper shadows are skipped; for
+  each change, the highest path whose type changed (appeared, vanished,
+  file ↔ directory) is an entry change in its directory (`inval_entry`, the
+  directory's listing, its nodes orphaned), else the file's node, if the
+  kernel holds it, loses its attributes and pages (`inval_inode`). The
+  notifications go out after `layers` is released: `inval_entry` waits for
+  lookups in the directory, which wait for `layers`. Changed files get the
+  switch's time as their stamp, so incremental builds rebuild them, and
+  everything else keeps its time. The cost is the layers' changes, not the
+  tree. A switch is refused while git is busy in the workspace: it changes
+  what the index describes.
+- **Writes refused:** a mixed path's file has no write bits, and copy-up
+  (writes, truncation, `chmod`), removal, renames from or onto it (or of a
+  directory holding one) and creating a path a layer deleted are `EACCES`.
+  Any of them would copy the layer's content into upper, where it becomes
+  this workspace's own work, hidden from later switches and committed with
+  its branch. `errno` carries no text, so Claude Code's edit tools are
+  denied first by a `PreToolUse` hook giving the reason and the two ways out
+  (ask the layer's agent with `gitfold send`; hide the layer).
+- **Git sees only the workspace's own work: skip-worktree and per-worktree
+  excludes** (`tell_git`). The layers' paths the base tracks are marked
+  skip-worktree in the worktree's own index, by an index editor
+  (`git::index_edit`, a one-pass transcoder copying untouched entries' bytes,
+  under git's `index.lock` protocol: ~50 ms for 5,000 paths in a 300k-entry
+  v4 index; gix-index writes only v2/v3 and drops unknown extensions). Git
+  then neither shows nor commits them and keeps the base's blob, through
+  `status`, `diff`, `add -A`, `commit -a`, `stash`, `restore` and `reset`.
+  Files layers add are excluded by a per-worktree `core.excludesFile`
+  (`git::worktree_config`, `extensions.worktreeConfig` at format version 0):
+  `info/exclude` is shared by every worktree, and the per-worktree setting
+  replaces the user's global ignore file, so the generated file starts with
+  its patterns. Hiding the layers clears both.
+- **Surrender as the fallback:** where the index can't be edited (sparse
+  checkout, whose re-application rewrites skip-worktree bits; a split or
+  sparse index; an unknown required extension; the index locked), the layers
+  still show, but the virtual `.git` (now swappable) names a directory that
+  doesn't exist: `gitdir: /LENS ON (a+b): git is off here (<why>). Run
+  gitfold lens off to use git`. Every git command then fails with that text
+  (exit 128), the registration and branch protection stay, and the `.git`
+  file can't be written, so `git worktree repair` can't undo it. Why is kept
+  in `lens-git-off`, so it survives remounts. gitfold's own commands find
+  the workspace from the mount instead (`cli::workspace_at`).
+- **The base isn't rebased while lensed** (`sync` waits): a rebase drops
+  upper files identical to the new base and copies up files it changes, and
+  with a view tree as lower either could turn a layer's content into this
+  workspace's own. Commits still move the branch; the base catches up once
+  no layer shows.
+- **Moves at turn boundaries, by hooks:** a workspace shown as a layer is
+  sealed when its Claude Code session stops (`seal --claude-hook stop`), and
+  a reader's layers move to the newest seals when its next prompt is sent
+  (`layer --claude-hook user-prompt-submit`), which tells the agent which
+  changed. Neither agent sees the other's half-done turn, and nothing the
+  reader read changes mid-turn. The agent's own `gitfold layer` commands
+  switch at once: a boundary it chose.
+
+Blending changes within one file (a registry both agents append to), with a
+synthesized HEAD (the lens commit) whose commits are extracted onto the
+branch, is the next phase, not built: `git::lens` and the push guard in
+`git::worktree_config` are its groundwork, not wired in.
+
+**Rejected:**
+
+- Other index tricks, tested on git 2.49 before building: the layers'
+  versions staged in the index (`status` shows them as staged, and even a
+  plain `git commit` commits them); `assume-unchanged` (a performance
+  promise: `stash`, `restore` and `reset --hard` revert the layers' files,
+  and `stash` lost an edit to a file both sides changed); an index per lens
+  swapped on toggle (what it adds over skip-worktree is staged entries, which
+  it loses or leaks into the other view).
+- `git update-index --[no-]skip-worktree --stdin` for the toggles (~115 ms
+  for 500k entries; kept as `set_skip_worktree_by_git`): the editor is
+  faster, and can also set an entry's stat data and id.
+- `info/exclude` for the layers' new files: shared by every worktree.
+- A deliberately broken index, or no `.git`, as the surrender: git says
+  "index file corrupt" and the usual repairs undo it; without `.git`, git
+  finds the enclosing repository and succeeds.
+- Layers following the other workspace live, every write at once: rewriting
+  the reader's index while its git may run, and a view changing in the
+  middle of its turn.
+- Rebasing the base under the layers: see above; it waits instead.
+
 ## Rejected ideas (index)
 
 | idea | why not | where |
@@ -1238,6 +1385,10 @@ nudge` drives tmux): tied to tmux and to how each harness reads input;
 | LRU content cache | no measured benefit | [memory](#memory-hygiene) |
 | Holding `creating` across a fork | every open waited for a copy | [forks](#forks-commands-on-a-workspaces-stored-state) |
 | Read tracking on by default | `R` lines are for several agents on one repository | [overlaps](#overlaps-reads-from-claude-codes-hook-writes-from-stored-state) |
+| Layers' versions staged, `assume-unchanged`, an index per lens | commit theirs, revert theirs, or lose staged entries; skip-worktree instead | [layers](#layers-other-workspaces-work-as-a-view-tree) |
+| `info/exclude` for layers' new files | shared by every worktree | [layers](#layers-other-workspaces-work-as-a-view-tree) |
+| Broken index or no `.git` as the surrender | repaired away; git finds the enclosing repository | [layers](#layers-other-workspaces-work-as-a-view-tree) |
+| Live layers | index rewritten under a running git; views change mid-turn | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 
 ## Known limitations
 
@@ -1353,6 +1504,14 @@ checkout" and "Running it"); this is the why and what it would take.
   to be detached (it lists the processes using it, from `/proc`, first),
   except when it or a process it runs under (its shell, `make`, ...) is
   inside the mount: it would wait for itself.
+- **Layers combine whole files.** A file both workspaces changed shows this
+  workspace's version only (blending within a file is the next phase). A
+  layer pins a seal that only the newest 16 seal refs keep: one not moved
+  while its workspace sealed 16 times more can be pruned by `git gc`. Lost
+  skip-worktree bits (`update-index --no-skip-worktree`, an index rebuilt by
+  hand) aren't re-derived until the next switch, and the excludes file isn't
+  regenerated when the user's global ignore file changes
+  (`refresh_excludes` exists, unused). A fork doesn't copy the layers.
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
   resolution uses the kernel's own parent links, so this only affects tools that
@@ -1385,3 +1544,8 @@ compact node table and write measurements. Next:
   [Limitations](#known-limitations).
 - **Parallel creates.** Creating an entry takes the workspace lock
   exclusively; per-directory locking would let parallel writers proceed.
+- **Layers, next phases.** Blending changes within a file through a
+  synthesized HEAD (the lens commit), with commits extracted onto the branch
+  and a push guard (groundwork in `git::lens` and `git::worktree_config`);
+  then proposals (a change to a layer's file made in a fork of its
+  workspace) and layers built on committed work (stacked branches).

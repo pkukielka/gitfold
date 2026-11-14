@@ -170,9 +170,13 @@ It runs the `gitfold` on `PATH`, or else the release matching the plugin
   except that in a repository used with gitfold creating a worktree fails,
   saying why.
 - **Inbox messages arrive in the session** (see [Messages](#messages-between-agents)).
+- **Layers move between turns** (see [Layers](#layers)).
 
 The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove
---claude-hook worktree-remove` and the `inbox --claude-hook` ones above. A
+--claude-hook worktree-remove`, the `inbox --claude-hook` ones above, and for
+layers `gitfold seal --claude-hook stop` (`Stop`), `gitfold layer
+--claude-hook user-prompt-submit` (`UserPromptSubmit`) and `gitfold layer
+--claude-hook pre-tool-use` (`PreToolUse` on `Edit|Write|MultiEdit|NotebookEdit`). A
 plugin's `WorktreeCreate` hook doesn't run for `claude --worktree --tmux`; for
 that, put the two worktree hooks in `settings.json` instead.
 
@@ -228,11 +232,23 @@ even on a huge tree. Each workspace then changes on its own.
   hook (the plugin's) reports: the Read tool's files, and the files `cat`,
   `head`, `tail`, `sed` ... show in Bash; with other agents, `overlaps` has
   `W` lines only.
-- **Merge previews:** to see what several branches look like merged, before
-  merging anything, make the merge commit with git and open it as a snapshot.
-  No working tree, index or ref is touched (git 2.38 or later). This is a
-  bash function: it runs in a subshell, so the identity doesn't leak into your
-  shell.
+- **Merge previews:** to see what several workspaces look like merged,
+  uncommitted work included, before merging anything:
+
+  ```
+  cd $(gitfold mix main agent/task-17 agent/task-18)   # build and test there
+  ```
+
+  It merges each workspace's work (its uncommitted changes as a commit,
+  `gitfold seal`), or a branch's or revision's commit, in order onto the
+  first (or `--onto <REV>`), and prints the merge as a snapshot path. No
+  workspace, index or branch changes. It exits 4 on conflicts, listing the
+  paths. The same work gives the same snapshot.
+
+  Committed work only, without gitfold: make the merge commit with git and
+  open it as a snapshot. No working tree, index or ref is touched (git 2.38
+  or later). This is a bash function: it runs in a subshell, so the identity
+  doesn't leak into your shell.
 
   ```
   merge_preview() (
@@ -266,6 +282,74 @@ even on a huge tree. Each workspace then changes on its own.
   once in the repository, then a plain `git status` once in each workspace.
   Later scans, including the ones coding tools run after every command, skip
   unchanged directories.
+
+## Layers
+
+A **layer** is another workspace's work (uncommitted included) shown in
+yours: its changed files over your base, under your own changes. Several
+agents building parts of one change can then build and test against each
+other's work as it is, without merging or committing anything.
+
+```
+gitfold layer list                # bottom first: on/off, the branch, its seal
+gitfold layer add agent/api       # show agent/api's work here, as now
+gitfold layer off agent/api       # hide it (kept; `on` shows it again)
+gitfold layer update              # every layer to its workspace's work as now
+gitfold lens off                  # hide every layer
+```
+
+- **A layer's files are read-only here.** They are another agent's work in
+  progress; a change made here would become your own copy of the file,
+  hiding theirs from you and landing in your commits. Writing one fails
+  with `EACCES` (Claude Code's edit tools are denied, saying whose it is).
+  Two ways out:
+  - **ask its agent** to change it: `gitfold send <BRANCH> -s "<file>" "<what
+    and why>"`; it shows here once they have made it (next turn);
+  - or **`gitfold layer off <BRANCH>`**, then edit your own version (a file
+    of yours at a layer's path always wins over the layer, and stays yours).
+- **Whole files:** a file both you and a layer changed shows your version.
+- **`git status` shows only your work.** The layers' files are hidden from
+  git (skip-worktree, and excluded if new): `status`, `diff`, `add -A`,
+  `commit -a` see and commit only your changes, as do `gitfold changes` and
+  `list`. Commit and push normally. If git refuses to touch a file you
+  didn't change (a merge or rebase over a layer's file), run `gitfold lens
+  off` and retry.
+- **`fatal: not a git repository: /LENS ON (<layers>): git is off here
+  (<why>)`** means gitfold couldn't hide the layers from git here (sparse
+  checkout, a split or sparse index), so it turned git off rather than let
+  you commit others' work. The files still show. Run `gitfold lens off` to
+  use git again; `gitfold` commands keep working meanwhile.
+- **Layers move between turns, not during them.** With the gitfold plugin, a
+  workspace shown as a layer is sealed when its session stops, and your
+  layers move to the newest seals when your next prompt starts; you are
+  then told which layers changed (files you read from them may have
+  changed: read them again). Without the plugin, or for a workspace no
+  session runs in, `gitfold layer update`.
+- **Changed files get a fresh time** at each switch, so incremental builds
+  rebuild them.
+
+**For an orchestrator: shared contracts.** Put what the tasks share
+(interfaces, schemas, a registry) in a root workspace, and make it a layer
+of each child; children then see the contracts as the root writes them, and
+can't change them (they ask the root with `gitfold send`):
+
+```
+gitfold branch agent/contracts --from origin/main
+gitfold branch agent/child-1 --from origin/main
+ls ~/mnt/repo/agent/child-1 >/dev/null               # opens its workspace
+gitfold layer -w agent/child-1 add agent/contracts   # each child
+```
+
+The workspace a layer is added to must have been opened (else exit 3); a
+layer's branch without a workspace shows its last commit.
+
+Children can also be layers of each other, or of a reviewer's workspace. To
+**check the work together**, mix it into a snapshot (`cd $(gitfold mix
+agent/contracts agent/child-1 agent/child-2)`, see the merge previews
+above), or add the children as layers of a workspace that builds and tests
+them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
+<BRANCH>` prints one workspace's uncommitted work as a commit, to open as
+`<mount>/@<sha>`.
 
 ## When something fails
 
