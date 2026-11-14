@@ -20,9 +20,11 @@ use anyhow::{Context, Result, bail, ensure};
 use super::hook::field;
 use crate::git;
 use crate::mount_table;
+use crate::settings;
 use crate::state::state_root;
 
-/// Claude Code's branch name for its worktree `name`, kept so a worktree
+/// Claude Code's branch name for its worktree `name` (as bin/gitfold's
+/// fallback names it too), kept so a worktree
 /// named like a branch of the repository (`main`) is never that branch's
 /// workspace.
 fn branch_of(name: &str) -> String {
@@ -44,18 +46,25 @@ pub fn worktree_create() -> Result<()> {
     let common_dir = git::init(&repo)?;
     let branch = branch_of(&name);
     let exists = git::branch_exists(&branch);
-    let path = match mount_table::mount_of(&common_dir)? {
+    let mount = match mount_table::mount_of(&common_dir)? {
+        Some(mount) => Some(mount),
+        None if state_root(&common_dir).exists() => Some(mount_again(&common_dir)?),
+        None => None,
+    };
+    let path = match mount {
         Some(mount) => {
             let path = mount.join(&branch);
-            open_workspace(&repo, &common_dir, &branch, exists, &path)?;
+            if !exists {
+                super::branch::check_new(&common_dir, &branch)?;
+                super::branch::create(&repo, &branch, None)?;
+            }
+            // Looking it up opens it.
+            let meta = fs::metadata(&path)
+                .with_context(|| format!("opening workspace {}", path.display()))?;
+            ensure!(meta.is_dir(), "{} is not a workspace", path.display());
             path
         }
-        None if state_root(&common_dir).exists() => {
-            let mount = mount_again(&common_dir)?;
-            let path = mount.join(&branch);
-            open_workspace(&repo, &common_dir, &branch, exists, &path)?;
-            path
-        }
+        // Kept as bin/gitfold's fallback does it, for when gitfold can't run.
         None => {
             // As Claude Code: below the top of the worktree the session is in.
             let top = git::work_tree().context("the session is in no worktree")?;
@@ -75,39 +84,17 @@ pub fn worktree_create() -> Result<()> {
     Ok(())
 }
 
-/// Opens the workspace of `branch` at `path`, the branch created first unless
-/// it `exists`.
-fn open_workspace(
-    repo: &Path,
-    common_dir: &Path,
-    branch: &str,
-    exists: bool,
-    path: &Path,
-) -> Result<()> {
-    if !exists {
-        super::branch::check_new(common_dir, branch)?;
-        super::branch::create(repo, branch, None)?;
-    }
-    // Looking it up opens it.
-    let meta =
-        fs::metadata(path).with_context(|| format!("opening workspace {}", path.display()))?;
-    ensure!(meta.is_dir(), "{} is not a workspace", path.display());
-    Ok(())
-}
-
 /// Mounts the repository of `common_dir` again where it last was
 /// (`gitfold.mountpoint`, recorded by `gitfold mount`), with the default
 /// options: `gitfold mount` in the background, its messages on stderr.
 fn mount_again(common_dir: &Path) -> Result<PathBuf> {
-    let recorded = git::cmd::output(common_dir, &["config", "--get", "gitfold.mountpoint"]);
-    let Ok(recorded) = recorded else {
-        bail!(
+    let mountpoint = settings::Local::read(common_dir).mountpoint().with_context(|| {
+        format!(
             "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a \
              workspace, rather than a full checkout",
             common_dir.display()
-        );
-    };
-    let mountpoint = PathBuf::from(String::from_utf8_lossy(&recorded).trim_end());
+        )
+    })?;
     let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
     let status = Command::new(std::env::current_exe()?)
         .arg("mount")

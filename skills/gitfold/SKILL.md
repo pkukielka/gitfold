@@ -140,10 +140,11 @@ way. With it:
   mounted it (`gitfold.mountpoint` in its git config), with default options;
   if none is recorded, creating a worktree fails, saying so: mount it.
 - **Other repositories are left alone:** a git worktree in
-  `.claude/worktrees/<name>`, as without the plugin. The same where gitfold
-  can't run (not Linux, no release binary that runs, as on NixOS without
-  `nix-ld`: build gitfold and put it on `PATH`), except in a repository used
-  with gitfold, where creating a worktree fails, saying why.
+  `.claude/worktrees/<name>`, as without the plugin.
+- **Where gitfold can't run** (not Linux, or no release binary that runs, as
+  on NixOS without `nix-ld`: build gitfold and put it on `PATH`), the same,
+  except that in a repository used with gitfold creating a worktree fails,
+  saying why.
 - **Inbox messages arrive in the session** (see [Messages](#messages-between-agents)).
 
 The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove

@@ -1,89 +1,84 @@
 #!/bin/sh
 # gitfold for the Claude Code plugin: its hooks run this, and Claude Code puts
-# this directory on the PATH of the commands it runs. It runs, in order:
-#
-# 1. $GITFOLD_BIN, if set;
-# 2. a gitfold on PATH (one you built or installed);
-# 3. the release of this plugin's version (Cargo.toml), downloaded once from
-#    GitHub to ~/.local/share/gitfold/bin, checked against the release's
-#    SHA256SUMS, and run once to see that it runs here
-#    ($GITFOLD_RELEASE_URL instead of GitHub's: a mirror, or tests).
-#
-# With none (not Linux x86_64 or aarch64, offline, a system that can't run it
-# such as NixOS without nix-ld), the hooks do what Claude Code does without
-# them: the inbox hooks nothing, the worktree hooks git worktrees (in a
-# repository used with gitfold, creating one fails: mount it). A failed
-# download is retried after a day, not on every hook.
+# this directory on its sessions' PATH. It runs $GITFOLD_BIN, else a gitfold
+# on PATH, else the release of this plugin's version (Cargo.toml), downloaded
+# once to ~/.local/share/gitfold/bin from GitHub ($GITFOLD_RELEASE_URL: a
+# mirror, or tests), checked against SHA256SUMS and tried once. Without one,
+# `without` below. Every hook runs it: no subprocess on the way to gitfold.
 
 set -u
-self_dir=$(cd "$(dirname "$0")" && pwd -P)
-root=$(dirname "$self_dir")
+case $0 in */*) here=${0%/*} ;; *) here=. ;; esac
 
+# The first gitfold on PATH other than this one, in $bin.
 on_path() {
-    old_ifs=$IFS
     IFS=:
     set -f
-    found=1
     for dir in $PATH; do
-        [ -n "$dir" ] && [ -x "$dir/gitfold" ] || continue
-        [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$self_dir" ] && continue
-        echo "$dir/gitfold"
-        found=0
-        break
+        # -ef: not POSIX, but in dash, bash and busybox.
+        # shellcheck disable=SC3013
+        if [ -n "$dir" ] && [ -x "$dir/gitfold" ] && ! [ "$dir/gitfold" -ef "$0" ]; then
+            bin=$dir/gitfold
+            return 0
+        fi
     done
-    IFS=$old_ifs
-    set +f
-    return $found
+    return 1
 }
 
-# Prints the path of the release binary, downloading it if needed.
+# The release binary in $bin, downloaded if needed. A failed download is
+# retried after a day, not on every hook.
 release() {
-    version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$root/Cargo.toml" | head -n 1)
-    case "$(uname -s)/$(uname -m)" in
-        Linux/x86_64) arch=x86_64 ;;
-        Linux/aarch64 | Linux/arm64) arch=aarch64 ;;
+    IFS=' '
+    version=
+    while read -r key eq value; do
+        if [ "$key" = version ] && [ "$eq" = = ]; then
+            version=${value#\"}
+            version=${version%\"}
+            break
+        fi
+    done <"$here/../Cargo.toml"
+    data=${XDG_DATA_HOME:-$HOME/.local/share}/gitfold/bin
+    for arch in x86_64 aarch64; do
+        bin=$data/gitfold-$version-$arch
+        [ -x "$bin" ] && return 0
+    done
+    case $(uname -sm) in
+        "Linux x86_64") arch=x86_64 ;;
+        "Linux aarch64" | "Linux arm64") arch=aarch64 ;;
         *) return 1 ;;
     esac
-    [ -n "$version" ] || return 1
-    data=${XDG_DATA_HOME:-$HOME/.local/share}/gitfold/bin
     bin=$data/gitfold-$version-$arch
-    [ -x "$bin" ] && { echo "$bin"; return 0; }
     failed=$data/.failed-$version-$arch
-    [ -f "$failed" ] && [ -z "$(find "$failed" -mmin +1440 2>/dev/null)" ] && return 1
+    if [ -f "$failed" ] && [ -z "$(find "$failed" -mmin +1440)" ]; then
+        return 1
+    fi
     mkdir -p "$data" || return 1
-    if fetch "$version" "$arch" "$data" "$bin" >"$failed" 2>&1; then
+    if fetch >"$failed" 2>&1; then
         rm -f "$failed"
-        echo "$bin"
         return 0
     fi
     echo "gitfold: no release binary ($(tail -n 1 "$failed")); retried after a day" >&2
     return 1
 }
 
-# Downloads release $1's binary for $2 into directory $3 as $4, checked.
+# Downloads release $version's binary for $arch as $bin, checked.
 fetch() {
-    base=${GITFOLD_RELEASE_URL:-https://github.com/pkukielka/gitfold/releases/download}/v$1
-    name=gitfold-$2-linux
-    tmp=$(mktemp "$3/.download-XXXXXX") || return 1
-    if ! get "$base/$name" >"$tmp" || ! sums=$(get "$base/SHA256SUMS"); then
-        rm -f "$tmp"
-        echo "downloading $base/$name failed"
-        return 1
-    fi
+    base=${GITFOLD_RELEASE_URL:-https://github.com/pkukielka/gitfold/releases/download}/v$version
+    name=gitfold-$arch-linux
+    tmp=$(mktemp "$data/.download-XXXXXX") || return 1
+    get "$base/$name" >"$tmp" && sums=$(get "$base/SHA256SUMS") ||
+        fail "downloading $base/$name failed" || return 1
     want=$(echo "$sums" | awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }')
-    have=$(sha256sum "$tmp" | cut -d ' ' -f 1)
-    if [ -z "$want" ] || [ "$want" != "$have" ]; then
-        rm -f "$tmp"
-        echo "$name doesn't match the release's SHA256SUMS"
-        return 1
-    fi
+    [ -n "$want" ] && [ "$want" = "$(sha256sum "$tmp" | cut -d ' ' -f 1)" ] ||
+        fail "$name doesn't match the release's SHA256SUMS" || return 1
     chmod +x "$tmp"
-    if ! "$tmp" --version >/dev/null 2>&1; then
-        rm -f "$tmp"
-        echo "the release binary doesn't run on this system"
-        return 1
-    fi
-    mv -f "$tmp" "$4"
+    "$tmp" --version >/dev/null 2>&1 || fail "the release binary doesn't run on this system" || return 1
+    mv -f "$tmp" "$bin"
+}
+
+fail() {
+    rm -f "$tmp"
+    echo "$1"
+    return 1
 }
 
 get() {
@@ -103,7 +98,10 @@ field() {
     sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' | head -n 1
 }
 
-# Without gitfold: what Claude Code does without the hooks.
+# Without gitfold, the hooks do what Claude Code does without them, as
+# src/cli/claude.rs does where gitfold isn't used (keep the two alike): the
+# inbox hooks nothing, the worktree hooks git worktrees; but in a repository
+# used with gitfold (state in <git common dir>/gitfold), creating one fails.
 without() {
     case "$*" in
         "inbox --claude-hook "*) exit 0 ;;
@@ -111,7 +109,10 @@ without() {
             input=$(cat)
             name=$(echo "$input" | field name)
             cwd=$(echo "$input" | field cwd)
-            [ -n "$name" ] && [ -n "$cwd" ] || { echo "gitfold: can't read the hook's input" >&2; exit 1; }
+            if [ -z "$name" ] || [ -z "$cwd" ]; then
+                echo "gitfold: can't read the hook's input" >&2
+                exit 1
+            fi
             if [ -d "$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir)/gitfold" ]; then
                 echo "gitfold: this repository is used with gitfold, but gitfold can't run here" >&2
                 exit 1
@@ -141,7 +142,9 @@ without() {
 if [ -n "${GITFOLD_BIN:-}" ]; then
     exec "$GITFOLD_BIN" "$@"
 fi
-if bin=$(on_path) || bin=$(release); then
+if on_path || release; then
+    IFS=' '
     exec "$bin" "$@"
 fi
+IFS=' '
 without "$@"

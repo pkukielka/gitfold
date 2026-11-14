@@ -103,18 +103,15 @@ pub fn mount(args: MountArgs) -> Result<()> {
     Ok(())
 }
 
-/// Records `mountpoint` as where the repository at `repo` is mounted
-/// (`gitfold.mountpoint` in its git config), for Claude Code's worktree hook
-/// to mount it there again (`cli::claude`). Only warns if it can't.
+/// Records `mountpoint` as where the repository at `repo` is mounted, for
+/// Claude Code's worktree hook to mount it there again (`cli::claude`). Only
+/// warns if it can't.
 fn remember(repo: &Path, mountpoint: &Path) {
-    let set = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["config", "gitfold.mountpoint"])
-        .arg(mountpoint)
-        .status();
-    if !set.is_ok_and(|s| s.success()) {
-        log::warn!("couldn't record the mount point in {}'s git config", repo.display());
+    let set = crate::git::discover(repo).and_then(|git_dir| {
+        crate::settings::set_mountpoint(&git_dir, mountpoint)
+    });
+    if let Err(e) = set {
+        log::warn!("recording the mount point in the git config: {e:#}");
     }
 }
 

@@ -285,7 +285,8 @@ out=$(PATH=$nogf "$L" --version 2>&1); rc=$?
 eq "a checksum that doesn't match: no binary, saying why" "1 yes yes" "$rc $(grep -q "doesn't match" <<<"$out" && echo yes) $([ -e "$T/data/gitfold/bin/gitfold-$v-$a" ] && echo no || echo yes)"
 (cd "$T/rel/v$v" && sha256sum "gitfold-$a-linux" >SHA256SUMS)
 eq "  not tried again within a day" "1" "$(PATH=$nogf "$L" --version >/dev/null 2>&1; echo $?)"
-eq "  without gitfold, the inbox hooks: nothing" "0 " "$(echo '{}' | PATH=$nogf "$L" inbox --claude-hook post-tool-use 2>&1; echo $? "$(echo '{}' | PATH=$nogf "$L" inbox --claude-hook post-tool-use 2>&1)")"
+out=$(echo '{}' | PATH=$nogf "$L" inbox --claude-hook post-tool-use 2>&1); rc=$?
+eq "  without gitfold, the inbox hooks: nothing" "0 " "$rc $out"
 G "$T" init -q plain; G "$T/plain" commit -q --allow-empty -m init
 out=$(printf '{"hook_event_name":"WorktreeCreate","cwd":"%s","name":"p1"}' "$T/plain" | PATH=$nogf "$L" branch --claude-hook worktree-create 2>/dev/null)
 eq "  the worktree hooks: a git worktree, as Claude Code makes" "$T/plain/.claude/worktrees/p1 worktree-p1" "$out $(G "$out" rev-parse --abbrev-ref HEAD 2>&1)"

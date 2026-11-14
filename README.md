@@ -542,13 +542,8 @@ So do a workspace's base following a branch that moved, and the checks of
   `ln -s "$PWD/skills/gitfold" ~/.claude/skills/gitfold` (or into a project's
   `.claude/skills/`). It is plain markdown, so other agents can be pointed at
   it from their instructions (`AGENTS.md`).
-- The gitfold Claude Code plugin bundles the skill and hooks that make Claude
-  Code's worktrees (`claude -w`, subagents with `isolation: worktree`)
-  gitfold workspaces and deliver inbox messages into the session, and
-  downloads gitfold if it isn't on `PATH` (see [Quick start](#quick-start);
-  details in the skill, "Claude Code"). `gitfold mount` records its mount
-  point in the repository's git config (`gitfold.mountpoint`) for the plugin
-  to mount it there again.
+- The gitfold Claude Code plugin: see [Quick start](#quick-start) and the
+  skill's "Claude Code" section.
 - Workspaces an agent only reads a few files in are cheaper without the prewarm
   walk: give their branch prewarm mode `none` (see [Usage](#usage)).
 - **Claude Code's git scans** (measured with Claude Code 2.1.322 and a git
