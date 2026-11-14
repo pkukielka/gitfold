@@ -5,11 +5,13 @@
 //!
 //! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
+//! - `lens`: layers' trees and commits, and extraction of commits made on them.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
 
 pub mod cmd;
 pub mod index;
+pub mod lens;
 pub mod promisor;
 pub mod worktree;
 
