@@ -9,8 +9,8 @@
 //! about 50 ms in a release build (`edit_300k_entries`): read, checksum
 //! checked, rewritten, checksummed, synced and renamed.
 //!
-//! The alternative, `set_skip_worktree_by_git`, has git do the toggling
-//! (`git update-index --stdin`): ~115 ms for 500k entries, measured.
+//! Having git do the toggling (`git update-index --stdin`) took ~115 ms for
+//! 500k entries, measured.
 //!
 //! Indexes it refuses (`Refused`): split (`link`), sparse (`sdir`), or with
 //! another extension git requires to read it. A worktree with
@@ -267,57 +267,6 @@ pub fn transcode(data: &[u8], edits: &HashMap<Vec<u8>, Edit>) -> Result<(Vec<u8>
         out.extend_from_slice(&[0; OID_LEN]);
     }
     Ok((out, edited))
-}
-
-/// The stage-0 entries of the index at `index`, in index order, with whether
-/// each has skip-worktree set: what `set_skip_worktree_by_git` may be given,
-/// and the bits already set.
-pub fn skip_worktree_bits(index: &Path) -> Result<Vec<(Vec<u8>, bool)>> {
-    let data = fs::read(index).with_context(|| format!("reading {}", index.display()))?;
-    let mut r = Reader::new(&data)?;
-    let mut bits = Vec::new();
-    while let Some(e) = r.next_entry()? {
-        if e.stage() == 0 {
-            bits.push((r.path.clone(), e.ext & SKIP_WORKTREE != 0));
-        }
-    }
-    Ok(bits)
-}
-
-/// Sets (`on`) or clears skip-worktree on `paths` with git: `git update-index
-/// --stdin`, under its own lock, keeping the index version and extensions.
-/// `git_dir` is the worktree's admin directory, `work_tree` its root. A path
-/// not in the index fails the whole batch (filter with `skip_worktree_bits`);
-/// so does a held lock.
-pub fn set_skip_worktree_by_git(
-    git_dir: &Path,
-    work_tree: &Path,
-    paths: &[&[u8]],
-    on: bool,
-) -> Result<()> {
-    let flag = if on {
-        "--skip-worktree"
-    } else {
-        "--no-skip-worktree"
-    };
-    let mut input = Vec::with_capacity(paths.iter().map(|p| p.len() + 1).sum());
-    for path in paths {
-        input.extend_from_slice(path);
-        input.push(0);
-    }
-    let work_tree = work_tree
-        .to_str()
-        .context("the work tree's path isn't UTF-8")?;
-    let args = [
-        "--work-tree",
-        work_tree,
-        "update-index",
-        "-z",
-        flag,
-        "--stdin",
-    ];
-    cmd::output_with_input(git_dir, &args, input)?;
-    Ok(())
 }
 
 /// Whether `core.sparseCheckout` is on for the git directory `git_dir` (a
@@ -701,9 +650,6 @@ mod tests {
             );
             assert_eq!(git(&dir, &["status", "--porcelain"]), "?? u.txt\n");
             git(&dir, &["fsck", "--no-progress"]);
-            let bits = skip_worktree_bits(&index).unwrap();
-            assert_eq!(bits[0], (b"a.txt".to_vec(), true));
-            assert_eq!(bits[1], (b"d/b.txt".to_vec(), false));
 
             // Git rewrote the index meanwhile (`status`); clear the bits of
             // the one written above.
@@ -850,30 +796,6 @@ mod tests {
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// The alternative through git: bits set and cleared; a path not in the
-    /// index fails the batch.
-    #[test]
-    fn skip_worktree_by_git() {
-        let dir = scratch("by-git");
-        repo(&dir, &FILES);
-        let git_dir = dir.join(".git");
-        let index = git_dir.join("index");
-        set_skip_worktree_by_git(&git_dir, &dir, &[b"a.txt", b"d/b.txt"], true).unwrap();
-        assert_eq!(
-            git(&dir, &["ls-files", "-v"]),
-            "S a.txt\nS d/b.txt\nH d/e/c.txt\nH z.txt\n"
-        );
-        set_skip_worktree_by_git(&git_dir, &dir, &[b"a.txt"], false).unwrap();
-        let bits = skip_worktree_bits(&index).unwrap();
-        assert_eq!(
-            bits[..2],
-            [(b"a.txt".to_vec(), false), (b"d/b.txt".to_vec(), true)]
-        );
-        assert!(set_skip_worktree_by_git(&git_dir, &dir, &[b"a.txt", b"nope"], true).is_err());
-        assert!(!skip_worktree_bits(&index).unwrap()[0].1);
-        fs::remove_dir_all(dir).unwrap();
-    }
-
     /// The time to set skip-worktree on 5,000 paths of a 300k-entry v4 index
     /// (300 × 10 × 100 files), written and renamed under the lock. Run with
     /// `cargo test --release edit_300k -- --ignored --nocapture`.
@@ -892,7 +814,7 @@ mod tests {
             }
         }
         for (i, p) in paths.iter().enumerate() {
-            w.push(p.as_bytes(), EntryKind::Blob, &oid, 0, i as u32, false);
+            w.push(p.as_bytes(), EntryKind::Blob, &oid, 0, i as u32);
         }
         let index = dir.join("index");
         fs::write(&index, w.finish()).unwrap();

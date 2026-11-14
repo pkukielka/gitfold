@@ -15,13 +15,10 @@
 pub mod attr;
 pub mod cmd;
 pub mod index;
-// Parts are for later layers phases (blended files, the push guard).
-#[allow(dead_code)]
 pub mod index_edit;
 pub mod lens;
 pub mod promisor;
 pub mod worktree;
-#[allow(dead_code)]
 pub mod worktree_config;
 
 use std::cell::RefCell;
@@ -351,7 +348,6 @@ pub fn excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
 /// `excludes_file` without the worktree's own config (`config.worktree`):
 /// the user's global ignore file, which gitfold's per-worktree one
 /// (`worktree_config::set_excludes`) replaces for git, so has to include.
-#[allow(dead_code)] // TODO(layers): until layers use `worktree_config`.
 pub fn user_excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
     excludes_file_scoped(git_dir, false)
 }

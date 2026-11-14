@@ -54,17 +54,7 @@ impl IndexWriter {
     }
 
     /// `ino` is the low 32 bits of the inode `stat` reports for the path.
-    /// `skip_worktree`: git takes the entry as it is and never looks at the
-    /// file (`git ls-files -v` shows `S`).
-    pub fn push(
-        &mut self,
-        path: &[u8],
-        kind: EntryKind,
-        oid: &ObjectId,
-        size: u64,
-        ino: u32,
-        skip_worktree: bool,
-    ) {
+    pub fn push(&mut self, path: &[u8], kind: EntryKind, oid: &ObjectId, size: u64, ino: u32) {
         debug_assert!(self.prev.as_slice() < path, "index entries must be sorted");
         debug_assert_ne!(kind, EntryKind::Tree, "trees are not index entries");
         // `EntryKind` discriminants are the git modes.
@@ -87,12 +77,7 @@ impl IndexWriter {
         }
         self.out.extend_from_slice(oid.as_bytes());
         let len = path.len().min(NAME_MASK.into()) as u16;
-        if skip_worktree {
-            self.out.extend_from_slice(&(EXTENDED | len).to_be_bytes());
-            self.out.extend_from_slice(&SKIP_WORKTREE.to_be_bytes());
-        } else {
-            self.out.extend_from_slice(&len.to_be_bytes());
-        }
+        self.out.extend_from_slice(&len.to_be_bytes());
         // Path: bytes to drop from the end of the previous path, then the new suffix.
         let common = self
             .prev
@@ -232,45 +217,5 @@ pub(super) mod tests {
     pub fn staged(dir: &Path, path: &str) -> ObjectId {
         let hex = git(dir, &["rev-parse", &format!(":{path}")]);
         ObjectId::from_hex(hex.trim().as_bytes()).unwrap()
-    }
-
-    /// An entry pushed with skip-worktree is what `git update-index
-    /// --skip-worktree` writes: the same flags, extended word and path bytes.
-    #[test]
-    fn skip_worktree_entry_as_git_writes_it() {
-        let dir = scratch("skip");
-        repo(&dir, &[("a.txt", "a\n"), ("d/b.txt", "b\n")]);
-        git(&dir, &["update-index", "--index-version", "4"]);
-        git(&dir, &["update-index", "--skip-worktree", "a.txt"]);
-        let theirs = fs::read(dir.join(".git/index")).unwrap();
-
-        let mut w = IndexWriter::new(StatInfo { uid: 0, gid: 0 }, 0);
-        w.push(
-            b"a.txt",
-            EntryKind::Blob,
-            &staged(&dir, "a.txt"),
-            2,
-            1,
-            true,
-        );
-        w.push(
-            b"d/b.txt",
-            EntryKind::Blob,
-            &staged(&dir, "d/b.txt"),
-            2,
-            2,
-            false,
-        );
-        let ours = w.finish();
-        // The first entry after its stat data and id: flags 0x4005, extended
-        // word 0x4000, prefix length 0, "a.txt", NUL.
-        let tail = 12 + 60..12 + 60 + 2 + 2 + 1 + 6;
-        assert_eq!(ours[tail.clone()], theirs[tail.clone()]);
-        assert_eq!(ours[tail][..4], [0x40, 0x05, 0x40, 0x00]);
-
-        fs::write(dir.join(".git/index"), &ours).unwrap();
-        assert_eq!(git(&dir, &["ls-files", "-v"]), "S a.txt\nH d/b.txt\n");
-        assert_eq!(git(&dir, &["status", "--porcelain"]), "");
-        fs::remove_dir_all(dir).unwrap();
     }
 }

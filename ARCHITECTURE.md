@@ -1629,9 +1629,9 @@ checkout" and "Running it"); this is the why and what it would take.
   skips it. A layer pins a seal that only the newest 16 seal refs keep: one
   not moved while its workspace sealed 16 times more can be pruned by `git
   gc`. Lost skip-worktree bits (`update-index --no-skip-worktree`, an index
-  rebuilt by hand) aren't re-derived until the next switch, and the
-  excludes file isn't regenerated when the user's global ignore file
-  changes (`refresh_excludes` exists, unused). A fork doesn't copy the
+  rebuilt by hand) aren't re-derived until the next switch, nor is the
+  excludes file regenerated when the user's global ignore file changes
+  (it copies that file). A fork doesn't copy the
   layers, but copies the index and upper as they are (skip-worktree bits,
   and in blended files the layers' lines, which become the fork's own).
 - **`..` in directory listings reports the mount root's inode.** A listing

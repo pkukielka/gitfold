@@ -75,26 +75,6 @@ pub fn set_excludes<P: AsRef<[u8]>>(admin: &Path, paths: &[P]) -> Result<()> {
     set(admin, "core.excludesFile", &excludes_path(admin))
 }
 
-/// Re-generates the worktree's excludes file if the user's global ignore
-/// file changed since (or another one is configured): whether it did.
-/// Nothing to do (false) without `set_excludes`.
-pub fn refresh_excludes(admin: &Path) -> Result<bool> {
-    let path = excludes_path(admin);
-    let text = match fs::read(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-    };
-    let (user, ours) = split_excludes(&text)
-        .with_context(|| format!("{} has no gitfold section", path.display()))?;
-    if user == user_excludes(admin)? {
-        return Ok(false);
-    }
-    let ours = ours.to_vec();
-    write_excludes(admin, &ours)?;
-    Ok(true)
-}
-
 /// Undoes `set_excludes`: the worktree ignores what the others do again.
 pub fn remove_excludes(admin: &Path) -> Result<()> {
     unset(admin, "core.excludesFile")?;
@@ -173,19 +153,6 @@ fn user_excludes(admin: &Path) -> Result<Vec<u8>> {
         text.push(b'\n');
     }
     Ok(text)
-}
-
-/// An excludes file's user part (through the newline before the marker) and
-/// gitfold's (after it). The last marker counts: the user's file may hold
-/// that line too, gitfold's patterns can't (they start with `/`).
-fn split_excludes(text: &[u8]) -> Option<(&[u8], &[u8])> {
-    let at = text
-        .windows(MARKER.len())
-        .enumerate()
-        .rev()
-        .find(|&(i, w)| w == MARKER && (i == 0 || text[i - 1] == b'\n'))?
-        .0;
-    Some((&text[..at], &text[at + MARKER.len()..]))
 }
 
 /// The gitignore pattern matching exactly `path` (relative to the top of the
@@ -446,12 +413,9 @@ mod tests {
             assert_eq!(gix_ignores(&common, &admin, path), ignored, "{path}");
         }
 
-        assert!(!refresh_excludes(&admin).unwrap());
+        // Another call replaces the paths, and takes the user's file as it
+        // is now.
         fs::write(&global, "*.globalign\n*.later\n").unwrap();
-        assert!(refresh_excludes(&admin).unwrap());
-        assert_eq!(untracked(&w), "");
-        assert!(!refresh_excludes(&admin).unwrap());
-        // Another call replaces the paths.
         set_excludes(&admin, &["nothing"]).unwrap();
         assert_eq!(untracked(&w), "?? t.txt\n");
 
@@ -460,7 +424,6 @@ mod tests {
         assert_eq!(untracked(&w), "?? t.txt\n");
         assert!(!admin.join(EXCLUDE_FILE).exists());
         assert_eq!(git::excludes_file(&admin).unwrap(), Some(global));
-        assert!(!refresh_excludes(&admin).unwrap());
         fs::remove_dir_all(&dir).unwrap();
     }
 
