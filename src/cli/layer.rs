@@ -204,7 +204,18 @@ fn deny_hook() -> Result<()> {
         if !lens.is_on() {
             return Ok(None);
         }
+        // Its own file at that path wins: writable.
+        if std::fs::symlink_metadata(crate::state::upper_path(&state.upper(), path.as_bytes()))
+            .is_ok()
+        {
+            return Ok(None);
+        }
         git::init(&state.common_dir)?;
+        // Most edits are of files no layer changes: told apart without
+        // building the view (it runs on every edit).
+        if !changed_by_any(&lens, path.as_bytes())? {
+            return Ok(None);
+        }
         let base = state.read_base()?;
         let Some(view) = crate::state::lens::view(&state.common_dir, &base.id, &lens)? else {
             return Ok(None);
@@ -212,12 +223,6 @@ fn deny_hook() -> Result<()> {
         let Some(&i) = view.mixed.get(path.as_bytes()) else {
             return Ok(None);
         };
-        // Its own file at that path wins: writable.
-        if std::fs::symlink_metadata(crate::state::upper_path(&state.upper(), path.as_bytes()))
-            .is_ok()
-        {
-            return Ok(None);
-        }
         let owner = &lens.layers[i].branch;
         Ok(Some(format!(
             "{path} shows workspace {owner}'s work (a layer, read-only here): it can't be \
@@ -235,6 +240,23 @@ fn deny_hook() -> Result<()> {
         Err(e) => log::warn!("gitfold layer --claude-hook pre-tool-use: {e:#}"),
     }
     Ok(())
+}
+
+/// Whether a shown layer of `lens` changes `path`: its entry there differs
+/// between the layer's merge base and its seal.
+fn changed_by_any(lens: &Lens, path: &[u8]) -> Result<bool> {
+    git::with_repo(|repo| {
+        let at = |commit: ObjectId| -> Result<Option<git::lens::Item>> {
+            let tree = repo.find_commit(commit)?.tree_id()?.detach();
+            git::lens::lookup(repo, tree, path.into())
+        };
+        for layer in lens.layers.iter().filter(|l| l.on) {
+            if at(layer.merge_base)? != at(layer.seal)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
 }
 
 /// `gitfold lens off`.

@@ -263,27 +263,52 @@ pub enum Note {
 }
 
 /// Builds the view of base commit `base` with `layers` (bottom to top),
-/// blending the paths `is_hunk` accepts and taking the top layer's entry for
-/// the others (§2.1 steps 1-3).
+/// blending hunk paths and taking the top layer's entry for the others
+/// (§2.1 steps 1-3). The paths a layer sets that B has and no layer deletes
+/// (a blend needs B's version, and a deletion is whole) are given to
+/// `hunk_paths`, once, which returns those that are hunk paths.
 pub fn build_view(
     repo: &gix::Repository,
     base: ObjectId,
     layers: &[Layer],
-    is_hunk: &dyn Fn(&BStr) -> bool,
+    hunk_paths: &dyn Fn(&[BString]) -> Result<HashSet<BString>>,
 ) -> Result<View> {
     let base_tree = commit_tree(repo, base)?;
+    let mut layer_bases = Vec::with_capacity(layers.len());
+    let mut deltas = Vec::with_capacity(layers.len());
+    for layer in layers {
+        let mb = commit_tree(repo, layer.merge_base)?;
+        deltas.push(delta(repo, mb, commit_tree(repo, layer.seal)?)?);
+        layer_bases.push(mb);
+    }
+    let mut candidates = BTreeSet::new();
+    let mut deleted = HashSet::new();
+    for (path, change) in deltas.iter().flatten() {
+        match change {
+            Change::Delete => {
+                deleted.insert(path);
+            }
+            Change::Set(_) => {
+                if lookup(repo, base_tree, path.as_ref())?.is_some() {
+                    candidates.insert(path.clone());
+                }
+            }
+        }
+    }
+    candidates.retain(|p| !deleted.contains(p));
+    let is_hunk = match candidates.is_empty() {
+        true => HashSet::new(),
+        false => hunk_paths(&candidates.into_iter().collect::<Vec<_>>())?,
+    };
     let mut notes = Vec::new();
     let mut hunks: BTreeMap<BString, Option<Item>> = BTreeMap::new();
     let mut blended: BTreeMap<BString, Vec<usize>> = BTreeMap::new();
     // Whole-file changes in layer order, so later (higher) layers win.
     let mut whole: Vec<(BString, Change, usize)> = Vec::new();
-    let mut layer_bases = Vec::with_capacity(layers.len());
-    for (ix, layer) in layers.iter().enumerate() {
-        let mb = commit_tree(repo, layer.merge_base)?;
-        let seal = commit_tree(repo, layer.seal)?;
-        layer_bases.push(mb);
-        for (path, change) in delta(repo, mb, seal)? {
-            if !is_hunk(path.as_ref()) {
+    for (ix, delta) in deltas.into_iter().enumerate() {
+        let mb = layer_bases[ix];
+        for (path, change) in delta {
+            if !is_hunk.contains(&path) {
                 whole.push((path, change, ix));
                 continue;
             }
@@ -1122,6 +1147,14 @@ mod tests {
         path == "registry.txt"
     }
 
+    fn registries(paths: &[BString]) -> Result<HashSet<BString>> {
+        Ok(paths
+            .iter()
+            .filter(|p| registry(p.as_ref()))
+            .cloned()
+            .collect())
+    }
+
     fn tree_of(r: &Repo, commit: ObjectId) -> ObjectId {
         r.id(&format!("{commit}^{{tree}}"))
     }
@@ -1186,7 +1219,7 @@ mod tests {
         let base = scenario(&r);
         let repo = r.open();
         let names = ["contracts", "a", "b"];
-        let view = build_view(&repo, base, &stack(&r, base, &names), &registry).unwrap();
+        let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
         assert_eq!(view.notes, []);
         let base_tree = tree_of(&r, base);
         assert_eq!(r.diff(base_tree, view.hunk_tree), "M\tregistry.txt");
@@ -1250,7 +1283,7 @@ mod tests {
         r.write("registry.txt", &(lines(3, "entry_base") + "entry_up\n"));
         let new = r.commit("upstream");
         let repo = r.open();
-        let view = build_view(&repo, new, &stack(&r, old, &["a"]), &registry).unwrap();
+        let view = build_view(&repo, new, &stack(&r, old, &["a"]), &registries).unwrap();
         assert_eq!(
             view.notes,
             [Note::HidesBase {
@@ -1293,7 +1326,7 @@ mod tests {
         );
         let repo = r.open();
 
-        let view = build_view(&repo, base, &stack(&r, base, &["x", "y"]), &registry).unwrap();
+        let view = build_view(&repo, base, &stack(&r, base, &["x", "y"]), &registries).unwrap();
         assert_eq!(view.notes, []);
         assert_eq!(
             r.show(view.view_tree, "registry.txt"),
@@ -1304,7 +1337,8 @@ mod tests {
             Some(&vec![0, 1])
         );
 
-        let view = build_view(&repo, base, &stack(&r, base, &["p", "x", "q"]), &registry).unwrap();
+        let view =
+            build_view(&repo, base, &stack(&r, base, &["p", "x", "q"]), &registries).unwrap();
         assert_eq!(
             view.notes,
             [Note::NotBlended {
@@ -1378,7 +1412,7 @@ mod tests {
         r.git(&["branch", "mine", "main"]);
         let repo = r.open();
         let names = ["contracts", "a", "b"];
-        let view = build_view(&repo, base, &stack(&r, base, &names), &registry).unwrap();
+        let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
         let seals: Vec<_> = names.iter().map(|n| r.id(n)).collect();
         let subject = lens_subject("mine", &names);
         let l = lens_commit(&repo, view.hunk_tree, base, &seals, &subject).unwrap();
@@ -1479,7 +1513,7 @@ mod tests {
         let base = scenario(&r);
         let repo = r.open();
         let names = ["contracts", "a"];
-        let view = build_view(&repo, base, &stack(&r, base, &names), &registry).unwrap();
+        let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
         let seals: Vec<_> = names.iter().map(|n| r.id(n)).collect();
         // L with A's util.c promoted into it.
         let util = lookup(&repo, tree_of(&r, seals[1]), "src/util.c".into());

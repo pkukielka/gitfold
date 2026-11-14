@@ -19,7 +19,7 @@ use std::fs;
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
-use gix::bstr::ByteSlice;
+use gix::bstr::BString;
 use gix::objs::tree::EntryKind;
 
 use super::StateDir;
@@ -242,11 +242,8 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
             merge_base: lens.layers[i].merge_base,
         })
         .collect();
-    let base_tree = git::resolve(&base.to_string())?.tree;
-    let hunk = hunk_paths(common_dir, base, &base_tree, &stack)?;
-    let view = git::with_repo(|repo| {
-        git::lens::build_view(repo, *base, &stack, &|p| hunk.contains(p.as_bytes()))
-    })?;
+    let hunk_paths = |paths: &[BString]| blend_attr(common_dir, base, paths);
+    let view = git::with_repo(|repo| git::lens::build_view(repo, *base, &stack, &hunk_paths))?;
     let layer = |ix: usize| shown[ix];
     let name = |ix: usize| lens.layers[shown[ix]].branch.clone();
     let notes = (view.notes.iter())
@@ -279,41 +276,13 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
     }))
 }
 
-/// The paths the layers in `stack` change that are blended: `gitfold-blend`
-/// is `hunk` for them in the base's attributes, the base has them, and no
-/// layer deletes them.
-fn hunk_paths(
+/// Those of `candidates` (paths the base has that layers change) that are
+/// blended: `gitfold-blend` is `hunk` for them in the base's attributes.
+fn blend_attr(
     common_dir: &std::path::Path,
     base: &ObjectId,
-    base_tree: &ObjectId,
-    stack: &[git::lens::Layer],
-) -> Result<std::collections::HashSet<Vec<u8>>> {
-    let mut candidates = std::collections::BTreeSet::new();
-    let mut deleted = std::collections::HashSet::new();
-    git::with_repo(|repo| -> Result<()> {
-        let tree_of =
-            |c: ObjectId| -> Result<ObjectId> { Ok(repo.find_commit(c)?.tree_id()?.detach()) };
-        for layer in stack {
-            let (mb, seal) = (tree_of(layer.merge_base)?, tree_of(layer.seal)?);
-            for (path, change) in git::lens::delta(repo, mb, seal)? {
-                match change {
-                    git::lens::Change::Delete => {
-                        deleted.insert(path.to_vec());
-                    }
-                    git::lens::Change::Set(_) => {
-                        if git::lens::lookup(repo, *base_tree, path.as_ref())?.is_some() {
-                            candidates.insert(path.to_vec());
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
-    })?;
-    candidates.retain(|p| !deleted.contains(p));
-    if candidates.is_empty() {
-        return Ok(Default::default());
-    }
+    candidates: &[BString],
+) -> Result<std::collections::HashSet<BString>> {
     let mut child = git::cmd::command(common_dir)
         .args([
             "check-attr",
@@ -326,7 +295,7 @@ fn hunk_paths(
         .stdout(std::process::Stdio::piped())
         .spawn()?;
     let mut input = Vec::new();
-    for p in &candidates {
+    for p in candidates {
         input.extend_from_slice(p);
         input.push(0);
     }
@@ -339,7 +308,7 @@ fn hunk_paths(
     let fields: Vec<&[u8]> = out.stdout.split(|&b| b == 0).collect();
     Ok((fields.chunks(3))
         .filter(|f| f.len() == 3 && f[2] == b"hunk")
-        .map(|f| f[0].to_vec())
+        .map(|f| f[0].into())
         .collect())
 }
 
