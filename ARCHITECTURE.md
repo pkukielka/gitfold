@@ -1099,6 +1099,20 @@ its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
   daemon) costs the same round trip on every later search. inotify
   `IN_ACCESS` sees cached reads but not who read; fanotify gives the pid
   only to root.
+- **Bash commands parsed, not only the Read tool:** Claude Code's hooks name
+  no files a command read (only Read's `file_path`), so the hook parses the
+  command, with `rable` (bash's grammar, validated against bash). Measured
+  over the Claude Code transcripts of this project's development
+  (`bench/transcript-reads.py`, 2026-11-14): of 4,182 deliberate reads,
+  248 were Read tool calls and 3,934 files shown by viewers in Bash
+  (`sed -n` most); the Grep tool ran 4 times against 3,769 Bash searches.
+  889 (21%; 31% in subagents, which `rg` a tree and then `sed -n` the
+  matches) were of a file a search had already read: cached, seen only by
+  parsing the command. Among commands with a viewer, the walk's constructs
+  are common: loops 1,005, heredocs 866, `<` 826, `if` 570, `$(...)` 501,
+  subshells and `<(...)` 190 each. `pushd`/`popd`, `cd -P`/`-L` and
+  `builtin cd` appeared in none (handled anyway, to the shell's rules).
+  Agents that read through the Read tool would miss less without it.
 - **Content prewarm walks as meta** in a tracked workspace: the walk would read
   every file first, and the agent's reads would come from the kernel's cache,
   unseen. A per-workspace downgrade, not a refusal of the mount option: a
@@ -1124,7 +1138,8 @@ recording searches' reads (noise); opens on by default to see cached reads
 the files it reads (pipelines, scripts and builds can't be told: simple
 viewers only); a hand-written shell lexer for those (heredocs, `$((...))`,
 subshells and loops each broke it; `rable` parses as bash does, validated
-against bash, for 3 crates);
+against bash, for 3 crates); the Read tool only (21% of reads missed,
+above);
 refusing `--track-reads` with `--prewarm content` (branches can say
 otherwise); line-level conflicts in `overlaps` (`git merge-tree` already says, for
 a merge someone actually asks about).
