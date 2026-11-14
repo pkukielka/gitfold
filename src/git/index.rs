@@ -167,8 +167,7 @@ pub(super) mod tests {
 
     /// An empty directory for test `name`.
     pub fn scratch(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("gitfold-index-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("gitfold-index-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -246,8 +245,22 @@ pub(super) mod tests {
         let theirs = fs::read(dir.join(".git/index")).unwrap();
 
         let mut w = IndexWriter::new(StatInfo { uid: 0, gid: 0 }, 0);
-        w.push(b"a.txt", EntryKind::Blob, &staged(&dir, "a.txt"), 2, 1, true);
-        w.push(b"d/b.txt", EntryKind::Blob, &staged(&dir, "d/b.txt"), 2, 2, false);
+        w.push(
+            b"a.txt",
+            EntryKind::Blob,
+            &staged(&dir, "a.txt"),
+            2,
+            1,
+            true,
+        );
+        w.push(
+            b"d/b.txt",
+            EntryKind::Blob,
+            &staged(&dir, "d/b.txt"),
+            2,
+            2,
+            false,
+        );
         let ours = w.finish();
         // The first entry after its stat data and id: flags 0x4005, extended
         // word 0x4000, prefix length 0, "a.txt", NUL.

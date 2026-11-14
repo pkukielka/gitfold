@@ -5,11 +5,15 @@
 //!
 //! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
+//! - `index_edit`: editing an index git wrote (skip-worktree bits).
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
 
 pub mod cmd;
 pub mod index;
+// Not used yet: layers switches will edit the index with it.
+#[allow(dead_code)]
+pub mod index_edit;
 pub mod promisor;
 pub mod worktree;
 
