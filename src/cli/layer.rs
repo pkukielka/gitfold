@@ -118,8 +118,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             }
         }
     }
-    lens.write(&state)?;
-    println!("{}", apply(&common_dir, &name)?);
+    println!("{}", store_and_apply(&common_dir, &state, &lens)?);
     Ok(())
 }
 
@@ -171,8 +170,7 @@ pub fn layer_hook(event: &str) -> Result<()> {
         if moved.is_empty() {
             return Ok(());
         }
-        lens.write(&state)?;
-        apply(&common_dir, &name)?;
+        store_and_apply(&common_dir, &state, &lens)?;
         println!(
             "gitfold: the layers shown in this workspace moved to their workspaces' latest work: {}. \
              Files you read from them may have changed.",
@@ -180,7 +178,7 @@ pub fn layer_hook(event: &str) -> Result<()> {
         );
         Ok(())
     })() {
-        log::warn!("gitfold layer --claude-hook: {e:#}");
+        log::debug!("gitfold layer --claude-hook: {e:#}");
     }
     Ok(())
 }
@@ -197,7 +195,7 @@ fn deny_hook() -> Result<()> {
         else {
             return Ok(None);
         };
-        let file = super::claude::cwd(&input)?.join(file);
+        let file = crate::shell::normalized(&super::claude::cwd(&input)?.join(file));
         let Some((state, path)) = super::workspace_at(&file) else {
             return Ok(None);
         };
@@ -248,8 +246,7 @@ pub fn lens(repo: &Path, args: LensArgs) -> Result<()> {
     for layer in &mut lens.layers {
         layer.on = false;
     }
-    lens.write(&state)?;
-    println!("{}", apply(&common_dir, &name)?);
+    println!("{}", store_and_apply(&common_dir, &state, &lens)?);
     Ok(())
 }
 
@@ -273,6 +270,19 @@ fn layer_of(store: &Store, common_dir: &Path, state: &StateDir, branch: &str) ->
         on: true,
         seal,
         merge_base,
+    })
+}
+
+/// Stores `lens` for the workspace in `state` and has the daemon show it
+/// now, if mounted; says what happened. If the daemon refuses, the layers
+/// stored before are put back, so what is stored is what shows.
+fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
+    let before = crate::state::lens::stored_bytes(state)?;
+    lens.write(state)?;
+    apply(common_dir, &state.branch).inspect_err(|_| {
+        if let Err(e) = crate::state::lens::restore(state, &before) {
+            log::warn!("putting the layers back: {e:#}");
+        }
     })
 }
 

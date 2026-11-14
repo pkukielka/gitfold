@@ -520,6 +520,9 @@ impl Workspaces {
         );
         let ws = Arc::new(ws);
         let slot = self.add(branch, Registered::Workspace(ws.clone()));
+        if let Some(notifier) = self.notifier.get() {
+            ws.set_kernel(notifier.clone(), slot);
+        }
         watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
         self.prewarm(branch);
         Ok(inode::ws(slot, 0))

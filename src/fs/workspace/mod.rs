@@ -129,6 +129,14 @@ pub struct Workspace {
     touched: Mutex<HashSet<Vec<u8>>>,
     /// The files read, if recorded (see `reads`).
     reads: Mutex<Option<reads::Reads>>,
+    /// Held by layer switches and the sync thread, so they never interleave
+    /// (see `lens`).
+    lens_lock: Mutex<()>,
+    /// The session's notifier and its slot, to tell the kernel what a switch
+    /// changed (see `lens`).
+    kernel: std::sync::OnceLock<(fuser::Notifier, u32)>,
+    /// The stored layers differ from those shown: switch once registered.
+    pub lens_pending: AtomicBool,
 }
 
 /// The lower layer and how upper overrides it.
@@ -150,6 +158,8 @@ struct Layers {
     /// The lens commit HEAD is detached at while files are blended (see
     /// `lens`).
     lens_head: Option<ObjectId>,
+    /// What was last applied of the layers (see `lens`).
+    applied: crate::state::lens::Applied,
     /// Whiteouts and opaque markers.
     markers: Markers,
     times: Times,
@@ -269,10 +279,11 @@ impl Workspace {
             hunk: base.tree,
             blended: Default::default(),
             lens_head: None,
+            applied: Default::default(),
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,
         };
-        let lensed = lens::open_view(store, &state, &mut layers)?;
+        let (lensed, lens_pending) = lens::open_view(store, &state, &mut layers)?;
         // Copy-ups a crash interrupted; their target was never replaced.
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
@@ -300,6 +311,9 @@ impl Workspace {
             removing: AtomicBool::new(false),
             touched: Mutex::new(HashSet::new()),
             reads: Mutex::new(None),
+            lens_lock: Mutex::new(()),
+            kernel: std::sync::OnceLock::new(),
+            lens_pending: AtomicBool::new(lens_pending),
         })
     }
 

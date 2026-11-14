@@ -31,10 +31,13 @@ use anyhow::{Result, bail};
 /// git directory). In a workspace showing layers, whose `.git` turns git away
 /// (see `fs::workspace::lens`), its registration, found from the mount.
 pub fn repo() -> Result<PathBuf> {
-    crate::git::discover(Path::new(".")).or_else(|e| {
-        let cwd = std::env::current_dir()?;
-        workspace_at(&cwd).map(|(state, _)| state.admin).ok_or(e)
-    })
+    // The mount first: discovery could skip a surrendered workspace's `.git`
+    // and find a repository the mount point is in.
+    let cwd = std::env::current_dir()?;
+    if let Some((state, _)) = workspace_at(&cwd) {
+        return Ok(state.admin);
+    }
+    crate::git::discover(Path::new("."))
 }
 
 /// The workspace `path` (absolute) is in, below a gitfold mount, and the path
@@ -43,7 +46,8 @@ pub fn repo() -> Result<PathBuf> {
 pub fn workspace_at(path: &Path) -> Option<(crate::state::StateDir, String)> {
     let (mount, common_dir) = (crate::mount_table::mounts().ok()?)
         .into_iter()
-        .find(|(mount, _)| path.starts_with(mount))?;
+        .filter(|(mount, _)| path.starts_with(mount))
+        .max_by_key(|(mount, _)| mount.as_os_str().len())?;
     let rest = path.strip_prefix(&mount).ok()?.to_str()?;
     let mut found = None;
     let mut at = 0;

@@ -142,9 +142,9 @@ impl Workspace {
         // With layers shown, commits made on the lens commit go onto the
         // branch (see `lens`), but the base waits, and an upper file
         // identical to a layer's mustn't be dropped as unchanged.
-        if self.lensed() {
+        if self.lensed() || self.lens_pending.swap(false, Ordering::Relaxed) {
             self.limit_touched();
-            return self.sync_lens();
+            return self.sync_lens(store);
         }
         if !self.git_idle() {
             self.limit_touched();
@@ -331,7 +331,7 @@ impl Workspace {
         layers.base = new.id;
         layers.base_tree = new_tree;
         // Not rebased while layers are shown (`sync`): the view is the base.
-        (layers.view_tree, layers.view) = (new_tree, new.tree);
+        (layers.view_tree, layers.view, layers.hunk) = (new_tree, new.tree, new.tree);
         // Before anything below can fail: cached listings hold the old base's files.
         self.changed();
 

@@ -144,6 +144,20 @@ eq "no layers: git back" "?? own.txt" "$(git -C "$W" status --short)"
 for _ in $(seq 50); do [ "$(cat "$COMMON/gitfold/me/base")" = "$(R rev-parse me)" ] && break; sleep 0.1; done
 eq "the base caught up with the commit" "$(R rev-parse me)" "$(cat "$COMMON/gitfold/me/base")"
 check "an unknown layer (exit 3)" sh -c "'$BIN' -C '$W' layer off nope; [ \$? = 3 ]"
+admin=$COMMON/worktrees/gitfold-ws-me
+touch "$admin/index.lock"
+out=$("$BIN" -C "$W" layer add la 2>&1); rc=$?
+rm -f "$admin/index.lock"
+eq "git busy: refused (exit 4), nothing stored" "4 " "$rc $("$BIN" -C "$W" layer list)"
+"$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
+eq "unmounted: stored, shown when it opens" "me: not mounted; its layers show when it opens" \
+    "$("$BIN" -C "$REPO" layer add la -w me)"
+mount_fs
+for _ in $(seq 50); do [ "$(sed -n 2p "$W/a.txt" 2>/dev/null)" = la ] && break; sleep 0.1; done
+eq "shown once mounted" "a
+la
+again" "$(cat "$W/a.txt")"
+eq "and git told: only own changes" "?? own.txt" "$(git -C "$W" status --short)"
 }
 
 blended_files_and_the_lens_commit() {
@@ -170,9 +184,18 @@ eq "HEAD at a new lens commit" "1" "$(G "$W" cat-file -p HEAD | grep -c '^gitfol
 git init -q --bare "$T/remote.git"
 check "pushing HEAD is refused" fails G "$W" push -q "$T/remote.git" HEAD:refs/heads/main
 check "pushing the branch isn't" G "$W" push -q "$T/remote.git" me
+eq "a seal of it: only its own lines" "one two fromMe" \
+    "$(R show "$("$BIN" -C "$REPO" seal me):reg.txt" | tr '\n' ' ' | sed 's/ $//')"
+echo amended >>"$W/reg.txt"
+check "commit, then amend" sh -c "git -C '$W' -c user.name=t -c user.email=t@t commit -qam two &&
+    sleep 2 && echo amended2 >>'$W/reg.txt' && git -C '$W' -c user.name=t -c user.email=t@t commit -q --amend -am two"
+for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = amended2 ] && break; sleep 0.1; done
+eq "the amend reaches the branch" "one two fromMe amended amended2" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
+eq "without the lens mark" "0" "$(R cat-file -p me | grep -c '^gitfold-lens')"
+eq "git status still clean" "" "$(git -C "$W" status --short)"
 echo moreMe >>"$W/reg.txt"
 check "lens off" "$BIN" -C "$W" lens off
-eq "the layer's lines gone, own ones kept" "one two fromMe moreMe" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+eq "the layer's lines gone, own ones kept" "one two fromMe amended amended2 moreMe" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
 eq "back on the branch, the uncommitted line its change" "me| M reg.txt" \
     "$(G "$W" branch --show-current)|$(git -C "$W" status --short)"
 }

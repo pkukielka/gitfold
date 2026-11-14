@@ -56,7 +56,7 @@ gitfold_check_lens() {
 			exit 1
 			;;
 		*)
-			echo "gitfold: refusing to push $gitfold_rref: it contains the lens commit $gitfold_lens (other agents' uncommitted work). Run 'gitfold commit' or 'gitfold lens off'." >&2
+			echo "gitfold: refusing to push $gitfold_rref: it contains the lens commit $gitfold_lens (other agents' uncommitted work). Push your branch instead (git push origin <branch>): your commits go onto it without the others' work." >&2
 			exit 1
 			;;
 		esac

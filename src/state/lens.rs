@@ -50,14 +50,18 @@ impl Lens {
     /// The layers stored for the workspace in `state` (none if it has no file).
     pub fn read(state: &StateDir) -> Result<Lens> {
         let path = state.dir.join(LENS);
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if not_found(&e) => return Ok(Lens::default()),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        };
+        Lens::parse(&stored_bytes(state)?).with_context(|| format!("reading {}", path.display()))
+    }
+
+    /// A layers file's content (empty: no layers).
+    pub fn parse(data: &[u8]) -> Result<Lens> {
+        if data.is_empty() {
+            return Ok(Lens::default());
+        }
+        let text = std::str::from_utf8(data)?;
         let mut lines = text.lines();
         if lines.next() != Some("version 1") {
-            bail!("{}: not a layers file this gitfold knows", path.display());
+            bail!("not a layers file this gitfold knows");
         }
         let mut layers = Vec::new();
         for line in lines {
@@ -67,7 +71,7 @@ impl Lens {
                 .split('\t')
                 .collect();
             let [branch, on, seal, merge_base] = fields[..] else {
-                bail!("{}: bad line {line:?}", path.display());
+                bail!("bad line {line:?}");
             };
             layers.push(Layer {
                 branch: branch.to_string(),
@@ -116,6 +120,29 @@ pub fn shown_anywhere(common_dir: &std::path::Path, branch: &str) -> Result<bool
     Ok(dirs
         .flatten()
         .any(|d| fs::read_to_string(d.path().join(LENS)).is_ok_and(|text| text.contains(&needle))))
+}
+
+/// Every seal a workspace's layers name, stored or applied (hex ids): their
+/// refs are kept (`seal`).
+pub fn named_seals(common_dir: &std::path::Path) -> std::collections::HashSet<String> {
+    let mut named = std::collections::HashSet::new();
+    let Ok(dirs) = fs::read_dir(super::state_root(common_dir)) else {
+        return named;
+    };
+    for dir in dirs.flatten() {
+        for file in [LENS, APPLIED] {
+            let Ok(data) = fs::read(dir.path().join(file)) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&data);
+            for line in text.lines().filter_map(|l| l.strip_prefix("layer ")) {
+                if let Some(seal) = line.split('\t').nth(2) {
+                    named.insert(seal.to_string());
+                }
+            }
+        }
+    }
+    named
 }
 
 /// What a workspace with layers shows below its own changes.
@@ -314,4 +341,104 @@ fn hunk_paths(
         .filter(|f| f.len() == 3 && f[2] == b"hunk")
         .map(|f| f[0].to_vec())
         .collect())
+}
+
+/// The file recording what the daemon last applied of a workspace's layers
+/// (`Applied`).
+pub const APPLIED: &str = "lens-applied";
+
+/// What was last applied of a workspace's layers, as opposed to what is
+/// stored (`Lens`): the layers file then, and what git was told. The view
+/// and git always describe the same layers: a workspace opens with these,
+/// and switches to the stored layers when they differ (a change made while
+/// it was closed, or a switch that failed half-way). Stored in `lens-applied`:
+/// `version 1`, `head <oid or ->`, a line `lens <bytes>` giving the length of
+/// the layers file that follows, then NUL-terminated records: `S<path>` a
+/// path git was told to skip (skip-worktree), `B<path>` a blended path whose
+/// index entry git was given the blend for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Applied {
+    /// The layers file's content when applied (empty: none).
+    pub lens: Vec<u8>,
+    /// The lens commit HEAD was detached at.
+    pub head: Option<ObjectId>,
+    pub skipped: std::collections::BTreeSet<Vec<u8>>,
+    pub blended: std::collections::BTreeSet<Vec<u8>>,
+}
+
+impl Applied {
+    pub fn read(state: &StateDir) -> Result<Applied> {
+        let path = state.dir.join(APPLIED);
+        let data = match fs::read(&path) {
+            Ok(data) => data,
+            Err(e) if not_found(&e) => return Ok(Applied::default()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
+        let bad = || anyhow::anyhow!("{}: not a file this gitfold knows", path.display());
+        let mut rest = data.strip_prefix(b"version 1\nhead ").ok_or_else(bad)?;
+        let nl = rest.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
+        let head = match &rest[..nl] {
+            b"-" => None,
+            hex => Some(ObjectId::from_hex(hex)?),
+        };
+        rest = rest[nl + 1..].strip_prefix(b"lens ").ok_or_else(bad)?;
+        let nl = rest.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
+        let len: usize = std::str::from_utf8(&rest[..nl])?.parse()?;
+        rest = &rest[nl + 1..];
+        anyhow::ensure!(rest.len() >= len, bad());
+        let mut applied = Applied {
+            lens: rest[..len].to_vec(),
+            head,
+            ..Default::default()
+        };
+        for record in rest[len..].split(|&b| b == 0).filter(|r| !r.is_empty()) {
+            match record.split_first() {
+                Some((b'S', path)) => applied.skipped.insert(path.to_vec()),
+                Some((b'B', path)) => applied.blended.insert(path.to_vec()),
+                _ => return Err(bad()),
+            };
+        }
+        Ok(applied)
+    }
+
+    pub fn write(&self, state: &StateDir) -> Result<()> {
+        let head = self.head.map_or("-".to_string(), |h| h.to_string());
+        let mut data = format!("version 1\nhead {head}\nlens {}\n", self.lens.len()).into_bytes();
+        data.extend_from_slice(&self.lens);
+        for (tag, set) in [(b'S', &self.skipped), (b'B', &self.blended)] {
+            for path in set {
+                data.push(tag);
+                data.extend_from_slice(path);
+                data.push(0);
+            }
+        }
+        Ok(write_atomic(&state.dir.join(APPLIED), &data)?)
+    }
+
+    /// The layers as applied.
+    pub fn layers(&self) -> Result<Lens> {
+        Lens::parse(&self.lens)
+    }
+}
+
+/// The content of the layers file of the workspace in `state` (empty if none).
+pub fn stored_bytes(state: &StateDir) -> Result<Vec<u8>> {
+    match fs::read(state.dir.join(LENS)) {
+        Ok(data) => Ok(data),
+        Err(e) if not_found(&e) => Ok(Vec::new()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Puts back the layers file content `before` (empty: none), after the daemon
+/// refused to apply a change.
+pub fn restore(state: &StateDir, before: &[u8]) -> Result<()> {
+    let path = state.dir.join(LENS);
+    if before.is_empty() {
+        return match fs::remove_file(&path) {
+            Err(e) if !not_found(&e) => Err(e.into()),
+            _ => Ok(()),
+        };
+    }
+    Ok(write_atomic(&path, before)?)
 }

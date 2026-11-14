@@ -11,13 +11,14 @@
 //! numbered from 1 (git would prune it otherwise); the oldest beyond
 //! `KEPT` are deleted.
 
+use std::collections::HashMap;
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 
 use anyhow::{Context, Result};
 use gix::ObjectId;
-use gix::bstr::BStr;
+use gix::bstr::{BStr, ByteSlice};
 use gix::objs::tree::EntryKind;
 
 use super::{StateDir, status, upper_path};
@@ -58,7 +59,8 @@ pub fn ref_prefix(id: &str) -> String {
 pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;
-    let tree = tree_of(state, &base.tree, &s.changed, &s.deleted)
+    let theirs = layers_lines(state, &base)?;
+    let tree = tree_of(state, &base.tree, &s.changed, &s.deleted, &theirs)
         .with_context(|| format!("sealing {}", state.branch))?;
     let commit = commit(&state.common_dir, &tree, &base.id, &state.branch)?;
     let seals = list(&state.common_dir, &state.id)?;
@@ -73,7 +75,10 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
         &state.common_dir,
         &["update-ref", &name, &commit.to_string(), ""],
     )?;
-    for (old, _) in seals.iter().take((seals.len() + 1).saturating_sub(KEPT)) {
+    // The oldest go, unless a workspace's layers name them.
+    let named = super::lens::named_seals(&state.common_dir);
+    let old = seals.iter().take((seals.len() + 1).saturating_sub(KEPT));
+    for (old, _) in old.filter(|(_, c)| !named.contains(&c.to_string())) {
         let name = format!("{}{old}", ref_prefix(&state.id));
         git::cmd::run(&state.common_dir, &["update-ref", "-d", &name])?;
     }
@@ -113,6 +118,7 @@ fn tree_of(
     base: &ObjectId,
     changed: &[Vec<u8>],
     deleted: &[Vec<u8>],
+    theirs: &HashMap<Vec<u8>, Vec<Vec<u8>>>,
 ) -> Result<ObjectId> {
     let upper = state.upper();
     git::with_repo(|repo| {
@@ -145,9 +151,18 @@ fn tree_of(
                     0 => EntryKind::Blob,
                     _ => EntryKind::BlobExecutable,
                 };
-                let f =
-                    fs::File::open(&file).with_context(|| format!("reading {}", file.display()))?;
-                (kind, repo.write_blob_stream(f)?)
+                match theirs.get(path) {
+                    // A blended file: its own lines only.
+                    Some(lines) => {
+                        let data = fs::read(&file)?;
+                        (kind, repo.write_blob(without(&data, lines))?)
+                    }
+                    None => {
+                        let f = fs::File::open(&file)
+                            .with_context(|| format!("reading {}", file.display()))?;
+                        (kind, repo.write_blob_stream(f)?)
+                    }
+                }
             };
             editor.upsert(BStr::new(path), kind, blob.detach())?;
         }
@@ -182,4 +197,56 @@ fn commit(
     Ok(ObjectId::from_hex(
         String::from_utf8_lossy(&out.stdout).trim().as_bytes(),
     )?)
+}
+
+/// The layers' lines in each file the workspace in `state` shows blended
+/// (`state::lens`): those its upper copy has but the base hasn't, from the
+/// layers. A seal of it holds only its own lines: a workspace showing it as
+/// a layer has those layers' own work from them.
+fn layers_lines(state: &StateDir, base: &git::Commit) -> Result<HashMap<Vec<u8>, Vec<Vec<u8>>>> {
+    let applied = super::lens::Applied::read(state)?;
+    if applied.blended.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let Some(view) = super::lens::view(&state.common_dir, &base.id, &applied.layers()?)? else {
+        return Ok(HashMap::new());
+    };
+    let content = |tree: ObjectId, path: &[u8]| -> Result<Vec<u8>> {
+        let item = git::with_repo(|repo| git::lens::lookup(repo, tree, BStr::new(path)))?;
+        item.map_or(Ok(Vec::new()), |i| git::read_blob(i.oid))
+    };
+    let mut out = HashMap::new();
+    for path in &applied.blended {
+        let (blend, before) = (content(view.hunk_tree, path)?, content(base.tree, path)?);
+        let mut left: HashMap<&[u8], usize> = HashMap::new();
+        for l in before.lines() {
+            *left.entry(l).or_default() += 1;
+        }
+        let mut lines = Vec::new();
+        for l in blend.lines() {
+            match left.get_mut(l) {
+                Some(n) if *n > 0 => *n -= 1,
+                _ => lines.push(l.to_vec()),
+            }
+        }
+        out.insert(path.clone(), lines);
+    }
+    Ok(out)
+}
+
+/// `data` without one occurrence of each of `lines`.
+fn without(data: &[u8], lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut drop: HashMap<&[u8], usize> = HashMap::new();
+    for l in lines {
+        *drop.entry(l).or_default() += 1;
+    }
+    let mut out = Vec::new();
+    for line in data.split_inclusive(|&b| b == b'\n') {
+        let key = line.strip_suffix(b"\n").unwrap_or(line);
+        match drop.get_mut(key) {
+            Some(n) if *n > 0 => *n -= 1,
+            _ => out.extend_from_slice(line),
+        }
+    }
+    out
 }

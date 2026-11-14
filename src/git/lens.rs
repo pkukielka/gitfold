@@ -43,9 +43,6 @@
 //! in a file whose layer version L holds conflicts too: it depends on that
 //! layer. Merge commits made on L are flattened (one parent, the tip).
 
-// The daemon doesn't use this yet (layers, phase 3).
-#![allow(dead_code)]
-
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
@@ -245,6 +242,7 @@ impl View {
     }
 
     /// The layers whose content is at `path` in M.
+    #[cfg(test)]
     pub fn owners(&self, path: &BStr) -> Vec<usize> {
         match self.mixed.get(path) {
             Some(layer) => vec![*layer],
@@ -527,6 +525,7 @@ pub fn lens_subject(branch: &str, layers: &[&str]) -> String {
 }
 
 /// Whether `commit` is a lens commit (has the `gitfold-lens` header).
+#[cfg(test)]
 pub fn is_lens(repo: &gix::Repository, commit: ObjectId) -> Result<bool> {
     let commit = repo.find_commit(commit)?;
     let decoded = commit.decode()?;
@@ -727,9 +726,12 @@ fn extract_one(
     let mut copy: gix::objs::Commit = repo.find_commit(commit)?.decode()?.try_into()?;
     copy.tree = tree;
     copy.parents = [tip].into_iter().collect();
-    // A signature would not match the new commit; a merge's tags are gone.
-    copy.extra_headers
-        .retain(|(k, _)| !matches!(k.as_bytes(), b"gpgsig" | b"gpgsig-sha256" | b"mergetag"));
+    // A signature would not match the new commit; a merge's tags are gone;
+    // an amended lens commit's mark mustn't reach the branch.
+    copy.extra_headers.retain(|(k, _)| {
+        !matches!(k.as_bytes(), b"gpgsig" | b"gpgsig-sha256" | b"mergetag")
+            && k.as_bytes() != LENS_HEADER.as_bytes()
+    });
     Ok(Ok(repo.write_object(&copy)?.detach()))
 }
 

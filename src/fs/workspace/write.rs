@@ -580,8 +580,9 @@ impl Workspace {
         // A layer's file, or a directory holding one (see `lens`), stays put:
         // renaming would copy the layer's content into the workspace's own.
         let layer_owned = |obj: &Obj, path: &[u8]| match obj {
-            Obj::LowerFile { mixed, .. } => *mixed,
-            Obj::Upper(m) if !m.is_dir() => false,
+            Obj::LowerFile { mixed: true, .. } => true,
+            Obj::LowerFile { .. } => layers.blended.contains_key(path),
+            Obj::Upper(m) if !m.is_dir() => layers.blended.contains_key(path),
             _ => Self::has_mixed_below(&layers, path),
         };
         if layer_owned(&src_obj, &src) {
