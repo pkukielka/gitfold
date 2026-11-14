@@ -525,8 +525,8 @@ pub fn stop_under(path: &Path) -> bool {
 }
 
 /// Stops the walkers of this user working below `mountpoint` (`gitfold
-/// prewarm-walk <root>` processes of the same binary name, or `prewarm <root>`
-/// from older daemons), for `gitfold unmount`.
+/// prewarm-walk <root>` processes of the same binary name), for `gitfold
+/// unmount`.
 pub fn stop_below(mountpoint: &Path) {
     let mut walkers = Vec::new();
     let is_walker = |dir: &Path| {
@@ -540,7 +540,7 @@ pub fn stop_below(mountpoint: &Path) {
         let below = args
             .get(2)
             .is_some_and(|root| Path::new(OsStr::from_bytes(root)).starts_with(mountpoint));
-        let walker = matches!(args.get(1), Some(&b"prewarm-walk" | &b"prewarm"));
+        let walker = matches!(args.get(1), Some(&b"prewarm-walk"));
         is_gitfold && walker && below
     };
     for (pid, dir) in crate::procs::own() {

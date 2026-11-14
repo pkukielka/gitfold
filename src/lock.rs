@@ -12,7 +12,7 @@ use crate::state::state_root;
 /// The repository lock (see `lock`); released when dropped, also when the
 /// process dies.
 pub struct Lock {
-    _files: Vec<fs::File>,
+    _file: fs::File,
 }
 
 /// Takes the lock a mounted daemon holds for its life and `remove`/`prune` hold
@@ -22,15 +22,18 @@ pub struct Lock {
 /// It is an exclusive `flock` on the git common directory itself, so nothing is
 /// created on disk. Where directories can't be flocked (NFS, unless mounted
 /// with `local_lock=flock`), the lock file `<common>/gitfold/.lock` is used
-/// instead, as earlier builds did; that file, if it exists, is locked too, so a
-/// daemon of such a build is still seen.
+/// instead. Hosts sharing a repository over NFS with different `local_lock`
+/// options don't see each other's lock. `GITFOLD_TEST_LOCK_FILE` forces the
+/// file, for tests.
 pub fn lock(common_dir: &Path) -> Result<Option<Lock>> {
     let context = || format!("locking {}", common_dir.display());
-    let file_lock = state_root(common_dir).join(".lock");
-    let mut files = Vec::new();
     let dir = fs::File::open(common_dir).with_context(context)?;
-    match flock(&dir) {
-        Ok(true) => files.push(dir),
+    let flocked = match std::env::var_os("GITFOLD_TEST_LOCK_FILE") {
+        Some(_) => Err(std::io::Error::from_raw_os_error(libc::ENOLCK)),
+        None => flock(&dir),
+    };
+    let locked = match flocked {
+        Ok(true) => dir,
         Ok(false) => return Ok(None),
         // Not supported for directories here: the lock file instead.
         Err(e)
@@ -39,25 +42,21 @@ pub fn lock(common_dir: &Path) -> Result<Option<Lock>> {
                 Some(libc::ENOLCK | libc::EINVAL | libc::EBADF | libc::EOPNOTSUPP)
             ) =>
         {
-            fs::create_dir_all(state_root(common_dir)).with_context(context)?;
-            fs::OpenOptions::new()
+            let root = state_root(common_dir);
+            fs::create_dir_all(&root).with_context(context)?;
+            let file = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&file_lock)
+                .open(root.join(".lock"))
                 .with_context(context)?;
+            if !flock(&file).with_context(context)? {
+                return Ok(None);
+            }
+            file
         }
         Err(e) => return Err(e).with_context(context),
-    }
-    // The lock file of earlier builds (or of the fallback), only if it exists.
-    match fs::OpenOptions::new().append(true).open(&file_lock) {
-        Ok(file) => match flock(&file).with_context(context)? {
-            true => files.push(file),
-            false => return Ok(None),
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e).with_context(context),
-    }
-    Ok(Some(Lock { _files: files }))
+    };
+    Ok(Some(Lock { _file: locked }))
 }
 
 /// An exclusive, non-blocking `flock`: whether it was taken.
