@@ -320,7 +320,7 @@ if command -v rg >/dev/null; then rg -q needle "$W"; fi
 eq "  a search's aren't (grep, rg; a program run as ugrep)" "a.txt" "$(reads_of rd)"
 cat "$W/d/b.txt" >/dev/null
 eq "  nor, the kernel serving it from its cache, a read after one" "a.txt" "$(reads_of rd)"
-hook() { printf '%s' "$1" | "$BIN" track-reads --claude-hook post-tool-use; }
+hook() { printf '%s' "$1" | "$BIN" track-reads --claude-hook pre-tool-use; }
 hook "{\"tool_name\":\"Read\",\"cwd\":\"$REPO\",\"tool_input\":{\"file_path\":\"$W/d/b.txt\"}}"
 eq "Claude Code's Read, of a file the kernel had cached (grep read it): recorded by the hook" "a.txt d/b.txt" "$(reads_of rd)"
 hook "{\"tool_name\":\"Bash\",\"cwd\":\"$W/d\",\"tool_input\":{\"command\":\"sed -n 1,2p c.txt | head -n 1; cat ../nope\"}}"
@@ -338,6 +338,8 @@ mount_fs --kernel-open
 "$BIN" -C "$REPO" track-reads ko on >/dev/null
 grep -rq needle "$MNT/ko"; cat "$MNT/ko/a.txt" >/dev/null
 eq "with every open seen (--kernel-open): a read after a search too, not the search" "a.txt" "$(reads_of ko)"
+(exec 3<>"$MNT/ko/d/b.txt"; cat <&3 >/dev/null)
+eq "  a file opened read-write: its read" "a.txt d/b.txt" "$(reads_of ko)"
 unmount_fs
 }
 

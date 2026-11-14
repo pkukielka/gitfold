@@ -1071,7 +1071,7 @@ in progress, is dropped), unless the reader is a file searcher (`rg`, `grep`,
 the reading thread; `procs::Scanners` remembers each for 1 s, and is asked
 before the path is built: a search's reads build none). The kernel caches contents, so that read is
 the only one the daemon gets; later reads cost nothing, and aren't seen:
-Claude Code's `PostToolUse` hook (`gitfold track-reads --claude-hook`) reports
+Claude Code's `PreToolUse` hook (`gitfold track-reads --claude-hook`; before the tool, so a command's `cd` counts once) reports
 its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
 ...), and the daemon records them (a `record-reads` control request).
 

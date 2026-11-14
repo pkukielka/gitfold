@@ -349,7 +349,8 @@ read after a search read it. For the same reason, a tracked workspace's
 `content` prewarm walks as `meta`. With the Claude Code plugin, its hook
 fills in the last case for the Read tool and for simple viewers in Bash
 (`cat`, `head`, `tail`, `sed`, `less`, `nl` with file arguments): `gitfold
-track-reads --claude-hook post-tool-use`. Every read is seen with
+track-reads --claude-hook pre-tool-use`: before the tool runs, so a
+command's own `cd` counts once. Every read is seen with
 `--kernel-open`, at its cost (see Options). `.gitignore` and `.gitattributes` files
 are left out of `R` lines: `git status` reads one in every directory. Without tracking, `overlaps` shows `W` lines
 and says so; `--reads` then fails (exit 3). A fork inherits what its source

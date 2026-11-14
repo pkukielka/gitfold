@@ -209,7 +209,7 @@ pub struct TrackReadsArgs {
     pub branch: Option<String>,
     #[arg(value_name = "on|off", value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set, required_unless_present = "claude_hook")]
     pub on: Option<bool>,
-    /// As Claude Code's `PostToolUse` hook on Read and Bash (`post-tool-use`):
+    /// As Claude Code's `PreToolUse` hook on Read and Bash (`pre-tool-use`):
     /// records the files they read in a tracked workspace, which gitfold
     /// can't see when the kernel serves them from its cache. See
     /// skills/gitfold/SKILL.md.
@@ -220,5 +220,5 @@ pub struct TrackReadsArgs {
 /// The Claude Code hook `gitfold track-reads` serves.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ReadsHook {
-    PostToolUse,
+    PreToolUse,
 }

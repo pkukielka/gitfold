@@ -154,8 +154,8 @@ pub fn worktree_remove() -> Result<()> {
     git::cmd::output(&common_dir, &["worktree", "remove", "--force", path]).map(drop)
 }
 
-/// `PostToolUse` on Read and Bash (`gitfold track-reads --claude-hook
-/// post-tool-use`): reports the files the tool read to the daemon of the
+/// `PreToolUse` on Read and Bash (`gitfold track-reads --claude-hook
+/// pre-tool-use`): reports the files the tool read to the daemon of the
 /// gitfold mount they are in, which records them in tracked workspaces: reads
 /// it may not have seen (the kernel serves a file read before, by a search
 /// say, from its cache; searches' reads aren't recorded). Read: its
@@ -170,21 +170,7 @@ pub fn reads_hook() -> Result<()> {
 }
 
 fn report_reads(input: &str) -> Result<()> {
-    let cwd = cwd(input)?;
-    // The Read tool resolves `..` in its path lexically (it is Node's
-    // `path.resolve`); a Bash command's files are as `cat` gets them, `..`
-    // resolved by the filesystem below.
-    let named = match field(input, "tool_name").as_deref() {
-        Some("Read") => field_at(input, &["tool_input", "file_path"])
-            .into_iter()
-            .map(|p| normalized(&cwd.join(p)))
-            .collect(),
-        Some("Bash") => viewed(
-            &field_at(input, &["tool_input", "command"]).unwrap_or_default(),
-            &cwd,
-        ),
-        _ => return Ok(()),
-    };
+    let named = named(input, &cwd(input)?);
     if named.is_empty() {
         return Ok(());
     }
@@ -222,6 +208,25 @@ fn report_reads(input: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The files the tool in hook input `input` reads, from `cwd` (before the
+/// tool runs: `PreToolUse`; after, a Bash command's own `cd` would count
+/// twice). The Read tool resolves `..` in its path lexically (it is Node's
+/// `path.resolve`); a Bash command's files are as `cat` gets them, `..`
+/// resolved by the filesystem (`report_reads`).
+fn named(input: &str, cwd: &Path) -> Vec<PathBuf> {
+    match field(input, "tool_name").as_deref() {
+        Some("Read") => field_at(input, &["tool_input", "file_path"])
+            .into_iter()
+            .map(|p| normalized(&cwd.join(p)))
+            .collect(),
+        Some("Bash") => viewed(
+            &field_at(input, &["tool_input", "command"]).unwrap_or_default(),
+            cwd,
+        ),
+        _ => Vec::new(),
+    }
 }
 
 /// The hook's working directory: `cwd` in its input, else this process's.
@@ -262,22 +267,19 @@ fn viewed(command: &str, cwd: &Path) -> Vec<PathBuf> {
         dir: Some(cwd.to_path_buf()),
         pushed: Vec::new(),
     };
-    let lines: Vec<&str> = command.split_inclusive('\n').collect();
-    // What rable can't parse whole: the longest runs of lines it can, in
-    // order (a heredoc's body stays with its command), the rest skipped.
-    let mut i = 0;
-    while i < lines.len() {
-        let parsed = (i + 1..=lines.len())
-            .rev()
-            .find_map(|j| Some((j, rable::parse(&lines[i..j].concat(), true).ok()?)));
-        let Some((j, nodes)) = parsed else {
-            i += 1;
-            continue;
-        };
-        for node in &nodes {
-            walk(node, &mut at, &mut files);
+    // A syntax error stops bash there: what comes before it runs.
+    let nodes = match rable::parse(command, true) {
+        Ok(nodes) => nodes,
+        Err(e) => {
+            let before: String = command
+                .split_inclusive('\n')
+                .take(e.line().saturating_sub(1))
+                .collect();
+            rable::parse(&before, true).unwrap_or_default()
         }
-        i = j;
+    };
+    for node in &nodes {
+        walk(node, &mut at, &mut files);
     }
     files
 }
@@ -447,31 +449,28 @@ fn simple_command(words: &[rable::Node], at: &mut At, files: &mut Vec<PathBuf>) 
         args.iter()
             .find(|a| !a.as_deref().is_some_and(|a| a.starts_with('-') && a != "-"))
     };
-    // Where `cd` or `pushd` goes: absolute, or relative to a known `dir`;
-    // logical, as the shell's (`a/..` is `.` whatever `a` is).
-    let to = |to: &str| match to {
-        to if to.starts_with('/') => Some(normalized(Path::new(to))),
-        to if to.starts_with('~') || to == "-" => None,
-        to => at.dir.as_ref().map(|d| normalized(&d.join(to))),
+    // `-P`: `..` resolved physically (by the filesystem, later), else
+    // logically, as the shell does (`a/..` is `.` whatever `a` is).
+    let physical = args.iter().any(|a| a.as_deref() == Some("-P"));
+    // Where `cd` or `pushd` goes: `None` for home, the previous directory,
+    // an expansion, or anywhere relative to an unknown `dir`.
+    let to = |to: &str| {
+        let to = (!to.starts_with('~') && to != "-").then(|| at.file(to))??;
+        Some(if physical { to } else { normalized(&to) })
+    };
+    // `+N`, `-N`: a stack entry.
+    let entry = |a: &str| {
+        a.strip_prefix(['+', '-'])
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
     };
     match program.as_str() {
         "cd" => {
-            // Home, the previous directory, an expansion: unknown.
             at.dir = operand().cloned().flatten().and_then(|t| to(&t));
             return;
         }
-        // `-n` (the stack only) and `+N`/`-N` (rotations): the stack is
-        // unknown, and with `+N`/`-N` where it leaves us too.
-        "pushd" | "popd"
-            if args.iter().any(|a| {
-                a.as_deref().is_none_or(|a| {
-                    a == "-n"
-                        || a.len() > 1
-                            && a[1..].bytes().all(|b| b.is_ascii_digit())
-                            && (a.starts_with('+') || a.starts_with('-'))
-                })
-            }) =>
-        {
+        // `-n` (the stack only) and rotations: the stack is unknown, and
+        // with a rotation where it leaves us too.
+        "pushd" | "popd" if args.iter().flatten().any(|a| a == "-n" || entry(a)) => {
             at.pushed = vec![None];
             if !args.iter().any(|a| a.as_deref() == Some("-n")) {
                 at.dir = None;
@@ -545,11 +544,14 @@ fn redirections(redirects: &[rable::Node], at: &At, files: &mut Vec<PathBuf>) {
 /// The text word `node` stands for, quotes removed; `None` if it has an
 /// expansion (a variable, a command substitution: its value isn't known).
 fn literal(node: &rable::Node) -> Option<String> {
-    let rable::NodeKind::Word { value, .. } = &node.kind else {
+    let rable::NodeKind::Word { value, parts, .. } = &node.kind else {
         return None;
     };
-    // A process substitution: a pipe, not a file name.
-    if value.starts_with("<(") || value.starts_with(">(") {
+    // Its parts: literals, or expansions (variables, substitutions).
+    if !parts
+        .iter()
+        .all(|p| matches!(p.kind, rable::NodeKind::WordLiteral { .. }))
+    {
         return None;
     }
     let mut out = String::new();
@@ -652,14 +654,10 @@ mod tests {
         assert_eq!(viewed("not ( valid"), Vec::<String>::new());
         assert_eq!(
             viewed("cat a\nnot ( valid\ncat b"),
-            ["a", "b"],
-            "the lines it can parse"
+            ["a"],
+            "bash stops at the error"
         );
-        assert_eq!(
-            viewed("cd d\ncat x\nnot ( valid\ncat > f <<'E'\ncat body\nE\ncat y"),
-            ["d/x", "d/y"],
-            "around a bad line: the cd kept, a heredoc's body still text"
-        );
+        assert_eq!(viewed("cd d\ncat x\nnot ( valid\ncat y"), ["d/x"]);
         assert_eq!(viewed("while read l; do :; done < list.txt"), ["list.txt"]);
         assert_eq!(
             viewed("if true; then :; fi < f; case x in *) :;; esac < g"),
@@ -723,8 +721,36 @@ mod tests {
             "then unknown"
         );
         assert_eq!(viewed("pushd +1; cat z"), Vec::<String>::new());
+        assert_eq!(viewed("pushd a; popd +1; cat z"), Vec::<String>::new());
+        assert_eq!(viewed("pushd ünï && cat x"), ["ünï/x"], "no panic on UTF-8");
+        assert_eq!(
+            viewed("pushd \"$B\" && popd && cat r"),
+            ["r"],
+            "an expansion: popd still known"
+        );
+        assert_eq!(
+            viewed("cat x<(cat y)"),
+            ["y"],
+            "a substitution inside a word"
+        );
         assert_eq!(viewed("cd +build && cat log"), ["+build/log"]);
+        assert_eq!(
+            super::viewed("cd -P /m/ws/link/.. && cat x", Path::new("/w")),
+            [Path::new("/m/ws/link/../x")],
+            "-P: physical"
+        );
         assert_eq!(viewed("[[ -f x ]] < r; (( 1 )) < s"), ["r", "s"]);
+    }
+
+    /// Read: its path, `..` resolved lexically; Bash: from the directory
+    /// before the command.
+    #[test]
+    fn named_files() {
+        let read = r#"{"tool_name":"Read","tool_input":{"file_path":"/m/ws/link/../a.rs"}}"#;
+        assert_eq!(named(read, Path::new("/w")), [Path::new("/m/ws/a.rs")]);
+        let bash = r#"{"tool_name":"Bash","tool_input":{"command":"cd sub && cat x"}}"#;
+        assert_eq!(named(bash, Path::new("/w")), [Path::new("/w/sub/x")]);
+        assert!(named(r#"{"tool_name":"Grep"}"#, Path::new("/w")).is_empty());
     }
 
     #[test]
