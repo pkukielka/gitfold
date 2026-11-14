@@ -268,14 +268,19 @@ def main():
     top = sorted(per.items(), key=lambda kv: -kv[1][3]['misses'])[:10]
     for p, (proj, sess, kind, s) in top:
         print(f"  {proj}/{sess[:12]} {kind} misses={s['misses']} vreads={s['vreads']} read={s['read']} bash={s['bash']} ex={s['examples'][:2]}")
-    big = [p for p in per if per[p][2]=='main' and per[p][1].startswith(sys.argv[1] if len(sys.argv)>1 else '719b')][0]
+    if '-v' in sys.argv:
+        for p, (proj, sess, kind, s) in per.items():
+            for e in s['examples']: print('EX', e)
+    prefix = next((a for a in sys.argv[1:] if not a.startswith('-')), None)
+    big = [p for p in per if per[p][2]=='main' and prefix and per[p][1].startswith(prefix)]
+    if not big:
+        return
+    big = big[0]
     sid = per[big][1]
     print('\nBiggest main session:', per[big][0], sid)
     mine = [per[k] for k in per if per[k][1]==sid or ('/'+sid+'/subagents/') in k]
     print('  it alone (+ its subagents):', agg(mine)[0])
     print('  everything else:', agg([per[k] for k in per if not (per[k][1]==sid or ('/'+sid+'/subagents/') in k)])[0])
-    if '-v' in sys.argv:
-        for p, (proj, sess, kind, s) in per.items():
-            for e in s['examples']: print('EX', e)
+
 
 main()
