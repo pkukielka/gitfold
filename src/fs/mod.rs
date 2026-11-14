@@ -451,8 +451,9 @@ impl Filesystem for GitFold {
             // Content is loaded lazily on the first read; with FOPEN_KEEP_CACHE later
             // opens of the same file are served from the kernel page cache.
             Ok(true) => {
-                // Every open reaches us, cached or not: a read is seen.
-                if flags.0 & libc::O_ACCMODE != libc::O_WRONLY {
+                // Every open reaches us, cached or not: a read is seen (opens
+                // for writing, O_RDWR included, aren't reads).
+                if flags.0 & libc::O_ACCMODE == libc::O_RDONLY {
                     self.note_open(ino, req.pid());
                 }
                 reply.opened(FileHandle(0), FopenFlags::FOPEN_KEEP_CACHE)

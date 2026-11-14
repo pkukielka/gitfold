@@ -64,7 +64,7 @@ The skill's "Claude Code" section has the details
 1. **Install**: download `gitfold-x86_64-linux` (or `-aarch64-`) from the
    [releases](https://github.com/pkukielka/gitfold/releases) (glibc 2.28 or
    newer), check it against `SHA256SUMS`, and put it on `PATH` as `gitfold`;
-   or build it (Rust 1.88+):
+   or build it (Rust 1.93+):
 
    ```
    git clone https://github.com/pkukielka/gitfold && cd gitfold
@@ -136,7 +136,7 @@ gitfold writes into the repository: worktree registrations under
   `tree:0`; git 2.29 or newer) whose promisor remote gitfold can fetch from
   without a prompt (an ssh agent, a credential helper); see [Partial
   clones](#partial-clones).
-- To build: Rust 1.88 or newer (edition 2024; developed with 1.99), or Nix on
+- To build: Rust 1.93 or newer (edition 2024; developed with 1.99), or Nix on
   x86_64-linux (`flake.nix` provides a dev shell with the toolchain). Without
   installing, the binary is `target/release/gitfold` after
   `cargo build --release`.

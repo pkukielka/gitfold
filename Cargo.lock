@@ -498,6 +498,7 @@ dependencies = [
  "libc",
  "log",
  "parking_lot",
+ "rable",
  "rayon",
  "sha1",
 ]
@@ -1625,6 +1626,15 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "rable"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e82a58cfc10437c5132d3b07e5d2a00a742c289f50494a612e8f60e475da2dd"
+dependencies = [
+ "thiserror",
+]
 
 [[package]]
 name = "rayon"

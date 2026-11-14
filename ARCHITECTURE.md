@@ -1119,7 +1119,9 @@ its Read tool's file and simple Bash viewers' (`cat`, `head`, `tail`, `sed`
 recording searches' reads (noise); opens on by default to see cached reads
 (seconds per search on large trees, above); parsing every Bash command for
 the files it reads (pipelines, scripts and builds can't be told: simple
-viewers only);
+viewers only); a hand-written shell lexer for those (heredocs, `$((...))`,
+subshells and loops each broke it; `rable` parses as bash does, validated
+against bash, for 3 crates);
 refusing `--track-reads` with `--prewarm content` (branches can say
 otherwise); line-level conflicts in `overlaps` (`git merge-tree` already says, for
 a merge someone actually asks about).

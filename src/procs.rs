@@ -131,7 +131,16 @@ fn scanner_named(comm: &str, cmdline: Option<&[u8]>) -> Option<bool> {
 /// git's command among its arguments `args`: the first that isn't one of
 /// git's own options (`git -C <dir> -c <key=value> grep`).
 fn git_command<'a>(mut args: impl Iterator<Item = &'a [u8]>) -> Option<&'a [u8]> {
-    const VALUED: &[&[u8]] = &[b"-C", b"-c", b"--git-dir", b"--work-tree", b"--namespace"];
+    const VALUED: &[&[u8]] = &[
+        b"-C",
+        b"-c",
+        b"--git-dir",
+        b"--work-tree",
+        b"--namespace",
+        b"--config-env",
+        b"--super-prefix",
+        b"--attr-source",
+    ];
     while let Some(arg) = args.next() {
         if VALUED.contains(&arg) {
             args.next();

@@ -173,6 +173,7 @@ fn report_reads(input: &str) -> Result<()> {
     let named = match field(input, "tool_name").as_deref() {
         Some("Read") => field_at(input, &["tool_input", "file_path"])
             .into_iter()
+            .map(PathBuf::from)
             .collect(),
         Some("Bash") => viewed(&field_at(input, &["tool_input", "command"]).unwrap_or_default()),
         _ => return Ok(()),
@@ -207,9 +208,12 @@ fn report_reads(input: &str) -> Result<()> {
     }
     for (common_dir, paths) in reads {
         let request = crate::daemon::control::Request::RecordReads { paths };
-        // Not held up long behind a slow request (a removal).
+        // Not held up long behind a slow request (a removal); one mount's
+        // failure doesn't lose the others' reads.
         let wait = Some(std::time::Duration::from_secs(5));
-        crate::daemon::control::request(common_dir, &request, wait)?;
+        if let Err(e) = crate::daemon::control::request(common_dir, &request, wait) {
+            log::debug!("recording reads in {}: {e:#}", common_dir.display());
+        }
     }
     Ok(())
 }
@@ -239,183 +243,190 @@ fn normalized(path: &Path) -> PathBuf {
 
 /// The files the simple viewers in shell command `command` show: `cat`,
 /// `head`, `tail`, `less`, `more`, `nl`, `tac`, `bat` and `sed` with file
-/// arguments (or `<` a file), in each command of its pipelines and lists. A
-/// guess, not a parse: quotes are handled, expansions aren't (what isn't a
-/// file in a workspace is dropped later). Keeping this small is the point: a
-/// file read by anything else is seen unless a search read it first.
-fn viewed(command: &str) -> Vec<String> {
-    // sed's options that give its script; then its first operand isn't one.
-    const SED_SCRIPT: &[&str] = &["-e", "--expression", "-f", "--file"];
+/// arguments, and any command's `<` file. Parsed as bash parses it (`rable`):
+/// in pipelines, lists, loops, conditionals, `case`s, subshells and command
+/// substitutions, not in heredoc bodies or function definitions; a `cd` moves
+/// where relative paths are, within its subshell. A word with an expansion is
+/// left out (its value isn't known), and what isn't a file in a workspace is
+/// dropped later. Small on purpose: a file read by anything else is seen,
+/// unless a search read it first.
+fn viewed(command: &str) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    // Where relative paths are, after the command's own `cd`s.
-    let mut dir = PathBuf::new();
-    for words in commands(command) {
-        let mut words = words.into_iter().peekable();
-        // Assignments before the command (`LC_ALL=C cat x`).
-        while words
-            .peek()
-            .is_some_and(|w| w.word.contains('=') && !w.word.starts_with('='))
-        {
-            words.next();
+    if let Ok(nodes) = rable::parse(command, false) {
+        let mut dir = Some(PathBuf::new());
+        for node in &nodes {
+            walk(node, &mut dir, &mut files);
         }
-        let Some(program) = words.next() else {
-            continue;
-        };
-        if program.word == "cd" {
-            dir.push(words.next().map(|w| w.word).unwrap_or_default());
-            continue;
-        }
-        let program = program.word.rsplit('/').next().unwrap_or_default();
-        // Options that take the next word as their value; `None`: not a
-        // viewer (only what `<` gives it is read).
-        let valued: Option<&[&str]> = match program {
-            "cat" | "less" | "more" | "nl" | "tac" | "bat" | "batcat" => Some(&[]),
-            "head" | "tail" => Some(&["-n", "-c", "--lines", "--bytes"]),
-            "sed" => Some(&["-e", "--expression", "-f", "--file", "-l"]),
-            _ => None,
-        };
-        let mut operands = Vec::new();
-        let mut script_given = false;
-        let mut options_end = false;
-        let mut words = words.peekable();
-        while let Some(w) = words.next() {
-            let arg = w.word;
-            match w.redirect {
-                Some('<') => files.push(dir.join(arg)),
-                Some(_) => {}
-                None if valued.is_none() => {}
-                None if options_end || !arg.starts_with('-') || arg == "-" => operands.push(arg),
-                None if arg == "--" => options_end = true,
-                None => {
-                    let name = arg.split('=').next().unwrap_or_default();
-                    script_given |= SED_SCRIPT.contains(&name);
-                    if valued.is_some_and(|v| v.contains(&arg.as_str())) {
-                        words.next();
-                    }
-                }
-            }
-        }
-        let skip = usize::from(program == "sed" && !script_given);
-        let operands = operands.into_iter().skip(skip).filter(|f| f != "-");
-        files.extend(operands.map(|f| dir.join(f)));
     }
     files
-        .into_iter()
-        .filter_map(|f| f.into_os_string().into_string().ok())
-        .collect()
 }
 
-/// A word of a shell command, and the redirection (`<`, `>`) it is the
-/// target of, if any.
-struct Word {
-    word: String,
-    redirect: Option<char>,
+/// `viewed` in `node`. `dir`: where relative paths are, relative to the
+/// hook's directory; `None` once unknown (`cd ~`, `cd -`, `cd $X`).
+fn walk(node: &rable::Node, dir: &mut Option<PathBuf>, files: &mut Vec<PathBuf>) {
+    use rable::NodeKind as K;
+    // A subshell's `cd` stays in it.
+    let inner = |node: &rable::Node, files: &mut Vec<PathBuf>| {
+        walk(node, &mut dir.clone(), files);
+    };
+    match &node.kind {
+        K::Command {
+            words, redirects, ..
+        } => {
+            for word in words {
+                if let K::Word { parts, .. } = &word.kind {
+                    parts.iter().for_each(|part| inner(part, files));
+                }
+            }
+            simple_command(words, dir, files);
+            input_redirects(redirects, dir, files);
+        }
+        // Each of a pipeline's commands runs in a subshell of its own.
+        K::Pipeline { commands, .. } if commands.len() > 1 => {
+            commands.iter().for_each(|c| inner(c, files));
+        }
+        K::Pipeline { commands, .. } => commands.iter().for_each(|c| walk(c, dir, files)),
+        K::List { items } => items.iter().for_each(|i| walk(&i.command, dir, files)),
+        K::If {
+            condition,
+            then_body,
+            else_body,
+            ..
+        } => {
+            walk(condition, dir, files);
+            walk(then_body, dir, files);
+            if let Some(e) = else_body {
+                walk(e, dir, files);
+            }
+        }
+        K::While {
+            condition, body, ..
+        }
+        | K::Until {
+            condition, body, ..
+        } => {
+            walk(condition, dir, files);
+            walk(body, dir, files);
+        }
+        K::For { body, .. } | K::Select { body, .. } | K::ForArith { body, .. } => {
+            walk(body, dir, files);
+        }
+        K::Case { patterns, .. } => {
+            for body in patterns.iter().filter_map(|p| p.body.as_ref()) {
+                walk(body, dir, files);
+            }
+        }
+        K::Subshell { body, redirects } => {
+            inner(body, files);
+            input_redirects(redirects, dir, files);
+        }
+        K::BraceGroup { body, redirects } => {
+            walk(body, dir, files);
+            input_redirects(redirects, dir, files);
+        }
+        K::Negation { pipeline } | K::Time { pipeline, .. } => walk(pipeline, dir, files),
+        K::Coproc { command, .. }
+        | K::CommandSubstitution { command, .. }
+        | K::ProcessSubstitution { command, .. } => inner(command, files),
+        _ => {}
+    }
 }
 
-/// The simple commands of `command` (split at `|`, `;`, `&` and newlines),
-/// each as its words, quotes removed.
-fn commands(command: &str) -> Vec<Vec<Word>> {
-    let mut commands = Vec::new();
-    let mut current: Vec<Word> = Vec::new();
-    let mut word: Option<String> = None;
-    let mut redirect = None;
-    // Heredoc delimiters whose bodies start at the next newline.
-    let mut heredocs: Vec<String> = Vec::new();
-    let mut chars = command.chars().peekable();
-    loop {
-        let c = chars.next();
-        // `2>`: digits right before a redirection are its descriptor.
-        if matches!(c, Some('<' | '>'))
-            && word
-                .as_ref()
-                .is_some_and(|w| w.chars().all(|c| c.is_ascii_digit()))
-        {
-            word = None;
-        }
-        // A word ends at whitespace, an operator or the end.
-        if c.is_none_or(|c| c.is_whitespace() || "|;&\n<>".contains(c))
-            && let Some(w) = word.take()
-        {
-            current.push(Word {
-                word: w,
-                redirect: redirect.take(),
-            });
-        }
-        match c {
-            None => break,
-            Some('\'') => {
-                let w = word.get_or_insert_default();
-                w.extend(chars.by_ref().take_while(|c| *c != '\''));
+/// A simple command's words: a `cd` moves `dir`; a viewer's file operands
+/// are recorded.
+fn simple_command(words: &[rable::Node], dir: &mut Option<PathBuf>, files: &mut Vec<PathBuf>) {
+    let words: Vec<Option<String>> = words.iter().map(literal).collect();
+    let Some(Some(program)) = words.first() else {
+        return;
+    };
+    let args = &words[1..];
+    if program == "cd" {
+        // The first operand, past -L, -P, -e, -@ and --.
+        let operand = args
+            .iter()
+            .find(|a| !a.as_deref().is_some_and(|a| a.starts_with('-') && a != "-"));
+        *dir = match operand {
+            Some(Some(to)) if !to.starts_with('~') && to != "-" => dir.as_ref().map(|d| d.join(to)),
+            // Home, the previous directory, or an expansion: unknown.
+            _ => None,
+        };
+        return;
+    }
+    let program = program.rsplit('/').next().unwrap_or_default();
+    // Options that take the next word as their value.
+    let valued: &[&str] = match program {
+        "cat" | "less" | "more" | "nl" | "tac" | "bat" | "batcat" => &[],
+        "head" | "tail" => &["-n", "-c", "--lines", "--bytes"],
+        "sed" => &["-e", "--expression", "-f", "--file", "-l"],
+        _ => return,
+    };
+    // sed's options that give its script; then its first operand isn't one.
+    const SED_SCRIPT: &[&str] = &["-e", "--expression", "-f", "--file"];
+    let mut operands = Vec::new();
+    let mut script_given = false;
+    let mut options_end = false;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let Some(arg) = arg else {
+            operands.push(None);
+            continue;
+        };
+        if options_end || !arg.starts_with('-') || arg == "-" {
+            operands.push(Some(arg.as_str()));
+        } else if arg == "--" {
+            options_end = true;
+        } else {
+            script_given |= SED_SCRIPT.contains(&arg.split('=').next().unwrap_or_default());
+            if valued.contains(&arg.as_str()) {
+                args.next();
             }
-            Some('"') => {
-                let w = word.get_or_insert_default();
-                while let Some(c) = chars.next() {
-                    match c {
-                        '"' => break,
-                        '\\' => w.extend(chars.next()),
-                        c => w.push(c),
-                    }
-                }
-            }
-            Some('\\') => word.get_or_insert_default().extend(chars.next()),
-            Some(c @ ('|' | ';' | '&' | '\n')) => {
-                redirect = None;
-                commands.push(std::mem::take(&mut current));
-                // A heredoc's body is text, not commands: skipped to its
-                // delimiter line.
-                if c == '\n' {
-                    for delimiter in heredocs.drain(..) {
-                        let mut line = String::new();
-                        for c in chars.by_ref() {
-                            if c != '\n' {
-                                line.push(c);
-                            } else if line.trim_start_matches('\t') == delimiter {
-                                break;
-                            } else {
-                                line.clear();
-                            }
-                        }
-                    }
-                }
-            }
-            Some('>') => {
-                redirect = Some('>');
-                while chars.peek().is_some_and(|c| matches!(c, '>' | '&' | '|')) {
-                    chars.next();
-                }
-            }
-            Some('<') => {
-                let mut n = 1;
-                while chars.next_if_eq(&'<').is_some() {
-                    n += 1;
-                }
-                match n {
-                    // `<<` (or `<<-`): a heredoc; its delimiter, unquoted.
-                    2 => {
-                        chars.next_if_eq(&'-');
-                        while chars.next_if(|c| *c == ' ' || *c == '\t').is_some() {}
-                        let mut delimiter = String::new();
-                        while let Some(c) =
-                            chars.next_if(|c| !c.is_whitespace() && !"|;&<>".contains(*c))
-                        {
-                            if !matches!(c, '\'' | '"' | '\\') {
-                                delimiter.push(c);
-                            }
-                        }
-                        heredocs.push(delimiter);
-                    }
-                    // `<<<`: a here-string, text not a file.
-                    n if n > 2 => redirect = Some('h'),
-                    _ => redirect = Some('<'),
-                }
-                chars.next_if_eq(&'&');
-            }
-            Some(c) if c.is_whitespace() => {}
-            Some(c) => word.get_or_insert_default().push(c),
         }
     }
-    commands.push(current);
-    commands
+    let skip = usize::from(program == "sed" && !script_given);
+    if let Some(dir) = dir {
+        let operands = operands.into_iter().skip(skip).flatten();
+        files.extend(operands.filter(|f| *f != "-").map(|f| dir.join(f)));
+    }
+}
+
+/// The files of `redirects` that are read: `<` (not heredocs or
+/// here-strings, which are text).
+fn input_redirects(redirects: &[rable::Node], dir: &Option<PathBuf>, files: &mut Vec<PathBuf>) {
+    for redirect in redirects {
+        if let rable::NodeKind::Redirect { op, target, .. } = &redirect.kind
+            && matches!(op.as_str(), "<" | "<>")
+            && let (Some(dir), Some(file)) = (dir, literal(target))
+        {
+            files.push(dir.join(file));
+        }
+    }
+}
+
+/// The text word `node` stands for, quotes removed; `None` if it has an
+/// expansion (a variable, a command substitution: its value isn't known).
+fn literal(node: &rable::Node) -> Option<String> {
+    let rable::NodeKind::Word { value, .. } = &node.kind else {
+        return None;
+    };
+    let mut out = String::new();
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => out.extend(chars.by_ref().take_while(|c| *c != '\'')),
+            '"' => loop {
+                match chars.next()? {
+                    '"' => break,
+                    '$' | '`' => return None,
+                    '\\' => out.extend(chars.next()),
+                    c => out.push(c),
+                }
+            },
+            '$' | '`' => return None,
+            '\\' => out.extend(chars.next()),
+            c => out.push(c),
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -425,6 +436,12 @@ mod tests {
     /// The files simple viewers show, wherever they are in the command.
     #[test]
     fn viewed_files() {
+        let viewed = |c: &str| -> Vec<String> {
+            super::viewed(c)
+                .into_iter()
+                .map(|p| p.display().to_string())
+                .collect()
+        };
         assert_eq!(viewed("cat a.txt"), ["a.txt"]);
         assert_eq!(
             viewed("cat -n a.txt 'b c.txt' | head -n 20"),
@@ -461,6 +478,37 @@ mod tests {
         );
         assert_eq!(viewed("cat <<-END\n\tcat q\n\tEND\nnl r"), ["r"]);
         assert_eq!(viewed("cat <<< 'not a file'"), Vec::<String>::new());
+        assert_eq!(viewed("head -n $((n+5)) src/x.rs"), ["src/x.rs"]);
+        assert_eq!(viewed("m=$((1<<4))\ncat f.txt"), ["f.txt"]);
+        assert_eq!(
+            viewed("(cd d && cat x) && cat y; { head -n 2 z; }"),
+            ["d/x", "y", "z"],
+            "a subshell's cd stays in it"
+        );
+        assert_eq!(
+            viewed("for f in a; do cat m.rs; done; if true; then nl n; fi"),
+            ["m.rs", "n"]
+        );
+        assert_eq!(viewed("case $x in *) cat c;; esac"), ["c"]);
+        assert_eq!(
+            viewed("cd src && case $x in *) cat main.rs;; esac"),
+            ["src/main.rs"]
+        );
+        assert_eq!(
+            viewed("cd && cat .env; cd - ; cat q"),
+            Vec::<String>::new(),
+            "home: unknown"
+        );
+        assert_eq!(viewed("cd -P sub && cat x"), ["sub/x"]);
+        assert_eq!(viewed("cat $F \"$G\" lit"), ["lit"], "expansions left out");
+        assert_eq!(viewed("echo $(cat inner) | head -n1 < in"), ["inner", "in"]);
+        assert_eq!(viewed("f() { cat defined; }"), Vec::<String>::new());
+        assert_eq!(viewed("! cat w"), ["w"]);
+        assert_eq!(
+            viewed("not ( valid"),
+            Vec::<String>::new(),
+            "a syntax error: nothing"
+        );
     }
 
     #[test]
