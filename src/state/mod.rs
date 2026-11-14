@@ -6,6 +6,7 @@
 //! - `retire`: the rules for removing a workspace or a snapshot's
 //!   registration.
 //! - `fork`: a new branch with a copy of a workspace (`branch --with-changes`).
+//! - `seal`: a workspace's uncommitted work as a commit (`gitfold seal`).
 //! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //!
 //! The state of the workspace of branch `b` is `.git/gitfold/<id>/`, `<id>`
@@ -19,6 +20,7 @@ pub mod fork;
 pub mod markers;
 pub mod reads;
 pub mod retire;
+pub mod seal;
 pub mod status;
 pub mod task;
 

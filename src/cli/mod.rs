@@ -4,6 +4,7 @@
 //! - `branch`: `branch` (and its forks), `prewarm`, `track-reads`.
 //! - `list`: `list`, `changes`.
 //! - `remove`: `remove`, `prune`.
+//! - `mix`: `seal`, `mix`: workspaces' uncommitted work as commits, merged.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
 //! - `claude`: Claude Code's hooks: its worktrees as workspaces (`branch` and
@@ -15,6 +16,7 @@ pub mod claude;
 pub mod hook;
 pub mod inbox;
 pub mod list;
+pub mod mix;
 pub mod mount;
 pub mod overlaps;
 pub mod remove;
