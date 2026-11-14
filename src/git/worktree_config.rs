@@ -111,7 +111,11 @@ pub fn install_push_guard(admin: &Path) -> Result<()> {
     let dir = hooks_path(admin);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     install_file(&dir.join(HOOKS_LIB), include_bytes!("hooks/lib.sh"), 0o644)?;
-    install_file(&dir.join("pre-push"), include_bytes!("hooks/pre-push"), 0o755)?;
+    install_file(
+        &dir.join("pre-push"),
+        include_bytes!("hooks/pre-push"),
+        0o755,
+    )?;
     for name in SHIMMED_HOOKS {
         let shim = format!(
             "#!/bin/sh\n\
@@ -419,7 +423,10 @@ mod tests {
         let (r, w, common) = (dir.join("r"), dir.join("w"), dir.join("r/.git"));
         let global = dir.join("global-ignore");
         fs::write(&global, "*.globalign").unwrap();
-        git(&r, &["config", "core.excludesFile", global.to_str().unwrap()]);
+        git(
+            &r,
+            &["config", "core.excludesFile", global.to_str().unwrap()],
+        );
         for d in [&r, &w] {
             for name in ["x.globalign", "t.txt", "y.later"] {
                 fs::write(d.join(name), "").unwrap();
@@ -498,7 +505,8 @@ mod tests {
 
         install_push_guard(&admin).unwrap();
         install_push_guard(&admin).unwrap();
-        let unset = |d: &Path| try_git(d, &["config", "core.hooksPath"], b"").status.code() == Some(1);
+        let unset =
+            |d: &Path| try_git(d, &["config", "core.hooksPath"], b"").status.code() == Some(1);
         assert!(unset(&r));
 
         // The user's pre-commit runs through the shim.
@@ -511,13 +519,17 @@ mod tests {
         let out = try_git(&w, &["push", "origin", "HEAD:refs/heads/main"], b"");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{stderr}");
-        let refusal =
-            format!("gitfold: refusing to push refs/heads/main: it contains the lens commit {lens}");
+        let refusal = format!(
+            "gitfold: refusing to push refs/heads/main: it contains the lens commit {lens}"
+        );
         assert!(stderr.contains(&refusal), "{stderr}");
         assert!(!got.exists(), "the user's pre-push ran after a refusal");
 
         // A push without the lens commit passes, through the user's pre-push.
-        git(&w, &["push", "-q", "origin", &format!("{lens}~1:refs/heads/main")]);
+        git(
+            &w,
+            &["push", "-q", "origin", &format!("{lens}~1:refs/heads/main")],
+        );
         let pushed = fs::read_to_string(&got).unwrap();
         assert!(pushed.contains(" refs/heads/main 0000000"), "{pushed}");
         assert!(pushed.ends_with("\norigin\n"), "{pushed}");
@@ -527,7 +539,10 @@ mod tests {
         // The main worktree runs the user's hooks itself, and has no guard.
         git(&r, &["commit", "-q", "--allow-empty", "-m", "main"]);
         assert_eq!(fs::read_to_string(&ran).unwrap(), "x\nx\nx\n");
-        git(&r, &["push", "-q", "origin", &format!("{lens}:refs/heads/main")]);
+        git(
+            &r,
+            &["push", "-q", "origin", &format!("{lens}:refs/heads/main")],
+        );
 
         remove_push_guard(&admin).unwrap();
         remove_push_guard(&admin).unwrap();
@@ -546,7 +561,10 @@ mod tests {
         let (r, w) = (dir.join("r"), dir.join("w"));
         let user_hooks = dir.join("my-hooks");
         hook(&user_hooks, "pre-commit", "echo no-commit >&2; exit 1");
-        git(&r, &["config", "core.hooksPath", user_hooks.to_str().unwrap()]);
+        git(
+            &r,
+            &["config", "core.hooksPath", user_hooks.to_str().unwrap()],
+        );
         install_push_guard(&admin).unwrap();
         let out = try_git(&w, &["commit", "--allow-empty", "-m", "x"], b"");
         assert!(!out.status.success());

@@ -92,8 +92,9 @@ check "renaming it is refused" fails mv "$W/a.txt" "$W/z.txt"
 check "renaming a directory holding one is refused" fails mv "$W/nd" "$W/nd2"
 check "chmod is refused" fails chmod +x "$W/nla.txt"
 check "own files stay writable" sh -c "echo more >>'$W/d/c.txt' && echo n >'$W/own.txt'"
-out=$(git -C "$W" status 2>&1); rc=$?
-eq "git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LENS ON (la)' && echo yes)"
+eq "git sees only own changes" " M d/c.txt
+?? own.txt" "$(git -C "$W" status --short)"
+check "creating where a layer deleted is refused" fails sh -c "echo x >'$W/d/b.txt'"
 eq "gitfold still finds the workspace" "on 	la" "$("$BIN" -C "$W/d" layer list | cut -c1-6)"
 check "a second layer on top" "$BIN" -C "$W" layer add lb
 eq "the higher layer wins a path" "a
@@ -121,11 +122,21 @@ mount_fs
 eq "shown again after a remount" "a
 la
 again" "$(cat "$W/a.txt")"
-check "and git still off" fails git -C "$W" status
+eq "and git still sees only own changes" " M d/c.txt
+?? own.txt" "$(git -C "$W" status --short)"
+check "commit -a" G "$W" commit -qam own
+eq "it holds only own changes" "d/c.txt" "$(G "$W" show --name-only --format= HEAD)"
+eq "nothing left after it" "?? own.txt" "$(git -C "$W" status --short)"
+R config core.sparseCheckout true
+check "sparse checkout: layers still switch" "$BIN" -C "$W" layer update
+out=$(git -C "$W" status 2>&1); rc=$?
+eq "but git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LENS ON (la): git is off here (sparse checkout is on)' && echo yes)"
+R config --unset core.sparseCheckout
 check "rm the layer" "$BIN" -C "$W" layer rm la
 check "rm the other" "$BIN" -C "$W" layer rm lb
-eq "no layers: git back" " M d/c.txt
-?? own.txt" "$(git -C "$W" status --short)"
+eq "no layers: git back" "?? own.txt" "$(git -C "$W" status --short)"
+for _ in $(seq 50); do [ "$(cat "$COMMON/gitfold/me/base")" = "$(R rev-parse me)" ] && break; sleep 0.1; done
+eq "the base caught up with the commit" "$(R rev-parse me)" "$(cat "$COMMON/gitfold/me/base")"
 check "an unknown layer (exit 3)" sh -c "'$BIN' -C '$W' layer off nope; [ \$? = 3 ]"
 }
 

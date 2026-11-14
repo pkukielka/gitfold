@@ -12,12 +12,12 @@
 
 pub mod cmd;
 pub mod index;
-// Not used yet: layers switches will edit the index with it.
+// Parts are for later layers phases (blended files, the push guard).
 #[allow(dead_code)]
 pub mod index_edit;
 pub mod promisor;
 pub mod worktree;
-#[allow(dead_code)] // TODO(layers): until layers use it.
+#[allow(dead_code)]
 pub mod worktree_config;
 
 use std::cell::RefCell;

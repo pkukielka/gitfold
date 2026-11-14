@@ -293,6 +293,10 @@ impl Workspace {
             return Err(Errno::ENOTDIR);
         }
         let path = join(parent_path, name);
+        // A path a layer deleted is the layer's (see `lens`).
+        if Self::is_mixed(layers, &path) {
+            return Err(Errno::EACCES);
+        }
         // An upper entry makes the creation itself fail with EEXIST.
         if self.has_lower(store, layers, &path) {
             return Err(Errno::EEXIST);
@@ -583,10 +587,10 @@ impl Workspace {
         if layer_owned(&src_obj, &src) {
             return Err(Errno::EACCES);
         }
-        if let Ok(dst_obj) = self.resolve_in(store, &layers, &dst)
-            && layer_owned(&dst_obj, &dst)
-        {
-            return Err(Errno::EACCES);
+        match self.resolve_in(store, &layers, &dst) {
+            Ok(dst_obj) if layer_owned(&dst_obj, &dst) => return Err(Errno::EACCES),
+            Err(_) if Self::is_mixed(&layers, &dst) => return Err(Errno::EACCES),
+            _ => {}
         }
         // Every check on the destination before copying anything.
         let mut replace_lower_dir = false;

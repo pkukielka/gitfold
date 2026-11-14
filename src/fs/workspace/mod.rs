@@ -141,6 +141,8 @@ struct Layers {
     view: ObjectId,
     /// The paths shown layers changed, with the layer's index (see `lens`).
     mixed: std::collections::HashMap<Vec<u8>, usize>,
+    /// Whether any layer is shown.
+    lens_on: bool,
     /// Whiteouts and opaque markers.
     markers: Markers,
     times: Times,
@@ -256,6 +258,7 @@ impl Workspace {
             view_tree: base_tree,
             view: base.tree,
             mixed: Default::default(),
+            lens_on: false,
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,
         };
