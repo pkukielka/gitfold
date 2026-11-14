@@ -339,7 +339,7 @@ mount_fs --kernel-open
 grep -rq needle "$MNT/ko"; cat "$MNT/ko/a.txt" >/dev/null
 eq "with every open seen (--kernel-open): a read after a search too, not the search" "a.txt" "$(reads_of ko)"
 (exec 3<>"$MNT/ko/d/b.txt"; cat <&3 >/dev/null)
-eq "  a file opened read-write: its read" "a.txt d/b.txt" "$(reads_of ko)"
+eq "  not a read-write open (it may only write), the file cached" "a.txt" "$(reads_of ko)"
 unmount_fs
 }
 

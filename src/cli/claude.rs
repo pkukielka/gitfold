@@ -155,12 +155,13 @@ pub fn worktree_remove() -> Result<()> {
 }
 
 /// `PreToolUse` on Read and Bash (`gitfold track-reads --claude-hook
-/// pre-tool-use`): reports the files the tool read to the daemon of the
-/// gitfold mount they are in, which records them in tracked workspaces: reads
-/// it may not have seen (the kernel serves a file read before, by a search
-/// say, from its cache; searches' reads aren't recorded). Read: its
-/// `file_path`; Bash: the files simple viewers name (`viewed`). It runs after
-/// every such tool call (async), so errors are only logged.
+/// pre-tool-use`): reports the files the tool is about to read to the daemon
+/// of the gitfold mount they are in, which records them in tracked
+/// workspaces: reads it may not see (the kernel serves a file read before, by
+/// a search say, from its cache; searches' reads aren't recorded). Read: its
+/// `file_path`; Bash: the files simple viewers name (`named`). Before the tool
+/// runs, for the directory a command starts in; so a call the user then
+/// denies is recorded too. Async, on every such call: errors are only logged.
 pub fn reads_hook() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     if let Err(e) = report_reads(&input) {
@@ -266,16 +267,26 @@ fn viewed(command: &str, cwd: &Path) -> Vec<PathBuf> {
     let mut at = At {
         dir: Some(cwd.to_path_buf()),
         pushed: Vec::new(),
+        physical: false,
     };
-    // A syntax error stops bash there: what comes before it runs.
-    let nodes = match rable::parse(command, true) {
-        Ok(nodes) => nodes,
-        Err(e) => {
-            let before: String = command
-                .split_inclusive('\n')
-                .take(e.line().saturating_sub(1))
-                .collect();
-            rable::parse(&before, true).unwrap_or_default()
+    // A syntax error stops bash there: what comes before it runs. Cut before
+    // the error's line (and the lines continued into it by a `\`), again
+    // while that still doesn't parse (the error was in an open `for`, say).
+    let lines: Vec<&str> = command.split_inclusive('\n').collect();
+    let mut end = lines.len();
+    let nodes = loop {
+        match rable::parse(&lines[..end].concat(), true) {
+            Ok(nodes) => break nodes,
+            Err(e) => {
+                let mut cut = (e.line().saturating_sub(1)).min(end.saturating_sub(1));
+                while cut > 0 && lines[cut - 1].trim_end_matches('\n').ends_with('\\') {
+                    cut -= 1;
+                }
+                if cut == 0 {
+                    break Vec::new();
+                }
+                end = cut;
+            }
         }
     };
     for node in &nodes {
@@ -290,6 +301,9 @@ fn viewed(command: &str, cwd: &Path) -> Vec<PathBuf> {
 struct At {
     dir: Option<PathBuf>,
     pushed: Vec<Option<PathBuf>>,
+    /// `dir` holds a `..` the filesystem resolves (after `cd -P`): later
+    /// `cd`s leave theirs to it too, as the shell's PWD is then physical.
+    physical: bool,
 }
 
 impl At {
@@ -449,30 +463,43 @@ fn simple_command(words: &[rable::Node], at: &mut At, files: &mut Vec<PathBuf>) 
         args.iter()
             .find(|a| !a.as_deref().is_some_and(|a| a.starts_with('-') && a != "-"))
     };
-    // `-P`: `..` resolved physically (by the filesystem, later), else
-    // logically, as the shell does (`a/..` is `.` whatever `a` is).
-    let physical = args.iter().any(|a| a.as_deref() == Some("-P"));
+    // `-P` (the last of `-L`/`-P`, alone or combined: `-LP`): `..` resolved
+    // physically, by the filesystem later; else logically, as the shell does
+    // (`a/..` is `.` whatever `a` is).
+    let options = args
+        .iter()
+        .flatten()
+        .take_while(|a| a.starts_with('-') && *a != "-" && *a != "--");
+    let physical = at.physical
+        || options
+            .flat_map(|a| a.chars().filter(|c| matches!(c, 'L' | 'P')))
+            .last()
+            == Some('P');
     // Where `cd` or `pushd` goes: `None` for home, the previous directory,
     // an expansion, or anywhere relative to an unknown `dir`.
     let to = |to: &str| {
         let to = (!to.starts_with('~') && to != "-").then(|| at.file(to))??;
         Some(if physical { to } else { normalized(&to) })
     };
-    // `+N`, `-N`: a stack entry.
-    let entry = |a: &str| {
-        a.strip_prefix(['+', '-'])
-            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-    };
+    // `-n` (the stack only); a rotation (`+N`, `-N`), or for popd any
+    // argument we can't read (it takes no directory): an entry.
+    let no_cd = args.iter().any(|a| a.as_deref() == Some("-n"));
+    let rotation = args.iter().any(|a| match a.as_deref() {
+        Some(a) => a
+            .strip_prefix(['+', '-'])
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        None => program == "popd",
+    });
     match program.as_str() {
         "cd" => {
             at.dir = operand().cloned().flatten().and_then(|t| to(&t));
+            at.physical = physical;
             return;
         }
-        // `-n` (the stack only) and rotations: the stack is unknown, and
-        // with a rotation where it leaves us too.
-        "pushd" | "popd" if args.iter().flatten().any(|a| a == "-n" || entry(a)) => {
+        // The stack unknown, and with a rotation where it leaves us too.
+        "pushd" | "popd" if no_cd || rotation => {
             at.pushed = vec![None];
-            if !args.iter().any(|a| a.as_deref() == Some("-n")) {
+            if !no_cd {
                 at.dir = None;
             }
             return;
@@ -481,6 +508,7 @@ fn simple_command(words: &[rable::Node], at: &mut At, files: &mut Vec<PathBuf>) 
             let dir = operand().cloned().flatten().and_then(|t| to(&t));
             at.pushed.push(at.dir.take());
             at.dir = dir;
+            at.physical = physical;
             return;
         }
         "popd" => {
@@ -722,6 +750,35 @@ mod tests {
         );
         assert_eq!(viewed("pushd +1; cat z"), Vec::<String>::new());
         assert_eq!(viewed("pushd a; popd +1; cat z"), Vec::<String>::new());
+        assert_eq!(
+            viewed("pushd sub; popd \"$i\"; cat z"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            viewed("cat a\nfor f in x; do\ncat b\n"),
+            ["a"],
+            "an open for"
+        );
+        assert_eq!(viewed("cat a\necho 'open\ncat b"), ["a"], "an open quote");
+        assert_eq!(
+            viewed("cat a \\\n  b; not ( valid"),
+            Vec::<String>::new(),
+            "a continued line"
+        );
+        assert_eq!(
+            super::viewed("cd -P link && cd .. && cat x", Path::new("/w")),
+            [Path::new("/w/link/../x")],
+            "after -P, cd .. is physical too"
+        );
+        assert_eq!(
+            super::viewed("cd -P -L link/.. && cat x", Path::new("/w")),
+            [Path::new("/w/x")],
+            "the last of -L/-P"
+        );
+        assert_eq!(
+            super::viewed("cd -LP link/.. && cat x", Path::new("/w")),
+            [Path::new("/w/link/../x")]
+        );
         assert_eq!(viewed("pushd ünï && cat x"), ["ünï/x"], "no panic on UTF-8");
         assert_eq!(
             viewed("pushd \"$B\" && popd && cat r"),
