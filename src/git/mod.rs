@@ -6,6 +6,7 @@
 //! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
 //! - `index_edit`: editing an index git wrote (skip-worktree bits).
+//! - `lens`: layers' trees and commits, and extraction of commits made on them.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
 //! - `worktree_config`: a worktree's own excludes and hooks (layers).
@@ -15,6 +16,7 @@ pub mod index;
 // Parts are for later layers phases (blended files, the push guard).
 #[allow(dead_code)]
 pub mod index_edit;
+pub mod lens;
 pub mod promisor;
 pub mod worktree;
 #[allow(dead_code)]
