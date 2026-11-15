@@ -201,7 +201,7 @@ Then, per request (`fs/workspace/`):
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
 | `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard; proposals, consent, accept and reject) |
-| `tests/stacks.sh` | end-to-end test of stacked branches: restacks with no workspace, in an open workspace (hook and `stack sync`) and an unmounted one, conflicts, uncommitted work in the way, manual mode, `list`'s notes; parents that landed (squash, rebase and merge commits, a tweaked squash, a stacked parent's parent, none when unmerged) |
+| `tests/stacks.sh` | end-to-end test of stacked branches: restacks with no workspace, in an open workspace (hook and `stack sync`) and an unmounted one, conflicts, uncommitted work in the way, manual mode, `list`'s notes; parents that landed (squash, rebase and merge commits, a tweaked squash, a stacked parent's parent, a merge of later parent commits, none when unmerged, an interrupted re-parent, a branch on the trunk's local branch) |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
@@ -387,8 +387,8 @@ decision that creates them.
   refs `refs/gitfold-seal/<id>/<n>`, the lens ref `refs/gitfold-lens/<id>`
   and the lens commit's `gitfold-lens 1` header (the push guard and a
   remount look for it), the stack refs `refs/gitfold-stack/<branch>` and
-  the `branch.<b>.gitfoldParent`, `gitfoldRestack` and
-  `gitfoldRestackBlocked` settings, the
+  the `branch.<b>.gitfoldParent`, `gitfoldRestack`,
+  `gitfoldRestackBlocked` and `gitfoldLanding` settings, the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
@@ -1678,23 +1678,38 @@ pull requests merged into each other), else the **trunk**
 (`gitfold.trunk`, else the branch `origin/HEAD` names, else `main` or
 `master`). `git::stack::landing`, cheapest first:
 
-1. B in the target's history, brought in by a merge (the first commit of
-   the target's first-parent line descending from B doesn't have B as its
-   first parent): landed at that merge.
+1. B in the target's history, brought in by a merge (of B, or of commits
+   the parent got later): the first commit of the target's first-parent
+   line that has B, found by bisection (once one has it, every later one
+   does); landed there unless that is B's own child on the line.
 2. Else, if B has changes since it and the target diverged (MB): the
    first commit S of `rev-list --ancestry-path MB..target -- <paths B
-   changed>` where `merge_trees(MB, S, B)` is S's tree, i.e. merging B
-   there changes nothing: a squash, the last commit of a rebase merge.
+   changed>` (the paths on its standard input) where `merge_trees(MB, S,
+   B)` is S's tree, i.e. merging B there changes nothing: a squash, the
+   last commit of a rebase merge. The newest 2,000 such commits at most,
+   logged when that cuts the walk short.
+
+The trunk includes the local branch tracking it (`main` for
+`origin/main`): a branch stacked on it would otherwise be restacked on
+every pull and its own commits, rewritten by `pull --rebase`, taken for
+landed.
 
 If so, the child is **re-parented** (`cli::stack::reparent`): `B..child`
 replayed onto S like any restack (the same intent, read-tree and
 transaction, its stack ref moved to S), then `gitfoldParent` set to the
-target (config can't join the ref transaction; until it is written, the
-next sync finds the same landing and has nothing to move). Answers are
-cached per (B, target tip) in `.git/gitfold/.stack-landings`. `gitfold
-stack merged <PARENT> [--at REV]` declares a landing detection missed. A
-deleted parent (often, after a merge) still has its children's stack refs
-saying where their own commits start.
+target. Config can't join the ref transaction, so the move is recorded
+first in `branch.<b>.gitfoldLanding` (`<target> <S>`); the next sync
+finishes it if the stack ref is at S (else forgets it, unless a
+workspace's restack intent may still move the refs). Without it, a crash
+between the two left the child stacked on its old parent, and the next
+sync replayed it back onto the parent's pre-squash commits. Answers are
+cached per (B, target) in `.git/gitfold/.stack-landings`: a landing while
+the target still has it, or "not landed up to tip T", so after a fetch
+only `T..` is walked. `gitfold stack merged <PARENT> [--at REV] [--onto
+BRANCH]` declares a landing detection missed; once the parent is deleted,
+`--onto` is required, since deleting a branch deletes its config and the
+name of its own parent with it. A deleted parent's children still have
+their stack refs saying where their own commits start.
 
 **Why:**
 
@@ -1721,7 +1736,12 @@ saying where their own commits start.
   a no-op merge, so it never counts; B on the target's first-parent line
   is what a fresh parent (no commits yet) looks like, so a fast-forward
   isn't taken either (`stack merged` says it). Main independently making
-  the same change counts, harmlessly: the content is there.
+  the same change looks like a squash: the content is there, but the child
+  would leave a parent that may still be going on. So a squash is said to
+  "look" merged; `stack sync` (asked for) follows it, and the turn-boundary
+  hook follows it only once the parent's branch is gone (deleted here, or
+  its upstream deleted on its remote, as a forge does when it merges), and
+  otherwise tells the agent once.
 - **The parent's own parent as target:** a stacked pull request is merged
   into its base branch; looking only at the trunk would miss it until the
   whole stack lands.

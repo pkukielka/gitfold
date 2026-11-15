@@ -56,7 +56,18 @@ pub fn output(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 
 /// `output`, with `input` on git's standard input.
 pub fn output_with_input(git_dir: &Path, args: &[&str], input: Vec<u8>) -> Result<Vec<u8>> {
+    output_with_env_input(git_dir, args, &[], input)
+}
+
+/// `output_with_input`, with variables `env` set for git.
+pub fn output_with_env_input(
+    git_dir: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    input: Vec<u8>,
+) -> Result<Vec<u8>> {
     let mut child = command(git_dir)
+        .envs(env.iter().copied())
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

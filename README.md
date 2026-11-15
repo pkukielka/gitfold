@@ -185,7 +185,8 @@ gitfold stack on <PARENT> [-w <BRANCH>] [--base <REV>]
 gitfold stack off [-w <BRANCH>]               # a branch built on another's commits
 gitfold stack sync [<BRANCH>... | --all] [--dry-run]
                                               # restack onto the parents' new commits
-gitfold stack merged <PARENT> [--at <REV>]    # PARENT landed: its branches onto it
+gitfold stack merged <PARENT> [--at <REV>] [--onto <BRANCH>]
+                                              # PARENT landed: its branches onto it
 gitfold stack list                            # the stacks, parents first
 gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
 gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
@@ -784,27 +785,38 @@ gitfold stack off -w p2         # forget the parent; the history stays
   directory, so a crash half-way is finished or undone (one gitfold can't
   tell apart is reported, and `gitfold stack off` forgets it).
 - **A parent that landed.** When p1 is merged into main, p2 moves onto
-  main with only its own commits, and is stacked on main from then on: at
-  `stack sync` or at its agent's next turn (`p2  p1 landed on main as
-  9f8e7d (squashed or rebased); moved there with its own 2 commits and now
-  stacked on main. Its pull request's base is now main: gh pr edit p2 --base
-  main`). What counts is whether p2's parent base landed, so a fix p1 got
-  after its merge doesn't stop it. Found: a merge commit; a squash or
-  rebase merge (merging the base into a main commit touching its files
-  changes nothing), also one the maintainer tweaked, or with main editing
-  the same lines later. Not found, so not taken: a fast-forward (a parent
-  with no commits of its own looks the same), or a squash rewritten when
-  merged; `gitfold stack merged p1 [--at <REV>]` says so for every branch
-  on p1. p2 lands on the commit that merged p1, not main's tip: only its
-  own commits move, onto exactly what p1 became, and nothing else main did
-  appears in its workspace mid-task; `stack sync p2` follows main's tip
-  when wanted. A branch on the trunk isn't restacked at turn boundaries,
-  nor said to need it: following main is on request. The trunk is
-  `gitfold.trunk` if set (`git config gitfold.trunk origin/main`), else
-  the branch `origin/HEAD` names, else `main` or `master`; a parent that
-  is itself stacked lands on its own parent instead (stacked pull requests
-  merged into each other). `list` notes `parent merged: re-parent with
-  stack sync`. gitfold doesn't fetch: it sees what was fetched.
+  main with only its own commits, and is stacked on main from then on
+  (`p2  p1 looks squash- or rebase-merged into main as 9f8e7d; moved there
+  with its own 2 commits and now stacked on main. Its pull request's base
+  should now be main: push it, then gh pr edit p2 --base main`). What
+  counts is whether p2's parent base landed, so a fix p1 got after its
+  merge doesn't stop it.
+  - Found: a merge commit (also of commits p1 got later); a squash or
+    rebase merge (merging the base into a main commit touching its files
+    changes nothing), also one the maintainer tweaked, or with main
+    editing the same lines later. A squash is found by content, so main
+    making the same change on its own looks the same: it is said to "look"
+    merged, `stack sync` follows it, and the turn-boundary hook follows it
+    only once p1's branch is gone (deleted here, or on its remote and
+    fetched with `--prune`); until then it tells the agent once.
+  - Not found, so not taken: a fast-forward (a parent with no commits of
+    its own looks the same), or a squash rewritten when merged: `gitfold
+    stack merged p1 [--at <REV>]` says so for every branch on p1 (with
+    `--onto <BRANCH>` once p1 is deleted: that deletes the name of what p1
+    was stacked on too).
+  - p2 lands on the commit that merged p1, not main's tip: only its own
+    commits move, onto exactly what p1 became, and nothing else main did
+    appears in its workspace mid-task; `stack sync p2` follows main's tip
+    when wanted. A branch on the trunk (or on the local branch tracking
+    it, `main` for `origin/main`) isn't restacked at turn boundaries, nor
+    said to need it: following main is on request.
+  - The trunk is `gitfold.trunk` if set (`git config gitfold.trunk
+    origin/main`), else the branch `origin/HEAD` names, else `main` or
+    `master`; a parent that is itself stacked lands on its own parent
+    instead (stacked pull requests merged into each other). `list` notes
+    `parent merged` (or `parent looks merged`) `: re-parent with stack
+    sync`. gitfold doesn't fetch: it sees what was fetched, and after a
+    fetch it checks only the trunk's new commits.
 
 ### Partial clones
 

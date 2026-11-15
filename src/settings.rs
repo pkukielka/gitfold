@@ -4,8 +4,9 @@
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
 //!   mode), `gitfoldTrackReads` (whether it records reads), and for a
 //!   stacked branch `gitfoldParent` (the branch it is built on),
-//!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only) and
-//!   `gitfoldRestackBlocked` (the restack that conflicted, see
+//!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only),
+//!   `gitfoldRestackBlocked` (the restack that conflicted) and
+//!   `gitfoldLanding` (a move onto a parent's landing under way; see
 //!   `cli::stack`); for a proposal (`gitfold propose`), `gitfoldProposal`
 //!   (the layer it would change), `gitfoldProposedBy` (the workspace that
 //!   proposed it) and `gitfoldConsent` (the last `gitfold consent`);
@@ -45,6 +46,10 @@ const PROPOSED_BY: &str = "gitfoldProposedBy";
 /// `branch.<branch>.gitfoldConsent`: `<passed|failed> <the proposal's seal
 /// checked> <summary>`, the last `gitfold consent` on a proposal.
 const CONSENT: &str = "gitfoldConsent";
+/// `branch.<branch>.gitfoldLanding`: `<target> <landing commit>`, set while
+/// the branch moves onto where its parent landed, until the target is its
+/// parent.
+const LANDING: &str = "gitfoldLanding";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -207,6 +212,12 @@ impl Local {
         self.branch(branch, RESTACK_BLOCKED)
     }
 
+    /// The move of `branch` onto its parent's landing under way, if any
+    /// (see `LANDING`).
+    pub fn landing(&self, branch: &str) -> Option<String> {
+        self.branch(branch, LANDING)
+    }
+
     /// The remote `branch` pushes to and its branch there, from git's own
     /// `branch.<branch>.remote` and `.merge`, if both are set.
     pub fn upstream(&self, branch: &str) -> Option<(String, String)> {
@@ -302,6 +313,15 @@ pub fn set_proposal(git_dir: &Path, branch: &str, layer: &str, by: &str) -> Resu
 /// Records the last consent check of proposal `branch` (see `CONSENT`).
 pub fn set_consent(git_dir: &Path, branch: &str, consent: &str) -> Result<()> {
     set_branch(git_dir, branch, CONSENT, consent)
+}
+
+/// Records the move of `branch` onto its parent's landing under way, or
+/// forgets it.
+pub fn set_landing(git_dir: &Path, branch: &str, landing: Option<&str>) -> Result<()> {
+    match landing {
+        Some(landing) => set_branch(git_dir, branch, LANDING, landing),
+        None => unset_branch(git_dir, branch, LANDING),
+    }
 }
 
 /// Records `mountpoint` as where the repository is mounted

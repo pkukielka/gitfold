@@ -245,13 +245,13 @@ commit_on main m.txt moved-on
 # A squash merge, the parent deleted after it.
 pair p1 p2
 s=$(squash p1)
-eq "list: the parent merged" "  p2  (parent merged: re-parent with stack sync)" \
+eq "list: the parent looks merged" "  p2  (parent looks merged: re-parent with stack sync)" \
     "$("$BIN" -C "$REPO" stack list | grep '^  p2')"
-eq "--dry-run: says so, moves nothing" "p2	p1 landed on main as ${s:0:12} (squashed or rebased); would move there and be stacked on main|p1" \
+eq "--dry-run: says so, moves nothing" "p2	p1 looks squash- or rebase-merged into main as ${s:0:12}; would move there and be stacked on main|p1" \
     "$("$BIN" -C "$REPO" stack sync p2 --dry-run)|$(R config branch.p2.gitfoldParent)"
 R branch -q -D p1
 out=$("$BIN" -C "$REPO" stack sync p2)
-eq "a squash merge: re-parented onto the landing commit" "p2	p1 landed on main as ${s:0:12} (squashed or rebased); moved there with its own 1 commit and now stacked on main. Its pull request's base is now main: \`gh pr edit p2 --base main\`" "$out"
+eq "a squash merge: re-parented onto the landing commit" "p2	p1 looks squash- or rebase-merged into main as ${s:0:12}; moved there with its own 1 commit and now stacked on main. Its pull request's base should now be main: push it, then \`gh pr edit p2 --base main\`" "$out"
 check "on the squash, stacked on main, its stack ref there" landed_on p2 "$s" main
 eq "with only its own change" "p2.txt" "$(R diff --name-only "$s" p2)"
 commit_on main later.txt later
@@ -279,8 +279,34 @@ commit_on p0 p0b.txt more
 R switch -q p0; R merge -q --no-ff --no-edit q1; R switch -q main
 out=$("$BIN" -C "$REPO" stack sync q2)
 eq "a merge into the parent's own parent: onto the merge" yes \
-    "$(grep -q "^q2	q1 landed on p0 as $(R rev-parse --short=12 p0) (merged)" <<<"$out" && echo yes)"
+    "$(grep -q "^q2	q1 was merged into p0 by $(R rev-parse --short=12 p0);" <<<"$out" && echo yes)"
 check "stacked on p0 now" landed_on q2 "$(R rev-parse p0)" p0
+
+# A merge of the parent after it got more commits than the child's base.
+pair x1 x2
+commit_on x1 x1b.txt later
+R merge -q --no-ff --no-edit x1
+"$BIN" -C "$REPO" stack sync x2 >/dev/null
+check "a merge of a later parent tip: onto the merge" landed_on x2 "$(R rev-parse main)" main
+
+# A move onto a landing interrupted after the refs (the parent not yet
+# set): the next sync finishes it, rather than going back onto the parent.
+pair k1 k2
+s=$(squash k1)
+R rebase -q --onto "$s" k1 k2; R switch -q main
+R update-ref refs/gitfold-stack/k2 "$s"; R config branch.k2.gitfoldLanding "main $s"
+eq "interrupted re-parent: finished" "k2	up to date with main|main|" \
+    "$("$BIN" -C "$REPO" stack sync k2)|$(R config branch.k2.gitfoldParent)|$(R config branch.k2.gitfoldLanding)"
+
+# stack merged on a deleted parent: its own parent's name went with it.
+R branch g0; commit_on g0 g0.txt g0
+"$BIN" -C "$REPO" branch g1 --on g0 >/dev/null; commit_on g1 g1.txt g1
+"$BIN" -C "$REPO" branch g2 --on g1 >/dev/null; commit_on g2 g2.txt g2
+R switch -q g0; R merge -q --squash g1 >/dev/null 2>&1; R commit -qm "g1 rewritten" -m x; R switch -q main
+R branch -q -D g1
+check "stack merged, the parent gone: --onto needed (exit 3)" sh -c "'$BIN' -C '$REPO' stack merged g1; [ \$? = 3 ]"
+"$BIN" -C "$REPO" stack merged g1 --onto g0 >/dev/null
+check "--onto: onto it" landed_on g2 "$(R rev-parse g0)" g0
 
 # Not merged: nothing said, nothing moved.
 pair u1 u2
@@ -297,6 +323,21 @@ eq "a squash rewritten when merged: not found" "v2	up to date with v1" "$("$BIN"
 check "stack merged: onto main's tip" landed_on v2 "$(R rev-parse main)" main
 }
 
+a_branch_on_the_local_trunk() {
+# The trunk is origin/main; c is stacked on the local main tracking it.
+git init -q --bare "$T/origin.git"; R remote add origin "$T/origin.git"
+R push -q -u origin main; R remote set-head origin main
+"$BIN" -C "$REPO" branch c --on main >/dev/null; commit_on c c.txt c
+commit_on main x.txt local      # not pushed
+"$BIN" -C "$REPO" stack sync c >/dev/null
+# Someone else pushes; pulling with --rebase rewrites the local commit.
+R switch -q --detach origin/main; echo y >"$REPO/y.txt"; R add y.txt; R commit -qm theirs
+R push -q origin HEAD:main; R switch -q main; R fetch -q origin; R rebase -q origin/main
+eq "list: no note for a branch on the trunk's local branch" "  c" "$("$BIN" -C "$REPO" stack list | grep '^  c')"
+eq "the rewritten local commit isn't taken for a landing" "c	restacked onto main (2 new commits)|main" \
+    "$("$BIN" -C "$REPO" stack sync c)|$(R config branch.c.gitfoldParent)"
+}
+
 a_landed_parent_in_an_open_workspace() {
 R branch h1; commit_on h1 h1.txt h1
 "$BIN" -C "$REPO" branch h2 --on h1 >/dev/null
@@ -306,8 +347,13 @@ echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm "h2 own"
 echo mine >>"$W/a.txt"
 commit_on main m.txt moved-on
 s=$(squash h1)
+tip=$(R rev-parse h2)
+eq "it only looks merged, h1 still there: the hook says so, moves nothing" "gitfold: h2's parent h1 looks squash- or rebase-merged into main as ${s:0:12}, but h1 is still there; \`gitfold stack sync h2\` moves it there; suggest it to the user rather than running it yourself: it rewrites h2's history.|$tip" \
+    "$(prompt_hook "$W")|$(R rev-parse h2)"
+eq "once" "" "$(prompt_hook "$W")"
+R branch -q -D h1
 out=$(prompt_hook "$W")
-eq "the hook re-parents it, and says so" "gitfold: this branch's parent h1 landed on main as ${s:0:12} (squashed or rebased). h2 now sits there with only its own 1 commit, stacked on main; files changed under you: m.txt. Its pull request's base should now be main (\`gh pr edit h2 --base main\`), and its history was rewritten: push it with --force-with-lease when you push." "$out"
+eq "h1 gone: the hook re-parents it, and says so" "gitfold: this branch's parent h1 looks squash- or rebase-merged into main as ${s:0:12}. h2 now sits there with only its own 1 commit, stacked on main; files changed under you: m.txt. Its history was rewritten, so it needs a push with --force-with-lease, and then its pull request's base should be main: suggest \`gh pr edit h2 --base main\` to the user after that push rather than running it yourself." "$out"
 check "on the squash" landed_on h2 "$s" main
 eq "main's file shows, own work kept" "moved-on| M a.txt" "$(cat "$W/m.txt")|$(git -C "$W" status --short)"
 commit_on main later.txt later
@@ -316,6 +362,7 @@ eq "main moving on: the hook leaves it" "|$(R rev-parse h2)" "$(prompt_hook "$W"
 
 section "stacks: branches with no workspace" branches_with_no_workspace
 section "stacks: a parent that landed" a_parent_that_landed
+section "stacks: a branch on the local trunk" a_branch_on_the_local_trunk
 section "stacks: a landed parent, an open workspace" a_landed_parent_in_an_open_workspace
 section "stacks: an open workspace" an_open_workspace
 section "stacks: layers, an unmounted workspace" layers_or_an_unmounted_workspace
