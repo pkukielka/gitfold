@@ -3,7 +3,7 @@
 # moves of branches with no workspace, of an unmounted workspace and of an
 # open one (by the UserPromptSubmit hook and by layer base again),
 # conflicts, uncommitted work in the way, commits already pushed, --frozen,
-# taking a branch off the stack, and list's tree and notes.
+# taking the base away (layer base main), landings, and list's tree and notes.
 # usage: tests/stacks.sh (or with the others: tests/run.sh); sections as in
 # tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -37,13 +37,14 @@ branches_with_no_workspace() {
 R branch p1
 commit_on p1 p1.txt one
 out=$("$BIN" -C "$REPO" branch p2 --base p1)
-eq "branch --base: created on the base's tip" "created branch p2 on p1; open it as <mountpoint>/p2" "$out"
+eq "branch --base: created on the base's tip" "created branch p2 on p1; open it under the mount as p2 (gitfold mount)" "$out"
 eq "its base recorded" "p1" "$(R config branch.p2.gitfoldParent)"
 eq "and where its own commits start" "$(R rev-parse p1)" "$(stack_ref p2)"
 commit_on p2 p2.txt two
 eq "layer base p1 again: up to date" "p2: up to date with p1" "$(base p2 p1)"
 check "a cycle is refused" fails base p1 p2
-check "so is a branch on itself" fails base p2 p2
+base p2 p2 >/dev/null 2>&1; rc=$?
+eq "a branch on itself: a usage error (exit 2)" 2 "$rc"
 old=$(R rev-parse p1)
 commit_on p1 a.txt fix
 eq "list: the tree, with what it needs" "p1 (needs update: gitfold layer base p1)" "$(listed p2)"
@@ -72,6 +73,10 @@ moves 1 commit of p3 onto p2
 p3: moved onto p2 (2 new commits)" "$out"
 check "p3 on p2" parent_is p3 p2
 check "p2 on p1" parent_is p2 p1
+"$BIN" -C "$REPO" layer base --all --frozen >/dev/null 2>&1; rc=$?
+eq "--all with --frozen: a usage error (exit 2)" 2 "$rc"
+"$BIN" -C "$REPO" layer base --all -w p2 >/dev/null 2>&1; rc=$?
+eq "--all with -w: a usage error (exit 2)" 2 "$rc"
 
 # A conflict: nothing moves, and it is recorded.
 commit_on p2 a.txt mine
@@ -110,14 +115,29 @@ p2: moved onto p1 (1 new commit)
 to push (rewritten since last push):
   git push --force-with-lease=p2:$pushed origin p2:p2" "$out"
 eq "not pushed" "$pushed" "$(git -C "$T/remote.git" rev-parse p2)"
-eq "list: the push to run" "p1 (push with: git push --force-with-lease origin p2)" "$(listed p2)"
+eq "list: the push to run, as layer base says it" "p1 (push with: git push --force-with-lease=p2:$pushed origin p2:p2)" "$(listed p2)"
+
+# Refused onto another base: nothing changes, its base included.
+R push -q -f origin p2 2>/dev/null
+R branch other main; commit_on other o.txt o
+tip=$(R rev-parse p2)
+out=$(base p2 other 2>&1); rc=$?
+eq "pushed, onto another base: refused (exit 4)" "4 yes" "$rc $(grep -q '^p2: not moved: .*--yes moves them' <<<"$out" && echo yes)"
+eq "its base, where its commits start and its tip unchanged" "p1 $(R rev-parse p1) $tip" \
+    "$(R config branch.p2.gitfoldParent) $(stack_ref p2) $(R rev-parse p2)"
+commit_on other p2.txt other-side
+out=$(base p2 other --yes 2>&1); rc=$?
+eq "a conflict with another base: refused (exit 4)" "4 yes" "$rc $(grep -q '^p2: blocked: commit .* conflicts on p2.txt with other' <<<"$out" && echo yes)"
+eq "nothing changed, no block recorded" "p1 $(R rev-parse p1) $tip|" \
+    "$(R config branch.p2.gitfoldParent) $(stack_ref p2) $(R rev-parse p2)|$(R config branch.p2.gitfoldRestackBlocked)"
+eq "a refused --frozen doesn't freeze it" "" "$(base p2 other --frozen --yes >/dev/null 2>&1; R config branch.p2.gitfoldRestack)"
 
 # The base rewound behind where its own commits start: its dropped commit
 # goes from p2 too.
 commit_on p1 x.txt dropped-later
 base p2 p1 --yes >/dev/null
 R branch -f p1 p1~1
-eq "base rewound: moved without the dropped commit" "p2: moved onto p1 (0 new commits)|" \
+eq "base rewound: moved without the dropped commit, no commit count" "p2: moved onto p1|" \
     "$(base p2 p1 --yes 2>&1 | grep '^p2:')|$(R ls-tree --name-only p2 x.txt)"
 check "onto the base's tip, its two commits on it" test "$(R rev-parse p2~2)" = "$(R rev-parse p1)"
 
@@ -131,23 +151,27 @@ frozen: z doesn't follow p1's new commits; \`gitfold layer base p1 --frozen\` br
 check "z on p1" parent_is z p1
 eq "frozen: stored as manual, listed so" "manual|p1 (frozen)" "$(R config branch.z.gitfoldRestack)|$(listed z)"
 commit_on p1 y.txt y
+eq "frozen: the update it needs keeps it frozen" "p1 (frozen; needs update: gitfold layer base p1 --frozen)" "$(listed z)"
+out=$("$BIN" -C "$REPO" layer base --all --yes)
+eq "--all leaves a frozen branch" "yes|$(R rev-parse p1^)" \
+    "$(grep -q '^left as they are (frozen): z;' <<<"$out" && echo yes)|$(R rev-parse z^)"
 eq "again, --frozen: up to date, still frozen" "manual" "$(base z p1 --frozen >/dev/null; R config branch.z.gitfoldRestack)"
 check "on p1's new tip" parent_is z p1
 base z p1 >/dev/null
 eq "again without --frozen: live" "" "$(R config branch.z.gitfoldRestack)"
 
-# The trunk as its base: off the stack, its own commits moved onto it.
+# The trunk as its base: no base left, its own commits moved onto it.
 commit_on main m.txt trunk
 out=$(base z main)
-eq "layer base main: its own commits moved onto main, off the stack" "moves 1 commit of z onto main
+eq "layer base main: its own commits moved onto main, no base left" "moves 1 commit of z onto main
 z: moved onto main (1 new commit)
-z is off the stack (it was built on p1); its base is main" "$out"
+z is now built on main (was p1)" "$out"
 check "on main" parent_is z main
 eq "without p1's work" "" "$(R ls-tree --name-only z p1.txt)"
 eq "forgotten, ref and all" "|||" "$(R config branch.z.gitfoldParent)|$(stack_ref z)|$(R config branch.z.gitfoldRestack)|$(listed z)"
-eq "again: nothing to do" "z isn't built on another branch; nothing to do|$(R rev-parse z)" \
+eq "again: nothing to do" "z's base is main already; nothing to do|$(R rev-parse z)" \
     "$(base z main)|$(R rev-parse z)"
-eq "branch --base main: an ordinary branch" "created branch o on main; open it as <mountpoint>/o|" \
+eq "branch --base main: an ordinary branch" "created branch o on main; open it under the mount as o (gitfold mount)|" \
     "$("$BIN" -C "$REPO" branch o --base main)|$(R config branch.o.gitfoldParent)"
 }
 
@@ -156,6 +180,7 @@ R branch p1
 "$BIN" -C "$REPO" branch p2 --base p1 >/dev/null
 mount_fs
 W=$MNT/p2
+eq "the listing: no commits of its own yet" "Base: p1, live no commits of your own yet; it follows p1" "$("$BIN" -C "$W" layer | head -1 | tr -s " ")"
 echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm "p2 own"
 # Its agent's uncommitted work: unstaged, staged and untracked.
 echo mine >>"$W/d/c.txt"; echo staged >"$W/s.txt"; G "$W" add s.txt; echo u >"$W/u.txt"
@@ -212,6 +237,7 @@ eq "a fork of it: the same base, its own commits from the same place" "p1 $(stac
 echo m >"$MNT/p1/m.txt"; G "$MNT/p1" add m.txt; G "$MNT/p1" commit -qm "p1 m"
 tip=$(R rev-parse p2)
 eq "frozen: the hook leaves it" "|$tip" "$(prompt_hook "$W")|$(R rev-parse p2)"
+eq "list: the update it needs keeps it frozen" "p1 (frozen; needs update: gitfold layer base p1 --frozen)" "$(listed p2)"
 check "layer base --frozen again moves it" "$BIN" -C "$W" layer base p1 --frozen
 check "m.txt shows" test -e "$W/m.txt"
 check "layer base again: live" "$BIN" -C "$W" layer base p1
@@ -229,16 +255,25 @@ eq "list: blocked" "p1 (blocked: conflicts on own.txt)" "$(listed p2)"
 }
 
 layers_or_an_unmounted_workspace() {
-R branch p1; R branch la
-"$BIN" -C "$REPO" branch p2 --base p1 >/dev/null
+R branch p1; R branch la; R branch p2; R branch other
 mount_fs
 W=$MNT/p2
 echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm "p2 own"
 echo la >>"$MNT/la/a.txt"
 "$BIN" -C "$W" layer add la >/dev/null
-echo n >"$MNT/p1/n.txt"; G "$MNT/p1" add n.txt; G "$MNT/p1" commit -qm "p1 n"
 out=$(base p2 p1 2>&1); rc=$?
-eq "layers shown: waits (exit 4)" "4 yes" "$rc $(grep -q 'its workspace shows layers' <<<"$out" && echo yes)"
+eq "layers shown: layer base refused (exit 4), saying what to run" "4 yes" \
+    "$rc $(grep -qF "p2 can't move while layers are shown: \`gitfold layer remove --all\`, then \`gitfold layer base p1\`" <<<"$out" && echo yes)"
+eq "before anything changed" "|" "$(R config branch.p2.gitfoldParent)|$(stack_ref p2)"
+# Layers on a branch with a base anyway (as an earlier gitfold allowed).
+R config branch.p2.gitfoldParent p1; R update-ref refs/gitfold-stack/p2 p1
+echo n >"$MNT/p1/n.txt"; G "$MNT/p1" add n.txt; G "$MNT/p1" commit -qm "p1 n"
+eq "list: what it needs, the layers removed first" "p1 (needs update: gitfold layer remove --all, then gitfold layer base p1)" "$(listed p2)"
+eq "the hook: it waits, and what to run" yes \
+    "$(prompt_hook "$W" | grep -qF "waits: can't move while layers are shown: \`gitfold layer remove --all\`, then \`gitfold layer base p1\`" && echo yes)"
+tip=$(R rev-parse p2)
+out=$(base p2 other 2>&1); rc=$?
+eq "onto another base: refused, nothing changed" "4 p1 $tip" "$rc $(R config branch.p2.gitfoldParent) $(R rev-parse p2)"
 "$BIN" -C "$W" layer remove --all >/dev/null
 for _ in $(seq 30); do [ "$(cat "$COMMON/gitfold/p2/base")" = "$(R rev-parse p2)" ] && break; sleep 0.1; done
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
@@ -259,13 +294,13 @@ mount_fs
 out=$(prompt_hook "$W")
 eq "mounted: the hook moves it" yes "$(grep -q 'was moved onto its base p1' <<<"$out" && echo yes)"
 eq "own change kept" " M a.txt" "$(git -C "$W" status --short)"
-# An intent recovery can't read: layer switches wait, taking it off the
-# stack forgets it.
+# An intent recovery can't read: layer switches wait, taking
+# its base away forgets it.
 echo junk >"$COMMON/gitfold/p2/restack"
 out=$("$BIN" -C "$W" layer add la 2>&1); rc=$?
 eq "an intent left: layer switches refused (exit 4)" "4 yes" "$rc $(grep -q 'p2 is being moved onto its base' <<<"$out" && echo yes)"
 out=$(base p2 main)
-eq "layer base main forgets it, nothing moved" "p2 is off the stack (it was built on p1); its base is main; nothing moved, and an interrupted move's intent is forgotten|" \
+eq "layer base main forgets it, nothing moved" "p2 is now built on main (was p1); nothing moved, and an interrupted move's intent is forgotten|" \
     "$out|$(R config branch.p2.gitfoldParent)"
 check "then layers switch again" "$BIN" -C "$W" layer add la
 }
@@ -280,10 +315,15 @@ squash() {
     R merge -q --squash "$1" >/dev/null 2>&1; R commit -qm "$1 (#1)"; R rev-parse main
 }
 # Says whether branch $1 sits right on commit $2 with its one own commit,
-# built on $3, its stack ref at $2.
+# built on $3, its stack ref at $2; or, $3 main (the trunk), with no base
+# left at all, as a branch never given one.
 landed_on() {
-    [ "$(R rev-parse "$1^")" = "$2" ] && [ "$(R config "branch.$1.gitfoldParent")" = "$3" ] &&
-        [ "$(stack_ref "$1")" = "$2" ]
+    [ "$(R rev-parse "$1^")" = "$2" ] || return 1
+    if [ "$3" = main ]; then
+        [ -z "$(R config "branch.$1.gitfoldParent")" ] && ! stack_ref "$1" >/dev/null
+    else
+        [ "$(R config "branch.$1.gitfoldParent")" = "$3" ] && [ "$(stack_ref "$1")" = "$2" ]
+    fi
 }
 
 a_parent_that_landed() {
@@ -291,24 +331,24 @@ commit_on main m.txt moved-on
 # A squash merge, the base deleted after it.
 pair p1 p2
 s=$(squash p1)
-eq "list: the base looks landed" "p1 (p1 looks landed in main: gitfold layer base p1 moves it onto main)" "$(listed p2)"
+eq "list: the base looks landed, the hint names main" "p1 (p1 looks landed in main: gitfold layer base main moves it there)" "$(listed p2)"
 R branch -q -D p1
 out=$(base p2 p1)
 eq "a squash merge: moved onto the landing commit, saying so first" "moves 1 commit of p2 onto main (p1 looks squash- or rebase-merged into main as ${s:0:12})
 p2: p1 looks squash- or rebase-merged into main as ${s:0:12}; moved there with its own 1 commit and now built on main. Its pull request's base should now be main: push it, then \`gh pr edit p2 --base main\`" "$out"
-check "on the squash, built on main, its stack ref there" landed_on p2 "$s" main
+check "on the squash, no base left" landed_on p2 "$s" main
 eq "with only its own change" "p2.txt" "$(R diff --name-only "$s" p2)"
 commit_on main later.txt later
-eq "main moving on: no note (following it is on request)" "main" "$(listed p2)"
-eq "layer base main follows it on request, off the stack" "p2: moved onto main (1 new commit)|" \
-    "$(base p2 main | grep '^p2:')|$(R config branch.p2.gitfoldParent)"
+eq "list: not listed (no base, no workspace)" "" "$(listed p2)"
+eq "layer base main: nothing to do" "p2's base is main already; nothing to do" "$(base p2 main)"
 
 # A rebase merge: onto its last commit.
 pair r1 r2
 commit_on main m.txt before-r1
 R cherry-pick main..r1 >/dev/null; last=$(R rev-parse main)
-base r2 r1 >/dev/null
-check "a rebase merge: onto its last commit" landed_on r2 "$last" main
+out=$(base r2 main)
+eq "layer base main, as the hint says: follows the landing" "moves 1 commit of r2 onto main (r1 looks squash- or rebase-merged into main as ${last:0:12})" "$(head -1 <<<"$out")"
+check "a rebase merge: onto its last commit, no base left" landed_on r2 "$last" main
 
 # A squash the maintainer tweaked.
 pair t1 t2
@@ -322,8 +362,8 @@ R branch p0; commit_on p0 p0.txt p0
 "$BIN" -C "$REPO" branch q2 --base q1 >/dev/null; commit_on q2 q2.txt q2
 commit_on p0 p0b.txt more
 R switch -q p0; R merge -q --no-ff --no-edit q1; R switch -q main
-out=$(base q2 q1)
-eq "a merge into the base's own base: onto the merge" yes \
+out=$(base q2 p0)
+eq "a merge into the base's own base, layer base p0: onto the merge" yes \
     "$(grep -q "^q2: q1 was merged into p0 by $(R rev-parse --short=12 p0);" <<<"$out" && echo yes)"
 check "built on p0 now" landed_on q2 "$(R rev-parse p0)" p0
 
@@ -340,8 +380,8 @@ pair k1 k2
 s=$(squash k1)
 R rebase -q --onto "$s" k1 k2; R switch -q main
 R update-ref refs/gitfold-stack/k2 "$s"; R config branch.k2.gitfoldLanding "main $s"
-eq "interrupted move onto a landing: finished" "k2: up to date with main|main|" \
-    "$(base k2 k1)|$(R config branch.k2.gitfoldParent)|$(R config branch.k2.gitfoldLanding)"
+eq "interrupted move onto a landing: finished, no base left" "k2's base is main already; nothing to do|||$(R rev-parse "$s")" \
+    "$(base k2 main)|$(R config branch.k2.gitfoldParent)|$(R config branch.k2.gitfoldLanding)|$(R rev-parse k2^)"
 
 # A deleted base: its own base's name went with it, so it is named.
 R branch g0; commit_on g0 g0.txt g0
@@ -377,12 +417,12 @@ tip=$(R rev-parse u2)
 eq "unmerged: up to date, still on its base" "u2: up to date with u1|$tip|u1" \
     "$(base u2 u1)|$(R rev-parse u2)|$(R config branch.u2.gitfoldParent)"
 
-# Merged in a way detection can't tell: moved by taking it off the stack.
+# Merged in a way detection can't tell: moved by layer base main.
 pair v1 v2
 R merge -q --squash v1 >/dev/null; echo rewritten >"$REPO/v1.txt"; R commit -qam "v1, rewritten"
 eq "a squash rewritten when merged: not found" "v2: up to date with v1" "$(base v2 v1)"
 base v2 main >/dev/null
-eq "layer base main: its own commit onto main's tip, off the stack" "$(R rev-parse main)|v2.txt|" \
+eq "layer base main: its own commit onto main's tip, no base left" "$(R rev-parse main)|v2.txt|" \
     "$(R rev-parse v2^)|$(R diff --name-only main v2)|$(R config branch.v2.gitfoldParent)"
 }
 
@@ -398,9 +438,26 @@ commit_on c c.txt c
 R switch -q --detach origin/main; echo y >"$REPO/y.txt"; R add y.txt; R commit -qm theirs
 R push -q origin HEAD:main; R switch -q main; R fetch -q origin; R rebase -q origin/main
 eq "list: no note for a branch on the trunk's local branch" "main" "$(listed c)"
+eq "--all leaves a branch on the trunk" "no branch with a base to update|$(R rev-parse c)" \
+    "$("$BIN" -C "$REPO" layer base --all)|$(R rev-parse c)"
 eq "the rewritten local commit isn't taken for a landing" "c: moved onto main (2 new commits)|" \
     "$(base c main | grep '^c:')|$(R config branch.c.gitfoldParent)"
 check "on main's tip" parent_is c main
+
+# Its local main behind (diverged from) origin/main: layer base main goes onto origin/main.
+R branch d1; commit_on d1 d1.txt d1
+"$BIN" -C "$REPO" branch d2 --base d1 >/dev/null; commit_on d2 d2.txt d2
+R switch -q --detach origin/main; echo z >"$REPO/z.txt"; R add z.txt; R commit -qm "theirs 2"
+R push -q origin HEAD:main; R fetch -q origin; R switch -q main
+out=$(base d2 main | grep '^d2:')
+eq "a stale local main: onto origin/main, named main" "d2: moved onto main (1 new commit)|$(R rev-parse origin/main)|" \
+    "$out|$(R rev-parse d2^)|$(R config branch.d2.gitfoldParent)"
+# No local main at all.
+R branch d3; commit_on d3 d3.txt d3
+"$BIN" -C "$REPO" branch d4 --base d3 >/dev/null; commit_on d4 d4.txt d4
+R switch -q --detach main; R branch -q -D main
+check "no local main: layer base main goes onto origin/main" base d4 main
+eq "only its own commit, on origin/main" "$(R rev-parse origin/main)|d4.txt" "$(R rev-parse d4^)|$(R diff --name-only origin/main d4)"
 }
 
 a_landed_parent_in_an_open_workspace() {
@@ -413,13 +470,15 @@ echo mine >>"$W/a.txt"
 commit_on main m.txt moved-on
 s=$(squash h1)
 tip=$(R rev-parse h2)
-eq "it only looks merged, h1 still there: the hook says so, moves nothing" "gitfold: h2's base h1 looks squash- or rebase-merged into main as ${s:0:12}, but h1 is still there; \`gitfold layer base h1\` moves h2 onto main with only its own commits; suggest it to the user rather than running it yourself: it rewrites h2's history.|$tip" \
+eq "it only looks merged, h1 still there: the hook says so, moves nothing" "gitfold: h2's base h1 looks squash- or rebase-merged into main as ${s:0:12}, but h1 is still there; \`gitfold layer base main\` moves h2 there with only its own commits; suggest it to the user rather than running it yourself: it rewrites h2's history.|$tip" \
     "$(prompt_hook "$W")|$(R rev-parse h2)"
 eq "once" "" "$(prompt_hook "$W")"
 R branch -q -D h1
 out=$(prompt_hook "$W")
 eq "h1 gone: the hook moves it onto main, and says so" "gitfold: this branch's base h1 looks squash- or rebase-merged into main as ${s:0:12}; h2 is now built on main with only its own 1 commit; files changed under you: m.txt. Its history was rewritten, so it needs a push with --force-with-lease, and then its pull request's base should be main: suggest \`gh pr edit h2 --base main\` to the user after that push rather than running it yourself." "$out"
-check "on the squash" landed_on h2 "$s" main
+check "on the squash, no base left" landed_on h2 "$s" main
+eq "the listing: a plain base line" "Base: main" "$("$BIN" -C "$W" layer | head -1)"
+eq "list: not under a base" "h2" "$(tree | grep h2)"
 eq "main's file shows, own work kept" "moved-on| M a.txt" "$(cat "$W/m.txt")|$(git -C "$W" status --short)"
 commit_on main later.txt later
 eq "main moving on: the hook leaves it" "|$(R rev-parse h2)" "$(prompt_hook "$W")|$(R rev-parse h2)"

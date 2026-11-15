@@ -43,7 +43,24 @@ pub fn repo() -> Result<PathBuf> {
     if let Some((state, _)) = workspace_at(&cwd) {
         return Ok(state.admin);
     }
+    // The mount point itself (or a snapshot under it): its repository.
+    let mounted = (crate::mount_table::mounts().unwrap_or_default().into_iter())
+        .filter(|(mount, _)| cwd.starts_with(mount))
+        .max_by_key(|(mount, _)| mount.as_os_str().len());
+    if let Some((_, common_dir)) = mounted {
+        return Ok(common_dir);
+    }
     crate::git::discover(Path::new("."))
+}
+
+/// Exits with a usage error (exit code 2), as clap does for a bad argument:
+/// `message`, then where to find help.
+pub fn usage(message: impl std::fmt::Display) -> ! {
+    clap::Error::raw(
+        clap::error::ErrorKind::ArgumentConflict,
+        format!("{message}\n"),
+    )
+    .exit()
 }
 
 /// The workspace `path` (absolute) is in, below a gitfold mount, and the path
@@ -84,7 +101,7 @@ pub fn branch_or_current(branch: Option<String>, repo: &Path) -> Result<String> 
         .and_then(|n| n.to_str()?.strip_prefix(crate::state::ADMIN_PREFIX));
     match id {
         Some(id) if in_worktrees => Ok(crate::state::workspace_branch(id)),
-        _ => bail!("not in a gitfold workspace: name the branch"),
+        _ => bail!("not in a workspace: run it inside one, or name the branch"),
     }
 }
 
