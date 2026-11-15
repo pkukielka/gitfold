@@ -52,11 +52,11 @@ gitfold_check_lens() {
 		case $gitfold_lens in
 		'') ;;
 		'?')
-			echo "gitfold: refusing to push $gitfold_rref: couldn't check it for lens commits" >&2
+			echo "gitfold: refusing to push $gitfold_rref: couldn't check it for layers commits" >&2
 			exit 1
 			;;
 		*)
-			echo "gitfold: refusing to push $gitfold_rref: it contains the lens commit $gitfold_lens (other agents' uncommitted work). Push your branch instead (git push origin <branch>): your commits go onto it without the others' work." >&2
+			echo "gitfold: refusing to push $gitfold_rref: it contains the layers commit $gitfold_lens (other branches' work, shown as layers). Push your branch instead (git push origin <branch>): your commits go onto it without the others' work." >&2
 			exit 1
 			;;
 		esac

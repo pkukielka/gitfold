@@ -131,23 +131,26 @@ enum Command {
     /// or branch changes. Exit codes: 4 conflicts (the paths listed), 1 other
     /// errors, 2 usage errors.
     Mix(cli::mix::MixArgs),
-    /// Show other workspaces' work in a workspace, read-only: layers.
+    /// Show other branches' work in a workspace, read-only (layers), and
+    /// build it on a base.
     ///
-    /// Each layer is a workspace's work (uncommitted included) as it was when
-    /// added or updated, shown over the workspace's base and under its own
-    /// changes; higher layers win a path. A layer's files can't be written
-    /// there, and git sees only the workspace's own changes. Files marked
-    /// `gitfold-blend=hunk` in .gitattributes are blended instead (the
-    /// layers' lines and the workspace's own, which it writes), with HEAD at a
-    /// lens commit; commits made on it go onto the branch with only the
-    /// workspace's changes. Where git can't be kept right, it is turned off
-    /// there, saying why. Stored with the workspace; while mounted, shown at
-    /// once. Exit codes: 3 no such workspace or layer, 4 git busy (or
-    /// commits that can't go onto the branch yet, or own lines that depend
-    /// on a layer's), 1 other errors, 2 usage errors.
+    /// A layer is another branch's work shown over the workspace's base and
+    /// under its own changes: a workspace's work (uncommitted included), or
+    /// with --commits or without a workspace, its commits. It is kept up to
+    /// date (at its agent's turns, and when added again) unless --frozen; a
+    /// tag or a commit never moves. A layer's files can't be written there,
+    /// and git sees only the workspace's own changes. Where several layers
+    /// change a file, it shows their merge, with conflict markers if they
+    /// conflict (listed). Files marked `merge=union` in .gitattributes are
+    /// blended instead (the layers' lines and the workspace's own, which it
+    /// writes), with HEAD at a layers commit; commits made on it go onto the
+    /// branch with only the workspace's changes. Where git can't be kept
+    /// right, it is turned off there, saying why. With no subcommand, lists
+    /// the base and the layers. Stored with the workspace; while mounted,
+    /// shown at once. Exit codes: 3 no such workspace, branch or layer, 4
+    /// refused (git busy, commits that can't go onto the branch yet, own
+    /// lines that depend on a layer's), 1 other errors, 2 usage errors.
     Layer(cli::layer::LayerArgs),
-    /// Hide every layer of a workspace (see `gitfold layer`).
-    Lens(cli::layer::LensArgs),
     /// Propose a change to a layer's files (a contract) from a workspace
     /// showing it.
     ///
@@ -319,7 +322,6 @@ fn run() -> Result<i32> {
             ..
         }) => cli::layer::layer_hook(&event)?,
         Command::Layer(args) => cli::layer::layer(&cli::repo()?, args)?,
-        Command::Lens(args) => cli::layer::lens(&cli::repo()?, args)?,
         Command::Propose(args) => cli::proposal::propose(&cli::repo()?, args)?,
         Command::Proposals(args) => cli::proposal::proposals(&cli::repo()?, args)?,
         Command::Consent(args) => return cli::proposal::consent(&cli::repo()?, args),

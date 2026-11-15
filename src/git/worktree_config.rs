@@ -483,7 +483,7 @@ mod tests {
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{stderr}");
         let refusal = format!(
-            "gitfold: refusing to push refs/heads/main: it contains the lens commit {lens}"
+            "gitfold: refusing to push refs/heads/main: it contains the layers commit {lens}"
         );
         assert!(stderr.contains(&refusal), "{stderr}");
         assert!(!got.exists(), "the user's pre-push ran after a refusal");

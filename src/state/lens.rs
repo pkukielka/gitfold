@@ -1,18 +1,29 @@
-//! A workspace's layers: other workspaces' work shown in it, read-only, over
-//! its base and under its own changes (a lens). Each layer is another
-//! workspace's work as of one seal (`seal`), as the changes it makes since
-//! where the two diverged (the merge base, pinned with the layer, so the view
-//! doesn't change when this workspace's base moves).
+//! A workspace's layers: other branches' work shown in it, read-only, over
+//! its base and under its own changes (the lens, in the code). Each layer is
+//! a branch's work as of one commit, its seal: a workspace's work as `seal`
+//! makes it, or a branch's or a revision's commits. It shows as the changes
+//! it makes since where the two diverged (the merge base, pinned with the
+//! layer, so the view doesn't change when this workspace's base moves).
+//!
+//! A live layer follows its branch (`cli::layer`): a workspace's newest
+//! seal, or the branch's tip with `--commits` or without a workspace. A
+//! frozen one stays as taken, and a revision (a tag, a commit) is fixed.
 //!
 //! What the workspace shows is then the view tree: its base's tree with each
-//! shown layer's changes on top, the higher layer winning a path (whole files;
-//! deletions too), and upper over all of it as before. A path a shown layer
-//! changed is mixed: it is that layer's, so it can't be written here; the
-//! workspace's own file at that path, if it has one, wins and stays writable.
+//! layer's changes on top, and upper over all of it as before. Where several
+//! layers change one path, it shows their 3-way merge against the base's
+//! version, conflict markers kept (the base's version if they can't be
+//! merged at all), reported (`View::conflicts`). A path a layer changed is
+//! mixed: it is that layer's (or those layers'), so it can't be written
+//! here; the workspace's own file at that path, if it has one, wins and
+//! stays writable.
 //!
-//! Stored in `lens` in the state directory, rewritten whole: `version 1`, then
-//! one line per layer, bottom first: `layer <branch> TAB <on|off> TAB <seal>
-//! TAB <merge base>` (branch names hold no control characters).
+//! Stored in `lens` in the state directory, rewritten whole: `version 2`,
+//! then one line per layer, in the order added: `layer <name> TAB <shows>
+//! TAB <updates> TAB <moved> TAB <seal> TAB <merge base>`, with `<shows>`
+//! `work`, `commits-only` or `commits` (`Shows`), `<updates>` `live`,
+//! `frozen` or `fixed` (`Updates`) and `<moved>` when it last moved, in
+//! seconds since the epoch (names hold no control characters).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -28,11 +39,75 @@ use crate::git;
 /// The file holding a workspace's layers.
 pub const LENS: &str = "lens";
 
+/// What a layer shows of its branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shows {
+    /// A workspace's work, uncommitted included (a seal).
+    Work,
+    /// Only what the branch committed (`--commits`).
+    CommitsOnly,
+    /// The commits of a branch without a workspace, a tag or a commit.
+    Commits,
+}
+
+/// How a layer moves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Updates {
+    /// Follows its branch.
+    Live,
+    /// As taken (`--frozen`).
+    Frozen,
+    /// A revision: never moves.
+    Fixed,
+}
+
+impl Shows {
+    fn word(self) -> &'static str {
+        match self {
+            Shows::Work => "work",
+            Shows::CommitsOnly => "commits-only",
+            Shows::Commits => "commits",
+        }
+    }
+
+    fn parse(word: &str) -> Result<Shows> {
+        Ok(match word {
+            "work" => Shows::Work,
+            "commits-only" => Shows::CommitsOnly,
+            "commits" => Shows::Commits,
+            _ => bail!("{word:?}: not work, commits-only or commits"),
+        })
+    }
+}
+
+impl Updates {
+    fn word(self) -> &'static str {
+        match self {
+            Updates::Live => "live",
+            Updates::Frozen => "frozen",
+            Updates::Fixed => "fixed",
+        }
+    }
+
+    fn parse(word: &str) -> Result<Updates> {
+        Ok(match word {
+            "live" => Updates::Live,
+            "frozen" => Updates::Frozen,
+            "fixed" => Updates::Fixed,
+            _ => bail!("{word:?}: not live, frozen or fixed"),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
+    /// The branch (or revision) as named.
     pub branch: String,
-    /// Shown (the eye icon).
-    pub on: bool,
+    pub shows: Shows,
+    pub updates: Updates,
+    /// When it last moved (taken, or followed to newer work), in seconds
+    /// since the epoch.
+    pub moved: i64,
     pub seal: ObjectId,
     /// Where the two workspaces' histories diverged: the layer's changes are
     /// its seal's against this.
@@ -41,7 +116,7 @@ pub struct Layer {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Lens {
-    /// Bottom first.
+    /// In the order added.
     pub layers: Vec<Layer>,
 }
 
@@ -59,7 +134,7 @@ impl Lens {
         }
         let text = std::str::from_utf8(data)?;
         let mut lines = text.lines();
-        if lines.next() != Some("version 1") {
+        if lines.next() != Some("version 2") {
             bail!("not a layers file this gitfold knows");
         }
         let mut layers = Vec::new();
@@ -69,12 +144,14 @@ impl Lens {
                 .unwrap_or("")
                 .split('\t')
                 .collect();
-            let [branch, on, seal, merge_base] = fields[..] else {
+            let [branch, shows, updates, moved, seal, merge_base] = fields[..] else {
                 bail!("bad line {line:?}");
             };
             layers.push(Layer {
                 branch: branch.to_string(),
-                on: on == "on",
+                shows: Shows::parse(shows)?,
+                updates: Updates::parse(updates)?,
+                moved: moved.parse()?,
                 seal: ObjectId::from_hex(seal.as_bytes())?,
                 merge_base: ObjectId::from_hex(merge_base.as_bytes())?,
             });
@@ -86,28 +163,30 @@ impl Lens {
     pub fn write(&self, state: &StateDir) -> Result<()> {
         let mut text = String::new();
         if !self.layers.is_empty() {
-            text += "version 1\n";
+            text += "version 2\n";
         }
         for l in &self.layers {
-            let on = if l.on { "on" } else { "off" };
-            text += &format!("layer {}\t{on}\t{}\t{}\n", l.branch, l.seal, l.merge_base);
+            text += &format!(
+                "layer {}\t{}\t{}\t{}\t{}\t{}\n",
+                l.branch,
+                l.shows.word(),
+                l.updates.word(),
+                l.moved,
+                l.seal,
+                l.merge_base
+            );
         }
         store_bytes(state, text.as_bytes())
     }
 
-    /// Whether any layer is shown.
+    /// Whether there are layers.
     pub fn is_on(&self) -> bool {
-        self.layers.iter().any(|l| l.on)
+        !self.layers.is_empty()
     }
 
-    /// The layers shown, bottom first.
-    pub fn shown(&self) -> impl Iterator<Item = &Layer> {
-        self.layers.iter().filter(|l| l.on)
-    }
-
-    /// The subject of the lens commit of workspace `branch` showing them.
+    /// The subject of the layers commit of workspace `branch` showing them.
     pub fn subject(&self, branch: &str) -> String {
-        let names: Vec<&str> = self.shown().map(|l| l.branch.as_str()).collect();
+        let names: Vec<&str> = self.layers.iter().map(|l| l.branch.as_str()).collect();
         git::lens::lens_subject(branch, &names)
     }
 
@@ -148,84 +227,126 @@ pub fn named_seals(common_dir: &std::path::Path) -> HashSet<ObjectId> {
         .collect()
 }
 
+/// A path several layers change whose changes conflict (see `view`).
+#[derive(Clone, Debug)]
+pub struct Conflict {
+    pub path: BString,
+    /// The layers (indexes in `Lens::layers`).
+    pub layers: Vec<usize>,
+    /// It shows git's conflict markers; else the base's version.
+    pub markers: bool,
+}
+
 /// What a workspace with layers shows below its own changes.
 pub struct View {
-    /// M: the base's tree with the shown layers' changes.
+    /// M: the base's tree with the layers' changes.
     pub tree: ObjectId,
     /// H: the base's tree with only the blended files blended (see `blend`).
     pub hunk_tree: ObjectId,
-    /// The paths the layers' whole files replace or delete, with the layer
-    /// (its index in `Lens::layers`) whose version shows: read-only.
-    pub mixed: HashMap<Vec<u8>, usize>,
+    /// The paths the layers' whole files replace, delete or merge, with the
+    /// layers (their indexes in `Lens::layers`) whose changes show there:
+    /// read-only.
+    pub mixed: HashMap<Vec<u8>, Vec<usize>>,
     /// The blended files (see `blend`), with the layers blended in: the
     /// workspace writes them, its own lines on top of theirs.
     pub blended: HashMap<Vec<u8>, Vec<usize>>,
     /// The seals of the layers blended in (L's parents after the base).
     pub hunk_seals: Vec<ObjectId>,
+    /// The paths several layers change whose changes conflict.
+    pub conflicts: Vec<Conflict>,
     /// What the agent should hear about it.
     pub notes: Vec<String>,
 }
 
-/// The view of `lens` over base commit `base`, or `None` if no layer is
-/// shown.
+/// The view of `lens` over base commit `base`, or `None` if it has no
+/// layers.
 ///
-/// A file is blended, rather than shown whole, if the attribute
-/// `gitfold-blend` is `hunk` for it (in the base's `.gitattributes` or
-/// `info/attributes`), the base has it and no shown layer deletes it: every
-/// layer's change to it is merged into the base's version, lines both sides
-/// add kept both (registries, manifests: files several agents append to).
+/// A file is blended, rather than shown whole, if it is `merge=union` (in
+/// the base's `.gitattributes` or `info/attributes`), the base has it and no
+/// layer deletes it: every layer's change to it is merged into the base's
+/// version, lines both sides add kept both (registries, manifests: files
+/// several agents append to).
 pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Result<Option<View>> {
     if !lens.is_on() {
         return Ok(None);
     }
-    let shown: Vec<usize> = (0..lens.layers.len())
-        .filter(|&i| lens.layers[i].on)
-        .collect();
-    let stack: Vec<git::lens::Pin> = (shown.iter())
-        .map(|&i| git::lens::Pin {
-            seal: lens.layers[i].seal,
-            merge_base: lens.layers[i].merge_base,
+    let stack: Vec<git::lens::Pin> = (lens.layers.iter())
+        .map(|l| git::lens::Pin {
+            name: l.branch.clone(),
+            seal: l.seal,
+            merge_base: l.merge_base,
         })
         .collect();
     let hunk_paths = |paths: &[BString]| -> Result<HashSet<BString>> {
         let rev = base.to_string();
-        let values = git::attr::values(common_dir, &rev, "gitfold-blend", paths)?;
+        let values = git::attr::values(common_dir, &rev, "merge", paths)?;
         Ok((values.into_iter())
-            .filter(|(_, value)| value == "hunk")
+            .filter(|(_, value)| value == "union")
             .map(|(path, _)| path)
             .collect())
     };
     let view = git::with_repo(|repo| git::lens::build_view(repo, *base, &stack, &hunk_paths))?;
-    let layer = |ix: usize| shown[ix];
-    let name = |ix: usize| lens.layers[shown[ix]].branch.clone();
-    let notes = (view.notes.iter())
-        .map(|n| match n {
+    let name = |ix: usize| lens.layers[ix].branch.clone();
+    let mut conflicts = Vec::new();
+    let mut notes = Vec::new();
+    let hunk_layers = view.hunk_layers();
+    for note in view.notes {
+        notes.push(match note {
             git::lens::Note::NotBlended { layer, path } => format!(
-                "{}: {}'s change conflicts with what is below it, so it isn't blended in",
-                path,
-                name(*layer)
+                "{path}: {}'s change conflicts with what is below it, so it isn't blended in",
+                name(layer)
             ),
             git::lens::Note::HidesBase { layer, path } => format!(
-                "{}: {}'s version hides a change on your base since it diverged",
-                path,
-                name(*layer)
+                "{path}: {}'s version hides a change on your base since it diverged",
+                name(layer)
             ),
-        })
-        .collect();
+            git::lens::Note::Conflict {
+                layers,
+                path,
+                markers,
+            } => {
+                let note = format!(
+                    "{path}: {} change it and conflict: {}",
+                    and_list(layers.iter().map(|&ix| name(ix))),
+                    match markers {
+                        true => "it shows git's conflict markers",
+                        false => "it shows your base's version",
+                    }
+                );
+                conflicts.push(Conflict {
+                    path,
+                    layers,
+                    markers,
+                });
+                note
+            }
+        });
+    }
     Ok(Some(View {
         tree: view.view_tree,
         hunk_tree: view.hunk_tree,
         mixed: (view.mixed.iter())
-            .map(|(p, &ix)| (p.to_vec(), layer(ix)))
+            .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
             .collect(),
         blended: (view.blended.iter())
-            .map(|(p, ixs)| (p.to_vec(), ixs.iter().map(|&ix| layer(ix)).collect()))
+            .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
             .collect(),
-        hunk_seals: (view.hunk_layers().into_iter())
-            .map(|ix| lens.layers[shown[ix]].seal)
+        hunk_seals: (hunk_layers.into_iter())
+            .map(|ix| lens.layers[ix].seal)
             .collect(),
+        conflicts,
         notes,
     }))
+}
+
+/// `a`, `a and b`, `a, b and c`.
+pub fn and_list(names: impl IntoIterator<Item = String>) -> String {
+    let mut names: Vec<String> = names.into_iter().collect();
+    match names.pop() {
+        None => String::new(),
+        Some(last) if names.is_empty() => last,
+        Some(last) => format!("{} and {last}", names.join(", ")),
+    }
 }
 
 /// The file recording what the daemon last applied of a workspace's layers

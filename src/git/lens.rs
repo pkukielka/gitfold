@@ -8,13 +8,16 @@
 //! - A layer: another workspace's work as of one seal S (a commit whose tree
 //!   is that workspace's view), with the merge base MB it was pinned at. Its
 //!   delta is `diff(MB.tree, S.tree)`.
-//! - H, the hunk tree: B with every hunk path (a registry, a manifest: the
-//!   caller's predicate) blended across the layers.
+//! - H, the hunk tree: B with every hunk path (a registry, a manifest, as the
+//!   caller says: those marked `merge=union`) blended across the layers.
 //! - M, the view tree: H with every other path a layer changed replaced by
-//!   the top such layer's entry ("whole-file" paths).
-//! - L, the lens commit: tree H, parents `[B, S...]`, an extra header
-//!   `gitfold-lens 1`. The worktree's HEAD while hunk paths are mixed in, so
-//!   `git diff` shows only my lines of a blended file.
+//!   that layer's entry ("whole-file" paths); where several layers change
+//!   one, the 3-way merge of their entries against B's, conflict markers
+//!   kept (or B's entry if they can't be merged at all).
+//! - L, the layers commit (the lens commit in the code): tree H, parents
+//!   `[B, S...]`, an extra header `gitfold-lens 1`. The worktree's HEAD
+//!   while hunk paths are mixed in, so `git diff` shows only my lines of a
+//!   blended file.
 //! - V, the view commit: tree M, parents `[L or B, S...]`; one ref on it
 //!   keeps M, L and the seals from `git gc`.
 //!
@@ -211,9 +214,11 @@ pub fn commit_tree(repo: &gix::Repository, commit: ObjectId) -> Result<ObjectId>
     Ok(commit.tree_id()?.detach())
 }
 
-/// One layer of a stack: a seal and the merge base it is pinned to.
-#[derive(Clone, Copy, Debug)]
+/// One layer of a stack: a seal and the merge base it is pinned to, and the
+/// name conflict markers give it.
+#[derive(Clone, Debug)]
 pub struct Pin {
+    pub name: String,
     pub seal: ObjectId,
     pub merge_base: ObjectId,
 }
@@ -225,9 +230,10 @@ pub struct Built {
     pub hunk_tree: ObjectId,
     /// M: H with the whole-file paths of the layers.
     pub view_tree: ObjectId,
-    /// Whole-file paths where M differs from H, with the layer (an index into
-    /// the stack) whose entry M has.
-    pub mixed: BTreeMap<BString, usize>,
+    /// Whole-file paths where M differs from H (or several layers' changes
+    /// don't merge), with the layers (indexes into the stack) whose changes
+    /// M has there: one, or those merged.
+    pub mixed: BTreeMap<BString, Vec<usize>>,
     /// Hunk paths where H differs from B, with the layers whose changes are
     /// blended in.
     pub blended: BTreeMap<BString, Vec<usize>>,
@@ -252,11 +258,30 @@ pub enum Note {
     /// B changed this whole-file path since the layer's merge base, and the
     /// layer's version, shown in M, hides that change.
     HidesBase { layer: usize, path: BString },
+    /// Several layers change this whole-file path and their changes
+    /// conflict: M has the merge with git's conflict markers (`markers`),
+    /// or, where that can't be (binary, a deletion against a change, a type
+    /// change), B's entry.
+    Conflict {
+        layers: Vec<usize>,
+        path: BString,
+        markers: bool,
+    },
+}
+
+/// How the changes of several layers to one whole-file path merged.
+enum Merged {
+    Clean(Option<Item>),
+    /// With conflict markers.
+    Markers(Item),
+    /// Not at all (see `Note::Conflict`).
+    Unmergeable,
 }
 
 /// Builds the view of base commit `base` with `layers` (bottom to top),
-/// blending hunk paths and taking the top layer's entry for the others
-/// (§2.1 steps 1-3). The paths a layer sets that B has and no layer deletes
+/// blending hunk paths and, for the others, taking the entry of the layer
+/// that changes them, or the 3-way merge (against B's entry) of the entries
+/// of the layers that do, conflicts reported (§2.1 steps 1-3). The paths a layer sets that B has and no layer deletes
 /// (a blend needs B's version, and a deletion is whole) are given to
 /// `hunk_paths`, once, which returns those that are hunk paths.
 pub fn build_view(
@@ -295,13 +320,20 @@ pub fn build_view(
     let mut notes = Vec::new();
     let mut hunks: BTreeMap<BString, Option<Item>> = BTreeMap::new();
     let mut blended: BTreeMap<BString, Vec<usize>> = BTreeMap::new();
-    // Whole-file changes in layer order, so later (higher) layers win.
-    let mut whole: Vec<(BString, Change, usize)> = Vec::new();
+    // Whole-file changes by path, in layer order; the paths in the order
+    // first changed (a file's deletion before the files of the directory
+    // replacing it).
+    let mut whole: HashMap<BString, Vec<(usize, Change)>> = HashMap::new();
+    let mut order: Vec<BString> = Vec::new();
     for (ix, delta) in deltas.into_iter().enumerate() {
         let mb = layer_bases[ix];
         for (path, change) in delta {
             if !is_hunk.contains(&path) {
-                whole.push((path, change, ix));
+                let changes = whole.entry(path.clone()).or_default();
+                if changes.is_empty() {
+                    order.push(path);
+                }
+                changes.push((ix, change));
                 continue;
             }
             let ours = match hunks.get(&path) {
@@ -335,35 +367,117 @@ pub fn build_view(
     for path in unchanged {
         blended.remove(&path);
     }
-    let view_tree = edit_tree(
-        repo,
-        hunk_tree,
-        whole.iter().map(|(p, change, _)| (p.as_ref(), *change)),
-    )?;
-    let mut top: BTreeMap<&BString, (Change, usize)> = BTreeMap::new();
-    for (path, change, ix) in &whole {
-        top.insert(path, (*change, *ix));
-    }
+    let mut edits = Vec::with_capacity(order.len());
     let mut mixed = BTreeMap::new();
-    for (path, (change, ix)) in top {
+    for path in &order {
+        let changes = &whole[path];
+        let ixs: Vec<usize> = changes.iter().map(|(ix, _)| *ix).collect();
         let in_base = lookup(repo, base_tree, path.as_ref())?;
-        if change.item() == in_base {
+        let (entry, conflict) = match changes[..] {
+            [(ix, change)] => {
+                if change.item() != in_base
+                    && lookup(repo, layer_bases[ix], path.as_ref())? != in_base
+                {
+                    notes.push(Note::HidesBase {
+                        layer: ix,
+                        path: path.clone(),
+                    });
+                }
+                (change.item(), None)
+            }
+            _ => {
+                let sides: Vec<(Option<Item>, &str)> = (changes.iter())
+                    .map(|(ix, c)| (c.item(), layers[*ix].name.as_str()))
+                    .collect();
+                match merge_layers(repo, in_base, &sides)? {
+                    Merged::Clean(item) => (item, None),
+                    Merged::Markers(item) => (Some(item), Some(true)),
+                    Merged::Unmergeable => (in_base, Some(false)),
+                }
+            }
+        };
+        edits.push((path.as_ref(), Change::from_item(entry)));
+        if let Some(markers) = conflict {
+            notes.push(Note::Conflict {
+                layers: ixs.clone(),
+                path: path.clone(),
+                markers,
+            });
+        } else if entry == in_base {
             continue;
         }
-        if lookup(repo, layer_bases[ix], path.as_ref())? != in_base {
-            notes.push(Note::HidesBase {
-                layer: ix,
-                path: path.clone(),
-            });
-        }
-        mixed.insert(path.clone(), ix);
+        mixed.insert(path.clone(), ixs);
     }
+    let view_tree = edit_tree(repo, hunk_tree, edits)?;
     Ok(Built {
         hunk_tree,
         view_tree,
         mixed,
         blended,
         notes,
+    })
+}
+
+/// Merges the entries `sides` (bottom first, with the layers' names) of
+/// layers changing one whole-file path, each against `base` (B's entry), as
+/// `git merge-file` does.
+fn merge_layers(
+    repo: &gix::Repository,
+    base: Option<Item>,
+    sides: &[(Option<Item>, &str)],
+) -> Result<Merged> {
+    let (mut acc, mut label) = (sides[0].0, sides[0].1.to_string());
+    let mut markers = false;
+    for &(theirs, name) in &sides[1..] {
+        if let Some(merged) = trivial_merge(base, acc, theirs) {
+            acc = merged;
+        } else {
+            let (Some(ours), Some(theirs)) = (acc, theirs) else {
+                return Ok(Merged::Unmergeable);
+            };
+            let Some(kind) = merged_kind(base, ours, theirs) else {
+                return Ok(Merged::Unmergeable);
+            };
+            let base_data = read_blob(repo, base)?;
+            let (ours_data, theirs_data) =
+                (read_blob(repo, Some(ours))?, read_blob(repo, Some(theirs))?);
+            if [&base_data, &ours_data, &theirs_data]
+                .iter()
+                .any(|d| is_binary(d))
+            {
+                return Ok(Merged::Unmergeable);
+            }
+            let labels = text::Labels {
+                ancestor: Some("base".into()),
+                current: Some(label.as_str().into()),
+                other: Some(name.into()),
+            };
+            let mut input = gix::diff::blob::InternedInput::default();
+            let mut out = Vec::new();
+            let options = text::Options {
+                conflict: keep_conflicts(),
+                ..Default::default()
+            };
+            let resolution = builtin_driver::text(
+                &mut out,
+                &mut input,
+                labels,
+                &ours_data,
+                &base_data,
+                &theirs_data,
+                options,
+            );
+            markers |= resolution == Resolution::Conflict;
+            acc = Some(Item {
+                kind,
+                oid: repo.write_blob(&out)?.detach(),
+            });
+        }
+        label = format!("{label} + {name}");
+    }
+    Ok(match (markers, acc) {
+        (true, Some(item)) => Merged::Markers(item),
+        _ => Merged::Clean(acc),
     })
 }
 
@@ -596,7 +710,7 @@ pub fn view_commit(
 /// L's subject, as `git log -1` shows it in the workspace.
 pub fn lens_subject(branch: &str, layers: &[&str]) -> String {
     format!(
-        "gitfold lens: {branch} + {} (commits go to {branch}; never push this commit)",
+        "gitfold layers: {branch} + {} (commits go to {branch}; never push this commit)",
         layers.join(" + ")
     )
 }
@@ -1010,6 +1124,7 @@ mod tests {
 
     fn stack(r: &Repo, base: ObjectId, names: &[&str]) -> Vec<Pin> {
         let layer = |name: &&str| Pin {
+            name: name.to_string(),
             seal: r.id(name),
             merge_base: base,
         };
@@ -1023,7 +1138,7 @@ mod tests {
     /// The layers whose content is at `path` in M (`Extractor::owners`).
     fn owners_of(view: &Built, path: &BStr) -> Vec<usize> {
         match view.mixed.get(path) {
-            Some(layer) => vec![*layer],
+            Some(layers) => layers.clone(),
             None => view.blended.get(path).cloned().unwrap_or_default(),
         }
     }
@@ -1111,7 +1226,9 @@ mod tests {
         assert_eq!(view.blended.get(BStr::new("registry.txt")), Some(&vec![1]));
         assert_eq!(view.blended.len(), 1);
         assert_eq!(view.hunk_layers(), [1]);
-        let mixed: Vec<_> = view.mixed.iter().map(|(p, l)| format!("{p}:{l}")).collect();
+        let mixed: Vec<_> = (view.mixed.iter())
+            .map(|(p, l)| format!("{p}:{}", l[0]))
+            .collect();
         assert_eq!(
             mixed.join(" "),
             "api/contract.h:0 api/current.h:0 api/types.h:0 bin/tool:1 conf:1 conf/main.conf:1 \
@@ -1234,6 +1351,89 @@ mod tests {
         assert_eq!(
             view.blended.get(BStr::new("registry.txt")),
             Some(&vec![0, 1])
+        );
+    }
+
+    /// Several layers changing one whole-file path: changes to different
+    /// lines merge; to the same line, the merge keeps git's conflict markers,
+    /// named after the layers; a deletion against a change shows B's
+    /// version. Each is reported and belongs to every layer involved.
+    #[test]
+    fn whole_files_merged() {
+        let r = Repo::new("merged");
+        let base = scenario(&r);
+        let util = lines(8, "util");
+        let layers = [
+            ("top", util.replace("util1\n", "util1 TOP\n"), None),
+            ("bottom", util.replace("util8\n", "util8 BOTTOM\n"), None),
+            ("other", util.replace("util8\n", "util8 OTHER\n"), None),
+            ("gone", util.clone(), Some("src/main.c")),
+            ("edit", util.clone(), None),
+        ];
+        for (name, content, delete) in &layers {
+            r.git(&["checkout", "-q", "-b", name, "main"]);
+            r.write("src/util.c", content);
+            match delete {
+                Some(path) => drop(r.git(&["rm", "-q", path])),
+                None => r.write("src/main.c", &lines(6, "main").replace("main2", "main2 E")),
+            }
+            r.commit(name);
+        }
+        r.git(&["checkout", "-q", "main"]);
+        let repo = r.open();
+
+        let view = build_view(
+            &repo,
+            base,
+            &stack(&r, base, &["top", "bottom"]),
+            &registries,
+        )
+        .unwrap();
+        assert_eq!(
+            r.show(view.view_tree, "src/util.c"),
+            util.replace("util1\n", "util1 TOP\n")
+                .replace("util8\n", "util8 BOTTOM")
+        );
+        assert_eq!(view.mixed.get(BStr::new("src/util.c")), Some(&vec![0, 1]));
+        assert_eq!(view.notes, []);
+
+        let names = ["top", "bottom", "other"];
+        let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
+        let shown = r.show(view.view_tree, "src/util.c");
+        assert!(shown.contains("<<<<<<< top + bottom\n"), "{shown}");
+        assert!(
+            shown.contains("util8 BOTTOM\n=======\nutil8 OTHER\n"),
+            "{shown}"
+        );
+        assert!(shown.ends_with(">>>>>>> other"), "{shown}");
+        assert_eq!(
+            view.notes,
+            [Note::Conflict {
+                layers: vec![0, 1, 2],
+                path: "src/util.c".into(),
+                markers: true
+            }]
+        );
+
+        let view = build_view(
+            &repo,
+            base,
+            &stack(&r, base, &["gone", "edit"]),
+            &registries,
+        )
+        .unwrap();
+        assert_eq!(
+            r.show(view.view_tree, "src/main.c"),
+            lines(6, "main").trim_end()
+        );
+        assert_eq!(view.mixed.get(BStr::new("src/main.c")), Some(&vec![0, 1]));
+        assert_eq!(
+            view.notes,
+            [Note::Conflict {
+                layers: vec![0, 1],
+                path: "src/main.c".into(),
+                markers: false
+            }]
         );
     }
 

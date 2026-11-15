@@ -105,9 +105,9 @@ struct GitPlan {
 
 /// The `.git` content while git is surrendered: git prints the path it names.
 fn surrendered(lens: &Lens, why: &str) -> Vec<u8> {
-    let shown: Vec<&str> = lens.shown().map(|l| l.branch.as_str()).collect();
+    let shown: Vec<&str> = lens.layers.iter().map(|l| l.branch.as_str()).collect();
     format!(
-        "gitdir: /LENS ON ({}): git is off here ({why}). Run gitfold lens off to use git\n",
+        "gitdir: /LAYERS SHOWN ({}): git is off here ({why}). Run gitfold layer remove --all to use git\n",
         shown.join("+")
     )
     .into_bytes()
@@ -125,7 +125,7 @@ fn lens_ref(id: &str) -> String {
 }
 
 /// The ref keeping the commit HEAD was at when it had left the lens commit's
-/// line (amended, reset) from `git gc`, after `lens off`.
+/// line (amended, reset) from `git gc`, after the layers are removed.
 fn left_ref(id: &str) -> String {
     format!("refs/gitfold-lens-left/{id}")
 }
@@ -314,7 +314,7 @@ impl Workspace {
         let why = git.err().map(|e| format!("{e:#}"));
         // Applied even where git couldn't be told: git off is how the layers
         // show then, and the sync thread doesn't retry every second. A switch
-        // asked for again (`gitfold layer`, `lens off`) tells git again.
+        // asked for again (`gitfold layer add`, `layer remove`) tells git again.
         // Recorded last (see `tell_git`): until then the switch is pending.
         applied.lens = stored_bytes;
         let off = why.is_some()
@@ -571,7 +571,7 @@ impl Workspace {
     ) -> Result<()> {
         let (admin, branch) = (&self.state.admin, &self.state.branch);
         let subject = stored.subject(branch);
-        let all_seals: Vec<ObjectId> = stored.shown().map(|l| l.seal).collect();
+        let all_seals: Vec<ObjectId> = stored.layers.iter().map(|l| l.seal).collect();
         let (l, vc) = git::with_repo(|repo| -> Result<(ObjectId, ObjectId)> {
             let l = git::lens::lens_commit(repo, hunk, tip, &view.hunk_seals, &subject)?;
             let vc = git::lens::view_commit(repo, view.tree, l, &all_seals, &subject)?;
@@ -590,7 +590,7 @@ impl Workspace {
         // Recorded before HEAD moves: a crash in between leaves it adopted.
         applied.next = Some(l);
         applied.write(&self.state)?;
-        let (msg, new) = ("gitfold: lens", l.to_string());
+        let (msg, new) = ("gitfold: layers", l.to_string());
         git::cmd::run(
             admin,
             &["update-ref", "--no-deref", "-m", msg, "HEAD", &new, &old],
@@ -618,7 +618,7 @@ impl Workspace {
         }
         if head.is_some() {
             let full = format!("refs/heads/{branch}");
-            let msg = "gitfold: lens off";
+            let msg = "gitfold: layers removed";
             git::cmd::run(admin, &["symbolic-ref", "-m", msg, "HEAD", &full])?;
         }
         worktree_config::remove_push_guard(admin)?;
@@ -753,7 +753,7 @@ impl Workspace {
     /// for HEAD being detached). An amend of L is extracted as a commit on L.
     /// If HEAD left L's line (git switch, reset), git is surrendered: the
     /// index holds the blends, which mustn't be committed on the branch;
-    /// `gitfold lens off` gives it back.
+    /// `gitfold layer remove --all` gives it back.
     fn sync_lens_locked(&self) -> Result<()> {
         let Some(l) = self.layers.read().applied.head else {
             return Ok(());

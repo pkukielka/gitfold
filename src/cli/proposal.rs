@@ -325,7 +325,8 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     // The proposal in the layer's place, shown as now.
     let swapped = shown != proposal;
     if swapped || !copied.is_empty() {
-        lens.layers[i] = super::layer::layer_of(&store, &common_dir, &state, &proposal)?;
+        lens.layers[i] =
+            super::layer::layer_of(&store, &common_dir, &state, &proposal, false, false)?;
         super::layer::store_and_apply(&common_dir, &state, &lens)?;
     }
     if swapped {
@@ -348,11 +349,11 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     }
     let _ = write!(
         out,
-        "then: `gitfold layer update` shows your edits here (your next turn does too); when \
-         it is ready, tell the agent of {target} (`gitfold send {target} <text>`): it checks \
-         the proposal against every workspace that shows {target} (`gitfold consent \
-         {proposal}`) and takes it (`gitfold accept {proposal}`), after which {name} shows \
-         {target} again"
+        "then: `gitfold layer add {proposal}` shows your edits here (your next turn does \
+         too); when it is ready, tell the agent of {target} (`gitfold send {target} \
+         <text>`): it checks the proposal against every workspace that shows {target} \
+         (`gitfold consent {proposal}`) and takes it (`gitfold accept {proposal}`), after \
+         which {name} shows {target} again"
     );
     println!("{out}");
     Ok(())
@@ -415,8 +416,10 @@ fn workspace_paths(state: &StateDir, paths: &[PathBuf]) -> Result<Vec<BString>> 
 /// only layer.
 fn default_layer(state: &StateDir, lens: &Lens, path: &BString) -> Result<String> {
     let applied = crate::state::lens::Applied::read(state)?.layers()?;
-    if let Some(i) = super::layer::owner(state, &applied, path)? {
-        return Ok(applied.layers[i].branch.clone());
+    match super::layer::owners(state, &applied, path)?[..] {
+        [i] => return Ok(applied.layers[i].branch.clone()),
+        [] => {}
+        _ => bail!("{path} shows the merge of several layers: name one with --layer"),
     }
     match &lens.layers[..] {
         [one] => Ok(one.branch.clone()),
@@ -802,9 +805,9 @@ fn view_with(
             replaced = true;
             layers.push(Layer {
                 branch: p.layer.clone(),
-                on: l.on,
                 seal: accepted,
                 merge_base: git::merge_base(base.id, accepted)?,
+                ..l
             });
         }
     }
@@ -1074,10 +1077,11 @@ pub fn accept(repo: &Path, args: AcceptArgs) -> Result<()> {
         if !paths.is_empty() && Read::of(&state, &paths)? != Read::No {
             let body = format!(
                 "contract {} changed: {}'s proposal {} was accepted into {}; your layer of {} \
-                 shows it from your next turn (or `gitfold layer update`).\n{diff}",
+                 shows it from your next turn (or now: `gitfold layer add {}`).\n{diff}",
                 shown.join(", "),
                 p.by,
                 p.name,
+                p.layer,
                 p.layer,
                 p.layer
             );
@@ -1162,12 +1166,11 @@ fn show_layer_again(
         return Ok(String::new());
     };
     let common_dir = &state.common_dir;
-    let on = lens.layers[i].on;
     match lens.find(&p.layer) {
         Some(_) => drop(lens.layers.remove(i)),
         None => {
-            lens.layers[i] = super::layer::layer_of(store, common_dir, state, &p.layer)?;
-            lens.layers[i].on = on;
+            lens.layers[i] =
+                super::layer::layer_of(store, common_dir, state, &p.layer, false, false)?;
         }
     }
     // Stored even if the switch is refused now: the workspace switches to it

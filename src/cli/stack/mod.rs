@@ -51,7 +51,7 @@ use crate::state::restack::{self, Intent, Mode, Recovery};
 use crate::state::retire::{check_name, index_matches_head};
 use crate::store::Store;
 
-mod land;
+pub(crate) mod land;
 
 /// How many paths a line of output names before "and N more".
 const SHOWN_PATHS: usize = 5;
@@ -1312,6 +1312,18 @@ fn shown_str(paths: &[&str]) -> String {
         let _ = write!(out, " and {} more", paths.len() - SHOWN_PATHS);
     }
     out
+}
+
+/// `gitfold layer base`: a stub until the stacks rework lands.
+pub fn base(
+    _repo: &Path,
+    _workspace: Option<String>,
+    _target: &str,
+    _frozen: bool,
+    _yes: bool,
+    _all: bool,
+) -> Result<()> {
+    anyhow::bail!("gitfold layer base: not yet")
 }
 
 #[cfg(test)]

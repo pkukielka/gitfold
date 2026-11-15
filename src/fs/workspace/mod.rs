@@ -158,8 +158,8 @@ struct Layers {
     /// layers shown, the view tree (see `lens`), with its id.
     view_tree: u32,
     view: ObjectId,
-    /// The paths shown layers changed, with the layer's index (see `lens`).
-    mixed: std::collections::HashMap<Vec<u8>, usize>,
+    /// The paths layers changed, with the layers' indexes (see `lens`).
+    mixed: std::collections::HashMap<Vec<u8>, Vec<usize>>,
     /// Whether any layer is shown.
     lens_on: bool,
     /// H: the base's tree with the blended files blended (the base's tree

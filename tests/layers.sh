@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end test of layers: workspaces' uncommitted work as commits (seal),
-# merged into snapshots (mix).
+# End-to-end test of layers (other branches' work shown in a workspace,
+# proposals to change it) and of snapshots of workspaces' work (seal, mix).
 # usage: tests/layers.sh (or with the others: tests/run.sh); sections as in
 # tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -69,16 +69,30 @@ eq "nothing changed in the workspaces" "M	a.txt
 A	n1.txt" "$("$BIN" -C "$REPO" changes m1)"
 }
 
+# A snapshot of workspace $1's work, as its agent's Stop hook makes one: its
+# commit.
+snap() { "$BIN" -C "$REPO" seal "$1" 2>/dev/null; }
+# The layers the listing of workspace $2 (or the one $1 is in) names, on one
+# line.
+layer_names() { "$BIN" -C "$1" layer ${2:+-w "$2"} | awk '/^LAYER/{t=1;next} t&&!NF{exit} t{print $1}' | paste -sd' '; }
+# The listing, its times as HH:MM and its columns' spaces squeezed.
+listing() { "$BIN" -C "$1" layer | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/g' | tr -s ' '; }
+# Claude Code's Edit of file $2 in directory $1, through the deny hook.
+edit_hook() { printf '{"tool_name":"Edit","cwd":"%s","tool_input":{"file_path":"%s"}}' "$1" "$2" |
+    "$BIN" layer --claude-hook pre-tool-use; }
+
 layers_shown_in_a_workspace() {
 R branch me; R branch la; R branch lb
 mount_fs
 W=$MNT/me
 echo "la" >>"$MNT/la/a.txt"; echo nla >"$MNT/la/nla.txt"; rm "$MNT/la/d/b.txt"
 mkdir "$MNT/la/nd"; echo f >"$MNT/la/nd/f"
-echo "lb" >>"$MNT/lb/a.txt"; echo lb >"$MNT/lb/d/c.txt"
+echo lb >"$MNT/lb/lb.txt"
 echo mine >>"$W/d/c.txt"
 cat "$W/a.txt" "$W/d/b.txt" >/dev/null   # cached by the kernel before the switch
-check "add a layer" "$BIN" -C "$W" layer add la
+out=$("$BIN" -C "$W" layer add la); rc=$?
+eq "add a layer: a confirmation, then what the daemon did" "0|layer la added: all work, live, last HH:MM|me: layers shown" \
+    "$rc|$(echo "$out" | sed -n 1p | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/')|$(echo "$out" | sed -n 2p | sed 's/ (.*//')"
 eq "its changes show" "a
 la|nla|f" "$(cat "$W/a.txt")|$(cat "$W/nla.txt")|$(cat "$W/nd/f")"
 check "its deletions too" test ! -e "$W/d/b.txt"
@@ -92,35 +106,33 @@ check "renaming it is refused" fails mv "$W/a.txt" "$W/z.txt"
 check "renaming a directory holding one is refused" fails mv "$W/nd" "$W/nd2"
 check "chmod is refused" fails chmod +x "$W/nla.txt"
 check "own files stay writable" sh -c "echo more >>'$W/d/c.txt' && echo n >'$W/own.txt'"
-edit_hook() { printf '{"tool_name":"Edit","cwd":"%s","tool_input":{"file_path":"%s"}}' "$W" "$1" |
-    "$BIN" layer --claude-hook pre-tool-use; }
-eq "Claude Code's Edit of a layer's file: denied, saying whose" "deny yes" \
-    "$(edit_hook a.txt | sed -n 's/.*"permissionDecision":"\([a-z]*\)".*/\1/p') $(edit_hook a.txt | grep -q "workspace la's work" && echo yes)"
-eq "of its own file: allowed" "" "$(edit_hook "$W/d/c.txt")"
-eq "outside a workspace: allowed" "" "$(edit_hook /tmp/x)"
+out=$(edit_hook "$W" a.txt)
+eq "Claude Code's Edit of a layer's file: denied, saying whose and what to do" "deny yes yes yes" \
+    "$(echo "$out" | sed -n 's/.*"permissionDecision":"\([a-z]*\)".*/\1/p') $(echo "$out" | grep -q "a.txt shows la's work" && echo yes) $(echo "$out" | grep -q 'gitfold send la <text>' && echo yes) $(echo "$out" | grep -q 'gitfold layer remove la' && echo yes)"
+eq "of its own file: allowed" "" "$(edit_hook "$W" "$W/d/c.txt")"
+eq "outside a workspace: allowed" "" "$(edit_hook "$W" /tmp/x)"
 eq "git sees only own changes" " M d/c.txt
 ?? own.txt" "$(git -C "$W" status --short)"
 check "creating where a layer deleted is refused" fails sh -c "echo x >'$W/d/b.txt'"
-eq "gitfold still finds the workspace" "on 	la" "$("$BIN" -C "$W/d" layer list | cut -c1-6)"
-check "a second layer on top" "$BIN" -C "$W" layer add lb
-eq "the higher layer wins a path" "a
-lb" "$(cat "$W/a.txt")"
-check "hide it" "$BIN" -C "$W" layer off lb
-eq "the lower one shows again" "a
-la" "$(cat "$W/a.txt")"
-check "lens off" "$BIN" -C "$W" lens off
+eq "gitfold still finds the workspace" "la" "$(layer_names "$W/d")"
+check "a second layer" "$BIN" -C "$W" layer add lb
+eq "both show" "a
+la|lb" "$(cat "$W/a.txt")|$(cat "$W/lb.txt")"
+check "remove --all" "$BIN" -C "$W" layer remove --all
 eq "the base again, own changes kept" "a|b|c
 mine
 more|n" "$(cat "$W/a.txt")|$(cat "$W/d/b.txt")|$(cat "$W/d/c.txt")|$(cat "$W/own.txt")"
-check "the layer's new files gone" test ! -e "$W/nla.txt" -a ! -e "$W/nd"
+check "the layers' new files gone" test ! -e "$W/nla.txt" -a ! -e "$W/nd" -a ! -e "$W/lb.txt"
 eq "git back, seeing only own changes" " M d/c.txt
 ?? own.txt" "$(git -C "$W" status --short)"
 echo again >>"$MNT/la/a.txt"
-check "layer on again" "$BIN" -C "$W" layer on la
-eq "still the layer's work as added" "a
-la" "$(cat "$W/a.txt")"
-check "update: the layer's work as now" "$BIN" -C "$W" layer update
-eq "the newer work shows" "a
+check "add it again, frozen" "$BIN" -C "$W" layer add la --frozen
+eq "the layer's work as now" "a
+la
+again" "$(cat "$W/a.txt")"
+echo later >>"$MNT/la/a.txt"; snap la >/dev/null
+(cd "$W" && "$BIN" layer --claude-hook user-prompt-submit >/dev/null)
+eq "frozen: the next turn doesn't move it" "a
 la
 again" "$(cat "$W/a.txt")"
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
@@ -137,45 +149,141 @@ check "commit -a" G "$W" commit -qam own
 eq "it holds only own changes" "d/c.txt" "$(G "$W" show --name-only --format= HEAD)"
 eq "nothing left after it" "?? own.txt" "$(git -C "$W" status --short)"
 R config core.sparseCheckout true
-check "sparse checkout: layers still switch" "$BIN" -C "$W" layer update
+check "sparse checkout: adding again still switches" "$BIN" -C "$W" layer add la --frozen
+eq "to the layer's work as now" "later" "$(tail -1 "$W/a.txt")"
 out=$(git -C "$W" status 2>&1); rc=$?
-eq "but git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LENS ON (la): git is off here (sparse checkout is on)' && echo yes)"
+eq "but git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LAYERS SHOWN (la): git is off here (sparse checkout is on). Run gitfold layer remove --all' && echo yes)"
 R config --unset core.sparseCheckout
-check "rm the layer" "$BIN" -C "$W" layer rm la
-check "rm the other" "$BIN" -C "$W" layer rm lb
+check "remove the layer" "$BIN" -C "$W" layer remove la
 eq "no layers: git back" "?? own.txt" "$(git -C "$W" status --short)"
 for _ in $(seq 50); do [ "$(cat "$COMMON/gitfold/me/base")" = "$(R rev-parse me)" ] && break; sleep 0.1; done
 eq "the base caught up with the commit" "$(R rev-parse me)" "$(cat "$COMMON/gitfold/me/base")"
-check "an unknown layer (exit 3)" sh -c "'$BIN' -C '$W' layer off nope; [ \$? = 3 ]"
+check "removing an unknown layer (exit 3)" sh -c "'$BIN' -C '$W' layer remove nope; [ \$? = 3 ]"
+check "remove names a layer or --all (exit 2)" sh -c "'$BIN' -C '$W' layer remove; [ \$? = 2 ]"
 admin=$COMMON/worktrees/gitfold-ws-me
 touch "$admin/index.lock"
 out=$("$BIN" -C "$W" layer add la 2>&1); rc=$?
 rm -f "$admin/index.lock"
-eq "git busy: refused (exit 4), nothing stored" "4 " "$rc $("$BIN" -C "$W" layer list)"
+eq "git busy: refused (exit 4), nothing stored" "4 No layers." "$rc $("$BIN" -C "$W" layer | tail -1)"
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
 eq "unmounted: stored, shown when it opens" "me: not mounted; its layers show when it opens" \
-    "$("$BIN" -C "$REPO" layer add la -w me)"
+    "$("$BIN" -C "$REPO" layer add la -w me | tail -1)"
 mount_fs
 for _ in $(seq 50); do [ "$(sed -n 2p "$W/a.txt" 2>/dev/null)" = la ] && break; sleep 0.1; done
 eq "shown once mounted" "a
 la
-again" "$(cat "$W/a.txt")"
+again
+later" "$(cat "$W/a.txt")"
 eq "and git told: only own changes" "?? own.txt" "$(git -C "$W" status --short)"
 }
 
-blended_files_and_the_lens_commit() {
-echo 'reg.txt gitfold-blend=hunk' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
+layers_live_frozen_commits_and_revisions() {
+R branch me; R branch live; R branch frozen; R branch commits; R branch plain
+R switch -q plain; echo p >"$REPO/p.txt"; R add p.txt; R commit -qm p
+R switch -q -c tagged main; echo t >"$REPO/t.txt"; R add t.txt; R commit -qm t; R tag v1.2
+R switch -q main; R branch -q -D tagged
+mount_fs
+W=$MNT/me
+echo live >"$MNT/live/live.txt"; echo fz >"$MNT/frozen/frozen.txt"
+echo cm >"$MNT/commits/cm.txt"; G "$MNT/commits" add cm.txt; G "$MNT/commits" commit -qm cm
+echo uncommitted >"$MNT/commits/cu.txt"
+ls "$W" >/dev/null
+check "add: live, --frozen, --commits, a branch without a workspace, a tag" sh -c "
+    '$BIN' -C '$W' layer add live && '$BIN' -C '$W' layer add frozen --frozen &&
+    '$BIN' -C '$W' layer add commits --commits && '$BIN' -C '$W' layer add plain &&
+    '$BIN' -C '$W' layer add v1.2"
+eq "each one's work shows" "live|fz|cm|no|p|t" \
+    "$(cat "$W/live.txt")|$(cat "$W/frozen.txt")|$(cat "$W/cm.txt")|$(test -e "$W/cu.txt" && echo yes || echo no)|$(cat "$W/p.txt")|$(cat "$W/t.txt")"
+eq "the listing: the base, then what each shows and how it updates" "Base: main
+
+LAYER SHOWS UPDATES
+live all work live, last HH:MM
+frozen all work frozen at HH:MM
+commits commits only live, last HH:MM
+plain commits live, last HH:MM
+v1.2 commits fixed" "$(listing "$W")"
+echo live2 >>"$MNT/live/live.txt"; echo fz2 >>"$MNT/frozen/frozen.txt"
+snap live >/dev/null; snap frozen >/dev/null
+echo cm2 >"$MNT/commits/cm2.txt"; G "$MNT/commits" add cm2.txt; G "$MNT/commits" commit -qm cm2
+R switch -q plain; echo p2 >>"$REPO/p.txt"; R commit -qam p2; R switch -q main
+out=$(cd "$W" && "$BIN" layer --claude-hook user-prompt-submit)
+eq "the next turn moves the live ones, saying so" "yes" \
+    "$(echo "$out" | grep -q 'moved to their latest work: live (1 file changed), commits (1 file changed), plain (1 file changed)' && echo yes)"
+eq "a workspace: its newest snapshot; a branch: its tip; frozen stays" "live
+live2|cm2|p
+p2|fz" "$(cat "$W/live.txt")|$(cat "$W/cm2.txt")|$(cat "$W/p.txt")|$(cat "$W/frozen.txt")"
+eq "a quiet turn says nothing" "" "$(cd "$W" && "$BIN" layer --claude-hook user-prompt-submit)"
+check "add the frozen one again, without --frozen" "$BIN" -C "$W" layer add frozen
+eq "replaced in place: live, its work as now" "frozen all work live, last HH:MM|fz
+fz2" "$(listing "$W" | grep '^frozen')|$(cat "$W/frozen.txt")"
+out=$("$BIN" -C "$W" layer add live --frozen)
+eq "and a live one --frozen" "layer live updated: all work, frozen at HH:MM|live all work frozen at HH:MM" \
+    "$(echo "$out" | head -1 | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/')|$(listing "$W" | grep '^live')"
+check "--commits dropped: all its work" "$BIN" -C "$W" layer add commits
+eq "uncommitted included" "uncommitted" "$(cat "$W/cu.txt")"
+eq "still five layers, in the order added" "live frozen commits plain v1.2" "$(layer_names "$W")"
+check "remove one" "$BIN" -C "$W" layer remove plain
+eq "gone" "live frozen commits v1.2|no" "$(layer_names "$W")|$(test -e "$W/p.txt" && echo yes || echo no)"
+check "neither a branch nor a revision (exit 3)" sh -c "'$BIN' -C '$W' layer add nope; [ \$? = 3 ]"
+check "remove --all" "$BIN" -C "$W" layer remove --all
+eq "no layers" "Base: main
+No layers." "$("$BIN" -C "$W" layer)"
+R branch api plain; R config branch.me.gitfoldParent api
+echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm own
+eq "built on a base: what follows it" "Base: api, live your 1 commit sits on api; it moves when api gets new commits" \
+    "$(listing "$W" | head -1)"
+R config branch.me.gitfoldRestack manual
+eq "and when it doesn't" "Base: api, frozen your 1 commit sits on api; it moves when you run \`gitfold layer base api\`" \
+    "$(listing "$W" | head -1)"
+}
+
+layers_changing_one_file() {
+printf '1\n2\n3\n4\n5\n6\n7\n8\n' >"$REPO/n.txt"; R add n.txt; R commit -qm n
+R branch me; R branch x; R branch y; R branch z
+mount_fs
+W=$MNT/me
+printf '1 x\n2\n3\n4\n5\n6\n7\n8\n' >"$MNT/x/n.txt"
+printf '1\n2\n3\n4\n5\n6\n7\n8 y\n' >"$MNT/y/n.txt"
+printf '1\n2\n3\n4\n5\n6\n7\n8 z\n' >"$MNT/z/n.txt"
+cat "$W/n.txt" >/dev/null
+check "two layers changing one file" sh -c "'$BIN' -C '$W' layer add x && '$BIN' -C '$W' layer add y"
+eq "different lines: merged" "1 x 2 3 4 5 6 7 8 y" "$(tr '\n' ' ' <"$W/n.txt" | sed 's/ $//')"
+eq "no conflict listed" "" "$("$BIN" -C "$W" layer | grep Conflict)"
+check "read-only" test ! -w "$W/n.txt"
+eq "the deny hook names both" "yes yes" \
+    "$(edit_hook "$W" n.txt | grep -q "n.txt shows the merge of x and y's work" && echo yes) $(edit_hook "$W" n.txt | grep -q 'gitfold layer remove x' && echo yes)"
+out=$("$BIN" -C "$W" layer add z)
+eq "a third changing the same line: conflict markers, said" "<<<<<<< x + y|>>>>>>> z|yes" \
+    "$(grep '^<<<<<<<' "$W/n.txt")|$(grep '^>>>>>>>' "$W/n.txt")|$(echo "$out" | grep -q 'note: n.txt: x, y and z change it and conflict' && echo yes)"
+eq "listed" "Conflict: n.txt is changed by x, y and z" "$("$BIN" -C "$W" layer | grep Conflict)"
+eq "the deny hook names them all" "yes yes" \
+    "$(edit_hook "$W" n.txt | grep -q "the merge of x, y and z's work" && echo yes) $(edit_hook "$W" n.txt | grep -q 'Their changes to it conflict' && echo yes)"
+check "still read-only" fails sh -c "echo x >>'$W/n.txt'"
+eq "git sees none of it" "" "$(git -C "$W" status --short)"
+rm "$MNT/x/d/b.txt"; echo yb >>"$MNT/y/d/b.txt"
+check "add both again, now up to date" sh -c "'$BIN' -C '$W' layer add x && '$BIN' -C '$W' layer add y"
+eq "a deletion against a change: the base's version" "b" "$(cat "$W/d/b.txt")"
+eq "listed as such" "Conflict: d/b.txt is changed by both x and y (they can't be merged: it shows your base's version)" \
+    "$("$BIN" -C "$W" layer | grep 'Conflict: d/')"
+check "remove one" "$BIN" -C "$W" layer remove z
+eq "the others merge again" "1 x 2 3 4 5 6 7 8 y" "$(tr '\n' ' ' <"$W/n.txt" | sed 's/ $//')"
+}
+
+blended_files_and_the_layers_commit() {
+echo 'reg.txt merge=union' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
 R add -A; R commit -qm blendable
-R branch me; R branch la
+R branch me; R branch la; R branch lb
 mount_fs
 W=$MNT/me
 echo fromA >>"$MNT/la/reg.txt"; echo la >>"$MNT/la/a.txt"
+echo fromB >>"$MNT/lb/reg.txt"
 cat "$W/reg.txt" >/dev/null
-check "add a layer" "$BIN" -C "$W" layer add la
-eq "the blended file has the layer's lines" "one two fromA" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+check "add two layers" sh -c "'$BIN' -C '$W' layer add la && '$BIN' -C '$W' layer add lb"
+eq "the blended file has both layers' lines" "one two fromA fromB" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+eq "not a conflict" "" "$("$BIN" -C "$W" layer | grep Conflict)"
 check "and is writable" test -w "$W/reg.txt"
 check "a whole file isn't" test ! -w "$W/a.txt"
-eq "HEAD at the lens commit" "gitfold lens: me + la (commits go to me; never push this commit)" "$(G "$W" log -1 --format=%s)"
+eq "HEAD at the layers commit" "gitfold layers: me + la + lb (commits go to me; never push this commit)" "$(G "$W" log -1 --format=%s)"
 eq "git status clean" "" "$(git -C "$W" status --short)"
 echo fromMe >>"$W/reg.txt"
 eq "git diff: only own lines" "+fromMe" "$(git -C "$W" diff | grep '^+[^+]')"
@@ -183,21 +291,24 @@ check "commit" G "$W" commit -qam mine
 for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = fromMe ] && break; sleep 0.1; done
 eq "the branch gets only own lines" "one two fromMe" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
 eq "git status still clean" "" "$(git -C "$W" status --short)"
-eq "HEAD at a new lens commit" "1" "$(G "$W" cat-file -p HEAD | grep -c '^gitfold-lens 1')"
+eq "HEAD at a new layers commit" "1" "$(G "$W" cat-file -p HEAD | grep -c '^gitfold-lens 1')"
 git init -q --bare "$T/remote.git"
-check "pushing HEAD is refused" fails G "$W" push -q "$T/remote.git" HEAD:refs/heads/main
+out=$(G "$W" push -q "$T/remote.git" HEAD:refs/heads/main 2>&1); rc=$?
+eq "pushing HEAD is refused, saying why" "1 yes" "$((rc != 0)) $(echo "$out" | grep -q 'it contains the layers commit' && echo yes)"
 check "pushing the branch isn't" G "$W" push -q "$T/remote.git" me
-eq "a seal of it: only its own lines" "one two fromMe" \
-    "$(R show "$("$BIN" -C "$REPO" seal me):reg.txt" | tr '\n' ' ' | sed 's/ $//')"
+check "remove one layer" "$BIN" -C "$W" layer remove lb
+eq "its lines gone, own ones kept" "one two fromA fromMe" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+eq "a snapshot of it: only its own lines" "one two fromMe" \
+    "$(R show "$(snap me):reg.txt" | tr '\n' ' ' | sed 's/ $//')"
 echo amended >>"$W/reg.txt"
 check "commit, then amend" sh -c "git -C '$W' -c user.name=t -c user.email=t@t commit -qam two &&
     sleep 2 && echo amended2 >>'$W/reg.txt' && git -C '$W' -c user.name=t -c user.email=t@t commit -q --amend -am two"
 for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = amended2 ] && break; sleep 0.1; done
 eq "the amend reaches the branch" "one two fromMe amended amended2" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
-eq "without the lens mark" "0" "$(R cat-file -p me | grep -c '^gitfold-lens')"
+eq "without the layers commit's mark" "0" "$(R cat-file -p me | grep -c '^gitfold-lens')"
 eq "git status still clean" "" "$(git -C "$W" status --short)"
 echo moreMe >>"$W/reg.txt"
-check "lens off" "$BIN" -C "$W" lens off
+check "remove --all" "$BIN" -C "$W" layer remove --all
 eq "the layer's lines gone, own ones kept" "one two fromMe amended amended2 moreMe" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
 eq "back on the branch, the uncommitted line its change" "me| M reg.txt" \
     "$(G "$W" branch --show-current)|$(git -C "$W" status --short)"
@@ -220,10 +331,8 @@ for c in c1 c2 c3 c5; do "$BIN" -C "$REPO" track-reads $c on >/dev/null; done   
 read_file "$MNT/c1/api.txt" "$MNT/c2/api.txt" "$MNT/c3/a.txt" "$MNT/c5/api.txt"
 echo 'get(1)' >"$MNT/c1/use.txt"; echo 'put(2)' >"$MNT/c2/use.txt"; echo 'get(4)' >"$MNT/c4/use.txt"
 "$BIN" -C "$MNT/c4" propose api.txt >/dev/null                                   # c4 shows a proposal of its own
-edit_hook() { printf '{"tool_name":"Edit","cwd":"%s","tool_input":{"file_path":"api.txt"}}' "$1" |
-    "$BIN" layer --claude-hook pre-tool-use; }
 eq "the deny hook offers a proposal first" "yes" \
-    "$(edit_hook "$MNT/c1" | grep -q 'To change it, run `gitfold propose api.txt`' && echo yes)"
+    "$(edit_hook "$MNT/c1" api.txt | grep -q 'To change it, run `gitfold propose api.txt`' && echo yes)"
 check "proposing outside a layer's workspace: no such layer (exit 3)" \
     sh -c "cd '$MNT/c1' && '$BIN' propose api.txt --layer c2; [ \$? = 3 ]"
 out=$(cd "$MNT/c1" && "$BIN" propose api.txt 2>&1)
@@ -231,12 +340,12 @@ eq "propose: a proposal branch, where to edit" "yes yes" \
     "$(echo "$out" | grep -q 'branch contracts-prop/c1' && echo yes) $(echo "$out" | grep -qx "  $MNT/contracts-prop/c1/api.txt" && echo yes)"
 eq "recorded as a proposal" "contracts c1" \
     "$(R config branch.contracts-prop/c1.gitfoldProposal) $(R config branch.contracts-prop/c1.gitfoldProposedBy)"
-eq "shown in place of the layer" "on 	contracts-prop/c1" "$("$BIN" -C "$MNT/c1" layer list | cut -f1,2)"
+eq "shown in place of the layer" "contracts-prop/c1" "$(layer_names "$MNT/c1")"
 eq "a copy of the layer's work, uncommitted included" "fn get(id)
 fn put(id)" "$(cat "$MNT/contracts-prop/c1/api.txt")"
 printf 'fn fetch(id)\nfn put(id)\n' >"$MNT/contracts-prop/c1/api.txt"; echo 'fetch(1)' >"$MNT/c1/use.txt"
 eq "the deny hook: edit the proposal there" "yes" \
-    "$(edit_hook "$MNT/c1" | grep -q "shows your proposal contracts-prop/c1.*$MNT/contracts-prop/c1/api.txt" && echo yes)"
+    "$(edit_hook "$MNT/c1" api.txt | grep -q "shows your proposal contracts-prop/c1.*$MNT/contracts-prop/c1/api.txt" && echo yes)"
 (cd "$MNT/c1" && "$BIN" layer --claude-hook user-prompt-submit >/dev/null)
 eq "the next turn shows the edits" "fn fetch(id)" "$(head -1 "$MNT/c1/api.txt")"
 mkdir -p "$T/from"; printf 'fn fetch(id)\nfn put(id)\n++ note\n' >"$T/from/api.txt"
@@ -251,7 +360,7 @@ TEST='f=$(cut -d"(" -f1 use.txt 2>/dev/null) || exit 0; grep -q "fn $f(" api.txt
 out=$("$BIN" -C "$REPO" consent contracts-prop/c1 2>&1); rc=$?
 eq "consent: a workspace's own version conflicts (exit 4)" "4 c5	yes	no	-	conflicts: api.txt" \
     "$rc $(echo "$out" | grep '^c5')"
-"$BIN" -C "$REPO" layer rm contracts -w c5 >/dev/null
+"$BIN" -C "$REPO" layer remove contracts -w c5 >/dev/null
 eq "--only-readers skips who didn't read the files" "c3	no	-	-" \
     "$("$BIN" -C "$REPO" consent contracts-prop/c1 --only-readers | grep '^c3')"
 out=$("$BIN" -C "$REPO" consent contracts-prop/c1 --test "$TEST" 2>&1); rc=$?
@@ -296,8 +405,8 @@ eq "accept" "0 accepted contracts-prop/c1 into contracts: api.txt" "$rc $(echo "
 eq "written into the layer's workspace, uncommitted" "fn fetch(id)
 fn put(id)
 ++ note| M api.txt" "$(cat "$MNT/contracts/api.txt")|$(git -C "$MNT/contracts" status --short -- api.txt)"
-eq "the proposer shows the layer again, with the change" "on 	contracts|fn fetch(id)" \
-    "$("$BIN" -C "$MNT/c1" layer list | cut -f1,2)|$(head -1 "$MNT/c1/api.txt")"
+eq "the proposer shows the layer again, with the change" "contracts|fn fetch(id)" \
+    "$(layer_names "$MNT/c1")|$(head -1 "$MNT/c1/api.txt")"
 check "the proposal's branch is gone" fails R rev-parse -q --verify refs/heads/contracts-prop/c1
 eq "and its config" "" "$(R config --get-regexp 'branch\.contracts-prop/c1' 2>&1)"
 eq "proposals: c4's left" "contracts-prop/c4: proposed by c4, to change contracts" "$("$BIN" -C "$REPO" proposals | head -1)"
@@ -306,7 +415,7 @@ eq "readers told: from the layer, the proposer's changed lines" "from: contracts
     "$(echo "$msg" | sed -n 1p)|$(echo "$msg" | sed -n 3p)|$(echo "$msg" | grep -q '^contract api.txt changed' && echo yes)|$(echo "$msg" | grep -q '^the change, as c1 proposed it:' && echo yes)|$(echo "$msg" | grep -- '-fn')|$(echo "$msg" | grep -- '+fn')|$(echo "$msg" | grep -- '++ note')"
 eq "the proposer too (it read it)" "1" "$("$BIN" -C "$REPO" inbox c1 | grep -c '^subject: contract changed')"
 eq "and who isn't known not to: c4, not c3" "|1" "$("$BIN" -C "$REPO" inbox c3)|$("$BIN" -C "$REPO" inbox c4 | grep -c '^subject: contract changed')"
-(cd "$MNT/contracts" && "$BIN" seal --claude-hook stop)
+snap contracts >/dev/null
 (cd "$MNT/c2" && "$BIN" layer --claude-hook user-prompt-submit >/dev/null)
 eq "the others see it at their next turn" "fn fetch(id)" "$(head -1 "$MNT/c2/api.txt")"
 start=$(R for-each-ref --format='%(refname)' refs/gitfold-proposal/ | head -1); oid=$(R rev-parse "$start")
@@ -315,13 +424,13 @@ eq "proposals: one that can't be read is said so" "yes" \
     "$("$BIN" -C "$REPO" proposals | grep -q "^contracts-prop/c4: to change contracts, can't be read" && echo yes)"
 R update-ref "$start" "$oid"
 check "the proposer withdraws its own" "$BIN" -C "$MNT/c4" reject contracts-prop/c4
-eq "it shows the layer again" "on 	contracts" "$("$BIN" -C "$MNT/c4" layer list | cut -f1,2)"
+eq "it shows the layer again" "contracts" "$(layer_names "$MNT/c4")"
 "$BIN" -C "$MNT/c2" propose api.txt >/dev/null
 check "reject in a third workspace: refused (exit 3)" \
     sh -c "'$BIN' -C '$REPO' reject contracts-prop/c2 -w c3; [ \$? = 3 ]"
 check "reject" "$BIN" -C "$MNT/contracts" reject contracts-prop/c2 --reason "keep fetch"
-eq "the layer shown again, the proposer told why, the proposal gone" "on 	contracts|yes|" \
-    "$("$BIN" -C "$MNT/c2" layer list | cut -f1,2 | grep contracts)|$("$BIN" -C "$REPO" inbox c2 | grep -q 'was rejected: keep fetch' && echo yes)|$(R branch --list 'contracts-prop/*')"
+eq "the layer shown again, the proposer told why, the proposal gone" "contracts|yes|" \
+    "$(layer_names "$MNT/c2" | tr " " "\n" | grep contracts)|$("$BIN" -C "$REPO" inbox c2 | grep -q 'was rejected: keep fetch' && echo yes)|$(R branch --list 'contracts-prop/*')"
 eq "no seal or start refs of removed proposals left" "" \
     "$(R for-each-ref --format='%(refname)' refs/gitfold-proposal/ 'refs/gitfold-seal/contracts-prop*')"
 (cd "$MNT/c2" && "$BIN" propose lib.txt --layer lib >/dev/null)
@@ -338,16 +447,18 @@ eq "--force; its workspace in use: kept, no longer a proposal" "0 yes |lib2" \
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
 printf 'fn fetch(id)\nfn put(id)\nfn list()\n' >"$T/from/api.txt"
 check "unmounted: propose --from" "$BIN" -C "$REPO" propose -w c2 api.txt --from "$T/from"
-eq "shown in place of the layer" "on 	contracts-prop/c2" "$("$BIN" -C "$REPO" layer list -w c2 | cut -f1,2 | grep contracts)"
+eq "shown in place of the layer" "contracts-prop/c2" "$(layer_names "$REPO" c2 | tr " " "\n" | grep contracts)"
 check "consent, without a test" "$BIN" -C "$REPO" consent contracts-prop/c2
 check "and accept" "$BIN" -C "$REPO" accept contracts-prop/c2 -w contracts
-eq "written into the stored workspace" "fn list()" "$(R show "$("$BIN" -C "$REPO" seal contracts 2>/dev/null):api.txt" | tail -1)"
-eq "the layer back" "contracts" "$("$BIN" -C "$REPO" layer list -w c2 | cut -f2 | grep contracts)"
+eq "written into the stored workspace" "fn list()" "$(R show "$(snap contracts 2>/dev/null):api.txt" | tail -1)"
+eq "the layer back" "contracts" "$(layer_names "$REPO" c2 | tr " " "\n" | grep contracts)"
 }
 
 
 section "layers: shown in a workspace" layers_shown_in_a_workspace
-section "layers: blended files, the lens commit" blended_files_and_the_lens_commit
+section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
+section "layers: several changing one file" layers_changing_one_file
+section "layers: blended files, the layers commit" blended_files_and_the_layers_commit
 section "seal: uncommitted work as a commit" seal_uncommitted_work_as_a_commit
 section "mix: workspaces merged into a snapshot" mix_workspaces_into_a_snapshot
 section "proposals: a contract changed by consent" proposals_to_change_a_contract
