@@ -152,7 +152,8 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             refuse_if_moving(&common_dir, &state)?;
             let store = Store::default();
             let layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
-            add(&local, &mut lens, &name, layer)
+            let in_base = in_base(&state, layer.seal)?;
+            add(&local, &mut lens, &name, layer, in_base)
         }
         Some(LayerOp::Remove { branch: None, .. }) => {
             lens.layers.clear();
@@ -170,11 +171,11 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
 
 /// `gitfold layer add`: `layer` added to `lens` (the layers of workspace
 /// `name`), or put in place of the one standing for its branch (`slot`);
-/// says which.
-fn add(local: &Local, lens: &mut Lens, name: &str, mut layer: Layer) -> String {
+/// says which. `in_base`: all of it is in the workspace's base already.
+fn add(local: &Local, lens: &mut Lens, name: &str, mut layer: Layer, in_base: bool) -> String {
     let branch = layer.branch.clone();
     let mut what = describe(&layer);
-    if layer.updates == Updates::Live && layer.merge_base == layer.seal {
+    if layer.updates == Updates::Live && in_base {
         let _ = write!(
             what,
             " (nothing to show yet: all of {branch} is in your base already; what it does \
@@ -441,26 +442,25 @@ fn owners_in_view(
         return Ok(None);
     }
     git::init(&state.common_dir)?;
+    let base = state.read_base()?;
     // Most edits are of files no layer changes: told apart without building
     // the view (the deny hook runs on every edit).
-    if !changed_by_any(lens, path)? {
+    if !differs_from_base(lens, base.tree, path)? {
         return Ok(None);
     }
-    let base = state.read_base()?;
     let view = crate::state::lens::view(&state.common_dir, &base.id, lens)?;
     Ok(view.map(|view| (view.mixed.get(path).cloned().unwrap_or_default(), view)))
 }
 
-/// Whether a layer of `lens` changes `path`: its entry there differs
-/// between the layer's merge base and its seal.
-fn changed_by_any(lens: &Lens, path: &[u8]) -> Result<bool> {
+/// Whether a layer of `lens` has another entry at `path` than base tree
+/// `base`: if none has, the view shows the base's there (each layer's
+/// change, merged in turn, is then the base's own version).
+fn differs_from_base(lens: &Lens, base: ObjectId, path: &[u8]) -> Result<bool> {
     git::with_repo(|repo| {
-        let at = |commit: ObjectId| -> Result<Option<git::lens::Item>> {
-            let tree = repo.find_commit(commit)?.tree_id()?.detach();
-            git::lens::lookup(repo, tree, path.into())
-        };
+        let at = |tree: ObjectId| git::lens::lookup(repo, tree, path.into());
+        let in_base = at(base)?;
         for layer in &lens.layers {
-            if at(layer.merge_base)? != at(layer.seal)? {
+            if at(git::lens::commit_tree(repo, layer.seal)?)? != in_base {
                 return Ok(true);
             }
         }
@@ -468,10 +468,18 @@ fn changed_by_any(lens: &Lens, path: &[u8]) -> Result<bool> {
     })
 }
 
+/// Whether commit `seal` is in the base of the workspace in `state`: as a
+/// layer it shows nothing (yet).
+fn in_base(state: &StateDir, seal: ObjectId) -> Result<bool> {
+    let base = state.read_base()?.id;
+    Ok(git::merge_base_if_any(base, seal)? == Some(seal))
+}
+
 /// The layer of `branch` (a branch, or any revision) as it is now, for the
 /// workspace in `state`: a workspace's work (its seal) unless `commits`,
 /// else a branch's tip or the revision; live unless `frozen` (a revision is
-/// fixed); with where it and the workspace's base diverged.
+/// fixed). Refused if it shares no history with the workspace's base, or,
+/// never moving, is in it already.
 pub(super) fn layer_of(
     store: &Store,
     common_dir: &Path,
@@ -510,7 +518,7 @@ pub(super) fn layer_of(
     };
     // A layer shows its changes since it and the base diverged: without a
     // commit in common there is no telling them apart.
-    let Some(merge_base) = git::merge_base_if_any(state.layers_point()?, seal)? else {
+    let Some(merge_base) = git::merge_base_if_any(state.read_base()?.id, seal)? else {
         return Err(Refusal::Changes.error(format!(
             "{branch} shares no history with {}'s base, so its changes can't be told apart: \
              a layer must start from a commit your branch also has",
@@ -533,7 +541,6 @@ pub(super) fn layer_of(
         updates,
         moved: now(),
         seal,
-        merge_base,
         instead: None,
     })
 }

@@ -108,16 +108,6 @@ impl StateDir {
         read_base(&self.dir)
     }
 
-    /// What layers' merge bases are pinned against: the branch's tip, where
-    /// the workspace's base is going (it lags behind for a moment after the
-    /// branch moves, onto its base say); its base if the branch is gone.
-    pub fn layers_point(&self) -> Result<ObjectId> {
-        match git::branch_tip(&self.branch) {
-            Ok(tip) => Ok(tip.id),
-            Err(_) => Ok(self.read_base()?.id),
-        }
-    }
-
     pub fn upper(&self) -> PathBuf {
         self.dir.join(UPPER)
     }

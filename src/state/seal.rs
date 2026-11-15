@@ -1,9 +1,10 @@
 //! A workspace's uncommitted work as a commit: a seal. Its tree is what the
 //! workspace shows (its base's tree with the changed files and without the
 //! deleted ones, ignored files left out, as `gitfold changes` lists them), its
-//! parent the base. A seal can be opened as a snapshot (`@<sha>`), merged with
-//! other workspaces' seals (`gitfold snapshot`), and is what a layer shows of
-//! another workspace (`layers`).
+//! parent the base (or the branch's tip, when the workspace committed and its
+//! base hasn't caught up yet: `parent`). A seal can be opened as a snapshot
+//! (`@<sha>`), merged with other workspaces' seals (`gitfold snapshot`), and
+//! is what a layer shows of another workspace (`layers`).
 //!
 //! Seals are made with a fixed identity and date, so the same work on the same
 //! base gives the same commit: sealing an unchanged workspace again makes
@@ -96,23 +97,63 @@ pub fn ref_prefix(id: &str) -> String {
     format!("refs/gitfold-seal/{id}/")
 }
 
-/// The parent of a snapshot of the workspace in `state` on `base`: the
-/// branch's tip when the workspace committed and its base hasn't caught up
-/// yet (the tip has the base, no move onto another base is under way: the
-/// tip's tree is then part of what the workspace shows), else `base`. A
-/// snapshot on the stale base would count the just-committed lines as the
-/// workspace's own new work, which layers then merge as such.
-fn parent(state: &StateDir, base: ObjectId) -> ObjectId {
+/// The parent of a snapshot, of tree `tree`, of the workspace in `state` on
+/// `base`: the commit whose tree, with the workspace's own new work, is the
+/// snapshot's. The branch's tip when the workspace committed and its base
+/// hasn't caught up yet (the tip has the base, no move onto another base is
+/// under way, and the workspace has the tip's changes: `has_tip`), else
+/// `base`. A snapshot on the stale base would count the just-committed lines
+/// as the workspace's own new work, which layers then merge as such; one on
+/// a tip whose changes the workspace's files lack (the branch moved without
+/// them: by hand, a push into it) would count undoing them.
+fn parent(state: &StateDir, base: &git::Commit, tree: ObjectId) -> ObjectId {
     let Ok(tip) = git::branch_tip(&state.branch) else {
-        return base;
+        return base.id;
     };
-    if tip.id == base || super::restack::pending(state) {
-        return base;
+    if tip.id == base.id || super::restack::pending(state) {
+        return base.id;
     }
-    match git::merge_base_if_any(base, tip.id) {
-        Ok(Some(mb)) if mb == base => tip.id,
-        _ => base,
+    let after_base =
+        matches!(git::merge_base_if_any(base.id, tip.id), Ok(Some(mb)) if mb == base.id);
+    match after_base && has_tip(state, base.tree, &tip, tree).unwrap_or(false) {
+        true => tip.id,
+        false => base.id,
     }
+}
+
+/// Whether the workspace in `state`, on base tree `base`, has the changes
+/// its branch's `tip` made since: at each path they change, its snapshot's
+/// tree `tree` has the tip's entry, or its git index has (committed through
+/// it, then edited further), or the tree has the change merged in already
+/// (edited further on other lines).
+fn has_tip(state: &StateDir, base: ObjectId, tip: &git::Commit, tree: ObjectId) -> Result<bool> {
+    let mut index = None;
+    git::with_repo(|repo| {
+        for (path, change) in git::lens::delta(repo, base, tip.tree)? {
+            let (path, theirs) = (BStr::new(&path), change.item());
+            let ours = git::lens::lookup(repo, tree, path)?;
+            if ours == theirs {
+                continue;
+            }
+            if index.is_none() {
+                index = Some(gix::index::File::at(
+                    state.index(),
+                    gix::hash::Kind::Sha1,
+                    false,
+                    Default::default(),
+                )?);
+            }
+            let staged = (index.as_ref().and_then(|i| i.entry_by_path(path))).map(|e| e.id);
+            if staged == theirs.map(|t| t.oid) {
+                continue;
+            }
+            let ancestor = git::lens::lookup(repo, base, path)?;
+            if !git::lens::has_change(repo, ancestor, ours, theirs)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    })
 }
 
 /// Seals the work of the workspace stored in `state` (see the module doc),
@@ -131,7 +172,7 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
     let commit = commit(
         &state.common_dir,
         &tree,
-        &parent(state, base.id),
+        &parent(state, &base, tree),
         &state.branch,
     )?;
     let _lock = crate::lock::wait(&state.dir.join(SEAL_LOCK))?;

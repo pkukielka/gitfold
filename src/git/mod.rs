@@ -28,6 +28,7 @@ pub mod worktree;
 pub mod worktree_config;
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::ops::Range;
@@ -41,6 +42,7 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 use gix::objs::tree::EntryKind;
+use parking_lot::Mutex;
 
 /// The least number of pack indexes the object database can hold. Its slot table
 /// is sized once, at open (by default to the packs on disk then, plus 10%), and
@@ -278,8 +280,25 @@ pub fn merge_base(a: ObjectId, b: ObjectId) -> Result<ObjectId> {
 }
 
 /// `merge_base`, or `None` if `a` and `b` share no history (git exits 1
-/// and prints nothing then).
+/// and prints nothing then). Remembered: commits never change, and views
+/// of layers ask for the same pairs again and again (`state::lens::view`).
 pub fn merge_base_if_any(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
+    type Known = HashMap<(ObjectId, ObjectId), Option<ObjectId>>;
+    static KNOWN: OnceLock<Mutex<Known>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    if let Some(&mb) = known.lock().get(&(a, b)) {
+        return Ok(mb);
+    }
+    let mb = ask_merge_base(a, b)?;
+    let mut known = known.lock();
+    if known.len() >= 4096 {
+        known.clear();
+    }
+    known.insert((a, b), mb);
+    Ok(mb)
+}
+
+fn ask_merge_base(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
     let common_dir = with_repo(|repo| repo.common_dir().to_path_buf());
     let out = cmd::command(&common_dir)
         .args(["merge-base", &a.to_string(), &b.to_string()])

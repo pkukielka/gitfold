@@ -827,7 +827,6 @@ fn view_with(
             layers.push(Layer {
                 branch: p.layer.clone(),
                 seal: accepted,
-                merge_base: git::merge_base(base.id, accepted)?,
                 ..l
             });
         }

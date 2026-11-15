@@ -53,12 +53,11 @@ pub fn follow_live(
     let mut lens = Lens::read(state)?;
     let (mut moved, mut stored) = (Vec::new(), false);
     let local = Local::read(&state.common_dir);
-    let base = state.layers_point()?;
     for layer in &mut lens.layers {
         if layer.updates != Updates::Live {
             continue;
         }
-        let files = match follow(store, &state.common_dir, &local, base, layer, &mut fresh) {
+        let files = match follow(store, &state.common_dir, &local, layer, &mut fresh) {
             Ok(Some(files)) => files,
             Ok(None) => continue,
             Err(e) => {
@@ -87,13 +86,12 @@ pub fn follow_live(
     Ok(Some(Followed { moved, applied }))
 }
 
-/// Moves live `layer` (of a workspace on `base`) to where it is now
-/// (`newest`): how many files changed, `None` if it didn't move.
+/// Moves live `layer` to where it is now (`newest`): how many files
+/// changed, `None` if it didn't move.
 fn follow(
     store: &Store,
     common_dir: &Path,
     local: &Local,
-    base: ObjectId,
     layer: &mut Layer,
     fresh: &mut impl FnMut(&StateDir) -> bool,
 ) -> Result<Option<usize>> {
@@ -108,7 +106,6 @@ fn follow(
         git::resolve(&newest.to_string())?,
     );
     let files = git::with_repo(|repo| git::lens::delta(repo, from.tree, to.tree))?.len();
-    layer.merge_base = git::merge_base(base, newest)?;
     layer.seal = newest;
     layer.shows = shows;
     Ok(Some(files))

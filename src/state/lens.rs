@@ -2,8 +2,13 @@
 //! its base and under its own changes (the lens, in the code). Each layer is
 //! a branch's work as of one commit, its seal: a workspace's work as `seal`
 //! makes it, or a branch's or a revision's commits. It shows as the changes
-//! it makes since where the two diverged (the merge base, pinned with the
-//! layer, so the view doesn't change when this workspace's base moves).
+//! it makes since where it and the commit the view is built on diverged
+//! (their merge base). That is worked out each time a view is built
+//! (`view`), against that very commit, never stored: the workspace's base
+//! lags behind its branch while layers show (commits made meanwhile, a move
+//! onto its base), and a merge base taken against another commit would make
+//! the lines between the two look like the layer's own changes, which then
+//! conflict with the base's.
 //!
 //! A live layer follows its branch (`cli::layer`): a workspace's work as
 //! `seal::Driven` says (an agent's at the end of its last turn), or the
@@ -22,9 +27,9 @@
 //! here; the workspace's own file at that path, if it has one, wins and
 //! stays writable.
 //!
-//! Stored in `lens` in the state directory, rewritten whole: `version 2`,
+//! Stored in `lens` in the state directory, rewritten whole: `version 3`,
 //! then one line per layer, in the order added: `layer <name> TAB <shows>
-//! TAB <updates> TAB <moved> TAB <seal> TAB <merge base>`, with `<shows>`
+//! TAB <updates> TAB <moved> TAB <seal>`, with `<shows>`
 //! `work`, `commits-only` or `commits` (`Shows`), `<updates>` `live`,
 //! `frozen` or `fixed` (`Updates`) and `<moved>` when it last moved, in
 //! seconds since the epoch (names hold no control characters). A layer line
@@ -33,9 +38,11 @@
 //! `cli::proposal`), put back when the proposal goes. Read and written under
 //! `lock`, so concurrent changes don't undo each other.
 //!
-//! Version 1 files (from builds before `layer add --frozen/--commits`) are
-//! read too: `layer <name> TAB <on|off> TAB <seal> TAB <merge base>`; a
-//! layer `on` is live and shows all work, one `off` (hidden) is dropped.
+//! Earlier versions are read too, their stored merge bases ignored:
+//! version 2, the same with a sixth field, the merge base; version 1 (from
+//! builds before `layer add --frozen/--commits`), `layer <name> TAB <on|off>
+//! TAB <seal> TAB <merge base>`, a layer `on` live and showing all work, one
+//! `off` (hidden) dropped.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -144,9 +151,6 @@ pub struct Layer {
     /// since the epoch.
     pub moved: i64,
     pub seal: ObjectId,
-    /// Where the two workspaces' histories diverged: the layer's changes are
-    /// its seal's against this.
-    pub merge_base: ObjectId,
     /// For a proposal shown in its layer's place: that layer as it was, put
     /// back (its way of updating kept) when the proposal goes.
     pub instead: Option<Box<Layer>>,
@@ -156,29 +160,31 @@ impl Layer {
     /// Its fields as stored (see the module doc), from the name on.
     fn fields(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}",
             self.branch,
             self.shows.word(),
             self.updates.word(),
             self.moved,
             self.seal,
-            self.merge_base
         )
     }
 
-    /// A layer from its stored fields (see `fields`), of `line`.
-    fn from_fields(line: &str, fields: &str) -> Result<Layer> {
+    /// A layer from its stored fields (see `fields`), of `line`, in a
+    /// file of `version` (2: a merge base after them, ignored).
+    fn from_fields(line: &str, fields: &str, version: u8) -> Result<Layer> {
         let fields: Vec<&str> = fields.split('\t').collect();
-        let [branch, shows, updates, moved, seal, merge_base] = fields[..] else {
+        let ([branch, shows, updates, moved, seal] | [branch, shows, updates, moved, seal, _]) =
+            fields[..]
+        else {
             bail!("bad line {line:?}");
         };
+        anyhow::ensure!(fields.len() == 5 || version == 2, "bad line {line:?}");
         Ok(Layer {
             branch: branch.to_string(),
             shows: Shows::parse(shows)?,
             updates: Updates::parse(updates)?,
             moved: moved.parse()?,
             seal: ObjectId::from_hex(seal.as_bytes())?,
-            merge_base: ObjectId::from_hex(merge_base.as_bytes())?,
             instead: None,
         })
     }
@@ -223,7 +229,7 @@ impl Lens {
                 let fields: Vec<&str> = (line.strip_prefix("layer ").unwrap_or(""))
                     .split('\t')
                     .collect();
-                let [branch, on, seal, merge_base] = fields[..] else {
+                let [branch, on, seal, _] = fields[..] else {
                     bail!("bad line {line:?}");
                 };
                 // Hidden: there are no hidden layers now.
@@ -236,25 +242,26 @@ impl Lens {
                     updates: Updates::Live,
                     moved: 0,
                     seal: ObjectId::from_hex(seal.as_bytes())?,
-                    merge_base: ObjectId::from_hex(merge_base.as_bytes())?,
                     instead: None,
                 });
             }
             return Ok(Lens { layers });
         }
-        if version != Some("version 2") {
-            bail!("not a layers file this gitfold knows");
-        }
+        let version = match version {
+            Some("version 2") => 2,
+            Some("version 3") => 3,
+            _ => bail!("not a layers file this gitfold knows"),
+        };
         for line in lines {
             if let Some(fields) = line.strip_prefix("instead ") {
                 let Some(last) = layers.last_mut() else {
                     bail!("bad line {line:?}");
                 };
-                last.instead = Some(Box::new(Layer::from_fields(line, fields)?));
+                last.instead = Some(Box::new(Layer::from_fields(line, fields, version)?));
                 continue;
             }
             let fields = line.strip_prefix("layer ").unwrap_or("");
-            layers.push(Layer::from_fields(line, fields)?);
+            layers.push(Layer::from_fields(line, fields, version)?);
         }
         Ok(Lens { layers })
     }
@@ -263,7 +270,7 @@ impl Lens {
     pub fn write(&self, state: &StateDir) -> Result<()> {
         let mut text = String::new();
         if !self.layers.is_empty() {
-            text += "version 2\n";
+            text += "version 3\n";
         }
         for l in &self.layers {
             text += &format!("layer {}\n", l.fields());
@@ -387,7 +394,8 @@ pub struct View {
 }
 
 /// The view of `lens` over base commit `base`, or `None` if it has no
-/// layers.
+/// layers. Each layer's changes are its seal's since it and `base` diverged
+/// (`merge_base`, see the module doc).
 ///
 /// A file is blended, rather than shown whole, if it is `merge=union` (in
 /// the base's `.gitattributes` or `info/attributes`), the base has it and no
@@ -398,13 +406,15 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
     if !lens.is_on() {
         return Ok(None);
     }
-    let stack: Vec<git::lens::Pin> = (lens.layers.iter())
-        .map(|l| git::lens::Pin {
-            name: l.branch.clone(),
-            seal: l.seal,
-            merge_base: l.merge_base,
+    let stack = (lens.layers.iter())
+        .map(|l| {
+            Ok(git::lens::Pin {
+                name: l.branch.clone(),
+                seal: l.seal,
+                merge_base: merge_base(base, l)?,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
     let hunk_paths = |paths: &[BString]| -> Result<HashSet<BString>> {
         let rev = base.to_string();
         let values = git::attr::values(common_dir, &rev, "merge", paths)?;
@@ -464,6 +474,18 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
         conflicts,
         notes,
     }))
+}
+
+/// Where `layer` and base commit `base` diverged: its changes are its
+/// seal's against this. Without a commit in common they can't be told
+/// apart, and no view can be built.
+pub fn merge_base(base: &ObjectId, layer: &Layer) -> Result<ObjectId> {
+    git::merge_base_if_any(*base, layer.seal)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} shares no history with the base {base}, so its changes can't be told apart",
+            layer.branch
+        )
+    })
 }
 
 /// `a`, `a and b`, `a, b and c`.
@@ -599,29 +621,13 @@ pub fn take_off(state: &StateDir) -> Result<()> {
 }
 
 /// Puts the layers of the workspace in `state` back after a move (or one
-/// interrupted, finished or undone since): each layer's merge base is
-/// pinned again against where the branch is now (what the workspace's base
-/// becomes), and the layers show again (the daemon switches to them).
-/// Whether they were off; `lock` held, `git::init` done.
+/// interrupted, finished or undone since): they show again (the daemon
+/// switches to them, its base first catching up with the moved branch;
+/// their changes are taken against that, see `view`). Whether they were
+/// off; `lock` held.
 pub fn put_back(state: &StateDir) -> Result<bool> {
     if !off(state) {
         return Ok(false);
-    }
-    let tip = state.layers_point()?;
-    let mut lens = Lens::read(state)?;
-    let before = lens.clone();
-    let repin = |layer: &mut Layer| match git::merge_base(tip, layer.seal) {
-        Ok(base) => layer.merge_base = base,
-        Err(e) => log::warn!("{}: layer {}: {e:#}", state.branch, layer.branch),
-    };
-    for layer in &mut lens.layers {
-        repin(layer);
-        if let Some(instead) = &mut layer.instead {
-            repin(instead);
-        }
-    }
-    if lens != before {
-        lens.write(state)?;
     }
     match fs::remove_file(state.dir.join(OFF)) {
         Err(e) if !not_found(&e) => return Err(e.into()),
@@ -729,8 +735,8 @@ mod tests {
     #[test]
     fn a_proposal_keeps_the_layer_it_stands_in_for() {
         let text = format!(
-            "version 2\nlayer b-prop/c\twork\tlive\t5\t{A}\t{B}\n\
-             instead b\tcommits-only\tfrozen\t3\t{B}\t{A}\nlayer d\tcommits\tfixed\t4\t{A}\t{A}\n"
+            "version 3\nlayer b-prop/c\twork\tlive\t5\t{A}\n\
+             instead b\tcommits-only\tfrozen\t3\t{B}\nlayer d\tcommits\tfixed\t4\t{A}\n"
         );
         let lens = Lens::parse(text.as_bytes()).unwrap();
         let was = lens.layers[0].instead.as_deref().unwrap();
@@ -748,5 +754,24 @@ mod tests {
         lens.write(&state).unwrap();
         assert_eq!(fs::read_to_string(dir.join(LENS)).unwrap(), text);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn version_2_files_are_read_their_merge_bases_dropped() {
+        let v2 = format!(
+            "version 2\nlayer b-prop/c\twork\tlive\t5\t{A}\t{B}\n\
+             instead b\tcommits-only\tfrozen\t3\t{B}\t{A}\nlayer d\tcommits\tfixed\t4\t{A}\t{A}\n"
+        );
+        let v3 = format!(
+            "version 3\nlayer b-prop/c\twork\tlive\t5\t{A}\n\
+             instead b\tcommits-only\tfrozen\t3\t{B}\nlayer d\tcommits\tfixed\t4\t{A}\n"
+        );
+        assert_eq!(
+            Lens::parse(v2.as_bytes()).unwrap(),
+            Lens::parse(v3.as_bytes()).unwrap()
+        );
+        // Only version 2 lines have the sixth field.
+        let bad = format!("version 3\nlayer d\tcommits\tfixed\t4\t{A}\t{A}\n");
+        assert!(Lens::parse(bad.as_bytes()).is_err());
     }
 }

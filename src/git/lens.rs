@@ -78,7 +78,8 @@ pub enum Change {
 }
 
 impl Change {
-    fn item(self) -> Option<Item> {
+    /// What it sets (`None`: a deletion).
+    pub fn item(self) -> Option<Item> {
         match self {
             Change::Set(item) => Some(item),
             Change::Delete => None,
@@ -595,6 +596,19 @@ fn merge_entries(
             Merged::Clean(Some(item))
         }
     })
+}
+
+/// Whether entry `ours` has the change from `ancestor` to `theirs` already:
+/// merging it in leaves `ours` as it is (`ours` is `theirs`, or changed it
+/// further on other lines).
+pub fn has_change(
+    repo: &gix::Repository,
+    ancestor: Option<Item>,
+    ours: Option<Item>,
+    theirs: Option<Item>,
+) -> Result<bool> {
+    let merged = merge_entries(repo, ancestor, ours, theirs, "", "")?;
+    Ok(matches!(merged, Merged::Clean(item) if item == ours))
 }
 
 /// Folds `theirs` (a layer's entry, changed from `ancestor`) into `ours`:

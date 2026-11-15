@@ -709,6 +709,57 @@ eq "a layer without a workspace: a copy of its commits, shown as all work" "yes|
 }
 
 
+# A layer whose work is built on this workspace's own commits, made while
+# its base waits for the layers to go: its change is taken against the
+# commit the view is built on, so the lines this workspace committed and
+# the layer changed since don't conflict.
+layers_on_the_workspaces_own_commits() {
+printf '1\n2\n3\n4\n5\n6\n7\n8\n' >"$REPO/p.txt"; cp "$REPO/p.txt" "$REPO/q.txt"; R add -A; R commit -qm p
+R branch api
+"$BIN" -C "$REPO" branch web --base api >/dev/null
+mount_fs
+A=$MNT/api W=$MNT/web
+ls "$A" "$W" >/dev/null
+turn_starts "$A" >/dev/null   # an agent's: its layers move at its turns
+echo w >"$W/w.txt"
+"$BIN" -C "$A" layer add web >/dev/null
+sed -i 's/^3$/3 api/' "$A/p.txt"; G "$A" commit -qam "api 3"
+eq "api committed; its base waits for the layers" "$(R rev-parse api^)" "$(cat "$COMMON/gitfold/api/base")"
+"$BIN" -C "$REPO" layer base api -w web >/dev/null
+sed -i 's/^3 api$/3 web/' "$W/p.txt"
+out=$(turn_starts "$A")
+eq "web's new work shows in api" yes "$(grep -q 'moved to their latest work: web' <<<"$out" && echo yes)"
+eq "no conflict said" "" "$(grep -i conflict <<<"$out")"
+eq "nor listed" "" "$("$BIN" -C "$A" layer | grep -i conflict)"
+eq "api's own line is its own" "3 api" "$(sed -n 3p "$A/p.txt")"
+# The layers removed and added again: the base catches up first, the same.
+"$BIN" -C "$A" layer remove --all >/dev/null
+for _ in $(seq 30); do [ "$(cat "$COMMON/gitfold/api/base")" = "$(R rev-parse api)" ] && break; sleep 0.1; done
+out=$("$BIN" -C "$A" layer add web)
+eq "added again, on the caught-up base: no conflict" "" "$(grep -i conflict <<<"$out")"
+eq "web's line shows now (api's is in the base)" "3 web|w" "$(sed -n 3p "$A/p.txt")|$(cat "$A/w.txt")"
+
+# A snapshot's parent: the tip only when the workspace has the tip's
+# changes (committed through it), else its base.
+base_was=$(cat "$COMMON/gitfold/api/base")
+sed -i 's/^2$/2 api/' "$A/q.txt"; G "$A" commit -qam "api q"
+eq "committed with the layers shown: the base waits" "$base_was" "$(cat "$COMMON/gitfold/api/base")"
+c=$(snap api)
+eq "committed through the workspace: on the tip" "$(R rev-parse api)" "$(R rev-parse "$c^")"
+sed -i 's/^7$/7 more/' "$A/q.txt"
+c=$(snap api)
+eq "and edited further: still on the tip" "$(R rev-parse api)" "$(R rev-parse "$c^")"
+base=$(cat "$COMMON/gitfold/api/base")
+blob=$(echo pushed | R hash-object -w --stdin)
+export GIT_INDEX_FILE=$T/x.index
+R read-tree api; R update-index --add --cacheinfo "100644,$blob,pushed.txt"
+R update-ref refs/heads/api "$(R commit-tree "$(R write-tree)" -p api -m "pushed in")"
+unset GIT_INDEX_FILE
+c=$(snap api)
+eq "the tip moved without its files (a push into it): on the base" "$base|" \
+    "$(R rev-parse "$c^")|$(R ls-tree --name-only "$c" pushed.txt)"
+}
+
 section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
 section "layers: several changing one file" layers_changing_one_file
@@ -720,4 +771,5 @@ section "snapshot: one workspace's work" snapshot_of_one_workspace
 section "snapshot: several merged" snapshot_of_several_merged
 section "proposals: a contract changed by consent" proposals_to_change_a_contract
 section "proposals: the layer kept as it was" proposals_keep_the_layer_as_it_was
+section "layers: on the workspace's own commits" layers_on_the_workspaces_own_commits
 finish
