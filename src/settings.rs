@@ -8,8 +8,9 @@
 //!   `gitfoldRestackBlocked` (the restack that conflicted, see
 //!   `cli::stack`);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
-//!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
-//!   mounted it, for Claude Code's worktree hook to mount it there again).
+//!   task folder and its inbox), `mountpoint` (where `gitfold mount` last
+//!   mounted it, for Claude Code's worktree hook to mount it there again),
+//!   and `trunk` (where stacked branches' parents land: `origin/main`, say).
 //!
 //! They are read from the repository's own config file, where `git config`
 //! writes them (not included files), at the moment they are needed: the
@@ -44,6 +45,9 @@ const TASKS_DIR: &str = "tasksDir";
 const INBOX: &str = "inbox";
 /// `gitfold.mountpoint`: where `gitfold mount` last mounted the repository.
 const MOUNTPOINT: &str = "mountpoint";
+/// `gitfold.trunk`: where the bottom of a stack lands (a branch or a
+/// remote-tracking branch).
+const TRUNK: &str = "trunk";
 /// The task folder's name unless `gitfold.taskDir` says otherwise.
 const DEFAULT_TASK_DIR: &str = ".task";
 /// The inbox's name unless `gitfold.inbox` says otherwise.
@@ -99,6 +103,11 @@ impl Local {
     /// (`gitfold.mountpoint`), if recorded.
     pub fn mountpoint(&self) -> Option<PathBuf> {
         self.repository(MOUNTPOINT).map(PathBuf::from)
+    }
+
+    /// Where the bottom of a stack lands (`gitfold.trunk`), if set.
+    pub fn trunk(&self) -> Option<String> {
+        self.repository(TRUNK)
     }
 
     /// The name of a task folder's inbox: `gitfold.inbox` if it is one plain
