@@ -37,7 +37,7 @@ use anyhow::{Result, bail};
 /// git directory). In a workspace showing layers, whose `.git` turns git away
 /// (see `fs::workspace::layers`), its registration, found from the mount.
 pub fn repo() -> Result<PathBuf> {
-    // The mount first: discovery could skip a surrendered workspace's `.git`
+    // The mount first: discovery could skip the `.git` of a workspace with git off
     // and find a repository the mount point is in.
     let cwd = std::env::current_dir()?;
     if let Some((state, _)) = workspace_at(&cwd) {

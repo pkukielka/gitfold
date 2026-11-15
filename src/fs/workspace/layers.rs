@@ -38,7 +38,7 @@
 //!
 //! Where git can't be kept right (a bare repository, sparse checkout, a split
 //! or sparse index, an index git keeps locked), git is turned off in the
-//! workspace instead (surrendered): its `.git` names a directory that doesn't
+//! workspace instead (git off): its `.git` names a directory that doesn't
 //! exist, whose name says why, so every git command fails with it.
 //!
 //! Meanwhile the base doesn't follow the branch (`rebase`): moving it would
@@ -71,7 +71,7 @@ use crate::state::layers::{self, ShownLayers};
 use crate::state::{StateDir, ancestors};
 use crate::store::{Lower, Store};
 
-/// A file in the state directory whose presence means git is surrendered
+/// A file in the state directory whose presence means git is off
 /// (see the module doc): its content is why.
 const GIT_OFF: &str = "layers-git-off";
 
@@ -106,8 +106,8 @@ struct GitPlan {
     blended: BTreeSet<Vec<u8>>,
 }
 
-/// The `.git` content while git is surrendered: git prints the path it names.
-fn surrendered(layers: &layers::Layers, why: &str) -> Vec<u8> {
+/// The `.git` content while git is off: git prints the path it names.
+fn off_gitfile(layers: &layers::Layers, why: &str) -> Vec<u8> {
     let shown: Vec<&str> = layers.layers.iter().map(|l| l.branch.as_str()).collect();
     format!(
         "gitdir: /LAYERS SHOWN ({}): git is off here ({why}). Run gitfold layer remove --all to use git\n",
@@ -159,7 +159,7 @@ fn adopt_next(state: &StateDir, applied: &mut ShownLayers) -> Result<()> {
 
 /// Sets up what was last applied of the layers of the workspace in `state`
 /// (see the module doc) when it opens. Returns the `.git` content if git is
-/// surrendered.
+/// off.
 pub(super) fn open_view(
     store: &Store,
     state: &StateDir,
@@ -170,7 +170,7 @@ pub(super) fn open_view(
     let shown = applied.layers()?;
     let off = fs::read_to_string(state.dir.join(GIT_OFF))
         .ok()
-        .map(|why| surrendered(&shown, why.trim()));
+        .map(|why| off_gitfile(&shown, why.trim()));
     layers.applied = applied;
     let view = match layers::view(&state.common_dir, &layers.base, &shown) {
         Ok(view) => view,
@@ -178,7 +178,7 @@ pub(super) fn open_view(
         // the switch that follows reports it.
         Err(e) => {
             log::warn!("{}: its layers can't be shown: {e:#}", state.branch);
-            return Ok(Some(surrendered(&shown, "its layers are missing")));
+            return Ok(Some(off_gitfile(&shown, "its layers are missing")));
         }
     };
     let Some(view) = view else {
@@ -215,7 +215,7 @@ impl Workspace {
     }
 
     /// Gives it the session's notifier and its slot, so it can tell the
-    /// kernel what a switch or a surrender changed.
+    /// kernel what a switch or turning git off changed.
     pub fn set_kernel(&self, notifier: fuser::Notifier, slot: u32) {
         let _ = self.kernel.set((notifier, slot));
     }
@@ -387,7 +387,7 @@ impl Workspace {
     }
 
     /// The `.git` content after a switch: the registration, or with git not
-    /// kept right (`why`), the surrender (persisted, so a remount keeps it);
+    /// kept right (`why`), git off (persisted, so a remount keeps it);
     /// the kernel is told.
     fn set_gitfile(&self, stored: &layers::Layers, why: Option<&str>) -> Result<()> {
         let off = self.state.dir.join(GIT_OFF);
@@ -395,7 +395,7 @@ impl Workspace {
             Some(why) => {
                 log::warn!("{}: git off: {why}", self.state.branch);
                 crate::fsutil::write_atomic(&off, why.as_bytes())?;
-                surrendered(stored, why)
+                off_gitfile(stored, why)
             }
             None => {
                 let _ = fs::remove_file(&off);
@@ -505,7 +505,7 @@ impl Workspace {
     /// skip-worktree, the files they add excluded, and with blended files,
     /// HEAD at a layers commit and the blends in the index. What was applied
     /// before is given back where no longer shown. The errors' text is the
-    /// reason the surrendered `.git` gives.
+    /// reason the `.git` gives with git off.
     ///
     /// The order is what a crash leaves right: the index edits are recorded
     /// before HEAD moves (a next switch gives back what was skipped), the
@@ -800,7 +800,7 @@ impl Workspace {
     /// (`git::layers::extract`), and HEAD moves to the new layers commit (the tree
     /// of the last one, so nothing git sees changes). Git must be idle (but
     /// for HEAD being detached). An amend of L is extracted as a commit on L.
-    /// If HEAD left L's line (git switch, reset), git is surrendered: the
+    /// If HEAD left L's line (git switch, reset), git is turned off: the
     /// index holds the blends, which mustn't be committed on the branch;
     /// `gitfold layer remove --all` gives it back.
     fn sync_layers_locked(&self) -> Result<()> {
@@ -812,7 +812,7 @@ impl Workspace {
             return Ok(());
         }
         let Some(head) = detached_head(admin) else {
-            return self.surrender("HEAD left the layers commit");
+            return self.git_off("HEAD left the layers commit");
         };
         if head == l || *self.layers_blocked.lock() == Some(head) {
             return Ok(());
@@ -845,7 +845,7 @@ impl Workspace {
             )?))
         })?;
         let Some(done) = done else {
-            return self.surrender("HEAD left the layers commit's line");
+            return self.git_off("HEAD left the layers commit's line");
         };
         if let Some(blocked) = &done.blocked {
             let paths: Vec<String> = (blocked.conflicts.iter())
@@ -876,9 +876,9 @@ impl Workspace {
     }
 
     /// Turns git off in it, saying why, and tells the kernel.
-    fn surrender(&self, why: &str) -> Result<()> {
+    fn git_off(&self, why: &str) -> Result<()> {
         let stored = self.layers.read().applied.layers()?;
-        if self.gitfile.read().starts_with(&surrendered(&stored, why)) {
+        if self.gitfile.read().starts_with(&off_gitfile(&stored, why)) {
             return Ok(());
         }
         self.set_gitfile(&stored, Some(why))

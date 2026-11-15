@@ -129,7 +129,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/restack.rs` | a closed workspace's base moved visibly for a restack of its branch, its changed files stamped |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/workspace/layers.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told (and own lines in blended files carried over), git told (skip-worktree, excludes, the blends in the index, HEAD at the layers commit, the push guard) or surrendered; extracting commits made on the layers commit onto the branch (`sync_layers`) |
+| `src/fs/workspace/layers.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told (and own lines in blended files carried over), git told (skip-worktree, excludes, the blends in the index, HEAD at the layers commit, the push guard) or turned off; extracting commits made on the layers commit onto the branch (`sync_layers`) |
 | `src/fs/workspace/follow.rs` | live layers of a workspace without an agent, moved by its sync thread once it is idle: writes counted (`Activity`), the check every 2 s, the move through `state::follow` and `switch` |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
@@ -203,7 +203,7 @@ Then, per request (`fs/workspace/`):
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
-| `tests/layers.sh` | end-to-end test of snapshots of work and layers in a workspace (refusals, git status and commits, surrender, remounts; live, frozen, commits-only and revision layers, re-adding, the listing; several layers on one file, merged or conflicting; blended files, the layers commit, extraction, the push guard; proposals, consent, accept and reject) |
+| `tests/layers.sh` | end-to-end test of snapshots of work and layers in a workspace (refusals, git status and commits, git off, remounts; live, frozen, commits-only and revision layers, re-adding, the listing; several layers on one file, merged or conflicting; blended files, the layers commit, extraction, the push guard; proposals, consent, accept and reject) |
 | `tests/stacks.sh` | end-to-end test of bases (stacked branches): moves with no workspace, in an open workspace (hook and `layer base`) and an unmounted one, conflicts, uncommitted work in the way, pushed commits and `--yes`, `--frozen`, refusals that change nothing, the base taken away (also with `origin/main` as the trunk), `list`'s tree and notes; parents that landed (squash, rebase and merge commits, a tweaked squash, a stacked parent's parent, a merge of later parent commits, none when unmerged, an interrupted re-parent, a branch on the trunk's local branch) |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
@@ -305,7 +305,7 @@ term; they never appear in messages, help or the README.
 - **Switch**: changing what the layers show (a layer added, replaced,
   removed or moved to newer work), telling the kernel and git, and
   carrying the workspace's own lines in blended files over.
-- **Surrender** (*internal*; user-facing: "git is off here"): turning git
+- **Git off** ("git is off here"): turning git
   off in a workspace with layers whose index can't be
   edited, or whose HEAD left the layers commit's line: its `.git` names a
   nonexistent `/LAYERS SHOWN (...)` directory saying why.
@@ -1595,7 +1595,7 @@ a snapshot, with no change to any workspace.
   (not text) refuses the whole switch before anything changes (`your
   changes to it depend on lines the layers would no longer show`). The
   rewritten files are invalidated with the rest of the switch.
-- **Surrender as the fallback:** where the index can't be edited (sparse
+- **Git off as the fallback:** where the index can't be edited (sparse
   checkout, whose re-application rewrites skip-worktree bits; a split or
   sparse index; an unknown required extension; the index locked), or HEAD
   left L's line while files are blended (`git switch`, `reset`, `rebase`,
@@ -1732,7 +1732,7 @@ a snapshot, with no change to any workspace.
   for 500k entries; kept as `set_skip_worktree_by_git`): the editor is
   faster, and can also set an entry's stat data and id.
 - `info/exclude` for the layers' new files: shared by every worktree.
-- A deliberately broken index, or no `.git`, as the surrender: git says
+- A deliberately broken index, or no `.git`, as git off: git says
   "index file corrupt" and the usual repairs undo it; without `.git`, git
   finds the enclosing repository and succeeds.
 - Layers following the other workspace live, every write at once: rewriting
@@ -2162,7 +2162,7 @@ children still have their stack refs saying where their own commits start.
 | Read tracking on by default | `R` lines are for several agents on one repository | [overlaps](#overlaps-reads-from-claude-codes-hook-writes-from-stored-state) |
 | Layers' versions staged, `assume-unchanged`, an index per layers | commit theirs, revert theirs, or lose staged entries; skip-worktree instead | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | `info/exclude` for layers' new files | shared by every worktree | [layers](#layers-other-workspaces-work-as-a-view-tree) |
-| Broken index or no `.git` as the surrender | repaired away; git finds the enclosing repository | [layers](#layers-other-workspaces-work-as-a-view-tree) |
+| Broken index or no `.git` as git off | repaired away; git finds the enclosing repository | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | Live layers | index rewritten under a running git; views change mid-turn | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | HEAD symbolic to `refs/worktree/layers` | `gc` from another worktree prunes L | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | Extraction as a plain merge (`merge=union` or not) | commits the layers' lines, or conflicts on every append | [layers](#layers-other-workspaces-work-as-a-view-tree) |
