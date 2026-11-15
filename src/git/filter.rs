@@ -83,14 +83,6 @@ impl Versions {
             .filter(|merged| self.clean(merged) == own)
             .unwrap_or_else(|| own.to_vec())
     }
-
-    /// The lines of the union the layers added (each without its newline).
-    pub fn layers_lines(&self) -> Vec<&[u8]> {
-        added_lines(&self.base, &self.union)
-            .into_iter()
-            .map(super::layers::key)
-            .collect()
-    }
 }
 
 /// The two versions of a file editable layers changed (`state::layers`'s
@@ -532,7 +524,6 @@ mod tests {
         let other = b"other\ncontent\n";
         assert_eq!(reg.smudge(other), other);
         assert_eq!(reg.clean(other), other);
-        assert_eq!(reg.layers_lines(), [b"fromA".as_slice(), b"fromB"]);
     }
 
     /// A layer's line in the middle of the base's lines.

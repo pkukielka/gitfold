@@ -767,9 +767,10 @@ impl Workspace {
             );
         }
         match (view, plan.filtered.is_empty()) {
-            (Some(v), false) => self.filter_on(plan, stored, v)?,
+            (Some(_), false) => self.filter_on(plan)?,
             _ => self.filter_off()?,
         }
+        self.guard_to(plan, stored, view)?;
         self.index_to_plan(plan, applied)?;
         match plan.layers_on {
             true => worktree_config::set_excludes(admin, &plan.added)?,
@@ -810,16 +811,11 @@ impl Workspace {
         applied.write(&self.state)
     }
 
-    /// `tell_git` with union files: the filter driver and its attributes on
-    /// them (`worktree_config::set_filter`), answered by `gitfold
-    /// filter-process` relaying to this workspace (`filter`), and the guard:
-    /// the layers' uncommitted lines in them (`git::guard`) and the hooks.
-    fn filter_on(
-        &self,
-        plan: &GitPlan,
-        stored: &layers::Layers,
-        view: &layers::View,
-    ) -> Result<()> {
+    /// `tell_git` with filtered files (union files, files only editable
+    /// layers changed): the filter driver and its attributes on them
+    /// (`worktree_config::set_filter`), answered by `gitfold filter-process`
+    /// relaying to this workspace (`filter`).
+    fn filter_on(&self, plan: &GitPlan) -> Result<()> {
         let admin = &self.state.admin;
         let exe = std::env::current_exe().context("finding the gitfold binary")?;
         let process = format!(
@@ -829,17 +825,36 @@ impl Workspace {
             worktree_config::shell_quote(self.state.id.as_bytes()),
         );
         let paths: Vec<&Vec<u8>> = plan.filtered.iter().collect();
-        worktree_config::set_filter(admin, &driver(&self.state.id), &process, &paths)?;
-        guard_of(&self.state.branch, plan.base, stored, view)?.write(admin)?;
-        worktree_config::install_guard(admin, &exe)
+        worktree_config::set_filter(admin, &driver(&self.state.id), &process, &paths)
     }
 
-    /// `tell_git` without union files: no filter, no guard.
+    /// `tell_git` without filtered files: no filter.
     fn filter_off(&self) -> Result<()> {
+        worktree_config::remove_filter(&self.state.admin, &driver(&self.state.id))
+    }
+
+    /// `tell_git`'s guard (`git::guard`): whenever an editable or union
+    /// layer shows uncommitted work (filtered files or not: a layer that
+    /// only adds or deletes files has its guard too), what it is and the
+    /// hooks that check it; else neither.
+    fn guard_to(
+        &self,
+        plan: &GitPlan,
+        stored: &layers::Layers,
+        view: Option<&layers::View>,
+    ) -> Result<()> {
         let admin = &self.state.admin;
-        worktree_config::remove_filter(admin, &driver(&self.state.id))?;
-        worktree_config::remove_guard(admin)?;
-        git::guard::Guard::remove(admin)
+        let guard = match view {
+            Some(view) => guard_of(&self.state.branch, plan.base, stored, view)?,
+            None => Default::default(),
+        };
+        if guard.is_empty() {
+            worktree_config::remove_guard(admin)?;
+            return git::guard::Guard::remove(admin);
+        }
+        let exe = std::env::current_exe().context("finding the gitfold binary")?;
+        guard.write(admin)?;
+        worktree_config::install_guard(admin, &exe)
     }
 
     /// Keeps the view's commits (the layers' snapshots) from `git gc` while
@@ -1168,67 +1183,111 @@ fn switched<'a>(
 }
 
 /// What the guard keeps from `branch` (`git::guard`) with `view` of
-/// `stored` over `base`: per union file, the lines the layers add there
-/// that are a layer's uncommitted work: in its snapshot of a workspace's
-/// work and not in the commit that snapshot is on. A line no layer's
-/// snapshot accounts for is guarded too, as the first layer's.
+/// `stored` over `base`: at each union file, and each path only editable
+/// layers changed (their changes to the base's files, the files they add
+/// and those they delete), each of those layers' uncommitted work there:
+/// its version in its snapshot of a workspace's work, the lines it adds
+/// that neither the commit the snapshot is on nor the base has, and the
+/// base's lines that commit has and the snapshot doesn't (compared as
+/// `git::guard::norm` does).
 fn guard_of(
     branch: &str,
     base: ObjectId,
     stored: &layers::Layers,
     view: &layers::View,
 ) -> Result<git::guard::Guard> {
+    use git::guard::{Entry, norm, significant};
     let mut guard = git::guard::Guard {
         branch: branch.to_string(),
         ..Default::default()
     };
     let base_tree = git::with_repo(|repo| git::layers::commit_tree(repo, base))?;
-    // Union files, then the files editable layers changed (the base's or
-    // their own new ones: a commit adding one with their lines is caught).
-    let edited = (view.edited.iter())
-        .chain(&view.edited_new)
-        .filter_map(|p| Some((p, view.mixed.get(p)?, view.tree)));
-    let union = (view.union.iter()).map(|(p, owners)| (p, owners, view.hunk_tree));
-    for (path, owners, tree) in union.chain(edited) {
-        let versions = filter::Versions {
-            base: content_at(base_tree, path)?,
-            union: content_at(tree, path)?,
-        };
-        // Per layer: its snapshot's lines, and those committed.
-        let mut sides = Vec::new();
+    let mut paths: Vec<(&Vec<u8>, &Vec<usize>)> = view.union.iter().collect();
+    paths.extend((view.writable.iter()).filter_map(|p| Some((p, view.mixed.get(p)?))));
+    let blob_at = |tree: ObjectId, path: &[u8]| -> Result<Option<ObjectId>> {
+        let item = git::with_repo(|repo| git::layers::lookup(repo, tree, BStr::new(path)))?;
+        Ok(item
+            .filter(|i| matches!(i.kind, EntryKind::Blob | EntryKind::BlobExecutable))
+            .map(|i| i.oid))
+    };
+    let read = |blob: Option<ObjectId>| blob.map_or(Ok(Vec::new()), git::read_blob);
+    let mut trees: HashMap<ObjectId, (ObjectId, Option<ObjectId>)> = HashMap::new();
+    for (path, owners) in paths {
+        let at_base = read(blob_at(base_tree, path)?)?;
+        let base_lines: HashSet<Vec<u8>> = git::layers::lines(&at_base)
+            .map(|l| norm(git::layers::key(l)))
+            .collect();
+        let mut entries = Vec::new();
         for &ix in owners {
             let layer = &stored.layers[ix];
-            let snapshot = git::with_repo(|repo| git::layers::commit_tree(repo, layer.snapshot))?;
-            let committed = match layer.shows {
-                layers::Shows::Work => git::with_repo(|repo| -> Result<Option<ObjectId>> {
-                    let parent = repo.find_commit(layer.snapshot)?.parent_ids().next();
-                    parent
-                        .map(|p| git::layers::commit_tree(repo, p.detach()))
-                        .transpose()
-                })?,
-                _ => Some(snapshot),
-            };
-            let committed = match committed {
-                Some(tree) => content_at(tree, path)?,
-                None => Vec::new(),
-            };
-            sides.push((&layer.branch, content_at(snapshot, path)?, committed));
-        }
-        let has = |data: &[u8], line: &[u8]| {
-            git::layers::lines(data).any(|l| git::layers::key(l) == line)
-        };
-        let mut lines = Vec::new();
-        for line in versions.layers_lines() {
-            let owner = sides.iter().find(|(_, snap, _)| has(snap, line));
-            let guarded = match owner {
-                Some((name, _, committed)) => (!has(committed, line)).then_some(*name),
-                None => sides.first().map(|(name, _, _)| *name),
-            };
-            if let Some(name) = guarded {
-                lines.push((name.clone(), line.to_vec()));
+            if layer.shows != layers::Shows::Work {
+                continue;
             }
+            let (snapshot, committed) = match trees.get(&layer.snapshot) {
+                Some(&t) => t,
+                None => {
+                    let t = git::with_repo(|repo| -> Result<_> {
+                        let commit = repo.find_commit(layer.snapshot)?;
+                        let parent = commit.parent_ids().next().map(|p| p.detach());
+                        Ok((
+                            git::layers::commit_tree(repo, layer.snapshot)?,
+                            parent
+                                .map(|p| git::layers::commit_tree(repo, p))
+                                .transpose()?,
+                        ))
+                    })?;
+                    trees.insert(layer.snapshot, t);
+                    t
+                }
+            };
+            let theirs = blob_at(snapshot, path)?;
+            let before = match committed {
+                Some(tree) => blob_at(tree, path)?,
+                None => None,
+            };
+            if theirs == before {
+                continue;
+            }
+            let (theirs_data, before_data) = (read(theirs)?, read(before)?);
+            let before_lines: HashSet<Vec<u8>> = git::layers::lines(&before_data)
+                .map(|l| norm(git::layers::key(l)))
+                .collect();
+            let theirs_lines: HashSet<Vec<u8>> = git::layers::lines(&theirs_data)
+                .map(|l| norm(git::layers::key(l)))
+                .collect();
+            let mut seen = HashSet::new();
+            let mut entry = Entry {
+                layer: layer.branch.clone(),
+                blob: theirs,
+                ..Default::default()
+            };
+            for line in git::layers::lines(&theirs_data).map(git::layers::key) {
+                let n = norm(line);
+                if significant(line)
+                    && !before_lines.contains(&n)
+                    && !base_lines.contains(&n)
+                    && seen.insert(n)
+                {
+                    entry.added.push(line.to_vec());
+                }
+            }
+            if theirs.is_some() {
+                for line in git::layers::lines(&at_base).map(git::layers::key) {
+                    let n = norm(line);
+                    if significant(line)
+                        && before_lines.contains(&n)
+                        && !theirs_lines.contains(&n)
+                        && seen.insert(n)
+                    {
+                        entry.removed.push(line.to_vec());
+                    }
+                }
+            }
+            entries.push(entry);
         }
-        guard.paths.insert(path.clone(), lines);
+        if !entries.is_empty() {
+            guard.paths.insert(path.clone(), entries);
+        }
     }
     Ok(guard)
 }

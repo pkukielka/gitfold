@@ -85,6 +85,7 @@ pub fn check(state: &StateDir) -> Result<Vec<String>> {
     let mut new = Vec::new();
     let guard = git::guard::Guard::read(&state.admin)?;
     if let (Some(last), Some(guard)) = (last, guard.filter(|g| !g.is_empty())) {
+        let guard = git::with_repo(|repo| guard.current(repo))?;
         let known = git::with_repo(|repo| repo.has_object(last));
         let mut args = vec![tip.id.to_string()];
         if known {
@@ -92,11 +93,8 @@ pub fn check(state: &StateDir) -> Result<Vec<String>> {
         }
         // A layer's own commits (the branch moved onto them) are its.
         let layers = super::layers::ShownLayers::read(state)?.layers()?;
-        for layer in &layers.layers {
-            if git::branch_exists(&layer.branch) {
-                args.push(format!("^refs/heads/{}", layer.branch));
-            }
-        }
+        let names = (layers.layers.iter().map(|l| l.branch.as_str())).chain(guard.layers());
+        args.extend(git::guard::hide_layers(names));
         let commits = git::guard::rev_list(common, &args)?;
         let found = git::with_repo(|repo| guard.violations(repo, &commits))?;
         // By commit and path, in the order found.
@@ -106,12 +104,10 @@ pub fn check(state: &StateDir) -> Result<Vec<String>> {
             let entry = by
                 .entry((order, v.path.clone()))
                 .or_insert_with(|| (v.commit, v.layer.clone(), Vec::new()));
-            entry
-                .2
-                .push(format!("{:?}", String::from_utf8_lossy(&v.line).trim()));
+            entry.2.push(v.says());
         }
-        for ((_, path), (commit, layer, lines)) in by {
-            let said = alarm(state, commit, &layer, &path, &lines);
+        for ((_, _), (commit, layer, says)) in by {
+            let said = alarm(state, commit, &layer, &says);
             let hex = commit.to_string();
             if !alarms.iter().any(|(c, s)| *c == hex && *s == said) {
                 log::warn!("{}: {said}", state.branch);
@@ -134,9 +130,9 @@ pub fn check(state: &StateDir) -> Result<Vec<String>> {
     Ok(new)
 }
 
-/// What an alarm says: commit `commit` of the branch of `state` has
-/// `layer`'s uncommitted `lines` in `path`.
-fn alarm(state: &StateDir, commit: ObjectId, layer: &str, path: &[u8], lines: &[String]) -> String {
+/// What an alarm says: commit `commit` of the branch of `state` brings
+/// `layer`'s uncommitted work, as `says` says (`git::guard::Violation::says`).
+fn alarm(state: &StateDir, commit: ObjectId, layer: &str, says: &[String]) -> String {
     let short = &commit.to_string()[..12];
     let subject = git::cmd::output(
         &state.common_dir,
@@ -144,18 +140,18 @@ fn alarm(state: &StateDir, commit: ObjectId, layer: &str, path: &[u8], lines: &[
     )
     .map(|s| String::from_utf8_lossy(&s).trim().to_string())
     .unwrap_or_default();
-    let shown: Vec<&str> = lines.iter().take(3).map(String::as_str).collect();
-    let more = match lines.len() > 3 {
-        true => format!(" and {} more", lines.len() - 3),
+    let shown: Vec<&str> = says.iter().take(3).map(String::as_str).collect();
+    let more = match says.len() > 3 {
+        true => format!(" and {} more", says.len() - 3),
         false => String::new(),
     };
     format!(
-        "commit {short} ({subject}) on {branch} has {layer}'s uncommitted lines in {path}: \
-         {lines}{more}. It was made without gitfold's filter (a tool built on libgit2 runs no \
-         hooks), so {layer}'s unfinished work is in your branch. Take it out before pushing: \
-         `git reset --soft {short}^` and commit again with git (git push refuses it meanwhile)",
+        "commit {short} ({subject}) on {branch} {said}{more}. It got past gitfold's filter (a \
+         tool built on libgit2 runs no hooks), so {layer}'s unfinished work is in your branch. \
+         Take it out before pushing: `git reset {short}^` (your files stay as they are, and \
+         git sees only your own changes in them again), then commit again with git (git push \
+         refuses it meanwhile)",
         branch = state.branch,
-        path = String::from_utf8_lossy(path),
-        lines = shown.join(", "),
+        said = shown.join("; "),
     )
 }
