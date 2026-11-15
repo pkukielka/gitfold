@@ -236,7 +236,7 @@ fn commit(
 fn work(store: &Store, common_dir: &Path, branch: &str) -> Result<ObjectId> {
     let state = StateDir::of(common_dir, branch);
     Ok(match state.opened() {
-        true => seal::seal(store, &state)?.commit,
+        true => seal::seal(store, &state, seal::By::Other)?.commit,
         false => git::branch_tip(branch)?.id,
     })
 }
@@ -828,7 +828,8 @@ fn view_with(
         Some(view) => view.tree,
         None => base.tree,
     };
-    let own = git::resolve(&seal::seal(store, state)?.commit.to_string())?;
+    let own = seal::seal(store, state, seal::By::Other)?.commit;
+    let own = git::resolve(&own.to_string())?;
     let tree = git::with_repo(|repo| {
         let changes = git::lens::delta(repo, base.tree, own.tree)?;
         git::lens::edit_tree(repo, view, changes.iter().map(|(p, c)| (p.as_ref(), *c)))
@@ -874,7 +875,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
             continue;
         }
         checked += 1;
-        let ours = seal::seal(&store, &state)?.commit;
+        let ours = seal::seal(&store, &state, seal::By::Other)?.commit;
         match super::snapshot::merge(&common_dir, &ours, &accepted, &p.name) {
             Ok(_) => {}
             Err(e) if Refusal::of(&e) == Some(Refusal::Changes) => {
@@ -1066,8 +1067,9 @@ pub fn accept(repo: &Path, args: AcceptArgs) -> Result<()> {
     write_files(&common_dir, &p.layer, &files)?;
     let layer_state = StateDir::of(&common_dir, &p.layer);
     if layer_state.opened() {
-        // Followers move to it at their next turn.
-        seal::seal(&store, &layer_state)?;
+        // Followers move to it now and at their next turn, even those of a
+        // workspace whose agent's turn is under way.
+        seal::seal(&store, &layer_state, seal::By::Owner)?;
     }
     let mut out = String::new();
     let shown: Vec<&str> = paths.iter().map(|p| p.to_str().unwrap_or("?")).collect();

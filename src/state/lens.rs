@@ -5,9 +5,10 @@
 //! it makes since where the two diverged (the merge base, pinned with the
 //! layer, so the view doesn't change when this workspace's base moves).
 //!
-//! A live layer follows its branch (`cli::layer`): a workspace's newest
-//! seal, or the branch's tip with `--commits` or without a workspace. A
-//! frozen one stays as taken, and a revision (a tag, a commit) is fixed.
+//! A live layer follows its branch (`cli::layer`): a workspace's work as
+//! `seal::Driven` says (an agent's at the end of its last turn), or the
+//! branch's tip with `--commits` or without a workspace. A frozen one stays
+//! as taken, and a revision (a tag, a commit) is fixed.
 //!
 //! What the workspace shows is then the view tree: its base's tree with each
 //! layer's changes on top, and upper over all of it as before. Where several
@@ -35,7 +36,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::os::fd::AsRawFd as _;
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
@@ -53,9 +53,7 @@ const LOCK: &str = "lens.lock";
 
 /// Held while a command reads, changes and stores a workspace's layers
 /// (`lock`); released when dropped, also when the process dies.
-pub struct LayersLock {
-    _file: fs::File,
-}
+pub type LayersLock = crate::lock::FileLock;
 
 /// Locks the layers of the workspace in `state` against other commands
 /// changing them, waiting for one that does: an exclusive `flock` on a file
@@ -64,22 +62,7 @@ pub struct LayersLock {
 /// add` runs, a proposal accepted meanwhile) don't lose one's change. The
 /// daemon only reads them, and takes no such lock.
 pub fn lock(state: &StateDir) -> Result<LayersLock> {
-    let path = state.dir.join(LOCK);
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("locking {}", path.display()))?;
-    loop {
-        // SAFETY: a plain syscall on a descriptor `file` owns.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
-            return Ok(LayersLock { _file: file });
-        }
-        let e = std::io::Error::last_os_error();
-        if e.kind() != std::io::ErrorKind::Interrupted {
-            return Err(e).with_context(|| format!("locking {}", path.display()));
-        }
-    }
+    crate::lock::wait(&state.dir.join(LOCK))
 }
 
 /// What a layer shows of its branch.

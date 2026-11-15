@@ -389,12 +389,15 @@ gitfold layer remove --all             # stop showing every layer
   it turned git off rather than let you commit others' work. The files
   still show. Run `gitfold layer remove --all` to use git again; `gitfold`
   commands keep working meanwhile.
-- **Layers move between turns, not during them.** With the gitfold plugin, a
-  workspace shown as a layer is snapshotted when its session stops, and your
-  live layers move to their newest work when your next prompt starts; you
-  are then told which layers changed (files you read from them may have
-  changed: read them again). Without the plugin, or for a workspace no
-  session runs in, `gitfold layer add <BRANCH>` brings it up to date.
+- **Layers move between turns, not during them.** With the gitfold plugin,
+  your live layers move when your next prompt starts, and you are told
+  which layers changed (files you read from them may have changed: read
+  them again). A live layer of an agent's workspace moves to its work as it
+  was at the end of the agent's last turn; of a workspace without an agent
+  (one a person edits), to its work as it is at your turn's start. A
+  branch without a workspace, or `--commits`, moves to the branch's tip.
+  Without the plugin, `gitfold layer add <BRANCH>` brings a layer up to
+  date.
 - **Changed files get a fresh time** at each switch, so incremental builds
   rebuild them.
 

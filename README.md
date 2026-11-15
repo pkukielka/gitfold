@@ -548,11 +548,14 @@ included (a snapshot of it, see above); of a branch without one, or with
 `--commits`, the branch's commits; of a tag or a commit, that commit. It is taken as the
 changes it makes since it and the workspace's base diverged; that merge base
 is pinned with the layer, so it shows the same files whatever happens to
-either branch until it moves. A live layer moves at the agent's turns (see
-*Between turns* below) and whenever `layer add` names it again: a
-workspace's to its newest snapshot (only one of its workspace as it is now,
-never one left by an earlier workspace of that branch; if it has none yet,
-one is taken then), a branch's to its tip. `--frozen` takes
+either branch until it moves. A live layer moves at your turns (see
+*Between turns* below) and whenever `layer add` names it again; a branch's
+moves to its tip. A live layer of an agent's workspace moves to its work
+as it was at the end of the agent's last turn; of a workspace without an
+agent, to its work as it is at your turn's start. (A workspace has an agent
+once its Claude Code session's `Stop` hook has run there; until then, and
+for a workspace a person edits, gitfold takes a snapshot of it at each of
+your turns' starts.) `--frozen` takes
 it as it is now and leaves it there (`--frozen --commits`: the branch's
 commits as they are now); a revision never moves. Adding a layer again
 replaces it in place, with the flags given, and brings it up to date: the
@@ -770,11 +773,13 @@ its new commits as they come; it says when there is nothing to show yet.
 - **Between turns, in Claude Code.** The plugin's hooks snapshot a session's
   workspace when the session stops (`gitfold snapshot --claude-hook stop`,
   only if some workspace has it as a layer), and when a prompt is sent,
-  move the session's workspace's live layers to their latest work (a
-  workspace's newest snapshot, a branch's tip), telling the agent which layers changed and
-  how many files, and any conflicts among them (`gitfold layer
-  --claude-hook user-prompt-submit`). What a layer shows thus changes only
-  between turns, never half-way through one, its agent's or the reader's.
+  move the session's workspace's live layers to their latest work (an
+  agent's workspace as it was when its last turn ended, a workspace
+  without an agent as it is now, a branch's tip), telling the agent which
+  layers changed and how many files, and any conflicts among them
+  (`gitfold layer --claude-hook user-prompt-submit`). What a layer shows
+  thus changes only between turns, never half-way through one, its agent's
+  or the reader's.
   Outside such a session, `gitfold layer add <BRANCH>` brings a layer up
   to date. A third hook, `gitfold layer --claude-hook pre-tool-use` on Edit,
   Write, MultiEdit and NotebookEdit, denies writing a layer's file with the

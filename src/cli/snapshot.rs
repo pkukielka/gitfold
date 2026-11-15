@@ -14,7 +14,7 @@ use crate::mount_table;
 use crate::refusal::Refusal;
 use crate::state::StateDir;
 use crate::state::retire::check_name;
-use crate::state::seal::{self, IDENTITY};
+use crate::state::seal::{self, By, IDENTITY};
 use crate::store::Store;
 
 #[derive(Args)]
@@ -41,17 +41,22 @@ pub struct SnapshotArgs {
 
 /// `gitfold snapshot --claude-hook stop`: when a session stops, seals its
 /// workspace if another workspace shows it as a layer, so layers move to the
-/// end of a turn, not into the middle of one (`gitfold layer --claude-hook`).
-/// Does nothing otherwise; errors are only logged.
+/// end of a turn, not into the middle of one (`gitfold layer --claude-hook`);
+/// either way records that the workspace has an agent (`seal::Driven`).
+/// Errors are only logged.
 pub fn snapshot_hook() -> Result<()> {
     if let Err(e) = (|| -> Result<()> {
         let repo = super::repo()?;
         let name = super::branch_or_current(None, &repo)?;
         let common_dir = git::init(&repo)?;
-        if !crate::state::lens::shown_anywhere(&common_dir, &name) {
+        let state = StateDir::of(&common_dir, &name);
+        if !state.opened() {
             return Ok(());
         }
-        seal::seal(&Store::default(), &StateDir::of(&common_dir, &name))?;
+        if !crate::state::lens::shown_anywhere(&common_dir, &name) {
+            return seal::stopped(&state);
+        }
+        seal::seal(&Store::default(), &state, By::StopHook)?;
         Ok(())
     })() {
         log::debug!("gitfold snapshot --claude-hook: {e:#}");
@@ -118,7 +123,7 @@ fn work_of(
     if !commits && check_name(what).is_ok() && !what.starts_with('@') {
         let state = StateDir::of(common_dir, what);
         if state.opened() {
-            let s = seal::seal(store, &state)?;
+            let s = seal::seal(store, &state, By::Other)?;
             return Ok((what.to_string(), s.commit, s.same));
         }
     }

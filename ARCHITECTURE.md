@@ -143,7 +143,7 @@ Then, per request (`fs/workspace/`):
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/state/restack.rs` | a restack under way in a workspace: the `restack` intent file (locked while it runs), and finishing or undoing one a crash interrupted |
-| `src/state/seal.rs` | seals (snapshots, to users): a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>`; the workspace's newest one recorded in its state (`sealed`) |
+| `src/state/seal.rs` | seals (snapshots, to users): a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`sealed`): whether an agent drives it |
 | `src/state/lens.rs` | a workspace's layers: the `lens` file (each layer's seal, what it shows and how it updates, the layer a proposal stands in for; version 1 files read too), its lock (`lens.lock`), the view (view and hunk trees, mixed and blended paths, conflicts, notes) and which files are blended (`merge=union`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
@@ -241,14 +241,16 @@ term; they never appear in messages, help or the README.
   commit of a workspace's uncommitted work: the tree it shows, ignored
   files left out, on its base, made with a fixed identity and date.
   `gitfold snapshot` and the `Stop` hook make one. Its refs outlive the
-  workspace; the workspace's own newest is recorded in its state
-  (`sealed`), so a live layer never follows an earlier workspace's.
+  workspace; the one the workspace's own `Stop` hook made last is recorded
+  in its state (`sealed`), so a live layer never follows an earlier
+  workspace's.
 - **Layer**: another branch's work shown in a workspace, read-only: one of
   its workspace's seals, or a branch's or a revision's commit, as the
   changes since a pinned merge base. **Live** layers follow their branch
-  (the newest seal of its workspace as it is now, one taken at the
-  reader's turn start if it has none yet; or the tip), **frozen** ones
-  stay as taken, revisions are **fixed**.
+  (an agent's workspace: the seal its `Stop` hook made at the end of its
+  last turn; a workspace without an agent: a seal taken at each of the
+  reader's turn starts; or the tip), **frozen** ones stay as taken,
+  revisions are **fixed**.
 - **Lens** (*internal*; user-facing: the layers): the layers of a
   workspace, in the order added (also the name of the file storing them);
   **lensed** (*internal*; user-facing: "layers shown") means it has at
@@ -1502,7 +1504,7 @@ a snapshot, with no change to any workspace.
   catches up once no layer shows.
 - **Moves at turn boundaries, by hooks:** a workspace shown as a layer is
   sealed when its Claude Code session stops (`snapshot --claude-hook stop`), and
-  a reader's live layers move to the newest seals (or, for commits, the
+  a reader's live layers move to their latest work (below; for commits, the
   branch tips) when its next prompt is sent (`layer --claude-hook
   user-prompt-submit`), which tells the agent which changed, and records
   when each moved (the listing's `live, last HH:MM`). Neither agent sees
@@ -1510,18 +1512,37 @@ a snapshot, with no change to any workspace.
   mid-turn. The agent's own `gitfold layer add` switches at once: a
   boundary it chose. Frozen layers and revisions never move: a reader
   that wants a fixed point says so, rather than turning a layer off.
-- **A live layer follows its workspace as it is now:** the newest seal is
-  the one recorded in the workspace's own state directory (`sealed`, written
-  by every seal), not the highest-numbered ref: seal refs outlive the
+- **A live layer follows an agent's turns, or a person's work as it is:**
+  a live layer of an agent's workspace moves to its work as it was at the
+  end of the agent's last turn; of a workspace without an agent, to its
+  work as it is at the reader's turn start. Which one a workspace is, its
+  own `Stop` hook tells: each run records itself in the workspace's state
+  directory (`sealed`: `<seal> stop`, or `- stop` when no layer showed it,
+  so no seal was made). A workspace with that record has an agent, and its
+  layers follow only the seal recorded there (none: they stay as they
+  are), never one taken half-way through its turn; `layer add` takes that
+  one too, or one now if there is none (`--frozen`: one now). Any other
+  workspace (no record, or one an earlier build wrote for any seal) has no
+  turns: a seal is taken at each reader's turn start (and on `layer add`),
+  so it follows every time, not once. A proposal accepted into an agent's
+  workspace is recorded the same way (the owner's own boundary), so
+  followers see it at their next turn. The record is in the workspace's
+  state directory, not the highest-numbered ref: seal refs outlive the
   workspace (layers name them, and the id comes from the branch name), so
   after `gitfold remove` and a new workspace of that branch the newest ref
   is an earlier workspace's work. The state directory goes with the
-  workspace, so its record can't be stale. A workspace with no seal yet
-  (opened since, or whose sessions never stopped: a person's) is sealed at
-  the reader's turn start, rather than the layer staying on old work.
-  Rejected: deleting a workspace's seal refs on `remove` (refs that layers
+  workspace, so its record can't be stale; the seal it names is kept from
+  pruning. Rejected: following the newest seal whoever made it (a reader's
+  turn start would then seal an agent's workspace half-way through its
+  turn); deleting a workspace's seal refs on `remove` (refs that layers
   name must stay, so the newest could still be old); numbering
   incarnations in the ref names (a new ref layout, for the same result).
+- **Seals of one workspace at once** (its `Stop` hook and readers' turn
+  starts) are numbered, given their ref and recorded under an `flock` on
+  `sealed.lock` in its state directory, so none takes another's number
+  (`update-ref` creating the ref would fail). In a reader's turn start, a
+  layer that can't move (its workspace's seal failing) is left as it is,
+  and the others still move.
 - **Read-modify-write of the layers under a lock:** `layer add`/`remove`,
   the hook moving live layers, `propose`, and `accept`/`reject` putting a
   layer back all read the layers file, change it and write it whole;
@@ -1638,11 +1659,12 @@ the proposal (workspace, branch, start ref, seals no stack names).
   them, so the kernel and git are told as for any write), or offline into
   upper and the markers under the repository lock; the root commits as
   usual. Workspaces showing the layer move at their next turn by the
-  existing hook (the layer is sealed at once); the proposer is switched
-  back at once, its stack stored first, so a switch refused now happens
-  when it can. The proposer's own proposal is sealed by the proposer's
-  `UserPromptSubmit` hook, since its edits are made from that session
-  (whose `Stop` seals only its own workspace).
+  existing hook (the layer is sealed at once, recorded as its agent's
+  boundary if it has one); the proposer is switched back at once, its
+  stack stored first, so a switch refused now happens when it can. The
+  proposer's own proposal has no agent of its own (its edits are made
+  from the proposer's session, whose `Stop` records only its own
+  workspace), so the proposer's `UserPromptSubmit` hook seals it each turn.
 
 **Rejected:**
 

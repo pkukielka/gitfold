@@ -11,11 +11,21 @@
 //! numbered from 1 (git would prune it otherwise); the oldest beyond
 //! `KEPT` are deleted.
 //!
-//! The refs outlive the workspace (`gitfold remove` keeps them while layers
-//! name them, and the id comes from the branch name), so the newest ref may
-//! hold an earlier workspace's work. What this workspace's newest seal is
-//! is recorded in its state directory (`SEALED`), which goes with it: a live
-//! layer follows that (`newest`), never an earlier workspace's work.
+//! A workspace's own Claude Code `Stop` hook, at the end of its agent's
+//! turn, records in its state directory (`SEALED`) that it has an agent,
+//! with a seal of its work then if another workspace shows it as a layer
+//! (`By::StopHook`). The record goes with the workspace. A live layer of a
+//! workspace with an agent follows that seal (`driven`): it shows its work
+//! as it was at the end of the agent's last turn, never half-way through
+//! one. A workspace without (a person's) has no turns, so its layers take a
+//! fresh seal at each of their own turns' starts. The refs outlive the
+//! workspace (`gitfold remove` keeps them while layers name them, and the
+//! id comes from the branch name), so the newest ref may hold an earlier
+//! workspace's work: the record never does.
+//!
+//! Numbering, the ref and the record are written under a lock on the
+//! workspace's `SEAL_LOCK`, so two seals at once (its `Stop` hook and
+//! another workspace's turn start) don't take the same number.
 
 use std::collections::HashMap;
 use std::fs;
@@ -34,8 +44,28 @@ use crate::store::Store;
 /// How many seals of one workspace are kept (the newest).
 const KEPT: usize = 16;
 
-/// The file in a workspace's state directory naming its newest seal.
+/// The file in a workspace's state directory recording its own `Stop`
+/// hook's last run: `<sha> stop`, the seal it made, or `- stop`, none (no
+/// layer showed it). (Earlier builds wrote a bare `<sha>` for any seal: not
+/// one of its hook's.)
 const SEALED: &str = "sealed";
+
+/// The file locked while a seal is numbered and recorded.
+const SEAL_LOCK: &str = "sealed.lock";
+
+/// Who makes a seal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum By {
+    /// The workspace's own Claude Code `Stop` hook, at the end of its
+    /// agent's turn: recorded (see the module doc).
+    StopHook,
+    /// Its owner, at a point of its choosing (a proposal accepted into it):
+    /// recorded as the `Stop` hook's if it has an agent, so its layers show
+    /// what it accepted from their next turn.
+    Owner,
+    /// A command (`snapshot`, `layer`, a proposal): not recorded.
+    Other,
+}
 
 /// The identity and date seals (and mixes) are made with: the same trees and
 /// parents give the same commit.
@@ -59,28 +89,34 @@ pub fn ref_prefix(id: &str) -> String {
     format!("refs/gitfold-seal/{id}/")
 }
 
-/// Seals the work of the workspace stored in `state` (see the module doc).
-/// Called by the commands themselves (`snapshot`, `layer`, the `Stop`
-/// hook), mounted or not, without the daemon or a lock: it reads the stored
-/// state (upper, markers, base) as it is, so a write in progress meanwhile
-/// may be half-seen. That is why the hooks seal at turn ends, when the
-/// workspace's agent isn't writing.
-pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
+/// Seals the work of the workspace stored in `state` (see the module doc),
+/// made `by` its `Stop` hook, its owner or another command. Called by the commands
+/// themselves (`snapshot`, `layer`, the `Stop` hook), mounted or not,
+/// without the daemon: it reads the stored state (upper, markers, base) as
+/// it is, so a write in progress meanwhile may be half-seen. That is why the
+/// hooks seal at turn ends, when the workspace's agent isn't writing.
+pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;
     let blends = blends(state, &base)?;
     let tree = tree_of(state, &base.tree, &s.changed, &s.deleted, &blends)
         .with_context(|| format!("taking a snapshot of {}", state.branch))?;
     let commit = commit(&state.common_dir, &tree, &base.id, &state.branch)?;
+    let _lock = crate::lock::wait(&state.dir.join(SEAL_LOCK))?;
     let seals = list(&state.common_dir, &state.id)?;
-    let record = || {
-        crate::fsutil::write_atomic(&state.dir.join(SEALED), commit.to_string().as_bytes())
-            .with_context(|| format!("recording the snapshot of {}", state.branch))
+    let recorded = match by {
+        By::StopHook => true,
+        By::Owner => matches!(driven(state), Driven::Agent(_)),
+        By::Other => false,
+    };
+    let note = || match recorded {
+        true => record(state, Some(commit)),
+        false => Ok(()),
     };
     if let Some(&(_, newest)) = seals.last()
         && newest == commit
     {
-        record()?;
+        note()?;
         return Ok(Seal { commit, same: true });
     }
     let seq = seals.last().map_or(1, |&(seq, _)| seq + 1);
@@ -89,9 +125,13 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
         &state.common_dir,
         &["update-ref", &name, &commit.to_string(), ""],
     )?;
-    record()?;
-    // The oldest go, unless a workspace's layers name them.
-    let named = super::lens::named_seals(&state.common_dir);
+    note()?;
+    // The oldest go, unless a workspace's layers name them, or a live layer
+    // of this one would follow it.
+    let mut named = super::lens::named_seals(&state.common_dir);
+    if let Driven::Agent(Some(followed)) = driven(state) {
+        named.insert(followed);
+    }
     let old = seals.iter().take((seals.len() + 1).saturating_sub(KEPT));
     for (old, _) in old.filter(|(_, c)| !named.contains(c)) {
         let name = format!("{}{old}", ref_prefix(&state.id));
@@ -103,11 +143,46 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
     })
 }
 
-/// The newest seal of the workspace in `state` (this one, not an earlier
-/// workspace of its branch: see the module doc), if it has one.
-pub fn newest(state: &StateDir) -> Option<ObjectId> {
-    let hex = fs::read_to_string(state.dir.join(SEALED)).ok()?;
-    ObjectId::from_hex(hex.trim().as_bytes()).ok()
+/// Who drives a workspace, as its live layers follow it (see the module
+/// doc).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Driven {
+    /// No `Stop` hook of its own ran (a person's): no turns to wait for.
+    Person,
+    /// An agent, whose `Stop` hook ran: the seal it made at the end of its
+    /// last turn (this workspace's, never an earlier one of its branch), if
+    /// a layer showed it then.
+    Agent(Option<ObjectId>),
+}
+
+/// Who drives the workspace in `state` (see `Driven`).
+pub fn driven(state: &StateDir) -> Driven {
+    let Ok(text) = fs::read_to_string(state.dir.join(SEALED)) else {
+        return Driven::Person;
+    };
+    match text.trim().split_once(' ') {
+        Some((hex, "stop")) => Driven::Agent(ObjectId::from_hex(hex.as_bytes()).ok()),
+        _ => Driven::Person,
+    }
+}
+
+/// The `Stop` hook of the workspace in `state` ran without sealing it (no
+/// layer shows it): it has an agent, and an earlier seal of its hook's is
+/// stale now.
+pub fn stopped(state: &StateDir) -> Result<()> {
+    let _lock = crate::lock::wait(&state.dir.join(SEAL_LOCK))?;
+    if driven(state) == Driven::Agent(None) {
+        return Ok(());
+    }
+    record(state, None)
+}
+
+/// Records a run of the `Stop` hook of the workspace in `state`, with the
+/// seal it made.
+fn record(state: &StateDir, seal: Option<ObjectId>) -> Result<()> {
+    let seal = seal.map_or("-".to_string(), |s| s.to_string());
+    crate::fsutil::write_atomic(&state.dir.join(SEALED), format!("{seal} stop").as_bytes())
+        .with_context(|| format!("recording the snapshot of {}", state.branch))
 }
 
 /// Workspace `id`'s seals, oldest first: (number, commit).

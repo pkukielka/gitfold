@@ -59,6 +59,34 @@ pub fn lock(common_dir: &Path) -> Result<Option<Lock>> {
     Ok(Some(Lock { _file: locked }))
 }
 
+/// An exclusive `flock` on a file (`wait`); released when dropped, also when
+/// the process dies.
+pub struct FileLock {
+    _file: fs::File,
+}
+
+/// Takes an exclusive `flock` on the file at `path` (created if missing),
+/// waiting for whoever holds it.
+pub fn wait(path: &Path) -> Result<FileLock> {
+    let context = || format!("locking {}", path.display());
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(context)?;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+    loop {
+        // SAFETY: a plain syscall on a descriptor `file` owns.
+        if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
+            return Ok(FileLock { _file: file });
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e).with_context(context);
+        }
+    }
+}
+
 /// An exclusive, non-blocking `flock`: whether it was taken.
 pub fn flock(file: &fs::File) -> std::io::Result<bool> {
     let fd = std::os::fd::AsRawFd::as_raw_fd(file);

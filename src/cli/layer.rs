@@ -28,10 +28,11 @@ pub struct LayerArgs {
     #[command(subcommand)]
     pub op: Option<LayerOp>,
     /// As Claude Code's `UserPromptSubmit` hook (`user-prompt-submit`): bring
-    /// the live layers of the workspace the session is in up to date (a
-    /// workspace's newest snapshot, made when its session stopped, or a
-    /// branch's tip), move it onto its base's new commits if it is built on
-    /// one (`gitfold layer base`), and say what changed. As `PreToolUse` on
+    /// the live layers of the workspace the session is in up to date (an
+    /// agent's workspace as it was when its last turn ended, one without an
+    /// agent as it is now, or a branch's tip), move it onto its base's new
+    /// commits if it is built on one (`gitfold layer base`), and say what
+    /// changed. As `PreToolUse` on
     /// Edit, Write, MultiEdit and NotebookEdit (`pre-tool-use`): deny
     /// writing a layer's file, saying why.
     #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit", "pre-tool-use"])]
@@ -275,13 +276,14 @@ fn updates(layer: &Layer) -> String {
 }
 
 /// `gitfold layer --claude-hook user-prompt-submit`: at the start of a turn,
-/// the live layers of the workspace the session is in move to their newest
-/// work (a workspace's newest snapshot: `gitfold snapshot --claude-hook
-/// stop` makes one when a session stops), so what shows changes only
-/// between turns, never half-way through another's; a branch built on a
-/// base is moved onto its new commits first (`stack::hook_context`). What
-/// changed is printed, which becomes context. Does nothing outside a
-/// workspace with layers or a base; errors are only logged.
+/// the live layers of the workspace the session is in move to their latest
+/// work (`latest_work`: an agent's workspace as `gitfold snapshot
+/// --claude-hook stop` took it when its last turn ended, one without an
+/// agent as it is now), so what shows changes only between turns, never
+/// half-way through another's; a branch built on a base is moved onto its
+/// new commits first (`stack::hook_context`). What changed is printed,
+/// which becomes context. Does nothing outside a workspace with layers or a
+/// base; errors are only logged.
 pub fn layer_hook(event: &str) -> Result<()> {
     if event == "pre-tool-use" {
         return deny_hook();
@@ -307,35 +309,21 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let mut lens = Lens::read(&state)?;
         let (mut moved, mut stored) = (Vec::new(), false);
         let local = Local::read(&common_dir);
+        let base = state.read_base()?.id;
         for layer in &mut lens.layers {
             if layer.updates != Updates::Live {
                 continue;
             }
-            // Its own proposal is edited from this session, whose end
-            // snapshots only this workspace: snapshotted here, so the edits
-            // show.
-            let theirs = StateDir::of(&common_dir, &layer.branch);
-            if local
-                .proposal(&layer.branch)
-                .is_some_and(|(_, by)| by == name)
-                && theirs.opened()
-            {
-                seal::seal(&Store::default(), &theirs)?;
-            }
-            let Some((newest, shows)) = newest(&common_dir, &local, layer)? else {
-                continue;
+            // One layer that can't move now (its workspace busy, say) leaves
+            // the others to move.
+            let files = match follow(&common_dir, &local, base, layer) {
+                Ok(Some(files)) => files,
+                Ok(None) => continue,
+                Err(e) => {
+                    log::debug!("gitfold layer --claude-hook: layer {}: {e:#}", layer.branch);
+                    continue;
+                }
             };
-            if newest == layer.seal {
-                continue;
-            }
-            let (from, to) = (
-                git::resolve(&layer.seal.to_string())?,
-                git::resolve(&newest.to_string())?,
-            );
-            let files = git::with_repo(|repo| git::lens::delta(repo, from.tree, to.tree))?.len();
-            layer.merge_base = git::merge_base(state.read_base()?.id, newest)?;
-            layer.seal = newest;
-            layer.shows = shows;
             stored = true;
             // The same files (its snapshot of what its tip has): nothing to
             // say, nor a move to show.
@@ -375,26 +363,42 @@ pub fn layer_hook(event: &str) -> Result<()> {
     Ok(())
 }
 
+/// Moves live `layer` (of a workspace on `base`) to where it is now
+/// (`newest`): how many files changed, `None` if it didn't move.
+fn follow(
+    common_dir: &Path,
+    local: &Local,
+    base: ObjectId,
+    layer: &mut Layer,
+) -> Result<Option<usize>> {
+    let Some((newest, shows)) = newest(common_dir, local, layer)? else {
+        return Ok(None);
+    };
+    if newest == layer.seal {
+        return Ok(None);
+    }
+    let (from, to) = (
+        git::resolve(&layer.seal.to_string())?,
+        git::resolve(&newest.to_string())?,
+    );
+    let files = git::with_repo(|repo| git::lens::delta(repo, from.tree, to.tree))?.len();
+    layer.merge_base = git::merge_base(base, newest)?;
+    layer.seal = newest;
+    layer.shows = shows;
+    Ok(Some(files))
+}
+
 /// Where live `layer` is now, and what it shows there: its workspace's
-/// newest snapshot, or with `--commits` or without a workspace, its
+/// work (`latest_work`), or with `--commits` or without a workspace, its
 /// branch's tip (`None` if the branch is gone).
-///
-/// Only a snapshot of its workspace as it is now counts, never one of an
-/// earlier workspace of the branch (removed, then opened again: its
-/// snapshots' refs outlive it). A workspace with none yet (opened since, or
-/// whose sessions never stopped, as a person's) gets one now, at this
-/// turn's start: the layer follows its work rather than going stale.
 fn newest(common_dir: &Path, local: &Local, layer: &Layer) -> Result<Option<(ObjectId, Shows)>> {
     if !git::branch_exists(&layer.branch) {
         return Ok(None);
     }
     let theirs = StateDir::of(common_dir, &layer.branch);
     if layer.shows != Shows::CommitsOnly && theirs.opened() {
-        let newest = match seal::newest(&theirs) {
-            Some(newest) => newest,
-            None => seal::seal(&Store::default(), &theirs)?.commit,
-        };
-        return Ok(Some((newest, Shows::Work)));
+        let work = latest_work(&Store::default(), &theirs)?;
+        return Ok(work.map(|work| (work, Shows::Work)));
     }
     let shows = match layer.shows {
         Shows::CommitsOnly => Shows::CommitsOnly,
@@ -402,6 +406,20 @@ fn newest(common_dir: &Path, local: &Local, layer: &Layer) -> Result<Option<(Obj
         _ => Shows::Commits,
     };
     Ok(Some((git::branch_tip(&layer.branch)?.id, shows)))
+}
+
+/// The work of the workspace in `theirs` a live layer shows (see
+/// `state::seal`): an agent's (one whose `Stop` hook ran) as it was at the
+/// end of its last turn, never half-way through one; one without an agent
+/// (a person's, a proposal edited from another workspace) has no turns, so
+/// a fresh snapshot, as it is now. An agent's that wasn't shown when its
+/// last turn ended has none to follow (`None`): the layer stays as it was
+/// added.
+fn latest_work(store: &Store, theirs: &StateDir) -> Result<Option<ObjectId>> {
+    Ok(match seal::driven(theirs) {
+        seal::Driven::Agent(last_turn) => last_turn,
+        seal::Driven::Person => Some(seal::seal(store, theirs, seal::By::Other)?.commit),
+    })
 }
 
 /// Whether `branch` is a proposal: a workspace to edit, its work shown as
@@ -553,7 +571,14 @@ pub(super) fn layer_of(
         check_name(branch)?;
         let theirs = StateDir::of(common_dir, branch);
         match (theirs.opened(), commits) {
-            (true, false) => (seal::seal(store, &theirs)?.commit, Shows::Work, updates),
+            // Live: as it follows it (`latest_work`), else as it is now.
+            (true, false) => {
+                let work = match (frozen, seal::driven(&theirs)) {
+                    (false, seal::Driven::Agent(Some(last_turn))) => last_turn,
+                    _ => seal::seal(store, &theirs, seal::By::Other)?.commit,
+                };
+                (work, Shows::Work, updates)
+            }
             (_, true) => (git::branch_tip(branch)?.id, Shows::CommitsOnly, updates),
             (false, false) => {
                 let shows = match is_proposal(&Local::read(common_dir), branch) {

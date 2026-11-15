@@ -336,6 +336,68 @@ check "and remove --all works" "$BIN" -C "$W" layer remove --all
 eq "nothing shown" "no|No layers." "$(test -e "$W/o2.txt" && echo yes || echo no)|$("$BIN" -C "$W" layer | tail -1)"
 }
 
+# Claude Code's hooks in workspace directory $1: its turn ends (Stop) or
+# starts (UserPromptSubmit).
+turn_ends() { (cd "$1" && "$BIN" snapshot --claude-hook stop); }
+turn_starts() { (cd "$1" && "$BIN" layer --claude-hook user-prompt-submit); }
+
+layers_of_an_agent_and_of_a_person() {
+R branch me; R branch ag; R branch pe
+mount_fs
+W=$MNT/me
+ls "$W" >/dev/null
+# A person's workspace (no Stop hook of its own runs): no turns, so at each
+# of this workspace's turn starts, as it is then.
+echo "pe 1" >"$MNT/pe/pe.txt"
+"$BIN" -C "$W" layer add pe >/dev/null
+eq "a person's work, added" "pe 1" "$(cat "$W/pe.txt")"
+for i in 2 3 4; do
+    echo "pe $i" >"$MNT/pe/pe.txt"; turn_starts "$W" >/dev/null
+    eq "a person's work: at every turn start, as it is then ($i)" "pe $i" "$(cat "$W/pe.txt")"
+done
+# A record an earlier build wrote (any snapshot's): not an agent's.
+echo "$(R rev-parse main)" >"$COMMON/gitfold/pe/sealed"
+echo "pe 5" >"$MNT/pe/pe.txt"; turn_starts "$W" >/dev/null
+eq "an earlier build's record: still followed as it is now" "pe 5" "$(cat "$W/pe.txt")"
+
+# An agent's workspace: as it was at the end of its last turn, never
+# half-way through one.
+echo "ag 1" >"$MNT/ag/ag.txt"
+eq "its turn ends, no layer shows it: no snapshot" "|" "$(turn_ends "$MNT/ag")|$(R for-each-ref refs/gitfold-seal/ag)"
+"$BIN" -C "$W" layer add ag >/dev/null
+eq "added: as it is now (no turn of its ended while shown)" "ag 1" "$(cat "$W/ag.txt")"
+echo "ag 2" >"$MNT/ag/ag.txt"; turn_starts "$W" >/dev/null
+eq "its turn under way: not shown half-way" "ag 1" "$(cat "$W/ag.txt")"
+turn_ends "$MNT/ag"; echo "ag 3, half-way" >"$MNT/ag/ag.txt"
+out=$(turn_starts "$W")
+eq "its turn ended: shown as it was then, and said" "ag 2|yes" \
+    "$(cat "$W/ag.txt")|$(grep -q 'moved to their latest work: ag (1 file changed)' <<<"$out" && echo yes)"
+"$BIN" -C "$W" layer add ag >/dev/null
+eq "added again: its last turn's end still" "ag 2" "$(cat "$W/ag.txt")"
+"$BIN" -C "$W" layer add ag --frozen >/dev/null
+eq "added frozen: as it is now" "ag 3, half-way" "$(cat "$W/ag.txt")"
+"$BIN" -C "$W" layer add ag >/dev/null
+eq "live again: its last turn's end" "ag 2" "$(cat "$W/ag.txt")"
+
+# One layer that can't move doesn't keep the others from moving.
+echo "1111111111111111111111111111111111111111 stop" >"$COMMON/gitfold/ag/sealed"
+echo "pe 6" >"$MNT/pe/pe.txt"; turn_starts "$W" >/dev/null
+eq "a layer that can't move: the others still do" "pe 6|ag 2" "$(cat "$W/pe.txt")|$(cat "$W/ag.txt")"
+turn_ends "$MNT/ag"; turn_starts "$W" >/dev/null
+eq "and it moves once it can" "ag 3, half-way" "$(cat "$W/ag.txt")"
+
+# Snapshots of one workspace at once (its Stop hook, others' turn starts):
+# each gets a number of its own, none fails.
+pids=()
+for i in 1 2 3 4 5 6 7 8; do
+    echo "c$i" >"$MNT/pe/c$i.txt"; "$BIN" -C "$REPO" snapshot pe >/dev/null 2>&1 & pids+=($!)
+done
+rcs=""; for p in "${pids[@]}"; do wait "$p"; rcs+=$?; done
+eq "snapshots at once: all made" "00000000" "$rcs"
+eq "numbered one after another" "$(R for-each-ref refs/gitfold-seal/pe | wc -l)" \
+    "$(R for-each-ref --format='%(refname)' refs/gitfold-seal/pe | sed 's|.*/||' | sort -n | tail -1)"
+}
+
 blended_files_and_the_layers_commit() {
 echo 'reg.txt merge=union' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
 R add -A; R commit -qm blendable
@@ -568,6 +630,7 @@ section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
 section "layers: several changing one file" layers_changing_one_file
 section "layers: following a workspace as it is now; v1 files; at once" layers_follow_the_workspace_as_it_is_now
+section "layers: of an agent and of a person" layers_of_an_agent_and_of_a_person
 section "layers: blended files, the layers commit" blended_files_and_the_layers_commit
 section "snapshot: one workspace's work" snapshot_of_one_workspace
 section "snapshot: several merged" snapshot_of_several_merged
