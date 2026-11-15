@@ -208,7 +208,7 @@ W=$MNT/me
 echo live >"$MNT/live/live.txt"; echo fz >"$MNT/frozen/frozen.txt"
 echo cm >"$MNT/commits/cm.txt"; G "$MNT/commits" add cm.txt; G "$MNT/commits" commit -qm cm
 echo uncommitted >"$MNT/commits/cu.txt"
-ls "$W" >/dev/null
+ls "$W" >/dev/null; turn_starts "$W" >/dev/null   # an agent's: its layers move at its turns
 check "add: live, --frozen, --commits, a branch without a workspace, a tag" sh -c "
     '$BIN' -C '$W' layer add live && '$BIN' -C '$W' layer add frozen --frozen &&
     '$BIN' -C '$W' layer add commits --commits && '$BIN' -C '$W' layer add plain &&
@@ -305,7 +305,7 @@ R branch me; R branch b; R branch o1; R branch o2; R branch o3; R branch o4
 mount_fs
 W=$MNT/me
 echo "b v1" >"$MNT/b/b.txt"; snap b >/dev/null
-ls "$W" >/dev/null
+ls "$W" >/dev/null; turn_starts "$W" >/dev/null   # an agent's: its layers move at its turns
 "$BIN" -C "$W" layer add b >/dev/null
 eq "a layer of b's work" "b v1" "$(cat "$W/b.txt")"
 "$BIN" -C "$REPO" remove --force b >/dev/null
@@ -355,7 +355,7 @@ layers_of_an_agent_and_of_a_person() {
 R branch me; R branch ag; R branch pe
 mount_fs
 W=$MNT/me
-ls "$W" >/dev/null
+ls "$W" >/dev/null; turn_starts "$W" >/dev/null   # an agent's: its layers move at its turns
 # A person's workspace (no Stop hook of its own runs): no turns, so at each
 # of this workspace's turn starts, as it is then.
 echo "pe 1" >"$MNT/pe/pe.txt"
@@ -406,6 +406,71 @@ rcs=""; for p in "${pids[@]}"; do wait "$p"; rcs+=$?; done
 eq "snapshots at once: all made" "00000000" "$rcs"
 eq "numbered one after another" "$(R for-each-ref refs/gitfold-seal/pe | wc -l)" \
     "$(R for-each-ref --format='%(refname)' refs/gitfold-seal/pe | sed 's|.*/||' | sort -n | tail -1)"
+}
+
+# Waits up to 15 s for file $1 to hold $2 (its last line); prints the time
+# waited in seconds.
+wait_for_line() {
+    local start=$SECONDS
+    for _ in $(seq 150); do [ "$(tail -1 "$1" 2>/dev/null)" = "$2" ] && break; sleep 0.1; done
+    echo $((SECONDS - start))
+}
+
+layers_move_by_themselves_without_an_agent() {
+R branch pe; R branch ag; R branch src; R branch fz; R branch tipb
+mount_fs
+P=$MNT/pe A=$MNT/ag
+ls "$P" "$A" >/dev/null
+# No hook ever runs in pe: a person works in it. One ran in ag: an agent's.
+turn_starts "$A" >/dev/null
+echo "src 1" >"$MNT/src/s.txt"; echo "fz 1" >"$MNT/fz/f.txt"
+for w in "$P" "$A"; do
+    "$BIN" -C "$w" layer add src >/dev/null; "$BIN" -C "$w" layer add fz --frozen >/dev/null
+done
+"$BIN" -C "$P" layer add tipb >/dev/null
+eq "added" "src 1|src 1|fz 1" "$(cat "$P/s.txt")|$(cat "$A/s.txt")|$(cat "$P/f.txt")"
+echo "src 2" >"$MNT/src/s.txt"; echo "fz 2" >"$MNT/fz/f.txt"
+wait_for_line "$P/s.txt" "src 2" >/dev/null
+eq "a person's workspace: a layer's new work shows by itself, within seconds" "src 2" "$(cat "$P/s.txt")"
+eq "a frozen layer doesn't move" "fz 1" "$(cat "$P/f.txt")"
+eq "an agent's workspace: not between its turns" "src 1" "$(cat "$A/s.txt")"
+eq "the listing says when it moved" "src all work live, last HH:MM" "$(listing "$P" | grep '^src')"
+check "the daemon log says so, one line" grep -q 'pe: its layers moved to their latest work (3 s without a write, no agent): src (1 file changed)' "$LOG"
+out=$(turn_starts "$A")
+eq "the agent's next turn moves it, and says so" "src 2|yes" \
+    "$(cat "$A/s.txt")|$(grep -q 'moved to their latest work: src (1 file changed)' <<<"$out" && echo yes)"
+eq "frozen there too" "fz 1" "$(cat "$A/f.txt")"
+
+# A branch's tip that moved.
+R switch -q tipb; echo "tip 1" >"$REPO/t.txt"; R add t.txt; R commit -qm t; R switch -q main
+wait_for_line "$P/t.txt" "tip 1" >/dev/null
+eq "a branch's new commit shows by itself" "tip 1" "$(cat "$P/t.txt" 2>/dev/null)"
+
+# Not while the workspace is being written to.
+echo "src 3" >"$MNT/src/s.txt"
+moved=no
+for i in $(seq 12); do
+    echo "$i" >>"$P/own.txt"; sleep 0.5
+    [ "$(cat "$P/s.txt")" = "src 3" ] && moved=yes
+done
+eq "being written to: it waits" "no" "$moved"
+took=$(wait_for_line "$P/s.txt" "src 3")
+eq "then moves once nothing wrote for a few seconds" "src 3" "$(cat "$P/s.txt")"
+check "not before ($took s after the last write)" test "$took" -ge 2
+
+# An agent's workspace as a layer: its end-of-turn snapshots only.
+"$BIN" -C "$P" layer add ag >/dev/null
+echo "ag 1" >"$A/a1.txt"; turn_ends "$A"
+wait_for_line "$P/a1.txt" "ag 1" >/dev/null
+eq "an agent's turn ended: its work shows by itself" "ag 1" "$(cat "$P/a1.txt" 2>/dev/null)"
+echo "ag 2, half-way" >"$A/a1.txt"
+sleep 6
+eq "never half-way through its turn" "ag 1" "$(cat "$P/a1.txt")"
+turn_ends "$A"
+wait_for_line "$P/a1.txt" "ag 2, half-way" >/dev/null
+eq "its next turn's end shows" "ag 2, half-way" "$(cat "$P/a1.txt")"
+eq "the frozen layer still as added" "fz 1" "$(cat "$P/f.txt")"
+eq "the agent's workspace: still as its last turn's start" "src 2" "$(cat "$A/s.txt")"
 }
 
 blended_files_and_the_layers_commit() {
@@ -464,7 +529,7 @@ mount_fs
 echo 'fn put(id)' >>"$MNT/contracts/api.txt"   # the root's contract, uncommitted
 echo 'fn mine(id)' >"$MNT/c5/api.txt"          # c5's own version, before the layer
 echo lib >"$MNT/lib/lib.txt"
-for c in c1 c2 c3 c4 c5; do ls "$MNT/$c" >/dev/null; "$BIN" -C "$REPO" layer add contracts -w $c >/dev/null; done
+for c in c1 c2 c3 c4 c5; do ls "$MNT/$c" >/dev/null; turn_starts "$MNT/$c" >/dev/null; "$BIN" -C "$REPO" layer add contracts -w $c >/dev/null; done
 "$BIN" -C "$REPO" layer add lib -w c2 >/dev/null                                  # c2 shows two layers
 for c in c1 c2 c3 c5; do "$BIN" -C "$REPO" track-reads $c on >/dev/null; done   # c4: reads unknown
 read_file "$MNT/c1/api.txt" "$MNT/c2/api.txt" "$MNT/c3/a.txt" "$MNT/c5/api.txt"
@@ -601,7 +666,7 @@ mount_fs
 W=$MNT/me
 echo 'fn put(id)' >>"$MNT/lead/api.txt"; G "$MNT/lead" commit -qam put
 echo 'fn wip(id)' >>"$MNT/lead/api.txt"
-ls "$W" "$MNT/rd" >/dev/null
+ls "$W" "$MNT/rd" >/dev/null; turn_starts "$W" >/dev/null; turn_starts "$MNT/rd" >/dev/null
 "$BIN" -C "$W" layer add lead --commits >/dev/null
 out=$("$BIN" -C "$W" propose api.txt)
 eq "propose: a copy of the layer's work; the next turn shows the edits" "yes yes" \
@@ -649,6 +714,7 @@ section "layers: live, frozen, commits only, revisions; the listing" layers_live
 section "layers: several changing one file" layers_changing_one_file
 section "layers: following a workspace as it is now; v1 files; at once" layers_follow_the_workspace_as_it_is_now
 section "layers: of an agent and of a person" layers_of_an_agent_and_of_a_person
+section "layers: moving by themselves without an agent" layers_move_by_themselves_without_an_agent
 section "layers: blended files, the layers commit" blended_files_and_the_layers_commit
 section "snapshot: one workspace's work" snapshot_of_one_workspace
 section "snapshot: several merged" snapshot_of_several_merged

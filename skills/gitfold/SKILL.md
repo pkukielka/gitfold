@@ -396,8 +396,14 @@ gitfold layer remove --all             # stop showing every layer
   was at the end of the agent's last turn; of a workspace without an agent
   (one a person edits), to its work as it is at your turn's start. A
   branch without a workspace, or `--commits`, moves to the branch's tip.
-  Without the plugin, `gitfold layer add <BRANCH>` brings a layer up to
-  date.
+  Frozen layers and revisions never move. `gitfold layer add <BRANCH>`
+  brings a layer up to date at once.
+- **Without an agent, layers move by themselves.** In a workspace where no
+  Claude Code hook has run (a person works in it), the mounted daemon moves
+  its live layers once they have new work and nothing has written to the
+  workspace for 3 seconds; each move is a line in the daemon's log, and
+  `gitfold layer` shows when each last moved. Your own workspace, once your
+  first prompt ran its hook, moves only at your turns.
 - **Changed files get a fresh time** at each switch, so incremental builds
   rebuild them.
 

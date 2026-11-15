@@ -548,14 +548,17 @@ included (a snapshot of it, see above); of a branch without one, or with
 `--commits`, the branch's commits; of a tag or a commit, that commit. It is taken as the
 changes it makes since it and the workspace's base diverged; that merge base
 is pinned with the layer, so it shows the same files whatever happens to
-either branch until it moves. A live layer moves at your turns (see
-*Between turns* below) and whenever `layer add` names it again; a branch's
-moves to its tip. A live layer of an agent's workspace moves to its work
-as it was at the end of the agent's last turn; of a workspace without an
-agent, to its work as it is at your turn's start. (A workspace has an agent
-once its Claude Code session's `Stop` hook has run there; until then, and
-for a workspace a person edits, gitfold takes a snapshot of it at each of
-your turns' starts.) `--frozen` takes
+either branch until it moves. A live layer moves whenever `layer add`
+names it again, and by itself: in a workspace with an agent, at the start
+of each of its turns (see *Between turns* below); in a workspace without
+one, where a person works, as soon as the layer has new work and nothing
+has written to the workspace for 3 seconds (see *Without an agent*
+below). A branch's moves to its tip. A live layer of an agent's workspace
+moves to its work as it was at the end of the agent's last turn; of a
+workspace without an agent, to its work as it is then. (A workspace has an
+agent once its Claude Code session's hooks have run there: from its first
+prompt on. Until then, and for a workspace a person edits, gitfold takes
+a fresh snapshot of it whenever a layer of it moves.) `--frozen` takes
 it as it is now and leaves it there (`--frozen --commits`: the branch's
 commits as they are now); a revision never moves. Adding a layer again
 replaces it in place, with the flags given, and brings it up to date: the
@@ -781,11 +784,24 @@ its new commits as they come; it says when there is nothing to show yet.
   layers changed and how many files, and any conflicts among them
   (`gitfold layer --claude-hook user-prompt-submit`). What a layer shows
   thus changes only between turns, never half-way through one, its agent's
-  or the reader's.
-  Outside such a session, `gitfold layer add <BRANCH>` brings a layer up
-  to date. A third hook, `gitfold layer --claude-hook pre-tool-use` on Edit,
+  or the reader's. The daemon leaves such a workspace's layers to its
+  turns. A third hook, `gitfold layer --claude-hook pre-tool-use` on Edit,
   Write, MultiEdit and NotebookEdit, denies writing a layer's file with the
   reason above.
+- **Without an agent.** In a workspace where no Claude Code hook has run
+  (a person works in it, in an editor or a shell), the mounted daemon
+  moves the live layers itself: every 2 seconds it looks for newer work (an
+  agent's workspace whose turn ended since, a branch whose tip moved, or a
+  person's workspace written to since its last snapshot; only then is a
+  new snapshot of it taken), and moves the layers once nothing has written
+  to the workspace for 3 seconds, so files don't change under you
+  half-way through an edit. Frozen layers and revisions never move. Each
+  move is one line in the daemon's log (`<branch>: its layers moved to
+  their latest work ...: agent/api (2 files changed)`), and `gitfold
+  layer` shows when each layer last moved (`live, last HH:MM`).
+  `gitfold layer add <BRANCH>` still brings a layer up to date at once.
+  No message is left in the workspace's inbox: it is read by agents, and
+  a person sees the files change.
 - **Stored** in the workspace's state directory, in the layers files: the
   layers as added, and what the daemon last applied, so a workspace opens
   as git was told and then catches up with the stored layers (their

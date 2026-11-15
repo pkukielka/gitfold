@@ -16,6 +16,7 @@
 //! The base follows the branch tip (`rebase`), without visible effect.
 //!
 //! - `lens`: other workspaces' work shown over the base (layers).
+//! - `follow`: its live layers moved by the daemon when no agent works in it.
 //! - `nodes`: local id ↔ (parent, name) table.
 //! - `rebase`: moving the base to the branch tip.
 //! - `restack`: a closed workspace's base moved for a restack, visibly.
@@ -26,6 +27,7 @@
 //! What a workspace stores, and what commands read from it without a mount
 //! (its changes, the removal rules, forks, the task folder), is `state`.
 
+mod follow;
 mod lens;
 mod nodes;
 mod reads;
@@ -34,6 +36,7 @@ mod restack;
 mod times;
 mod write;
 
+pub use follow::{Activities, Activity};
 pub use restack::restack_closed;
 
 use std::collections::{HashMap, HashSet};
@@ -148,6 +151,10 @@ pub struct Workspace {
     /// The index's mtime when the layers' skip-worktree bits were last
     /// checked (see `lens`).
     index_checked: Mutex<Option<std::time::SystemTime>>,
+    /// Writes through the mount (see `follow`).
+    activity: Arc<Activity>,
+    /// What the daemon's moves of its live layers keep (see `follow`).
+    following: Mutex<follow::Following>,
 }
 
 /// The lower layer and how upper overrides it.
@@ -321,6 +328,8 @@ impl Workspace {
             lens_refused: Mutex::new(None),
             lens_blocked: Mutex::new(None),
             index_checked: Mutex::new(None),
+            activity: Default::default(),
+            following: Default::default(),
         })
     }
 
@@ -525,7 +534,10 @@ impl Workspace {
         self.listings.lock().clear();
     }
 
+    /// An upper file written (or created, renamed, its attributes changed):
+    /// counted as a write (`follow`), and checked by the next sync.
     fn touch(&self, path: &[u8]) {
+        self.activity.wrote();
         let mut touched = self.touched.lock();
         if !touched.contains(path) {
             touched.insert(path.to_vec());

@@ -18,7 +18,10 @@
 //! workspace with an agent follows that seal (`driven`): it shows its work
 //! as it was at the end of the agent's last turn, never half-way through
 //! one. A workspace without (a person's) has no turns, so its layers take a
-//! fresh seal at each of their own turns' starts. The refs outlive the
+//! fresh seal when they move (`state::follow`). Its `UserPromptSubmit` hook
+//! records that it has an agent too (`TURNS`), from its first turn on: the
+//! daemon leaves such a workspace's own live layers to its turns
+//! (`has_agent`). The refs outlive the
 //! workspace (`gitfold remove` keeps them while layers name them, and the
 //! id comes from the branch name), so the newest ref may hold an earlier
 //! workspace's work: the record never does.
@@ -49,6 +52,10 @@ const KEPT: usize = 16;
 /// layer showed it). (Earlier builds wrote a bare `<sha>` for any seal: not
 /// one of its hook's.)
 const SEALED: &str = "sealed";
+
+/// The file in a workspace's state directory whose presence records that
+/// its own `UserPromptSubmit` hook ran (`turn_started`).
+const TURNS: &str = "turns";
 
 /// The file locked while a seal is numbered and recorded.
 const SEAL_LOCK: &str = "sealed.lock";
@@ -176,6 +183,26 @@ pub fn stopped(state: &StateDir) -> Result<()> {
         return Ok(());
     }
     record(state, None)
+}
+
+/// Records that the workspace in `state` has an agent of its own: its
+/// Claude Code `UserPromptSubmit` hook ran (a turn started). Its live layers
+/// then move at its turns' starts only, never by the daemon in between
+/// (`has_agent`), from its first turn on, before any `Stop` hook ran.
+pub fn turn_started(state: &StateDir) -> Result<()> {
+    let path = state.dir.join(TURNS);
+    if path.exists() {
+        return Ok(());
+    }
+    crate::fsutil::write_atomic(&path, b"")
+        .with_context(|| format!("recording a turn of {}", state.branch))
+}
+
+/// Whether the workspace in `state` has an agent of its own: one of its
+/// turn hooks ran (`turn_started`, or its `Stop` hook: `driven`). The
+/// records go with the workspace.
+pub fn has_agent(state: &StateDir) -> bool {
+    state.dir.join(TURNS).exists() || matches!(driven(state), Driven::Agent(_))
 }
 
 /// Records a run of the `Stop` hook of the workspace in `state`, with the

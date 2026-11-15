@@ -389,6 +389,7 @@ impl Workspace {
         if self.is_virtual(parent, name) {
             return Err(Errno::EPERM);
         }
+        self.activity.wrote();
         let mut layers = self.layers.write();
         let path = join(&self.path(parent)?, name);
         let obj = self.resolve_in(store, &layers, &path)?;

@@ -87,8 +87,8 @@ pub fn wait(path: &Path) -> Result<FileLock> {
     }
 }
 
-/// `wait`, without waiting: `None` if someone holds it.
-pub fn try_wait(path: &Path) -> Result<Option<FileLock>> {
+/// `wait` without waiting: `None` if someone else holds it.
+pub fn try_take(path: &Path) -> Result<Option<FileLock>> {
     let context = || format!("locking {}", path.display());
     let file = fs::OpenOptions::new()
         .create(true)

@@ -284,7 +284,7 @@ impl Workspace {
 
     /// Whether the workspace's HEAD is on its branch and no git operation is
     /// running or stopped half-way in it.
-    fn git_idle(&self) -> bool {
+    pub(super) fn git_idle(&self) -> bool {
         self.state.git_busy().is_none()
     }
 
