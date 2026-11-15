@@ -381,7 +381,7 @@ gitfold branch agent/contracts --from origin/main
 gitfold branch agent/child-1 --from origin/main
 ls ~/mnt/repo/agent/child-1 >/dev/null               # opens its workspace
 gitfold layer -w agent/child-1 add agent/contracts   # each child
-gitfold track-reads agent/child-1 on                 # who read what: consent asks only them
+gitfold track-reads agent/child-1 on                 # who read what (shown by consent)
 ```
 
 The workspace a layer is added to must have been opened (else exit 3); a
@@ -421,22 +421,28 @@ them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
 1. `gitfold proposals` lists them: who, the files changed (diff stat), and
    the last consent check. `gitfold changes <branch>` and `git diff`
    in `<mount>/<branch>` show more.
-2. `gitfold consent <branch> --test '<build or test command>'` checks it
-   with every child it affects: those that read a changed file (or whose
-   reads aren't tracked), each child's work mixed with the proposal, the
-   command run in the mix (`$GITFOLD_WORKSPACE` names the child). Exit 0:
-   all pass. Exit 4: the table says who fails and how (`merges` `no`:
-   conflicts with the child's own files; `test` `failed`: the exit code and
-   last line, and the snapshot to look in). Nothing in any workspace
+2. `gitfold consent <branch> --test '<build or test command>'` checks what
+   accepting it gives (your work as now with the proposed change) with
+   every child showing your workspace: each child's own work merged with
+   it, and the command run in the child's view with it (a read-only
+   snapshot; `$GITFOLD_WORKSPACE` names the child, `$GITFOLD_SCRATCH` is a
+   writable directory for build output, e.g. `CARGO_TARGET_DIR=$GITFOLD_SCRATCH/target
+   cargo check`; `--timeout` seconds, default 600). Exit 0: all pass. Exit
+   4: the table says who fails and how (`merges` `no`: conflicts with the
+   child's own files; `test` `failed`: the exit code and last line, and the
+   snapshot to look in), or nobody was checked. Nothing in any workspace
    changes.
-3. If it passes (or the failures are expected and the children told),
-   `gitfold accept <branch>` in your workspace: the files are written as
-   your uncommitted changes (commit them as usual), the proposer shows your
-   workspace again, every child that read the files gets a `contract
-   changed` message with the changed lines, and the others see it at their
-   next turn. Exit 4 means you changed those files since the proposal was
-   made: `gitfold reject <branch> --reason "<why>"` and ask for a new one.
-   Otherwise reject with a reason the proposer can act on.
+3. If it passes, `gitfold accept <branch>` in your workspace: the files are
+   written as your uncommitted changes (commit them as usual), the proposer
+   shows your workspace again, every child not known to have skipped the
+   files gets a `contract changed` message with the proposed lines, and
+   all see it at their next turn. Accept needs a passed consent of the
+   proposal and your work as they are now: if either changed since, check
+   again (`--force` skips this; only when the failures are expected and
+   the children told). Exit 4 with `changed <files> since` means you
+   changed those files since the proposal was made: `gitfold reject
+   <branch> --reason "<why>"` and ask for a new one. Otherwise reject with
+   a reason the proposer can act on.
 
 **A child told `contract changed`** reads the message (the changed lines),
 re-reads the files it uses (run `gitfold layer update` first if the message

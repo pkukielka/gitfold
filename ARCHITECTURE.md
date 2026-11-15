@@ -260,8 +260,8 @@ Then, per request (`fs/workspace/`):
 - **Proposal**: a fork of a layer's workspace (`<layer>-prop/<ws>`) where a
   workspace showing the layer edits the layer's files, shown in its place;
   its changes are its seal against what it started from. **Consent**: the
-  proposal mixed with the work of each workspace that read what it
-  changes, and tested there.
+  layer's work as now with those changes, checked in the view of each
+  workspace showing the layer (merged with its own work, and tested).
 - **Stacked branch**: a branch built on a **parent** branch
   (`gitfoldParent`); its **parent base** is the commit of the parent its
   own commits sit on (`refs/gitfold-stack/<branch>`).
@@ -1499,12 +1499,13 @@ recorded in config (`gitfoldProposal`, `gitfoldProposedBy`) with what it
 started from (its first seal) kept by `refs/gitfold-proposal/<id>`, and put
 in the layer's place in the proposer's stack. The proposer edits the files
 in the proposal's workspace, where they are its own. Its changes are its
-seal against that start. `gitfold consent` mixes the proposal with the seal
-of each workspace showing the layer (or the proposal) that read a changed
-file and runs a test in each mix's snapshot; `gitfold accept` writes the
-changed files into the layer's workspace, puts the layer back in place of
-the proposal, sends the readers the changed lines, and removes the
-proposal (workspace, branch, start ref, seals no stack names).
+seal against that start. `gitfold consent` builds what accepting gives (the
+layer's work as now with those changes) and, for each workspace showing the
+layer or a proposal to change it, checks that its own work merges with it
+and runs a test in its view with it; `gitfold accept`, given a current
+passed consent, writes the changed files into the layer's workspace, puts
+the layer back in place of the proposal, tells the followers, and removes
+the proposal (workspace, branch, start ref, seals no stack names).
 
 **Why:**
 
@@ -1523,15 +1524,38 @@ proposal (workspace, branch, start ref, seals no stack names).
   later edits as reverted by the proposal. `accept` refuses (exit 4) if the
   layer changed any proposed file since the start: writing the proposal's
   version would undo that silently. Then `reject`, and propose again.
-- **Consent from the read records:** who read a changed file is who could
-  break, so only they are checked (one mix and one test each, not one per
-  workspace showing the layer); a workspace whose reads aren't tracked is
-  checked too (`unknown`), one that tracked and didn't read is listed
-  (`no`) and skipped. Each check is `gitfold mix` of the workspace's seal and
-  the proposal's work: its own work as it would be with the proposal, in a
-  snapshot, so no workspace, index or branch changes and checks can run
-  while the agents work. The result is recorded with the proposal's seal,
-  so `proposals` can say a later edit made it stale.
+- **Consent checks what accept writes:** the proposal forked the layer's
+  work as it was; accept writes its changes onto the layer's work as it
+  is. So the checked commit is the latter (the layer's seal now, its tree
+  edited with the proposal's changes), and the record holds both the
+  proposal's and the layer's seal: a later edit to either makes it stale,
+  and accept refuses a stale or failed one (`--force` overrides). Accept
+  also writes exactly the consented seal: a proposal edited since (or
+  half-way through an edit) differs from it and is refused, and one
+  edited while it is being accepted is kept with only those later edits.
+- **Each follower's view, not its seal alone:** the test runs in a
+  snapshot of what the workspace would show: its view tree rebuilt with
+  the accepted commit in place of the layer (and of any proposal to change
+  it), its other layers as they are, its own work on top (blended files
+  then show its own version). `merges` is `git merge-tree` of its own work
+  with the accepted commit: what committing both would meet. Snapshot
+  registrations are removed after each test; the test gets a writable
+  scratch directory (the snapshot is read-only), a timeout (its process
+  group killed) and only the end of its output is read.
+- **Every follower is checked, reads only annotate:** read records hold
+  what an agent's tools opened, not what its build read (a header compiled
+  against, a file added by the proposal), and a log can be stale, so `no`
+  is weak evidence. They decide only `--only-readers` (skip definite
+  non-readers) and who isn't told (told: everyone but definite
+  non-readers). Nothing checked is `unchecked`, not a pass.
+- **Who may accept:** the workspace the command runs in (from the current
+  directory), the layer's; `-w` names one only from outside every
+  workspace. Not a security boundary (any agent can `cd`), but an agent in
+  its own workspace can't accept for another by mistake.
+- **Retiring:** removal is forced (the proposal's changes are taken); a
+  workspace still in use stays as a plain branch (no longer a proposal).
+  Seals a pending switch still names stay until a later retire sweeps the
+  refs of proposals that are gone.
 - **Accepting is writing, not merging:** the layer's workspace gets the
   files as uncommitted changes through the mount (as its agent would write
   them, so the kernel and git are told as for any write), or offline into
@@ -1547,9 +1571,12 @@ proposal (workspace, branch, start ref, seals no stack names).
 
 - A write policy `propose` on a layer (design §1.3), redirecting writes
   in place: see above.
-- Checking every workspace showing the layer regardless of reads: as
-  correct, but the cost grows with the tree, not with who depends on the
-  change.
+- Checking only the workspaces whose read records hold a changed file:
+  those records miss what builds read, so a proposal could pass having
+  checked nobody (kept as `--only-readers`).
+- Mixing the follower's seal with the proposal's work: that tests the
+  layer as it was when proposed, not what accept writes, and leaves out
+  the follower's other layers.
 - Merging the proposal into the layer's workspace on accept: the start
   makes a 3-way merge possible, but a merged contract nobody tested is
   what consent exists to avoid; the refusal sends it back instead.

@@ -178,8 +178,9 @@ gitfold lens off [<BRANCH>]                   # hide all of a workspace's layers
 gitfold propose <PATH>... [--layer <L>] [--from <DIR>] [-w <BRANCH>]
                                               # change a layer's files, in a fork of it
 gitfold proposals [<L>]                       # the open proposals
-gitfold consent <PROPOSAL> [--test <CMD>]     # check it with whoever read the files
-gitfold accept <PROPOSAL> [-w <L>]            # take it into the layer's workspace
+gitfold consent <PROPOSAL> [--test <CMD>] [--timeout <SECS>] [--only-readers]
+                                              # check it with every workspace showing the layer
+gitfold accept <PROPOSAL> [--force] [-w <L>]  # take it into the layer's workspace
 gitfold reject <PROPOSAL> [--reason <TEXT>] [-w <BRANCH>]
 gitfold stack on <PARENT> [-w <BRANCH>] [--base <REV>]
 gitfold stack off [-w <BRANCH>]               # a branch built on another's commits
@@ -207,7 +208,7 @@ error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
 Six commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
-`mix` (4 conflicts), `consent` (4 a workspace fails), `stack sync` and
+`mix` (4 conflicts), `consent` (4 a workspace fails, or none checked), `stack sync` and
 `stack merged` (3 a branch not stacked, 4 a branch not restacked: a
 conflict, uncommitted work in the way, git busy, layers shown) and `inbox
 --claude-hook rewake` (2, to wake the session).
@@ -578,7 +579,8 @@ depend on lines that would go (see below); 2 usage errors, 1 other errors
   gitfold layer update               # the edits show here (the next turn does too)
   # in contracts' workspace (the root):
   gitfold proposals                  # who proposed what (diff stat), consent so far
-  gitfold consent contracts-prop/child-3 --test 'cargo check'
+  gitfold consent contracts-prop/child-3 \
+      --test 'CARGO_TARGET_DIR=$GITFOLD_SCRATCH/target cargo check'
   gitfold accept contracts-prop/child-3     # or: gitfold reject ... --reason <TEXT>
   ```
 
@@ -594,27 +596,39 @@ depend on lines that would go (see below); 2 usage errors, 1 other errors
   `refs/gitfold-proposal/<id>`; its changes are its work (sealed) against
   that.
 
-  `consent <PROPOSAL> [--test <CMD>]` checks it with every workspace it
-  affects: each workspace showing the layer (or the proposal) that read a
-  file it changes, by the read records (`gitfold track-reads`), or every one
-  whose reads aren't recorded. Each one's work is mixed with the proposal
-  (`gitfold mix`), and `CMD` runs (`sh -c`, with `GITFOLD_WORKSPACE` set)
-  in the mix's snapshot; no workspace changes. It prints a table
-  (workspace, read the files: `yes`/`no`/`unknown`, merges cleanly, test,
-  then conflicts or the test's exit code, last line and snapshot), records
-  the result for `proposals`, and exits 0 if all passed, 4 if any failed.
-  `--test` needs the repository mounted.
+  `consent <PROPOSAL> [--test <CMD>] [--timeout <SECS>] [--only-readers]`
+  checks what accepting it would give, the layer's work as now with the
+  proposal's changes, with every workspace showing the layer (or a
+  proposal to change it): whether the workspace's own work merges with it,
+  and `CMD` (`sh -c`) run in the workspace's view with it in the layer's
+  place (its other layers and its own work included), a read-only
+  snapshot. `GITFOLD_WORKSPACE` names the workspace and `GITFOLD_SCRATCH`
+  an empty writable directory, removed after (point build output there);
+  the test is killed after `--timeout` seconds (default 600), and only the
+  end of its output is kept. `--only-readers` skips the workspaces whose
+  read records (`gitfold track-reads`) say they didn't read a changed file
+  (by default they are checked too: a build reads files no agent opened).
+  No workspace changes. It prints a table (workspace, read the files:
+  `yes`/`no`/`unknown`, merges cleanly, test, then conflicts or the test's
+  exit code and last line, and the snapshot), records the result with the
+  proposal's and the layer's work checked, and exits 0 if all passed, 4 if
+  any failed or none was checked. `--test` needs the repository mounted.
 
-  `accept <PROPOSAL>`, in the layer's workspace (or `-w <L>`), writes the
-  files the proposal changed into it, as uncommitted work (through the
-  mount, or into its stored state unmounted); refused (exit 4) if the layer
-  changed any of them since the proposal was made. Workspaces showing the
-  proposal show the layer again, at once; those showing the layer get the
-  change at their next turn (or `gitfold layer update`); each that read the
-  files gets a message (`subject: contract changed`, the changed lines).
-  The proposal's workspace and branch are removed. `reject <PROPOSAL>
-  [--reason <TEXT>]`, in the layer's or the proposer's workspace, removes it
-  untaken, shows the layer again and tells the proposer.
+  `accept <PROPOSAL>`, in the layer's workspace, writes the files the
+  proposal changed into it, as uncommitted work (through the mount, or into
+  its stored state unmounted). Refused (exit 4) if the layer changed any of
+  them since the proposal was made, or without a passed consent check of
+  the proposal and the layer as they are now (`--force` accepts anyway).
+  Workspaces showing the proposal show the layer again, at once; those
+  showing the layer get the change at their next turn (or `gitfold layer
+  update`); each one but those whose read records say they didn't read the
+  files gets a message (`subject: contract changed`, the lines as proposed).
+  The proposal's workspace and branch are removed; edits made to it while
+  it was accepted stay in it as a proposal of their own, and a workspace in
+  use stays as a plain branch to remove later. `reject <PROPOSAL> [--reason
+  <TEXT>]`, in the layer's or the proposer's workspace, removes it untaken,
+  shows the layer again and tells the proposer. Both act as the workspace
+  you are in: `-w` names one only when run outside every workspace.
 - **A switch** (any of the commands above, or the hook below) tells the
   kernel exactly what changed: the files whose content changed, the entries
   added, removed or changed in type, and their directories' listings.
