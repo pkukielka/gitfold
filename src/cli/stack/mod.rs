@@ -500,7 +500,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
     if let Some(base) = &base
         && !land::is_trunk(common_dir, &local, &parent)
         && let Some(target) = land::target(common_dir, &local, &parent)?
-        && let Some(landing) = land::landed(common_dir, base.commit, target.tip)?
+        && let Some(landing) = land::landed(common_dir, base.commit, &target)?
     {
         return reparent(
             common_dir, name, &parent, &target, landing, base, tip, dry_run,
@@ -982,7 +982,7 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
     if !trunk
         && let Some(base) = &base
         && let Ok(Some(target)) = land::target(common_dir, local, &parent)
-        && let Ok(Some(_)) = land::landed(common_dir, base.commit, target.tip)
+        && let Ok(Some(_)) = land::landed(common_dir, base.commit, &target)
     {
         notes.push("parent merged: re-parent with stack sync".into());
     } else if local.restack_blocked(name).is_some() {

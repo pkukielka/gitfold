@@ -57,8 +57,24 @@ pub fn trunk(common_dir: &Path, local: &Local) -> Option<String> {
 
 /// Whether `name` is the trunk: a parent never restacked onto at a turn
 /// boundary (following the trunk is `stack sync`'s, on request).
+/// A local branch tracking it counts too (`main` for `origin/main`): a
+/// branch stacked on it would otherwise be restacked on every pull, and its
+/// own commits taken for landed once rebased onto the trunk.
 pub fn is_trunk(common_dir: &Path, local: &Local, name: &str) -> bool {
-    trunk(common_dir, local).as_deref() == Some(name)
+    let Some(trunk) = trunk(common_dir, local) else {
+        return false;
+    };
+    trunk == name || local_of(common_dir, &trunk).as_deref() == Some(name)
+}
+
+/// The local branch name of remote-tracking branch `trunk` (`main` for
+/// `origin/main`), if it is one.
+fn local_of(common_dir: &Path, trunk: &str) -> Option<String> {
+    let (_, branch) = trunk.split_once('/')?;
+    stack::rev(common_dir, &format!("refs/remotes/{trunk}"))
+        .ok()
+        .flatten()
+        .map(|_| branch.to_string())
 }
 
 /// The full ref name and commit of parent `name`: a local branch, else a
@@ -78,7 +94,7 @@ pub fn target(common_dir: &Path, local: &Local, parent: &str) -> Result<Option<T
     let name = match local.parent(parent) {
         Some(above) => above,
         None => match trunk(common_dir, local) {
-            Some(trunk) if trunk != parent => trunk,
+            Some(trunk) if !is_trunk(common_dir, local, parent) => trunk,
             _ => return Ok(None),
         },
     };
@@ -93,30 +109,41 @@ pub fn target(common_dir: &Path, local: &Local, parent: &str) -> Result<Option<T
     Ok(Some(Target { name, tip, pr_base }))
 }
 
-/// Whether parent base `base` landed on target tip `target`, and where
-/// (`git::stack::landing`), remembered.
-pub fn landed(common_dir: &Path, base: ObjectId, target: ObjectId) -> Result<Option<Landing>> {
+/// Whether parent base `base` landed on `target`, and where
+/// (`git::stack::landing`), remembered: a landing while the target still
+/// has it, "not landed up to tip T" as a starting point, so after a fetch
+/// only the target's new commits are walked.
+pub fn landed(common_dir: &Path, base: ObjectId, target: &Target) -> Result<Option<Landing>> {
     let path = cache(common_dir);
     let text = fs::read_to_string(&path).unwrap_or_default();
-    let key = format!("{base} {target} ");
+    let key = format!("{base} {} ", target.name);
+    let mut since = None;
     if let Some(line) = text.lines().find(|l| l.starts_with(&key))
-        && let Some(known) = parse(&line[key.len()..])
+        && let Some((tip, known)) = parse(&line[key.len()..])
     {
-        return Ok(known);
+        match known {
+            Some(landing) if stack::is_ancestor(common_dir, landing.at, target.tip)? => {
+                return Ok(Some(landing));
+            }
+            None if tip == target.tip => return Ok(None),
+            None if stack::is_ancestor(common_dir, tip, target.tip)? => since = Some(tip),
+            // The target was rewound or rewritten: from the start.
+            _ => {}
+        }
     }
-    let found = git::with_repo(|repo| stack::landing(repo, base, target))?;
+    let found = git::with_repo(|repo| stack::landing(repo, base, target.tip, since))?;
     let answer = match found {
         None => "-".to_string(),
         Some(l) => format!("{} {}", l.at, if l.how == How::Merged { "m" } else { "s" }),
     };
-    let mut lines: Vec<&str> = text.lines().collect();
+    let mut lines: Vec<&str> = text.lines().filter(|l| !l.starts_with(&key)).collect();
     let skip = lines.len().saturating_sub(CACHED - 1);
     lines.drain(..skip);
     let mut out = lines.join("\n");
     if !out.is_empty() {
         out.push('\n');
     }
-    out += &format!("{key}{answer}\n");
+    out += &format!("{key}{} {answer}\n", target.tip);
     // Only a cache: a failed write costs a walk next time.
     let written = (path.parent().map_or(Ok(()), fs::create_dir_all))
         .and_then(|()| crate::fsutil::write_atomic(&path, out.as_bytes()));
@@ -130,21 +157,22 @@ fn cache(common_dir: &Path) -> PathBuf {
     crate::state::state_root(common_dir).join(".stack-landings")
 }
 
-/// A cached answer: `-`, or `<at> m|s`; `None` if unreadable.
-fn parse(answer: &str) -> Option<Option<Landing>> {
-    if answer == "-" {
-        return Some(None);
+/// A cached answer, after its key: the target tip it was found at, then
+/// `-` (not landed up to it) or `<at> m|s`; `None` if unreadable.
+fn parse(answer: &str) -> Option<(ObjectId, Option<Landing>)> {
+    let (tip, rest) = answer.split_once(' ')?;
+    let tip = ObjectId::from_hex(tip.as_bytes()).ok()?;
+    if rest == "-" {
+        return Some((tip, None));
     }
-    let (at, how) = answer.split_once(' ')?;
+    let (at, how) = rest.split_once(' ')?;
     let how = match how {
         "m" => How::Merged,
         "s" => How::Squashed,
         _ => return None,
     };
-    Some(Some(Landing {
-        at: ObjectId::from_hex(at.as_bytes()).ok()?,
-        how,
-    }))
+    let at = ObjectId::from_hex(at.as_bytes()).ok()?;
+    Some((tip, Some(Landing { at, how })))
 }
 
 #[cfg(test)]
@@ -153,14 +181,20 @@ mod tests {
 
     #[test]
     fn cached_answers_read_back() {
-        let at = ObjectId::from_bytes_or_panic(&[7; 20]);
-        assert_eq!(parse("-"), Some(None));
+        let (tip, at) = (
+            ObjectId::from_bytes_or_panic(&[6; 20]),
+            ObjectId::from_bytes_or_panic(&[7; 20]),
+        );
+        assert_eq!(parse(&format!("{tip} -")), Some((tip, None)));
         assert_eq!(
-            parse(&format!("{at} s")),
-            Some(Some(Landing {
-                at,
-                how: How::Squashed
-            }))
+            parse(&format!("{tip} {at} s")),
+            Some((
+                tip,
+                Some(Landing {
+                    at,
+                    how: How::Squashed
+                })
+            ))
         );
         assert_eq!(parse("junk"), None);
     }
