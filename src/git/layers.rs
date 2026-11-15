@@ -994,6 +994,32 @@ pub(crate) fn merge3(
     }
 }
 
+/// A 3-way line merge, as `git merge-file`, conflicts kept with git's
+/// markers named `ours_label` and `theirs_label`: the merge, and whether
+/// conflicts remain.
+pub(crate) fn merge3_marked(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    ours_label: &str,
+    theirs_label: &str,
+) -> (Vec<u8>, bool) {
+    let mut input = gix::diff::blob::InternedInput::default();
+    let mut out = Vec::new();
+    let options = text::Options {
+        conflict: keep_conflicts(),
+        ..Default::default()
+    };
+    let labels = text::Labels {
+        ancestor: Some("before".into()),
+        current: Some(ours_label.into()),
+        other: Some(theirs_label.into()),
+    };
+    let resolution =
+        builtin_driver::text(&mut out, &mut input, labels, ours, base, theirs, options);
+    (out, matches!(resolution, Resolution::Conflict))
+}
+
 // The line-set rule's helpers, shared by union merging, extraction, carrying own
 // lines over a switch (`fs::workspace::layers`) and snapshotting them
 // (`state::snapshot`). Lines are compared whole but for the `\n`: two registry

@@ -22,6 +22,11 @@
 //! switch refused: git busy, or own lines in a union file that depend on
 //! lines that would go), or sooner if the workspace is written to.
 //!
+//! Its branch first follows its editable layers' new commits, as the hook
+//! moves an agent's at its turn start (`cli::layer::follow_editable`), once
+//! their tips or its own moved since it last looked: so a person's waiting
+//! edits become ordinary changes too once the layer commits those lines.
+//!
 //! The move is the hook's (`state::follow::follow_live`), under the layers'
 //! lock (`state::layers::try_lock`: a command holding it goes first, and the
 //! check waits for the next round), shown through `switch`, as `gitfold
@@ -118,6 +123,9 @@ pub(super) struct Following {
     refused: Option<(Instant, u64)>,
     /// The last error logged, not logged again until another.
     failed: String,
+    /// The tips of its editable layers' branches and its own when it last
+    /// followed them, and whether it got where they are.
+    editable: Option<(Vec<Option<ObjectId>>, bool)>,
 }
 
 impl Workspace {
@@ -188,6 +196,53 @@ impl Workspace {
         let Some(locked) = layers::try_lock(&self.state)? else {
             return Ok(None);
         };
+        // Its editable layers' new commits first, as an agent's turn start
+        // moves its branch (the move is a switch of this workspace, asked
+        // of this daemon); those it can't move onto are held as they show.
+        // Looked at again only once a tip moved (theirs or its own).
+        let mut hold = Vec::new();
+        let editable = applied.editable_names();
+        let tips: Vec<Option<ObjectId>> = (editable.iter())
+            .chain(std::iter::once(&self.state.branch))
+            .map(|b| git::branch_tip(b).ok().map(|t| t.id))
+            .collect();
+        let last = self.following.lock().editable.clone();
+        match last {
+            _ if editable.is_empty() => {}
+            Some((seen, true)) if seen == tips => {}
+            Some((seen, false)) if seen == tips => hold = editable,
+            _ => {
+                let followed =
+                    crate::cli::layer::follow_editable(&self.state.common_dir, &self.state.branch);
+                let done = match followed {
+                    Ok((done, said)) => {
+                        if let Some(said) = said {
+                            log::info!(
+                                "{}: following its editable layers: {said}",
+                                self.state.branch
+                            );
+                        }
+                        done
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "{}: following its editable layers: {e:#}",
+                            self.state.branch
+                        );
+                        false
+                    }
+                };
+                if !done {
+                    hold = editable;
+                }
+                // Its own tip as it is after the move.
+                let mut tips = tips;
+                if let Some(own) = tips.last_mut() {
+                    *own = git::branch_tip(&self.state.branch).ok().map(|t| t.id);
+                }
+                self.following.lock().editable = Some((tips, done));
+            }
+        }
         let (seen, source_failed) = {
             let following = self.following.lock();
             (following.seen.clone(), following.source_failed.clone())
@@ -215,7 +270,7 @@ impl Workspace {
             tried.push((theirs.branch.clone(), now));
             true
         };
-        let followed = follow::follow_live(store, &self.state, &locked, &[], fresh, || {
+        let followed = follow::follow_live(store, &self.state, &locked, &hold, fresh, || {
             self.switch(store)
         })?;
         let Some(followed) = followed else {

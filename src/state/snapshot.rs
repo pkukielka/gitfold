@@ -369,9 +369,24 @@ fn tree_of(
                     _ => EntryKind::BlobExecutable,
                 };
                 match unions.get(path) {
+                    // A file editable layers changed: its own lines only;
+                    // with waiting edits, what it saw and made (`Seen`).
+                    Some(Filtered::Edited(edited)) => {
+                        let made = fs::read(&file)?;
+                        let own = edited.clean(&made);
+                        if made != edited.shown {
+                            seen.push(Seen {
+                                path: path.clone(),
+                                kind,
+                                seen: repo.write_blob(&edited.shown)?.detach(),
+                                made: repo.write_blob(&made)?.detach(),
+                            });
+                        }
+                        (kind, repo.write_blob(own)?)
+                    }
                     // A union file: its own lines only, and, if they sit
                     // among other layers' lines, where (`Seen`).
-                    Some((union, before)) => {
+                    Some(Filtered::Union(union, before)) => {
                         let made = fs::read(&file)?;
                         let own = own_lines(&std::env::temp_dir(), &made, union, before)?;
                         if union != before && own != *before {
@@ -384,6 +399,7 @@ fn tree_of(
                         }
                         (kind, repo.write_blob(own)?)
                     }
+                    Some(Filtered::Theirs) => continue,
                     None => {
                         let f = fs::File::open(&file)
                             .with_context(|| format!("reading {}", file.display()))?;
@@ -448,20 +464,33 @@ fn commit(
     )?)
 }
 
-/// Per union path, the union and the base's version (`unions`).
-type Unions = HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
+/// A file a snapshot doesn't take whole from upper (`unions`).
+enum Filtered {
+    /// A union file: the union and the base's version.
+    Union(Vec<u8>, Vec<u8>),
+    /// A file only editable layers changed, the base's: its versions.
+    Edited(git::filter::Edited),
+    /// A file only editable layers have (they added it): the workspace's
+    /// copy is its waiting edits, not its work, and left out.
+    Theirs,
+}
 
-/// For each file the workspace in `state` shows union-merged (`state::layers`),
-/// the union and the base's version: a snapshot of it holds the upper copy with
-/// the change from the union back to the base's version merged in (only its
-/// own lines), so a workspace showing it as a layer gets the other layers'
-/// work from them, not through it.
+/// The files of `unions`, by path.
+type Unions = HashMap<Vec<u8>, Filtered>;
+
+/// The files the workspace in `state` shows mixed with the layers' lines
+/// that it may write (see `state::layers`): union files, and those only
+/// editable layers changed. A snapshot of it holds only its own lines of
+/// them (the layers' lines taken out, and its waiting edits), so a
+/// workspace showing it as a layer gets the other layers' work from them,
+/// not through it; a file only the editable layers have is left out.
 fn unions(state: &StateDir, base: &git::Commit) -> Result<Unions> {
     let applied = super::layers::ShownLayers::read(state)?;
-    if applied.union.is_empty() {
+    let layers = applied.layers()?;
+    if applied.union.is_empty() && layers.editable().next().is_none() {
         return Ok(HashMap::new());
     }
-    let Some(view) = super::layers::view(&state.common_dir, &base.id, &applied.layers()?)? else {
+    let Some(view) = super::layers::view(&state.common_dir, &base.id, &layers)? else {
         return Ok(HashMap::new());
     };
     let content = |tree: ObjectId, path: &[u8]| -> Result<Vec<u8>> {
@@ -469,11 +498,19 @@ fn unions(state: &StateDir, base: &git::Commit) -> Result<Unions> {
         item.map_or(Ok(Vec::new()), |i| git::read_blob(i.oid))
     };
     let mut out = HashMap::new();
-    for path in &applied.union {
-        out.insert(
-            path.clone(),
-            (content(view.hunk_tree, path)?, content(base.tree, path)?),
-        );
+    for path in view.union.keys() {
+        let union = Filtered::Union(content(view.hunk_tree, path)?, content(base.tree, path)?);
+        out.insert(path.clone(), union);
+    }
+    for path in &view.edited {
+        let edited = git::filter::Edited {
+            base: content(base.tree, path)?,
+            shown: content(view.tree, path)?,
+        };
+        out.insert(path.clone(), Filtered::Edited(edited));
+    }
+    for path in &view.edited_new {
+        out.insert(path.clone(), Filtered::Theirs);
     }
     Ok(out)
 }

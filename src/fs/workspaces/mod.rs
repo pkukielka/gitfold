@@ -582,6 +582,7 @@ fn watch(ws: Weak<Workspace>, store: Arc<Store>, activities: Activities, branch:
                     }
                 }
                 ws.follow_layers(&store, &activities);
+                ws.check_branch();
             }
         }
     });

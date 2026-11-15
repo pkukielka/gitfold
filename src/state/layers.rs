@@ -59,6 +59,7 @@ use std::fs;
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 use gix::bstr::BString;
+use gix::objs::tree::EntryKind;
 
 use super::StateDir;
 use crate::fsutil::{not_found, write_atomic};
@@ -430,6 +431,14 @@ pub struct View {
     pub mixed: HashMap<Vec<u8>, Vec<usize>>,
     /// The paths of `mixed` only editable layers changed: writable.
     pub writable: HashSet<Vec<u8>>,
+    /// The files of `writable` the base has: git sees them through the
+    /// filter (`git::filter::Edited`), without the layers' lines and the
+    /// waiting edits.
+    pub edited: HashSet<Vec<u8>>,
+    /// The files of `writable` the base doesn't have (the layers added
+    /// them): hidden from git until a layer's commit brings them; every
+    /// change to one is a waiting edit.
+    pub edited_new: HashSet<Vec<u8>>,
     /// The union files (see `union`), with the layers union-merged in: the
     /// workspace writes them, its own lines on top of theirs.
     pub union: HashMap<Vec<u8>, Vec<usize>>,
@@ -533,13 +542,35 @@ pub fn view(
         });
     }
     let editable = |ixs: &Vec<usize>| ixs.iter().all(|&i| layers.layers[i].edit);
+    let writable: HashSet<Vec<u8>> = (view.mixed.iter())
+        .filter(|(_, ixs)| editable(ixs))
+        .map(|(p, _)| p.to_vec())
+        .collect();
+    // Of those, the files the base has and the view shows (git sees them
+    // through the filter), and those only the layers have (hidden from git).
+    let (mut edited, mut edited_new) = (HashSet::new(), HashSet::new());
+    git::with_repo(|repo| -> Result<()> {
+        let base_tree = git::layers::commit_tree(repo, *base)?;
+        let blob = |item: Option<git::layers::Item>| {
+            item.is_some_and(|i| matches!(i.kind, EntryKind::Blob | EntryKind::BlobExecutable))
+        };
+        for path in &writable {
+            let shown = git::layers::lookup(repo, view.view_tree, path.as_slice().into())?;
+            let below = git::layers::lookup(repo, base_tree, path.as_slice().into())?;
+            match (blob(below), blob(shown)) {
+                (true, true) => edited.insert(path.clone()),
+                (false, true) if below.is_none() => edited_new.insert(path.clone()),
+                _ => false,
+            };
+        }
+        Ok(())
+    })?;
     Ok(Some(View {
         tree: view.view_tree,
         hunk_tree: view.hunk_tree,
-        writable: (view.mixed.iter())
-            .filter(|(_, ixs)| editable(ixs))
-            .map(|(p, _)| p.to_vec())
-            .collect(),
+        writable,
+        edited,
+        edited_new,
         mixed: (view.mixed.iter())
             .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
             .collect(),
@@ -650,14 +681,20 @@ pub const SHOWN_LAYERS: &str = "layers-shown";
 /// it was closed, or a switch that failed half-way). Stored in `layers-shown`:
 /// `version 2`, a line `layers <bytes>` giving the length of the layers file
 /// that follows, then NUL-terminated records: `S<path>` a path git was told
-/// to skip (skip-worktree), `B<path>` a union path git was told to filter.
+/// to skip (skip-worktree), `B<path>` a path git was told to filter (a union
+/// file, or a file only editable layers changed), `N<path>` a file only
+/// editable layers have.
 /// (Version 1, of builds with a layers commit, isn't read.)
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShownLayers {
     /// The layers file's content when applied (empty: none).
     pub layers: Vec<u8>,
     pub skipped: std::collections::BTreeSet<Vec<u8>>,
+    /// The files git sees through the filter: union files, and the files
+    /// only editable layers changed that the base has.
     pub union: std::collections::BTreeSet<Vec<u8>>,
+    /// The files only editable layers have (hidden, edits to them waiting).
+    pub theirs: std::collections::BTreeSet<Vec<u8>>,
 }
 
 impl ShownLayers {
@@ -688,6 +725,7 @@ impl ShownLayers {
             match record.split_first() {
                 Some((b'S', path)) => applied.skipped.insert(path.to_vec()),
                 Some((b'B', path)) => applied.union.insert(path.to_vec()),
+                Some((b'N', path)) => applied.theirs.insert(path.to_vec()),
                 _ => return Err(bad()),
             };
         }
@@ -697,7 +735,12 @@ impl ShownLayers {
     pub fn write(&self, state: &StateDir) -> Result<()> {
         let mut data = format!("version 2\nlayers {}\n", self.layers.len()).into_bytes();
         data.extend_from_slice(&self.layers);
-        for (tag, set) in [(b'S', &self.skipped), (b'B', &self.union)] {
+        let sets = [
+            (b'S', &self.skipped),
+            (b'B', &self.union),
+            (b'N', &self.theirs),
+        ];
+        for (tag, set) in sets {
             for path in set {
                 data.push(tag);
                 data.extend_from_slice(path);

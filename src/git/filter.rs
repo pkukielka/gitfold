@@ -10,6 +10,10 @@
 //! - **smudge** (git writes an object out: `checkout`, `switch`, `reset`,
 //!   `stash pop`, `merge`) puts them back.
 //!
+//! The same filter covers a file only editable layers changed (`Edited`):
+//! there clean also strips the workspace's waiting edits (its changes to
+//! the layers' uncommitted lines), and smudge puts them back.
+//!
 //! The index, commits and stashes hold only the workspace's lines; the file
 //! shows everyone's. Both are a function of the file's two versions the view
 //! has (`Versions`): the base's (below the layers) and the union (with the
@@ -87,6 +91,163 @@ impl Versions {
             .map(super::layers::key)
             .collect()
     }
+}
+
+/// The two versions of a file editable layers changed (`state::layers`'s
+/// `edited`) a filter request is answered from. Unlike a union file's
+/// lines, the layers' lines here are the workspace's to change, but not
+/// yet to commit (its branch doesn't have them): changing them is a
+/// waiting edit, kept in the file and out of git until the layer commits
+/// those lines.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Edited {
+    /// The base's version, below the layers.
+    pub base: Vec<u8>,
+    /// The version shown: the base's with the editable layers' lines.
+    pub shown: Vec<u8>,
+}
+
+/// A file of `Edited` split into the workspace's own change and its
+/// waiting edits (see `Edited::split`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Split {
+    /// The base's version with the workspace's own changes: what git sees.
+    pub own: Vec<u8>,
+    /// The version shown with only the waiting edits: what stays in the file
+    /// when git takes its own changes out (a checkout, a stash).
+    pub kept: Vec<u8>,
+    /// How many waiting edits (hunks) there are.
+    pub waiting: usize,
+}
+
+impl Edited {
+    /// `work` (the file as it is) split, hunk by hunk of its change from
+    /// the version shown: a hunk that changes or deletes a layer's line,
+    /// inserts lines with a layer's lines on both sides, or spans lines of
+    /// the base the layers deleted, is a waiting edit (it depends on the
+    /// layer's lines); any other is the workspace's own, applied to the
+    /// base's version where its lines are. In a binary file every change
+    /// waits.
+    pub fn split(&self, work: &[u8]) -> Split {
+        use imara_diff::{Algorithm, Diff, InternedInput, sources::byte_lines};
+        let Edited { base, shown } = self;
+        if work == shown.as_slice() {
+            return Split {
+                own: base.clone(),
+                kept: shown.clone(),
+                waiting: 0,
+            };
+        }
+        if [base, shown].iter().any(|d| is_binary(d)) || is_binary(work) {
+            return Split {
+                own: base.clone(),
+                kept: work.to_vec(),
+                waiting: 1,
+            };
+        }
+        let b: Vec<&[u8]> = super::layers::lines(base).collect();
+        let m: Vec<&[u8]> = super::layers::lines(shown).collect();
+        let w: Vec<&[u8]> = super::layers::lines(work).collect();
+        // Each shown line's base line (`None`: a layer's), and where the
+        // layers deleted base lines (before shown line i: `gap[i]`).
+        let mut from_base: Vec<Option<usize>> = vec![None; m.len()];
+        let mut gap = vec![false; m.len() + 1];
+        let input = InternedInput::new(byte_lines(base), byte_lines(shown));
+        let (mut bi, mut mi) = (0usize, 0usize);
+        for hunk in Diff::compute(Algorithm::Histogram, &input).hunks() {
+            while mi < hunk.after.start as usize {
+                from_base[mi] = Some(bi);
+                (mi, bi) = (mi + 1, bi + 1);
+            }
+            if hunk.after.is_empty() {
+                gap[mi] = true;
+            }
+            (mi, bi) = (hunk.after.end as usize, hunk.before.end as usize);
+        }
+        while mi < m.len() {
+            from_base[mi] = Some(bi);
+            (mi, bi) = (mi + 1, bi + 1);
+        }
+        let layers_line = |i: usize| from_base.get(i).is_some_and(Option::is_none);
+        // Own hunks as (base range, new lines); waiting ones as (shown
+        // range, new lines).
+        let mut own: Vec<(std::ops::Range<usize>, &[&[u8]])> = Vec::new();
+        let mut waiting: Vec<(std::ops::Range<usize>, &[&[u8]])> = Vec::new();
+        let input = InternedInput::new(byte_lines(shown), byte_lines(work));
+        for hunk in Diff::compute(Algorithm::Histogram, &input).hunks() {
+            let (s, e) = (hunk.before.start as usize, hunk.before.end as usize);
+            let new = &w[hunk.after.start as usize..hunk.after.end as usize];
+            let depends = match s == e {
+                true => s > 0 && layers_line(s - 1) && layers_line(s),
+                false => (s..e).any(layers_line) || (s + 1..e).any(|i| gap[i]),
+            };
+            if depends {
+                waiting.push((s..e, new));
+                continue;
+            }
+            // Where in the base: after the base line before it.
+            let at = (0..s).rev().find_map(|i| from_base[i]).map_or(0, |i| i + 1);
+            let range = match s == e {
+                true => at..at,
+                false => from_base[s].unwrap_or(at)..from_base[e - 1].map_or(at, |i| i + 1),
+            };
+            own.push((range, new));
+        }
+        let apply = |lines: &[&[u8]], hunks: &[(std::ops::Range<usize>, &[&[u8]])]| {
+            let mut out = Vec::new();
+            let mut at = 0;
+            for (range, new) in hunks {
+                for line in &lines[at.min(range.start)..range.start] {
+                    out.extend_from_slice(line);
+                }
+                for line in new.iter() {
+                    out.extend_from_slice(line);
+                }
+                at = at.max(range.end);
+            }
+            for line in &lines[at.min(lines.len())..] {
+                out.extend_from_slice(line);
+            }
+            out
+        };
+        Split {
+            own: apply(&b, &own),
+            kept: apply(&m, &waiting),
+            waiting: waiting.len(),
+        }
+    }
+
+    /// `work` without the layers' lines and the waiting edits: what git sees.
+    pub fn clean(&self, work: &[u8]) -> Vec<u8> {
+        self.split(work).own
+    }
+
+    /// `own` (what git has) with the layers' lines and the waiting edits
+    /// of `now`, the file as it is before git writes `own` out: git's own
+    /// change merged into the file without its own changes (a 3-way merge
+    /// from the base's version; where they touch, both kept, if clean
+    /// gives `own` back), else `own` as it is (another commit's file).
+    pub fn smudge(&self, own: &[u8], now: &[u8]) -> Vec<u8> {
+        let kept = self.split(now).kept;
+        if own == self.base.as_slice() {
+            return kept;
+        }
+        if [&self.base, &kept].iter().any(|d| is_binary(d)) || is_binary(own) {
+            return own.to_vec();
+        }
+        if let Some(merged) = merge3(&self.base, &kept, own, keep_conflicts()) {
+            return merged;
+        }
+        let union_style = gix::merge::blob::builtin_driver::text::Conflict::ResolveWithUnion;
+        merge3(&self.base, &kept, own, union_style)
+            .filter(|merged| self.clean(merged) == own)
+            .unwrap_or_else(|| own.to_vec())
+    }
+}
+
+/// Whether `data` has a line opening git's conflict markers.
+pub fn has_markers(data: &[u8]) -> bool {
+    super::layers::lines(data).any(|l| l.starts_with(b"<<<<<<< "))
 }
 
 /// What git asks of the filter.
@@ -396,6 +557,65 @@ mod tests {
             reg.clean(b"a\nb\nfromA\nmine\nc\nd\n"),
             b"a\nb\nmine\nc\nd\n"
         );
+    }
+
+    fn edited(base: &str, shown: &str) -> Edited {
+        Edited {
+            base: base.into(),
+            shown: shown.into(),
+        }
+    }
+
+    fn text(data: &[u8]) -> &str {
+        std::str::from_utf8(data).unwrap()
+    }
+
+    /// A method added inside a layer's uncommitted class waits; a change
+    /// elsewhere is the workspace's own; both survive git writing the file.
+    #[test]
+    fn waiting_edits_split_off() {
+        let api = edited("// api\n", "// api\nclass Api {\n    fn a() {}\n}\n");
+        let mine = "// api\nclass Api {\n    fn a() {}\n    fn m() {}\n}\n";
+        let split = api.split(mine.as_bytes());
+        assert_eq!((text(&split.own), split.waiting), ("// api\n", 1));
+        assert_eq!(text(&split.kept), mine);
+        // The file as shown: nothing of its own, nothing waiting.
+        let shown = api.split(api.shown.as_slice());
+        assert_eq!((text(&shown.own), shown.waiting), ("// api\n", 0));
+        // Own lines before the class, and after it: git sees them.
+        let both = "// api\n// mine\nclass Api {\n    fn a() {}\n    fn m() {}\n}\nfn own() {}\n";
+        let split = api.split(both.as_bytes());
+        assert_eq!(text(&split.own), "// api\n// mine\nfn own() {}\n");
+        assert_eq!(split.waiting, 1);
+        assert_eq!(text(&split.kept), mine);
+        // A changed line of the layer's waits.
+        let changed = "// api\nclass Api {\n    fn a() { mine }\n}\n";
+        let split = api.split(changed.as_bytes());
+        assert_eq!((text(&split.own), split.waiting), ("// api\n", 1));
+        // Smudge: git's version with the layer's lines and the waiting edit.
+        assert_eq!(text(&api.smudge(b"// api\n", both.as_bytes())), mine);
+        let own = b"// api\n// mine\nfn own() {}\n";
+        let smudged = api.smudge(own, both.as_bytes());
+        assert_eq!(text(&api.clean(&smudged)), text(own));
+        assert!(text(&smudged).contains("fn m()"));
+    }
+
+    /// The base's lines a layer changed or deleted are the layer's.
+    #[test]
+    fn layers_changes_to_base_lines() {
+        let f = edited("a\nb\nc\nd\n", "a\nB\nd\n");
+        // Own change to a base line the layer left: own.
+        let split = f.split(b"A\nB\nd\n");
+        assert_eq!((text(&split.own), split.waiting), ("A\nb\nc\nd\n", 0));
+        // A change to the layer's line: waits.
+        let split = f.split(b"a\nBB\nd\n");
+        assert_eq!((text(&split.own), split.waiting), ("a\nb\nc\nd\n", 1));
+        // Appended at the end: own.
+        let split = f.split(b"a\nB\nd\ne\n");
+        assert_eq!((text(&split.own), split.waiting), ("a\nb\nc\nd\ne\n", 0));
+        // Binary: every change waits.
+        let bin = edited("x\0", "y\0");
+        assert_eq!(bin.split(b"z\0").own, b"x\0");
     }
 
     fn pkt(data: &str) -> Vec<u8> {

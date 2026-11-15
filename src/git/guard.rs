@@ -1,5 +1,6 @@
 //! The guard: no commit holding another layer's uncommitted lines of a union
-//! file reaches the workspace's branch, or a remote.
+//! file, or of a file editable layers changed or added, reaches the
+//! workspace's branch, or a remote.
 //!
 //! The filter (`git::filter`) keeps those lines out of what git commits, but
 //! not everything runs it: `git -c filter.<driver>.clean=cat`, `hash-object
@@ -9,9 +10,11 @@
 //! - `reference-transaction` (state `prepared`, for every ref update git
 //!   makes, plumbing included, and not skipped by `--no-verify`) refuses an
 //!   update of the workspace's branch to a commit that would bring such lines;
-//! - `pre-push`, a second line, refuses pushing one.
+//! - `pre-push`, a second line, refuses pushing one;
+//! - libgit2 runs no hooks: the daemon checks the commits once the branch
+//!   moved (`state::guard_check`), and warns.
 //!
-//! The lines are recorded by the daemon at each switch, per union path, with
+//! The lines are recorded by the daemon at each switch, per path, with
 //! the layer whose they are (`Guard`, in `<admin>/gitfold-guard`). A commit
 //! brings one when its version of the path has the line and none of its
 //! parents' versions does: a merge of the layer's branch, once it committed
@@ -133,8 +136,28 @@ impl Guard {
         repo: &gix::Repository,
         commits: &[ObjectId],
     ) -> Result<Option<Violation>> {
+        Ok(self.scan(repo, commits, false)?.pop())
+    }
+
+    /// Every guarded line `commits` bring.
+    pub fn violations(
+        &self,
+        repo: &gix::Repository,
+        commits: &[ObjectId],
+    ) -> Result<Vec<Violation>> {
+        self.scan(repo, commits, true)
+    }
+
+    /// The guarded lines `commits` bring: `all`, or the first.
+    fn scan(
+        &self,
+        repo: &gix::Repository,
+        commits: &[ObjectId],
+        all: bool,
+    ) -> Result<Vec<Violation>> {
+        let mut out = Vec::new();
         if self.is_empty() {
-            return Ok(None);
+            return Ok(out);
         }
         for &id in commits {
             let commit = repo.find_commit(id)?;
@@ -166,22 +189,29 @@ impl Guard {
                     .collect();
                 for line in lines(&data).map(key) {
                     let norm = normalized(line);
-                    if norm.is_empty() || had.contains(&norm) {
+                    // A line of punctuation alone (`}`, `);`) says nothing
+                    // of whose it is.
+                    if !norm.iter().any(|b| b.is_ascii_alphanumeric() || *b >= 0x80)
+                        || had.contains(&norm)
+                    {
                         continue;
                     }
                     let found = guarded.iter().find(|(_, l)| normalized(l) == norm);
                     if let Some((layer, _)) = found {
-                        return Ok(Some(Violation {
+                        out.push(Violation {
                             commit: id,
                             path: path.clone(),
                             line: line.to_vec(),
                             layer: layer.clone(),
-                        }));
+                        });
+                        if !all {
+                            return Ok(out);
+                        }
                     }
                 }
             }
         }
-        Ok(None)
+        Ok(out)
     }
 }
 
@@ -247,7 +277,7 @@ fn common_dir(admin: &Path) -> Result<PathBuf> {
 }
 
 /// The commits `rev-list <args>` gives, in `common`.
-fn rev_list(common: &Path, args: &[String]) -> Result<Vec<ObjectId>> {
+pub(crate) fn rev_list(common: &Path, args: &[String]) -> Result<Vec<ObjectId>> {
     let mut all = vec!["rev-list".to_string(), format!("--max-count={MAX_COMMITS}")];
     all.extend(args.iter().cloned());
     let all: Vec<&str> = all.iter().map(String::as_str).collect();
@@ -375,5 +405,39 @@ mod tests {
         let spaced = r.commit("spaced");
         let v = guard.violation(&repo, &[spaced]).unwrap().unwrap();
         assert_eq!(&v.line[..], b" fromA  ");
+    }
+
+    /// Every guarded line a commit brings is found (the safety net names
+    /// them all); a line of punctuation alone is no one's.
+    #[test]
+    fn all_violations_but_punctuation() {
+        let r = Repo::new("guard-all");
+        r.write("api.rs", "// api\n");
+        r.commit("c0");
+        r.write("api.rs", "// api\nclass Api {\n    fn a() {}\n}\n");
+        let leak = r.commit("leak");
+        r.write(
+            "api.rs",
+            "// api\nclass Api {\n    fn a() {}\n}\nfn own() {\n}\n",
+        );
+        let own = r.commit("own");
+        let mut guard = Guard {
+            branch: "main".into(),
+            ..Default::default()
+        };
+        let lines = ["class Api {", "    fn a() {}", "}"];
+        let lines = lines.map(|l| ("lead".to_string(), l.as_bytes().to_vec()));
+        guard.paths.insert(b"api.rs".to_vec(), lines.to_vec());
+        let repo = r.open();
+        let found = guard.violations(&repo, &[leak]).unwrap();
+        let found: Vec<&[u8]> = found.iter().map(|v| &v.line[..]).collect();
+        assert_eq!(found, [&b"class Api {"[..], b"    fn a() {}"]);
+        // A `}` of its own, added after the layer's: not the layer's.
+        let mut guard = guard.clone();
+        guard.paths.insert(
+            b"api.rs".to_vec(),
+            vec![("lead".to_string(), b"}".to_vec())],
+        );
+        assert!(guard.violations(&repo, &[own]).unwrap().is_empty());
     }
 }

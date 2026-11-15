@@ -24,6 +24,7 @@
 
 pub mod follow;
 pub mod fork;
+pub mod guard_check;
 pub mod layers;
 pub mod markers;
 pub mod moves;
@@ -32,6 +33,7 @@ pub mod retire;
 pub mod snapshot;
 pub mod status;
 pub mod task;
+pub mod waiting;
 
 use std::fs;
 use std::io;

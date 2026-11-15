@@ -148,6 +148,12 @@ pub struct Workspace {
     /// What git's filter was given to smudge, by the hash of what it gave
     /// back (see `layers::filter`).
     filter_memo: Mutex<HashMap<[u8; 20], Vec<u8>>>,
+    /// The safety net's last error (`check_branch`), logged once.
+    guard_check_failed: Mutex<Option<String>>,
+    /// Files only editable layers changed whose index entries' size was
+    /// zeroed before a write, with the index's mtime then (see
+    /// `layers::unstat_edited`).
+    unstated: Mutex<HashMap<Vec<u8>, Option<std::time::SystemTime>>>,
     /// The index's mtime when the layers' skip-worktree bits were last
     /// checked (see `layers`).
     index_checked: Mutex<Option<std::time::SystemTime>>,
@@ -169,6 +175,13 @@ struct Layers {
     mixed: std::collections::HashMap<Vec<u8>, Vec<usize>>,
     /// The paths of `mixed` only editable layers changed: writable.
     writable: HashSet<Vec<u8>>,
+    /// The files of `writable` the base has: git sees them through the
+    /// filter, without the layers' lines and the waiting edits (see
+    /// `layers`).
+    edited: HashSet<Vec<u8>>,
+    /// The files of `writable` the base doesn't have: hidden from git, every
+    /// change to one waiting (see `layers`).
+    edited_new: HashSet<Vec<u8>>,
     /// Whether any layer is shown.
     layers_on: bool,
     /// H: the base's tree with the union files union-merged (the base's tree
@@ -291,6 +304,8 @@ impl Workspace {
             view: base.tree,
             mixed: Default::default(),
             writable: Default::default(),
+            edited: Default::default(),
+            edited_new: Default::default(),
             layers_on: false,
             hunk: base.tree,
             union: Default::default(),
@@ -299,6 +314,10 @@ impl Workspace {
             times: Times::open(&state.times())?,
         };
         let showing = layers::open_view(store, &state, &mut layers)?;
+        // The safety net starts from the branch as it is now (`check_branch`).
+        if let Err(e) = crate::state::guard_check::start(&state) {
+            log::warn!("{}: {e:#}", state.branch);
+        }
         // Copy-ups a crash interrupted; their target was never replaced.
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
@@ -330,6 +349,8 @@ impl Workspace {
             kernel: std::sync::OnceLock::new(),
             layers_refused: Mutex::new(None),
             filter_memo: Mutex::new(HashMap::new()),
+            guard_check_failed: Mutex::new(None),
+            unstated: Mutex::new(HashMap::new()),
             index_checked: Mutex::new(None),
             activity: Default::default(),
             following: Default::default(),

@@ -327,12 +327,13 @@ pub fn changed_paths(intent: &Intent) -> Result<Vec<BString>> {
 }
 
 /// The paths the move changes where the workspace's own work may be in its
-/// way: `changed_paths` but the union files shown in the workspace in
-/// `state`, whose own lines a switch carries over.
+/// way: `changed_paths` but the files the workspace in `state` shows mixed
+/// with its layers' lines (union files, files editable layers changed or
+/// added), whose own lines and waiting edits a switch carries over.
 pub fn own_paths(state: &StateDir, intent: &Intent) -> Result<Vec<BString>> {
-    let union = super::layers::ShownLayers::read(state)?.union;
+    let applied = super::layers::ShownLayers::read(state)?;
     let mut paths: Vec<BString> = (changed_paths(intent)?.into_iter())
-        .filter(|p| !union.contains(p.as_slice()))
+        .filter(|p| !applied.union.contains(p.as_slice()) && !applied.theirs.contains(p.as_slice()))
         .collect();
     paths.dedup();
     Ok(paths)

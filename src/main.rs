@@ -140,11 +140,14 @@ enum Command {
     /// files can't be written there, and git sees only the workspace's own
     /// changes. An editable layer (`layer add BRANCH --edit`) is one the
     /// branch builds on: its commits sit on BRANCH's commits (on a merge of
-    /// them with several), follow its new ones at its agent's turns, and
-    /// come off them when it is removed or made see-only (`layer add BRANCH`
-    /// again); what BRANCH committed is the branch's to edit, and a file
-    /// only editable layers changed is writable. Every branch otherwise sits
-    /// on main. A layer brings only its
+    /// them with several), follow its new ones at its agent's turns (or,
+    /// without an agent, once the workspace is idle), and come off them
+    /// when it is removed or made see-only (`layer add BRANCH` again); what
+    /// BRANCH committed is the branch's to edit, and a file only editable
+    /// layers changed is writable, git seeing only the workspace's own lines
+    /// of it. Changes to their uncommitted lines are waiting edits: kept in
+    /// the file and out of git until the layer commits those lines. Every
+    /// branch otherwise sits on main. A layer brings only its
     /// own changes: a file it changed shows the base's version with them
     /// merged in (as merging its branch would), one layer after another,
     /// with conflict markers where they conflict with the base's or another
@@ -153,16 +156,18 @@ enum Command {
     /// writes; each workspace's lines where it put them among the others'),
     /// with a filter so git sees and commits only the workspace's own
     /// lines, and a guard refusing commits that bring the layers' onto the
-    /// branch. Where git can't be kept right, it is turned off there,
-    /// saying why. With no subcommand, lists the layers
+    /// branch (and the daemon warning about one made without it). Where git
+    /// can't be kept right, it is turned off there, saying why. With no
+    /// subcommand, lists the layers
     /// (what each shows, how it updates, whether your commits sit on it),
-    /// what your commits sit on, their conflicts, notes on landings and on
+    /// what your commits sit on, their conflicts, waiting edits, commits
+    /// with a layer's uncommitted lines, notes on landings and on
     /// union files (lines placed by the base's lines, or lines added among
     /// another branch's: maybe not a list). Stored with the workspace (a
     /// branch without one: its editable layers); while mounted, shown at
     /// once. Exit codes: 3 no such workspace, branch or layer, 4 refused or
     /// not moved (git busy, commits already pushed without --yes, commits
-    /// that change a layer's lines, a conflict, uncommitted work in the
+    /// or waiting edits that change a layer's lines, a conflict, uncommitted work in the
     /// way, own lines that depend on a layer's), 1 other errors, 2 usage
     /// errors (--edit on a tag, a commit or main).
     Layer(cli::layer::LayerArgs),

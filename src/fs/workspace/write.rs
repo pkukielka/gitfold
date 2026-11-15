@@ -205,6 +205,7 @@ impl Workspace {
         let layers = self.layers.read();
         let path = self.path(local)?;
         self.touch(&path);
+        self.unstat_edited(&layers, &path);
         // A copy-up turns a lower entry into an upper one, even if the write then
         // fails (listings stat upper entries when serving them, so plain writes
         // need no invalidation).
@@ -251,6 +252,7 @@ impl Workspace {
         let layers = self.layers.read();
         let path = self.path(local)?;
         self.touch(&path);
+        self.unstat_edited(&layers, &path);
         if self.copy_up(store, &layers, &path, size == Some(0))? {
             self.changed();
         }
@@ -653,6 +655,7 @@ impl Workspace {
             }
         } else {
             self.touch(&dst);
+            self.unstat_edited(&layers, &dst);
         }
         let was_opaque = layers.markers.set(Kind::Opaque, &src, false)?;
         let dst_whiteout = layers.markers.set(Kind::Whiteout, &dst, false)?;

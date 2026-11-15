@@ -64,18 +64,23 @@ pub enum LayerOp {
     /// 3 seconds.
     ///
     /// With --edit, your commits sit on BRANCH's commits (they move there
-    /// now, and onto its new commits at your turns), and what it committed
-    /// is yours to edit; what it hasn't committed yet shows on top. A pull
+    /// now, and onto its new commits at your turns, or without an agent,
+    /// once the workspace is idle), and what it committed is yours to
+    /// edit; what it hasn't committed yet shows on top, editable too, but
+    /// git sees only your lines. Your changes to its uncommitted lines are
+    /// waiting edits: kept in the file, not seen by git, listed by `gitfold
+    /// layer`, and yours to commit once BRANCH commits those lines. A pull
     /// request for your branch then includes BRANCH's commits until BRANCH
     /// lands. Several editable layers: your commits sit on a merge of
     /// theirs. Adding an editable layer without --edit makes it see-only
     /// again, taking your commits off it. It says first what it moves;
-    /// commits already pushed move only with --yes, and commits that change
-    /// the layer's lines can't come off it (listed, nothing moved). gitfold
-    /// never pushes: it prints the force-push to run. Exit codes: 3 no such
-    /// branch, 4 not moved (commits already pushed, a conflict, uncommitted
-    /// work in the way, git busy), 2 usage errors (--edit on a tag or a
-    /// commit, or on the main branch).
+    /// commits already pushed move only with --yes, and commits or waiting
+    /// edits that change the layer's lines can't come off it (listed,
+    /// nothing moved). gitfold never pushes: it prints the force-push to
+    /// run. Exit codes: 3 no such branch, 4 not moved (commits already
+    /// pushed, a conflict, waiting edits, uncommitted work in the way, git
+    /// busy), 2 usage errors (--edit on a tag or a commit, or on the main
+    /// branch).
     Add {
         /// A branch, or any revision.
         branch: String,
@@ -293,6 +298,34 @@ fn add_edit(
     show_after_move(common_dir, state)
 }
 
+/// Refuses taking the branch of `state` off editable layers `off` while it
+/// has waiting edits of their lines (`state::waiting`): they can't stand
+/// without them, so they are listed, nothing moving.
+fn refuse_waiting(state: &StateDir, off: &[String]) -> Result<()> {
+    let waiting = crate::state::waiting::of_workspace(state)?;
+    let on: Vec<String> = (waiting.iter())
+        .filter(|w| w.layers.iter().any(|l| off.contains(l)))
+        .map(|w| {
+            format!(
+                "{} ({})",
+                String::from_utf8_lossy(&w.path),
+                super::plural(w.edits, "waiting edit", "waiting edits")
+            )
+        })
+        .collect();
+    if on.is_empty() {
+        return Ok(());
+    }
+    let off = and_list(off.iter().cloned());
+    Err(Refusal::Changes.error(format!(
+        "{} has waiting edits of {off}'s uncommitted lines in {}: they can't stand without \
+         {off}. Undo them, or keep {off} editable until it commits those lines (they then \
+         become yours to commit)",
+        state.branch,
+        on.join(", ")
+    )))
+}
+
 /// `gitfold layer add BRANCH` on editable layer BRANCH (`layer`, as it is
 /// now): it becomes see-only, the branch's own commits taken off it.
 fn see_only(
@@ -304,6 +337,7 @@ fn see_only(
 ) -> Result<()> {
     let name = &state.branch;
     let branch = layer.branch.clone();
+    refuse_waiting(state, std::slice::from_ref(&branch))?;
     let mut next = built.layers.clone();
     let i = next.find(&branch).expect("an editable layer");
     if next.layers[i].snapshot == layer.snapshot {
@@ -343,6 +377,7 @@ fn remove_edit(
     yes: bool,
 ) -> Result<()> {
     let name = &state.branch;
+    refuse_waiting(state, &[branch.to_string()])?;
     let mut next = built.layers.clone();
     next.layers.retain(|l| l.branch != branch);
     let after = moves::Built {
@@ -424,6 +459,7 @@ fn remove_all_edit(
         return show_after_move(common_dir, state);
     }
     let editable = built.layers.editable_names();
+    refuse_waiting(state, &editable)?;
     let off = and_list(editable.iter().cloned());
     let plan = moves::Plan {
         name,
@@ -652,6 +688,52 @@ pub fn layer_hook(event: &str) -> Result<()> {
         Ok(())
     })() {
         log::debug!("gitfold layer --claude-hook: {e:#}");
+    }
+    if let Err(e) = turn_notes() {
+        log::debug!("gitfold layer --claude-hook: {e:#}");
+    }
+    Ok(())
+}
+
+/// For the daemon's move of a workspace without an agent, once it is idle
+/// (`fs::workspace::follow`), as the hook does at an agent's turn start:
+/// the branch `name` follows its editable layers' new commits (and where
+/// one landed, once its branch is gone), so their committed lines become
+/// its own (and its waiting edits on them ordinary changes). `lock` held.
+/// Whether it is where its editable layers are, and what it did, if it
+/// moved or can't.
+pub(crate) fn follow_editable(common_dir: &Path, name: &str) -> Result<(bool, Option<String>)> {
+    let (outcome, _, _) = moves::follow(common_dir, name)?;
+    let said = match &outcome {
+        moves::Outcome::UpToDate | moves::Outcome::BaseMoved => None,
+        other => Some(other.said()),
+    };
+    Ok((outcome.done(), said))
+}
+
+/// The turn's notes on the session's workspace, after its layers moved:
+/// commits on its branch with a layer's uncommitted lines
+/// (`state::guard_check`), and its waiting edits.
+fn turn_notes() -> Result<()> {
+    let repo = super::repo()?;
+    let name = super::branch_or_current(None, &repo)?;
+    let common_dir = git::init(&repo)?;
+    let state = StateDir::of(&common_dir, &name);
+    if !state.opened() {
+        return Ok(());
+    }
+    for alarm in crate::state::guard_check::read(&state) {
+        hook_say(&format!("gitfold: WARNING: {alarm}"));
+    }
+    let waiting = crate::state::waiting::of_workspace(&state)?;
+    for w in &waiting {
+        hook_say(&format!(
+            "gitfold: {} (git doesn't see them: `git commit -a` leaves them waiting).",
+            w.describe()
+        ));
+    }
+    for w in waiting.iter().filter(|w| w.conflict) {
+        hook_say(&format!("gitfold: Conflict: {}.", w.describe_conflict()));
     }
     Ok(())
 }
@@ -1127,8 +1209,27 @@ fn listing(common_dir: &Path, state: &StateDir, layers: &Layers) -> Result<Strin
         }
         false => (Vec::new(), Vec::new()),
     };
-    if !conflicts.is_empty() || !warnings.is_empty() || !notes.is_empty() {
+    let waiting = crate::state::waiting::of_workspace(state).unwrap_or_else(|e| {
+        log::warn!("{}: its waiting edits: {e:#}", state.branch);
+        Vec::new()
+    });
+    let alarms = crate::state::guard_check::read(state);
+    if !conflicts.is_empty()
+        || !warnings.is_empty()
+        || !notes.is_empty()
+        || !waiting.is_empty()
+        || !alarms.is_empty()
+    {
         out += "\n";
+    }
+    for alarm in &alarms {
+        let _ = writeln!(out, "WARNING: {alarm}");
+    }
+    for w in &waiting {
+        let _ = writeln!(out, "{}", w.describe());
+    }
+    for w in waiting.iter().filter(|w| w.conflict) {
+        let _ = writeln!(out, "Conflict: {}", w.describe_conflict());
     }
     for note in &notes {
         let _ = writeln!(out, "Note: {note}");
