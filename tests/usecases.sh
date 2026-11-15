@@ -160,7 +160,7 @@ eq "UC6: the other's version, no conflict" "x = 2" "$(cat "$W/config.rs")"
 check "UC6: the conflict line gone" fails has "$(listing "$W")" "Conflict"
 }
 
-# UC25: the base moved on since the layers started. A layer brings only its
+# UC26: the base moved on since the layers started. A layer brings only its
 # own changes: the base's newer fixes stay, two layers that started from
 # different older commits keep all their changes, and a change to a line
 # the base changed too conflicts with the base. A branch that shares no
@@ -181,21 +181,21 @@ R switch -q main
 mount_fs
 W=$MNT/me
 "$BIN" -C "$W" layer add b >/dev/null
-eq "UC25: the base's fix stays, the layer's change shows" "one FIX two three four five B six seven eight FIX" \
+eq "UC26: the base's fix stays, the layer's change shows" "one FIX two three four five B six seven eight FIX" \
     "$(paste -sd' ' "$W/util.rs")"
 "$BIN" -C "$W" layer add c >/dev/null
-eq "UC25: two layers from different older commits: every change" \
+eq "UC26: two layers from different older commits: every change" \
     "one FIX two three C four five B six seven eight FIX" "$(paste -sd' ' "$W/util.rs")"
-check "UC25: read-only" fails sh -c "echo x >>'$W/util.rs'"
-check "UC25: a change to a line the base changed too: git's markers" grep -q '^<<<<<<< base' "$W/config.rs"
+check "UC26: read-only" fails sh -c "echo x >>'$W/util.rs'"
+check "UC26: a change to a line the base changed too: git's markers" grep -q '^<<<<<<< base' "$W/config.rs"
 out=$(listing "$W")
-check "UC25: listed as a conflict with the base" has "$out" "Conflict: config.rs: b's change conflicts with your base"
-check "UC25: not the clean merge" fails has "$out" "util.rs"
-check "UC25: the deny hook says so" has "$(edit_hook "$W" config.rs)" "b's change conflicts with your base"
-eq "UC25: git sees none of it" "" "$(git -C "$W" status --short)"
+check "UC26: listed as a conflict with the base" has "$out" "Conflict: config.rs: b's change conflicts with your base"
+check "UC26: not the clean merge" fails has "$out" "util.rs"
+check "UC26: the deny hook says so" has "$(edit_hook "$W" config.rs)" "b's change conflicts with your base"
+eq "UC26: git sees none of it" "" "$(git -C "$W" status --short)"
 out=$("$BIN" -C "$W" layer add lonely 2>&1); rc=$?
-eq "UC25: no shared history: refused (exit 4)" "4" "$rc"
-check "UC25: saying why" has "$out" "lonely shares no history with me's base"
+eq "UC26: no shared history: refused (exit 4)" "4" "$rc"
+check "UC26: saying why" has "$out" "lonely shares no history with me's base"
 }
 
 # UC10: a file everyone appends to.
@@ -326,7 +326,7 @@ eq "UC19: on api's tip, the layer there" "$(R rev-parse api)|one|wip|more" \
 eq "UC19: git clean" "" "$(git -C "$U" status --short)"
 }
 
-# UC24: a child shows the lead's uncommitted contract, then builds on the
+# UC27: a child shows the lead's uncommitted contract, then builds on the
 # lead's branch: its own commits go onto the lead's, the contract still
 # shows on top.
 a_child_on_the_leads_branch() {
@@ -338,17 +338,17 @@ echo 'fn shared() {}' >"$L/api/shared.rs"; G "$L" add -A; G "$L" commit -qm "lea
 echo 'fn draft() {}' >>"$L/api/contract.rs"
 "$BIN" -C "$C" layer add lead >/dev/null
 echo 'use shared;' >"$C/client.rs"; G "$C" add client.rs; G "$C" commit -qm "child: client"
-check "UC24: the child builds on the lead's branch" "$BIN" -C "$C" layer base lead
-eq "UC24: its commit on the lead's" "$(R rev-parse lead)|client.rs" "$(R rev-parse child^)|$(R diff --name-only lead child)"
-eq "UC24: the contract still shows, uncommitted part too" "fn v1() {}|fn draft() {}" "$(paste -sd'|' "$C/api/contract.rs")"
-check "UC24: read-only" fails sh -c "echo x >>'$C/api/contract.rs'"
-check "UC24: what the lead committed is the child's base now: writable" sh -c "echo '// ok' >>'$C/api/shared.rs'"
-eq "UC24: git sees only that" " M api/shared.rs" "$(git -C "$C" status --short)"
+check "UC27: the child builds on the lead's branch" "$BIN" -C "$C" layer base lead
+eq "UC27: its commit on the lead's" "$(R rev-parse lead)|client.rs" "$(R rev-parse child^)|$(R diff --name-only lead child)"
+eq "UC27: the contract still shows, uncommitted part too" "fn v1() {}|fn draft() {}" "$(paste -sd'|' "$C/api/contract.rs")"
+check "UC27: read-only" fails sh -c "echo x >>'$C/api/contract.rs'"
+check "UC27: what the lead committed is the child's base now: writable" sh -c "echo '// ok' >>'$C/api/shared.rs'"
+eq "UC27: git sees only that" " M api/shared.rs" "$(git -C "$C" status --short)"
 G "$C" checkout -q -- api/shared.rs
-check "UC24: the listing: base and layer" sh -c "'$BIN' -C '$C' layer | grep -q '^Base: lead, live' && '$BIN' -C '$C' layer | grep -q '^lead '"
+check "UC27: the listing: base and layer" sh -c "'$BIN' -C '$C' layer | grep -q '^Base: lead, live' && '$BIN' -C '$C' layer | grep -q '^lead '"
 }
 
-# UC25: a layer of another branch while built on api, with a blended file:
+# UC28: a layer of another branch while built on api, with a blended file:
 # api's new commits move the branch, the layer stays, blends and the
 # layers commit come back.
 an_unrelated_layer_on_a_base() {
@@ -362,19 +362,19 @@ echo '- c: thing' >>"$MNT/c/CHANGELOG.md"; echo c >"$MNT/c/c.txt"
 "$BIN" -C "$U" layer add c >/dev/null
 echo '- ui: screen' >>"$U/CHANGELOG.md"; G "$U" commit -qam "ui: log"
 for _ in $(seq 30); do [ "$(R show ui:CHANGELOG.md | wc -l)" = 2 ] && break; sleep 0.1; done
-eq "UC25: ui's commit holds only its own line" "# log|- ui: screen" "$(R show ui:CHANGELOG.md | paste -sd'|')"
+eq "UC28: ui's commit holds only its own line" "# log|- ui: screen" "$(R show ui:CHANGELOG.md | paste -sd'|')"
 echo api >"$A/api.txt"; G "$A" add api.txt; G "$A" commit -qm "api: more"
 out=$(turn_starts "$U")
-check "UC25: moved onto api at the turn" has "$out" "was moved onto its base api"
-eq "UC25: on api's tip" "$(R rev-parse api)" "$(R rev-parse ui~1)"
-eq "UC25: api's file, c's layer" "api|c" "$(cat "$U/api.txt")|$(cat "$U/c.txt")"
-eq "UC25: the blend: c's line and ui's" "# log|- c: thing|- ui: screen" "$(LC_ALL=C sort "$U/CHANGELOG.md" | paste -sd'|')"
-check "UC25: HEAD at a layers commit again" has "$(git -C "$U" log -1 --format=%s)" "gitfold layers"
-eq "UC25: git sees nothing of c" "" "$(git -C "$U" status --short)"
-eq "UC25: ui's commits hold only its own changes" "CHANGELOG.md" "$(R diff --name-only api ui)"
+check "UC28: moved onto api at the turn" has "$out" "was moved onto its base api"
+eq "UC28: on api's tip" "$(R rev-parse api)" "$(R rev-parse ui~1)"
+eq "UC28: api's file, c's layer" "api|c" "$(cat "$U/api.txt")|$(cat "$U/c.txt")"
+eq "UC28: the blend: c's line and ui's" "# log|- c: thing|- ui: screen" "$(LC_ALL=C sort "$U/CHANGELOG.md" | paste -sd'|')"
+check "UC28: HEAD at a layers commit again" has "$(git -C "$U" log -1 --format=%s)" "gitfold layers"
+eq "UC28: git sees nothing of c" "" "$(git -C "$U" status --short)"
+eq "UC28: ui's commits hold only its own changes" "CHANGELOG.md" "$(R diff --name-only api ui)"
 echo '- ui: more' >>"$U/CHANGELOG.md"; G "$U" commit -qam "ui: more"
 for _ in $(seq 30); do [ "$(R show ui:CHANGELOG.md | wc -l)" = 3 ] && break; sleep 0.1; done
-eq "UC25: commits still go onto the branch, own lines only" "# log|- ui: screen|- ui: more" "$(R show ui:CHANGELOG.md | paste -sd'|')"
+eq "UC28: commits still go onto the branch, own lines only" "# log|- ui: screen|- ui: more" "$(R show ui:CHANGELOG.md | paste -sd'|')"
 }
 
 # UC20-UC22: snapshots.
@@ -419,7 +419,7 @@ check "UC23: the child sees it after its turn" grep -q wanted "$C/api/contract.r
 eq "UC23: the lead shown again" "lead" "$(listing "$C" | awk '/^LAYER/{t=1;next} t&&NF{print $1; exit}')"
 }
 
-# UC24: a person works in a workspace with no agent; the lead's agent works
+# UC29: a person works in a workspace with no agent; the lead's agent works
 # on. The person's layer of the lead follows by itself, between the
 # person's edits.
 a_person_without_an_agent() {
@@ -429,21 +429,21 @@ mount_fs
 L=$MNT/lead P=$MNT/me
 echo 'fn draft() {}' >>"$L/api/contract.rs"
 "$BIN" -C "$P" layer add lead >/dev/null
-check "UC24: the person sees the lead's draft" grep -q draft "$P/api/contract.rs"
+check "UC29: the person sees the lead's draft" grep -q draft "$P/api/contract.rs"
 echo 'fn second() {}' >>"$L/api/contract.rs"; turn_ends "$L"
 for _ in $(seq 150); do grep -q second "$P/api/contract.rs" && break; sleep 0.1; done
-check "UC24: the lead's next turn shows within seconds, no command run" grep -q second "$P/api/contract.rs"
-eq "UC24: listed as moved" "lead all work live, last HH:MM" "$(row "$P" lead)"
+check "UC29: the lead's next turn shows within seconds, no command run" grep -q second "$P/api/contract.rs"
+eq "UC29: listed as moved" "lead all work live, last HH:MM" "$(row "$P" lead)"
 echo 'fn third() {}' >>"$L/api/contract.rs"; turn_ends "$L"
 seen=no
 for i in $(seq 10); do
     echo "note $i" >>"$P/notes.txt"; sleep 0.5
     grep -q third "$P/api/contract.rs" && seen=yes
 done
-eq "UC24: not while the person is editing" "no" "$seen"
+eq "UC29: not while the person is editing" "no" "$seen"
 for _ in $(seq 150); do grep -q third "$P/api/contract.rs" && break; sleep 0.1; done
-check "UC24: but once they pause" grep -q third "$P/api/contract.rs"
-eq "UC24: git sees only the person's own file" "?? notes.txt" "$(git -C "$P" status --short)"
+check "UC29: but once they pause" grep -q third "$P/api/contract.rs"
+eq "UC29: git sees only the person's own file" "?? notes.txt" "$(git -C "$P" status --short)"
 }
 
 section "use cases: a child builds on the lead" a_child_builds_on_the_lead
