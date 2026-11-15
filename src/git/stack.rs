@@ -260,16 +260,6 @@ pub enum How {
     Declared,
 }
 
-impl How {
-    pub fn name(self) -> &'static str {
-        match self {
-            How::Merged => "merged",
-            How::Squashed => "squashed or rebased",
-            How::Declared => "declared",
-        }
-    }
-}
-
 /// Where a parent base landed: `at`, the first commit of the target that
 /// has all of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

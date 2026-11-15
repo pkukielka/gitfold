@@ -88,6 +88,20 @@ pub fn resolve(common_dir: &Path, name: &str) -> Result<Option<(String, ObjectId
     Ok(None)
 }
 
+/// Whether branch `parent` is gone: deleted here, or its upstream deleted
+/// on its remote (a forge deletes a merged pull request's branch; seen once
+/// fetched with `--prune`). What makes a squash found by content safe to
+/// follow unasked.
+pub fn gone(common_dir: &Path, local: &Local, parent: &str) -> Result<bool> {
+    if resolve(common_dir, parent)?.is_none() {
+        return Ok(true);
+    }
+    let Some((remote, theirs)) = local.upstream(parent) else {
+        return Ok(false);
+    };
+    Ok(stack::rev(common_dir, &format!("refs/remotes/{remote}/{theirs}"))?.is_none())
+}
+
 /// Where the work of `parent` lands: its own parent, else the trunk (`None`
 /// if there is none, or `parent` is it).
 pub fn target(common_dir: &Path, local: &Local, parent: &str) -> Result<Option<Target>> {
@@ -98,6 +112,12 @@ pub fn target(common_dir: &Path, local: &Local, parent: &str) -> Result<Option<T
             _ => return Ok(None),
         },
     };
+    named(common_dir, name)
+}
+
+/// The target named `name` (a branch, or a remote-tracking one), if it
+/// exists.
+pub fn named(common_dir: &Path, name: String) -> Result<Option<Target>> {
     let Some((full, tip)) = resolve(common_dir, &name)? else {
         return Ok(None);
     };

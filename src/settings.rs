@@ -4,8 +4,9 @@
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
 //!   mode), `gitfoldTrackReads` (whether it records reads), and for a
 //!   stacked branch `gitfoldParent` (the branch it is built on),
-//!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only) and
-//!   `gitfoldRestackBlocked` (the restack that conflicted, see
+//!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only),
+//!   `gitfoldRestackBlocked` (the restack that conflicted) and
+//!   `gitfoldLanding` (a move onto a parent's landing under way; see
 //!   `cli::stack`);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), `mountpoint` (where `gitfold mount` last
@@ -36,6 +37,10 @@ const RESTACK: &str = "gitfoldRestack";
 /// `branch.<branch>.gitfoldRestackBlocked`: `<parent tip> <commit> <paths>`,
 /// the restack onto that parent tip that conflicted.
 const RESTACK_BLOCKED: &str = "gitfoldRestackBlocked";
+/// `branch.<branch>.gitfoldLanding`: `<target> <landing commit>`, set while
+/// the branch moves onto where its parent landed, until the target is its
+/// parent.
+const LANDING: &str = "gitfoldLanding";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -172,6 +177,12 @@ impl Local {
         self.branch(branch, RESTACK_BLOCKED)
     }
 
+    /// The move of `branch` onto its parent's landing under way, if any
+    /// (see `LANDING`).
+    pub fn landing(&self, branch: &str) -> Option<String> {
+        self.branch(branch, LANDING)
+    }
+
     /// The remote `branch` pushes to and its branch there, from git's own
     /// `branch.<branch>.remote` and `.merge`, if both are set.
     pub fn upstream(&self, branch: &str) -> Option<(String, String)> {
@@ -254,6 +265,15 @@ pub fn set_restack_blocked(git_dir: &Path, branch: &str, blocked: Option<&str>) 
     match blocked {
         Some(blocked) => set_branch(git_dir, branch, RESTACK_BLOCKED, blocked),
         None => unset_branch(git_dir, branch, RESTACK_BLOCKED),
+    }
+}
+
+/// Records the move of `branch` onto its parent's landing under way, or
+/// forgets it.
+pub fn set_landing(git_dir: &Path, branch: &str, landing: Option<&str>) -> Result<()> {
+    match landing {
+        Some(landing) => set_branch(git_dir, branch, LANDING, landing),
+        None => unset_branch(git_dir, branch, LANDING),
     }
 }
 

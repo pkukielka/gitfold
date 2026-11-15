@@ -107,6 +107,11 @@ pub enum StackOp {
         /// The target's commit that has PARENT's work (default: its tip).
         #[arg(long, value_name = "REV")]
         at: Option<String>,
+        /// Where it landed (default: its own parent, else the trunk;
+        /// needed once PARENT is deleted, which deletes its own parent's
+        /// name with it).
+        #[arg(long, value_name = "BRANCH")]
+        onto: Option<String>,
     },
     /// List the stacks, each parent above its branches.
     List,
@@ -132,6 +137,7 @@ pub fn stack(repo: &Path, args: StackArgs) -> Result<()> {
             };
             settings::set_parent(&common_dir, &name, None)?;
             settings::set_restack_blocked(&common_dir, &name, None)?;
+            settings::set_landing(&common_dir, &name, None)?;
             stack::drop_base(&common_dir, &name)?;
             // The way out of an interrupted restack recovery can't tell apart.
             let forgot = match restack::forget(&StateDir::of(&common_dir, &name))? {
@@ -145,7 +151,9 @@ pub fn stack(repo: &Path, args: StackArgs) -> Result<()> {
             all,
             dry_run,
         } => return sync(repo, &common_dir, branches, all, dry_run),
-        StackOp::Merged { parent, at } => return merged(&common_dir, &parent, at.as_deref()),
+        StackOp::Merged { parent, at, onto } => {
+            return merged(&common_dir, &parent, at.as_deref(), onto);
+        }
         StackOp::List => print!("{}", listing(&common_dir)?),
     }
     Ok(())
@@ -224,6 +232,9 @@ enum Outcome {
     },
     /// `--dry-run`: its parent landed, it would move there.
     WouldLand(Landed),
+    /// At a turn boundary: its parent looks squash-merged, but its branch
+    /// is still there, so it is only said (`stack sync` moves it).
+    LooksLanded(Landed),
     /// A commit conflicts with what it would move onto (`onto`, named);
     /// `told` if that commit had blocked it already; `rebase` the command
     /// that does it by hand.
@@ -250,15 +261,18 @@ struct Landed {
 }
 
 impl Landed {
-    /// `p1 landed on main as 1a2b3c4d5e6f (squashed or rebased)`.
+    /// `p1 looks squash- or rebase-merged into main as 1a2b3c4d5e6f`: a
+    /// squash is found by content, so main making the same change on its
+    /// own looks the same.
     fn said(&self) -> String {
-        format!(
-            "{} landed on {} as {} ({})",
-            self.parent,
-            self.target,
-            short(self.landing.at),
-            self.landing.how.name()
-        )
+        let (parent, target, at) = (&self.parent, &self.target, short(self.landing.at));
+        match self.landing.how {
+            stack::How::Merged => format!("{parent} was merged into {target} by {at}"),
+            stack::How::Squashed => {
+                format!("{parent} looks squash- or rebase-merged into {target} as {at}")
+            }
+            stack::How::Declared => format!("{parent} was declared merged into {target} at {at}"),
+        }
     }
 }
 
@@ -274,7 +288,7 @@ impl Outcome {
 /// `gitfold stack merged`: `parent` landed on its target at `at` (default:
 /// the target's tip), as detection didn't see (a squash heavily edited
 /// when merged, say): every branch stacked on it moves there now.
-fn merged(common_dir: &Path, parent: &str, at: Option<&str>) -> Result<()> {
+fn merged(common_dir: &Path, parent: &str, at: Option<&str>, onto: Option<String>) -> Result<()> {
     check_name(parent)?;
     let local = Local::read(common_dir);
     let children: Vec<String> = (local.parents().into_iter())
@@ -284,11 +298,23 @@ fn merged(common_dir: &Path, parent: &str, at: Option<&str>) -> Result<()> {
     if children.is_empty() {
         return Err(Refusal::NotFound.error(format!("no branch is stacked on {parent}")));
     }
-    let Some(target) = land::target(common_dir, &local, parent)? else {
-        return Err(Refusal::NotFound.error(format!(
-            "{parent} has no parent of its own and there is no trunk to land on \
-             (`git config gitfold.trunk <BRANCH>` names it)"
-        )));
+    let target = match onto {
+        Some(onto) => land::named(common_dir, onto.clone())?
+            .ok_or_else(|| Refusal::NotFound.error(format!("no branch {onto}")))?,
+        // Deleting a branch deletes its config, its own parent's name too:
+        // the trunk would be a guess.
+        None if land::resolve(common_dir, parent)?.is_none() => {
+            return Err(Refusal::NotFound.error(format!(
+                "{parent} is gone, and with it the name of what it was stacked on: say where \
+                 it landed with --onto <BRANCH>"
+            )));
+        }
+        None => land::target(common_dir, &local, parent)?.ok_or_else(|| {
+            Refusal::NotFound.error(format!(
+                "{parent} has no parent of its own and there is no trunk to land on \
+                 (`git config gitfold.trunk <BRANCH>` names it, or --onto)"
+            ))
+        })?,
     };
     let at = match at {
         Some(rev) => stack::rev(common_dir, rev)?
@@ -299,7 +325,7 @@ fn merged(common_dir: &Path, parent: &str, at: Option<&str>) -> Result<()> {
         at,
         how: stack::How::Declared,
     };
-    each(common_dir, &local, &children, |name| {
+    each(common_dir, &children, |name| {
         let tip = tip_of(common_dir, name)?;
         let resolved = land::resolve(common_dir, parent)?;
         let Some(base) = own_base(common_dir, name, resolved.as_ref(), tip)? else {
@@ -339,8 +365,8 @@ fn sync(
     // Bottom-up: a branch restacks onto its parent's restacked commits.
     branches.sort_by_cached_key(|b| (depth(&local, b), b.clone()));
     branches.dedup();
-    each(common_dir, &local, &branches, |name| {
-        restack_branch(common_dir, name, dry_run)
+    each(common_dir, &branches, |name| {
+        restack_branch(common_dir, name, dry_run, false)
     })
 }
 
@@ -348,15 +374,15 @@ fn sync(
 /// then the force-pushes to run; fails (exit 4) if any wasn't restacked.
 fn each(
     common_dir: &Path,
-    local: &Local,
     branches: &[String],
     restack: impl Fn(&str) -> Result<Outcome>,
 ) -> Result<()> {
     let mut failed = 0;
     let mut pushes = Vec::new();
     for name in branches {
-        let parent = local.parent(name).unwrap_or_default();
         let outcome = restack(name).unwrap_or_else(|e| Outcome::Refused(format!("{e:#}")));
+        // As now: finishing an interrupted move onto a landing changes it.
+        let parent = Local::read(common_dir).parent(name).unwrap_or_default();
         failed += usize::from(!outcome.done());
         println!("{name}\t{}", describe(&outcome, name, &parent));
         if matches!(outcome, Outcome::Restacked { .. } | Outcome::Landed { .. })
@@ -452,7 +478,7 @@ fn describe(outcome: &Outcome, name: &str, parent: &str) -> String {
             }
             let _ = write!(
                 line,
-                ". Its pull request's base is now {}: `gh pr edit {name} --base {}`",
+                ". Its pull request's base should now be {}: push it, then `gh pr edit {name} --base {}`",
                 landed.pr_base, landed.pr_base
             );
             line
@@ -461,6 +487,11 @@ fn describe(outcome: &Outcome, name: &str, parent: &str) -> String {
             "{}; would move there and be stacked on {}",
             landed.said(),
             landed.target
+        ),
+        Outcome::LooksLanded(landed) => format!(
+            "{}, but {} is still there; `gitfold stack sync {name}` moves it there",
+            landed.said(),
+            landed.parent
         ),
         Outcome::Blocked {
             commit,
@@ -488,8 +519,14 @@ fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
 
 /// Restacks branch `name` onto its parent's tip, if it moved, or onto
 /// where its parent base landed, if its parent was merged (see the module
-/// doc); with `dry_run`, only says what it would do.
-fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcome> {
+/// doc); with `dry_run`, only says what it would do. `auto` (the hook, not
+/// asked by anyone): a parent that only looks squash-merged (found by
+/// content) is followed only if its branch is gone, here or on its remote;
+/// else it is only said.
+fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> Result<Outcome> {
+    if !dry_run {
+        finish_landing(common_dir, name)?;
+    }
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
         return Err(Refusal::NotFound.error(format!("{name} isn't stacked")));
@@ -502,6 +539,15 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
         && let Some(target) = land::target(common_dir, &local, &parent)?
         && let Some(landing) = land::landed(common_dir, base.commit, &target)?
     {
+        if auto && landing.how == stack::How::Squashed && !land::gone(common_dir, &local, &parent)?
+        {
+            return Ok(Outcome::LooksLanded(Landed {
+                parent: parent.clone(),
+                target: target.name.clone(),
+                pr_base: target.pr_base.clone(),
+                landing,
+            }));
+        }
         return reparent(
             common_dir, name, &parent, &target, landing, base, tip, dry_run,
         );
@@ -603,7 +649,14 @@ fn reparent(
     };
     let onto = format!("{} at {}", target.name, short(landing.at));
     let at = short(landing.at);
-    let (files, dropped) = match copy_onto(
+    // Recorded first: the parent can't join the ref transaction, and a
+    // branch moved but still stacked on its old parent would be restacked
+    // back onto the parent's commits (`finish_landing`).
+    let marker = format!("{} {}", target.name, landing.at);
+    if !dry_run {
+        settings::set_landing(common_dir, name, Some(&marker))?;
+    }
+    let copied = copy_onto(
         common_dir,
         name,
         (&onto, &at),
@@ -611,12 +664,20 @@ fn reparent(
         tip,
         landing.at,
         dry_run,
-    )? {
-        Copied::Moved { files, dropped } => (files, dropped),
-        Copied::Dry => return Ok(Outcome::WouldLand(landed)),
-        Copied::Stop(outcome) => return Ok(outcome),
+    );
+    let (files, dropped) = match copied {
+        Ok(Copied::Moved { files, dropped }) => (files, dropped),
+        Ok(Copied::Dry) => return Ok(Outcome::WouldLand(landed)),
+        // Not moved, or moved there by another sync first (up to date).
+        Ok(Copied::Stop(outcome)) => {
+            finish_landing(common_dir, name)?;
+            return Ok(outcome);
+        }
+        // Maybe half-way: `finish_landing` sorts it out next time.
+        Err(e) => return Err(e),
     };
     settings::set_parent(common_dir, name, Some(&target.name))?;
+    settings::set_landing(common_dir, name, None)?;
     let own = stack::count(common_dir, landing.at, tip_of(common_dir, name)?)?;
     Ok(Outcome::Landed {
         landed,
@@ -624,6 +685,29 @@ fn reparent(
         dropped,
         files,
     })
+}
+
+/// Finishes or forgets the move of branch `name` onto its parent's landing
+/// that `gitfoldLanding` records: its stack ref at the landing commit means
+/// the refs moved, so the target becomes its parent; else the move didn't
+/// happen, unless a workspace's restack intent may still finish it.
+fn finish_landing(common_dir: &Path, name: &str) -> Result<()> {
+    let Some(marker) = Local::read(common_dir).landing(name) else {
+        return Ok(());
+    };
+    let Some((target, at)) = marker.split_once(' ') else {
+        return settings::set_landing(common_dir, name, None);
+    };
+    if stack_base(common_dir, name)
+        .map(|b| b.to_string())
+        .as_deref()
+        == Some(at)
+    {
+        settings::set_parent(common_dir, name, Some(target))?;
+    } else if restack::pending(&StateDir::of(common_dir, name)) {
+        return Ok(());
+    }
+    settings::set_landing(common_dir, name, None)
 }
 
 /// What `copy_onto` did.
@@ -982,9 +1066,12 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
     if !trunk
         && let Some(base) = &base
         && let Ok(Some(target)) = land::target(common_dir, local, &parent)
-        && let Ok(Some(_)) = land::landed(common_dir, base.commit, &target)
+        && let Ok(Some(landing)) = land::landed(common_dir, base.commit, &target)
     {
-        notes.push("parent merged: re-parent with stack sync".into());
+        notes.push(match landing.how {
+            stack::How::Squashed => "parent looks merged: re-parent with stack sync".into(),
+            _ => "parent merged: re-parent with stack sync".into(),
+        });
     } else if local.restack_blocked(name).is_some() {
         notes.push("restack blocked".into());
     } else if let (Some((_, parent_tip)), Some(base)) = (&resolved, &base) {
@@ -1067,7 +1154,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
     }
     let told_file = StateDir::of(common_dir, name).dir.join(TOLD);
     let before = stack_base(common_dir, name);
-    let outcome = restack_branch(common_dir, name, false)?;
+    let outcome = restack_branch(common_dir, name, false, true)?;
     let say = |text: String| -> Result<Option<String>> {
         if std::fs::read_to_string(&told_file).is_ok_and(|told| told == text) {
             return Ok(None);
@@ -1077,7 +1164,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
         }
         Ok(Some(text))
     };
-    if outcome.done() {
+    if outcome.done() && !matches!(outcome, Outcome::LooksLanded(_)) {
         let _ = std::fs::remove_file(&told_file);
     }
     Ok(match outcome {
@@ -1093,9 +1180,10 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
             };
             Some(format!(
                 "gitfold: this branch's parent {}. {name} now sits there with only its own \
-                 {}, stacked on {}; {files}. Its pull request's base should now be {} (`gh pr \
-                 edit {name} --base {}`), and its history was rewritten: push it with \
-                 --force-with-lease when you push.",
+                 {}, stacked on {}; {files}. Its history was rewritten, so it needs a push with \
+                 --force-with-lease, and then its pull request's base should be {}: suggest \
+                 `gh pr edit {name} --base {}` to the user after that push rather than running \
+                 it yourself.",
                 landed.said(),
                 plural(own, "commit", "commits"),
                 landed.target,
@@ -1140,6 +1228,11 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
             "gitfold: {name} is stacked on {parent}, which has new commits; {}",
             describe(&outcome, name, &parent)
         )),
+        Outcome::LooksLanded(_) => say(format!(
+            "gitfold: {name}'s parent {}; suggest it to the user rather than running it \
+             yourself: it rewrites {name}'s history.",
+            describe(&outcome, name, &parent)
+        ))?,
         other => say(format!(
             "gitfold: {name} is stacked on {parent}, which has new commits; {}",
             describe(&other, name, &parent)
