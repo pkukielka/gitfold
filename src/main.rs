@@ -144,15 +144,16 @@ enum Command {
     /// layer's (listed). Files marked `merge=union` in .gitattributes are
     /// union instead (the layers' lines and the workspace's own, which it
     /// writes; each workspace's lines where it put them among the others'),
-    /// with HEAD at a layers commit; commits made on it go onto the branch
-    /// with only the workspace's changes. Where git can't be kept right, it
-    /// is turned off there, saying why. With no subcommand, lists the base,
+    /// with a filter so git sees and commits only the workspace's own
+    /// lines, and a guard refusing commits that bring the layers' onto the
+    /// branch. Where git can't be kept right, it is turned off there,
+    /// saying why. With no subcommand, lists the base,
     /// the layers, their conflicts, and notes on union files (lines placed
     /// by the base's lines, or lines added among another branch's: maybe
     /// not a list). Stored with the workspace; while mounted,
     /// shown at once. Exit codes: 3 no such workspace, branch or layer, 4
-    /// refused (git busy, commits that can't go onto the branch yet, own
-    /// lines that depend on a layer's), 1 other errors, 2 usage errors.
+    /// refused (git busy, own lines that depend on a layer's), 1 other
+    /// errors, 2 usage errors.
     Layer(cli::layer::LayerArgs),
     /// Propose a change to a layer's files (a contract) from a workspace
     /// showing it.
