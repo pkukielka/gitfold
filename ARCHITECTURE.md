@@ -1476,7 +1476,8 @@ a snapshot, with no change to any workspace.
   one side or alike on both, trivially (a deletion the base didn't touch
   is a deletion; a change the base already has shows the base's, not
   owned); a mode change on one side wins. A text conflict keeps git's
-  markers (`<<<<<<< base + A`, `>>>>>>> B`), so the reader sees both
+  markers (`<<<<<<< main + A`, `>>>>>>> B`: the base named as users know
+  it, main or the branch's editable layers), so the reader sees both
   sides; anything that can't be merged (binary, a deletion against a
   change, a type change, a new file under a file that stays) shows the
   base's entry. Both are mixed paths (read-only, owned by every layer that
@@ -1724,8 +1725,10 @@ a snapshot, with no change to any workspace.
   checkout, whose re-application rewrites skip-worktree bits; a split or
   sparse index; an unknown required extension; the index locked), the layers
   still show, but the virtual `.git` (now swappable) names a directory that
-  doesn't exist: `gitdir: /LAYERS SHOWN (a+b): git is off here (<why>). Run
-  gitfold layer remove --all to use git`. Every git command then fails
+  doesn't exist: `gitdir: /LAYERS SHOWN (a+b): git is off here (<why>). To
+  use git, remove the see-only layers: gitfold layer remove BRANCH` (not
+  `--all`, which would also move the branch's commits off its editable
+  layers). Every git command then fails
   with that text (exit 128), the registration and branch protection stay, and the `.git`
   file can't be written, so `git worktree repair` can't undo it. Why is kept
   in `layers-git-off`, so it survives remounts. gitfold's own commands find
@@ -2092,22 +2095,42 @@ old tip, so its next move replays exactly its own commits.
   ref if it isn't yet; tip at C and the index at C' on the changed paths
   → move the refs if the base moved, else put the index back; tip and
   index at C → forget it; the branch moved on and the index describes it
-  → forget it; else leave it and report, and `gitfold layer remove --all`
-  forgets it (every layer removed, nothing moved). While one is there, the
-  layers don't change (layer changes are refused: `<b> is being moved (or
-  a move of it was interrupted ...); retry once it is done`).
+  → forget it; an intent it can't read, or anything else → leave it and
+  report (`Recovery::Stuck`), and `gitfold layer remove --all` forgets it
+  (every layer removed, nothing moved). A recovery that fails otherwise
+  (a base it can't read, git failing) is an error: `remove --all` says it
+  and forgets nothing. While one is there, the layers don't change (layer
+  changes are refused: `<b> is being moved (or a move of it was
+  interrupted ...); retry once it is done`).
 - **With the intent held, the refs are read again:** a move computed
   before another one of the same branch finished (the hook and `layer
   add` at once) would otherwise move the files against the other's result
   (`moved_meanwhile`).
+- **git's index lock from the index through the refs:** a `git commit`
+  between the index step and the ref step would commit the moved index
+  onto C, squashing a's new commits into one of b's. So the move creates
+  `index.lock` itself (`state::moves::IndexLock`, git's own protocol:
+  `git commit` then fails), writes the index through a copy renamed over
+  it, checks the branch again (a commit may have ended since the move was
+  planned), and removes the lock right after the ref transaction. The lock
+  holds a marker line, so a crash's leftover is removed by the next
+  recovery (it holds the intent: no move is running), and by the sync
+  thread before it checks whether git is idle.
 - **Never pushes:** a move prints `git push --force-with-lease=b:<tip>
   origin b:b` with the remote-tracking tip as the lease, and `list` says
-  the same (`push with: ...`) while that tip isn't in the branch.
+  the same (`push with: ...`) while that tip isn't in the branch. The
+  tip is b's branch of the same name on the remote b pushes to (its
+  upstream's remote, else `origin`), never the upstream branch itself: a
+  branch started from `origin/main` tracks main, and a force-push onto
+  main is never what to run.
 - **Pushed commits only with `--yes`:** an asked move says what it moves
-  first, and refuses (exit 4) if any of `B..b` is reachable from b's
-  upstream (else `origin/<b>`): a rewrite of published history is asked
-  for, not done in passing. The hook's moves, which follow what was
-  already asked, aren't refused; they say the branch needs a force-push.
+  first (or, refused, what it would have moved, then why, with no
+  `error:` line after), and refuses (exit 4) if any of `B..b` is
+  reachable from that same remote-tracking branch: a rewrite of published
+  history is asked for, not done in passing. The hook's moves, which
+  follow what was already asked, aren't refused; they say the push to run
+  when one is needed, and say nothing of a rewrite when b had no commits
+  of its own (it only moved up with a).
 - **Editable layers the hook couldn't move onto are held** as they showed
   (`follow_live`'s `hold`): their new commits, not under b's, would show
   as their changes, conflicting with the lines b's commits already have.
@@ -2171,7 +2194,9 @@ commits onto S like any move (the same intent and transaction, its own
 ref moved to S), a gone from its layers; landed in another branch T,
 T becomes an editable layer (if it isn't one already); with other
 editable layers left, the commits sit on a merge of S and their tips
-(the trunk kept as a part at S). The hook does it unasked only once a's
+(the trunk kept as a part at S). Several landings followed at once keep
+the newest commit of their target (one landing after another may be
+processed out of order; two that diverged both stay, merged). The hook does it unasked only once a's
 branch is gone (`land::gone`: deleted here, or its upstream deleted on
 its remote and fetched with `--prune`), for every kind of landing: a
 merge into main may be one of several while a goes on, and a squash is
