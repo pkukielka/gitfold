@@ -302,7 +302,10 @@ gitfold lens off                  # hide every layer
   progress; a change made here would become your own copy of the file,
   hiding theirs from you and landing in your commits. Writing one fails
   with `EACCES` (Claude Code's edit tools are denied, saying whose it is).
-  Two ways out:
+  Three ways out:
+  - **propose the change**: `gitfold propose <file>` (see "Contracts"
+    below): you edit a copy of the layer's workspace, shown here in its
+    place, and its agent accepts it;
   - **ask its agent** to change it: `gitfold send <BRANCH> -s "<file>" "<what
     and why>"`; it shows here once they have made it (next turn);
   - or **`gitfold layer off <BRANCH>`**, then edit your own version (a file
@@ -371,13 +374,14 @@ gitfold lens off                  # hide every layer
 **For an orchestrator: shared contracts.** Put what the tasks share
 (interfaces, schemas, a registry) in a root workspace, and make it a layer
 of each child; children then see the contracts as the root writes them, and
-can't change them (they ask the root with `gitfold send`):
+can't change them in place (they propose changes, below):
 
 ```
 gitfold branch agent/contracts --from origin/main
 gitfold branch agent/child-1 --from origin/main
 ls ~/mnt/repo/agent/child-1 >/dev/null               # opens its workspace
 gitfold layer -w agent/child-1 add agent/contracts   # each child
+gitfold track-reads agent/child-1 on                 # who read what: consent asks only them
 ```
 
 The workspace a layer is added to must have been opened (else exit 3); a
@@ -390,6 +394,53 @@ above), or add the children as layers of a workspace that builds and tests
 them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
 <BRANCH>` prints one workspace's uncommitted work as a commit, to open as
 `<mount>/@<sha>`.
+
+### Contracts: proposing a change, consent of the affected
+
+**As a child**, when a contract (a layer's file) must change for your task:
+
+1. `gitfold propose <file>...` (from your workspace). It prints the new
+   branch (`<layer>-prop/<you>`, a copy of the contracts' workspace with
+   their uncommitted work) and where to edit:
+   `<mount>/<layer>-prop/<you>/<file>`. Your workspace now shows the
+   proposal in the layer's place. `--from <DIR>` copies `<DIR>/<file>` in
+   instead.
+2. Edit the files **there** (the path printed; not in your workspace,
+   where they stay read-only). Keep the change minimal: others build on
+   these files. Run `gitfold layer update` to see the edits in your
+   workspace, then build and test your own work against them.
+3. Tell the layer's agent: `gitfold send <layer> -s "proposal" "<branch>:
+   <what changed and why>"`. Wait for its answer in your inbox: `contract
+   changed` (accepted; your workspace shows the layer again, with it) or
+   `proposal rejected` (with a reason; your workspace shows the layer as it
+   was). Running `gitfold propose` again adds to the same proposal;
+   `gitfold reject <branch>` withdraws it.
+
+**As the root** (the contracts' agent), when told of a proposal:
+
+1. `gitfold proposals` lists them: who, the files changed (diff stat), and
+   the last consent check. `gitfold changes <branch>` and `git diff`
+   in `<mount>/<branch>` show more.
+2. `gitfold consent <branch> --test '<build or test command>'` checks it
+   with every child it affects: those that read a changed file (or whose
+   reads aren't tracked), each child's work mixed with the proposal, the
+   command run in the mix (`$GITFOLD_WORKSPACE` names the child). Exit 0:
+   all pass. Exit 4: the table says who fails and how (`merges` `no`:
+   conflicts with the child's own files; `test` `failed`: the exit code and
+   last line, and the snapshot to look in). Nothing in any workspace
+   changes.
+3. If it passes (or the failures are expected and the children told),
+   `gitfold accept <branch>` in your workspace: the files are written as
+   your uncommitted changes (commit them as usual), the proposer shows your
+   workspace again, every child that read the files gets a `contract
+   changed` message with the changed lines, and the others see it at their
+   next turn. Exit 4 means you changed those files since the proposal was
+   made: `gitfold reject <branch> --reason "<why>"` and ask for a new one.
+   Otherwise reject with a reason the proposer can act on.
+
+**A child told `contract changed`** reads the message (the changed lines),
+re-reads the files it uses (run `gitfold layer update` first if the message
+came mid-turn: the layer moves at your next prompt), and adapts its work.
 
 ## Stacked branches
 

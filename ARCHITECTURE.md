@@ -175,7 +175,8 @@ Then, per request (`fs/workspace/`):
 | `src/cli/list.rs` | `list` and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
 | `src/cli/mix.rs` | `seal` and `mix` (and the `Stop` hook that seals) |
-| `src/cli/layer.rs` | `layer` and `lens` (and the hooks that move layers, restacking a stacked branch first, and deny edits of their files) |
+| `src/cli/layer.rs` | `layer` and `lens` (and the hooks that move layers, restacking a stacked branch first, and deny edits of their files, offering a proposal) |
+| `src/cli/proposal.rs` | `propose`, `proposals`, `consent`, `accept` and `reject`: changes to a layer's files made in a fork of its workspace, checked against the workspaces that read them, written into the layer's workspace |
 | `src/cli/stack.rs` | `stack` (on, off, sync, list), the restack the `UserPromptSubmit` hook does, `list`'s stack notes |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
@@ -198,7 +199,7 @@ Then, per request (`fs/workspace/`):
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
-| `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard) |
+| `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard; proposals, consent, accept and reject) |
 | `tests/stacks.sh` | end-to-end test of stacked branches: restacks with no workspace, in an open workspace (hook and `stack sync`) and an unmounted one, conflicts, uncommitted work in the way, manual mode, `list`'s notes |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
@@ -255,6 +256,11 @@ Then, per request (`fs/workspace/`):
   layer's lines **waits**.
 - **Push guard**: the per-worktree `pre-push` hook that refuses to publish
   a lens commit while HEAD is one.
+- **Proposal**: a fork of a layer's workspace (`<layer>-prop/<ws>`) where a
+  workspace showing the layer edits the layer's files, shown in its place;
+  its changes are its seal against what it started from. **Consent**: the
+  proposal mixed with the work of each workspace that read what it
+  changes, and tested there.
 - **Stacked branch**: a branch built on a **parent** branch
   (`gitfoldParent`); its **parent base** is the commit of the parent its
   own commits sit on (`refs/gitfold-stack/<branch>`).
@@ -1347,8 +1353,9 @@ a snapshot, with no change to any workspace.
   Any of them would copy the layer's content into upper, where it becomes
   this workspace's own work, hidden from later switches and committed with
   its branch. `errno` carries no text, so Claude Code's edit tools are
-  denied first by a `PreToolUse` hook giving the reason and the two ways out
-  (ask the layer's agent with `gitfold send`; hide the layer).
+  denied first by a `PreToolUse` hook giving the reason and the ways out
+  (propose a change, see "Proposals"; ask the layer's agent with `gitfold
+  send`; hide the layer).
 - **Git sees only the workspace's own work: skip-worktree and per-worktree
   excludes** (`tell_git`). The layers' paths the base tracks are marked
   skip-worktree in the worktree's own index, by an index editor
@@ -1479,6 +1486,71 @@ a snapshot, with no change to any workspace.
   `refs/worktree/*` ref keeping L: `gc` from another worktree prunes them.
 - Extraction as a plain merge, with or without `merge=union`: it commits
   the layers' lines, or conflicts on every append.
+
+### Proposals: a layer's files changed in a fork, with the consent of the affected
+
+**What:** a workspace that needs a layer's file changed (a contract a root
+agent wrote, shown read-only in each child) proposes the change with
+`gitfold propose <path>`: the layer's workspace is forked (`branch
+--with-changes`, through the daemon when mounted) into `<layer>-prop/<ws>`,
+recorded in config (`gitfoldProposal`, `gitfoldProposedBy`) with what it
+started from (its first seal) kept by `refs/gitfold-proposal/<id>`, and put
+in the layer's place in the proposer's stack. The proposer edits the files
+in the proposal's workspace, where they are its own. Its changes are its
+seal against that start. `gitfold consent` mixes the proposal with the seal
+of each workspace showing the layer (or the proposal) that read a changed
+file and runs a test in each mix's snapshot; `gitfold accept` writes the
+changed files into the layer's workspace, puts the layer back in place of
+the proposal, sends the readers the changed lines, and removes the
+proposal (workspace, branch, start ref, seals no stack names).
+
+**Why:**
+
+- **Edits where the files are writable:** the alternative, routing writes
+  to a layer's path into a fork from inside the reader's workspace, would
+  need a second upper per workspace and a write path that changes meaning
+  with the stack. A fork is a workspace like any other: editors, builds
+  and git work there unchanged, and the deny hook only has to say where
+  it is (it offers `gitfold propose <path>` first, and for a file the
+  proposal already shows, its path in the proposal).
+- **A copy of the layer's work, uncommitted included:** contracts are
+  written in a workspace and rarely committed while children build on them;
+  forking the branch tip would propose against a version nobody sees.
+- **Its changes against its own start, not the layer as now:** the layer
+  goes on changing; a diff against its current work would show the root's
+  later edits as reverted by the proposal. `accept` refuses (exit 4) if the
+  layer changed any proposed file since the start: writing the proposal's
+  version would undo that silently. Then `reject`, and propose again.
+- **Consent from the read records:** who read a changed file is who could
+  break, so only they are checked (one mix and one test each, not one per
+  workspace showing the layer); a workspace whose reads aren't tracked is
+  checked too (`unknown`), one that tracked and didn't read is listed
+  (`no`) and skipped. Each check is `gitfold mix` of the workspace's seal and
+  the proposal's work: its own work as it would be with the proposal, in a
+  snapshot, so no workspace, index or branch changes and checks can run
+  while the agents work. The result is recorded with the proposal's seal,
+  so `proposals` can say a later edit made it stale.
+- **Accepting is writing, not merging:** the layer's workspace gets the
+  files as uncommitted changes through the mount (as its agent would write
+  them, so the kernel and git are told as for any write), or offline into
+  upper and the markers under the repository lock; the root commits as
+  usual. Workspaces showing the layer move at their next turn by the
+  existing hook (the layer is sealed at once); the proposer is switched
+  back at once, its stack stored first, so a switch refused now happens
+  when it can. The proposer's own proposal is sealed by the proposer's
+  `UserPromptSubmit` hook, since its edits are made from that session
+  (whose `Stop` seals only its own workspace).
+
+**Rejected:**
+
+- A write policy `propose` on a layer (design §1.3), redirecting writes
+  in place: see above.
+- Checking every workspace showing the layer regardless of reads: as
+  correct, but the cost grows with the tree, not with who depends on the
+  change.
+- Merging the proposal into the layer's workspace on accept: the start
+  makes a 3-way merge possible, but a merged contract nobody tested is
+  what consent exists to avoid; the refusal sends it back instead.
 
 ### Stacked branches: restacks computed by plumbing, moved like a checkout
 
@@ -1800,8 +1872,12 @@ compact node table and write measurements. Next:
   exclusively; per-directory locking would let parallel writers proceed.
 - **Layers, next phases.** Telling the agent about a waiting commit (in the
   hook context, not only the daemon log) and retrying it when the layer
-  moves; proposals (a change to a layer's file made in a fork of its
-  workspace).
+  moves. Proposals: a 3-way merge in `accept` instead of the refusal when
+  the layer changed the files since (only safe once the proposal is
+  rebased onto the layer's work); several proposals to one layer checked
+  together (`consent` checks each alone); the `deps` log of reads of
+  layers' files (design §4.3), so `consent` knows reads per seal rather
+  than per path.
 - **Stacks, next phases** (see
   [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout)).
   *A parent that landed on trunk:* what a child needs to know is whether
