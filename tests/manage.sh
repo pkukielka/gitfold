@@ -49,7 +49,7 @@ check "an unknown workspace refused" fails "$BIN" -C "$REPO" changes nope
 eq "in a workspace, it's that one's" "$EXPECT" "$(cd "$W1" && "$BIN" changes 2>&1)"
 eq "from a subdirectory of it too" "$EXPECT" "$(cd "$W1/d" && "$BIN" changes 2>&1)"
 check "outside a workspace, the branch must be named" sh -c "cd '$REPO' && '$BIN' changes 2>&1 | grep -q 'not in a workspace: run it inside one'"
-for cmd in "layer" "layer add two" "layer base main" "propose a.txt"; do
+for cmd in "layer" "layer add two" "layer add two --edit" "propose a.txt"; do
     eq "outside a workspace: $cmd asks for -w" "Error: not in a workspace: run it inside one, or pass -w BRANCH" \
         "$(cd "$REPO" && $BIN $cmd 2>&1)"
 done
