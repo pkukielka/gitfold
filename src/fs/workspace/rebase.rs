@@ -155,6 +155,9 @@ impl Workspace {
                 Recovery::Stuck(why) => return Err(anyhow!("{why}")),
             }
         }
+        // Layers taken off for a move that was interrupted: put back (the
+        // switch below shows them).
+        crate::state::lens::put_back_if_left(&self.state)?;
         // With layers shown, commits made on the lens commit go onto the
         // branch (see `lens`), but the base waits, and an upper file
         // identical to a layer's mustn't be dropped as unchanged.
@@ -285,7 +288,7 @@ impl Workspace {
         self.state.git_busy().is_none()
     }
 
-    fn rebase(&self, store: &Store, new: &Commit, fetch: bool) -> Result<()> {
+    pub(super) fn rebase(&self, store: &Store, new: &Commit, fetch: bool) -> Result<()> {
         let started = Instant::now();
         let new_tree = match fetch {
             true => store.load_tree(new.tree)?,

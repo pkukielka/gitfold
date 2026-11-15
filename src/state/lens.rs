@@ -538,6 +538,91 @@ impl Applied {
     }
 }
 
+/// The file whose presence means the layers of a workspace are taken off
+/// for a move of its branch onto its base (`cli::stack`): the layers file
+/// stays as it is (what is stored is the truth), but none show until
+/// `put_back`.
+pub const OFF: &str = "lens-off";
+
+/// Whether the layers of the workspace in `state` are taken off for a move.
+pub fn off(state: &StateDir) -> bool {
+    fs::symlink_metadata(state.dir.join(OFF)).is_ok()
+}
+
+/// Takes the layers of the workspace in `state` off for a move (see `OFF`),
+/// durably; `lock` held.
+pub fn take_off(state: &StateDir) -> Result<()> {
+    write_atomic(
+        &state.dir.join(OFF),
+        b"taken off for a move onto the base\n",
+    )?;
+    fs::File::open(&state.dir)?.sync_all()?;
+    Ok(())
+}
+
+/// Puts the layers of the workspace in `state` back after a move (or one
+/// interrupted, finished or undone since): each layer's merge base is
+/// pinned again against where the branch is now (what the workspace's base
+/// becomes), and the layers show again (the daemon switches to them).
+/// Whether they were off; `lock` held, `git::init` done.
+pub fn put_back(state: &StateDir) -> Result<bool> {
+    if !off(state) {
+        return Ok(false);
+    }
+    let tip = git::branch_tip(&state.branch)?.id;
+    let mut lens = Lens::read(state)?;
+    let before = lens.clone();
+    let repin = |layer: &mut Layer| match git::merge_base(tip, layer.seal) {
+        Ok(base) => layer.merge_base = base,
+        Err(e) => log::warn!("{}: layer {}: {e:#}", state.branch, layer.branch),
+    };
+    for layer in &mut lens.layers {
+        repin(layer);
+        if let Some(instead) = &mut layer.instead {
+            repin(instead);
+        }
+    }
+    if lens != before {
+        lens.write(state)?;
+    }
+    match fs::remove_file(state.dir.join(OFF)) {
+        Err(e) if !not_found(&e) => return Err(e.into()),
+        _ => {}
+    }
+    fs::File::open(&state.dir)?.sync_all()?;
+    Ok(true)
+}
+
+/// The layers of the workspace in `state` to show, and their bytes as
+/// stored: those stored, none while taken off for a move (`OFF`).
+pub fn to_show(state: &StateDir) -> Result<(Lens, Vec<u8>)> {
+    match off(state) {
+        true => Ok((Lens::default(), Vec::new())),
+        false => Ok((Lens::read(state)?, stored_bytes(state)?)),
+    }
+}
+
+/// `to_show`'s bytes alone (a cheap read).
+pub fn shown_bytes(state: &StateDir) -> Result<Vec<u8>> {
+    match off(state) {
+        true => Ok(Vec::new()),
+        false => stored_bytes(state),
+    }
+}
+
+/// `put_back` for the daemon, after a move it didn't make was interrupted:
+/// only if no command holds the layers' lock (one moving it holds it
+/// throughout). Whether they were put back.
+pub fn put_back_if_left(state: &StateDir) -> Result<bool> {
+    if !off(state) {
+        return Ok(false);
+    }
+    match crate::lock::try_wait(&state.dir.join(LOCK))? {
+        Some(_lock) => put_back(state),
+        None => Ok(false),
+    }
+}
+
 /// The content of the layers file of the workspace in `state` (empty if none).
 pub fn stored_bytes(state: &StateDir) -> Result<Vec<u8>> {
     match fs::read(state.dir.join(LENS)) {

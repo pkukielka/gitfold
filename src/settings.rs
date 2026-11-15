@@ -9,7 +9,8 @@
 //!   `gitfoldLanding` (a move onto a new base under way: a parent's
 //!   landing, or another base) and
 //!   `gitfoldBaseOnTarget` (whether its parent base was in the parent's
-//!   target when recorded; see `cli::stack`); for a proposal (`gitfold
+//!   target when recorded; see `cli::stack`), `gitfoldMoved` (when it
+//!   was last moved onto its base); for a proposal (`gitfold
 //!   propose`), `gitfoldProposal` (the layer it would change),
 //!   `gitfoldProposedBy` (the workspace that proposed it) and
 //!   `gitfoldConsent` (the last `gitfold consent`);
@@ -60,6 +61,9 @@ const LANDING: &str = "gitfoldLanding";
 /// parent's own parent) when it was set, to tell a fast-forward landing
 /// from a fresh parent.
 const BASE_ON_TARGET: &str = "gitfoldBaseOnTarget";
+/// `branch.<branch>.gitfoldMoved`: when it was last moved onto its base (or
+/// its own commits last said to start there), in seconds since the epoch.
+const MOVED: &str = "gitfoldMoved";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -235,6 +239,11 @@ impl Local {
         self.branch(branch, BASE_ON_TARGET)
     }
 
+    /// When `branch` was last moved onto its base, if recorded (see `MOVED`).
+    pub fn moved(&self, branch: &str) -> Option<i64> {
+        self.branch(branch, MOVED)?.parse().ok()
+    }
+
     /// The remote `branch` pushes to and its branch there, from git's own
     /// `branch.<branch>.remote` and `.merge`, if both are set.
     pub fn upstream(&self, branch: &str) -> Option<(String, String)> {
@@ -346,6 +355,14 @@ pub fn set_base_on_target(git_dir: &Path, branch: &str, record: Option<&str>) ->
     match record {
         Some(record) => set_branch(git_dir, branch, BASE_ON_TARGET, record),
         None => unset_branch(git_dir, branch, BASE_ON_TARGET),
+    }
+}
+
+/// Records when `branch` was moved onto its base (see `MOVED`), or forgets it.
+pub fn set_moved(git_dir: &Path, branch: &str, at: Option<i64>) -> Result<()> {
+    match at {
+        Some(at) => set_branch(git_dir, branch, MOVED, &at.to_string()),
+        None => unset_branch(git_dir, branch, MOVED),
     }
 }
 

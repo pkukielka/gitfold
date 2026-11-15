@@ -78,16 +78,18 @@ pub enum LayerOp {
     /// work; one whose uncommitted work is on a path the move changes waits,
     /// and a conflict leaves the branch as it was, reported (`gitfold list`
     /// shows both). A move that doesn't happen changes nothing, the base
-    /// included. Refused while the workspace shows layers (`gitfold layer
-    /// remove --all` first). When its base lands (a merge, squash, rebase
-    /// merge or fast-forward), the branch moves onto what it landed in, by
-    /// itself, or when you name that (`gitfold layer base main`): only its
+    /// included. Layers the workspace shows stay shown: they are taken off
+    /// for the move and put back on the new commits. When its base lands
+    /// (a merge, squash, rebase merge or fast-forward), the branch moves
+    /// onto what it landed in when you name that (`gitfold layer base
+    /// main`), or by itself once the base's branch is gone; until then it
+    /// follows the base as before, and the landing is reported. Only its
     /// own commits move. The main branch (main, master, or gitfold.trunk)
     /// as TARGET takes the base away, its own commits moved onto main.
     /// gitfold never pushes: it prints the force-pushes to run. Exit codes:
     /// 3 no such branch, 4 not moved (commits already pushed, a conflict,
-    /// uncommitted work in the way, git busy, layers shown), 1 other
-    /// errors, 2 usage errors.
+    /// uncommitted work in the way, git busy), 1 other errors, 2 usage
+    /// errors.
     Base {
         /// The branch to build on (the main branch: no base, just main).
         #[arg(required_unless_present = "all", conflicts_with = "all")]
@@ -144,7 +146,6 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         }) => {
             // A move in progress first: it is what to wait for.
             refuse_if_moving(&common_dir, &state)?;
-            refuse_with_base(&common_dir, &local, &name)?;
             let store = Store::default();
             let layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
             add(&local, &mut lens, &name, layer)
@@ -251,24 +252,6 @@ pub(super) fn slot(local: &Local, lens: &Lens, name: &str, branch: &str) -> Opti
     };
     let target = target_of(branch);
     (lens.layers.iter()).position(|l| l.branch == branch || target_of(&l.branch) == target)
-}
-
-/// Refuses layers in the workspace of `name` if it is built on a base (not
-/// the trunk): moving it onto its base's new commits with layers shown
-/// isn't supported yet.
-fn refuse_with_base(common_dir: &Path, local: &Local, name: &str) -> Result<()> {
-    let Some(parent) = local.parent(name) else {
-        return Ok(());
-    };
-    if super::stack::land::is_trunk(common_dir, local, &parent) {
-        return Ok(());
-    }
-    let trunk = super::stack::land::main_name(common_dir, local);
-    Err(Refusal::Changes.error(format!(
-        "{name} is built on {parent}; layers on a branch with a base aren't supported yet: \
-         show {parent}'s work with a snapshot (`gitfold snapshot {parent}`), or take {name} \
-         off its base first (`gitfold layer base {trunk}`)"
-    )))
 }
 
 /// What `layer` shows and how it updates, as the listing says it.
@@ -672,6 +655,8 @@ pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) 
     refuse_if_moving(common_dir, state)?;
     let before = crate::state::lens::stored_bytes(state)?;
     lens.write(state)?;
+    // Taken off for a move that was interrupted: back, pinned again.
+    crate::state::lens::put_back(state)?;
     apply(common_dir, &state.branch).inspect_err(|_| {
         if let Err(e) = crate::state::lens::store_bytes(state, &before) {
             log::warn!("putting the layers back: {e:#}");
@@ -807,10 +792,7 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
     };
     let width = head.chars().count().max(15) + 6;
     let mut out = format!("{head:<width$}{commits}; {how}\n");
-    // When the stack ref last moved, while git keeps it loose.
-    let stack_ref = common_dir.join(git::stack::stack_ref(branch));
-    if let Ok(at) = std::fs::metadata(stack_ref).and_then(|m| m.modified()) {
-        let at = crate::fsutil::epoch_secs(at);
+    if let Some(at) = local.moved(branch) {
         let _ = writeln!(out, "{:width$}last moved {}", "", clock(at));
     }
     for note in super::stack::notes(common_dir, &local, branch) {

@@ -32,20 +32,22 @@
 //!   the refs.
 //!
 //! Both workspace cases record an intent first (`state::restack`), so a
-//! crash half-way is finished or undone. Workspaces showing layers aren't
-//! moved (not yet): `layer base` refuses, and the commands advised remove
-//! the layers first (`advice`).
+//! crash half-way is finished or undone. A workspace showing layers is moved
+//! with them taken off and put back after, pinned again against its new
+//! commits (`layers`).
 //!
 //! A base that landed (merged, squashed or rebased onto its own base or the
 //! trunk, `land`) has its children moved the same way onto the landing
-//! commit, with only their own commits (`reparent`): by the hook unasked,
-//! or by `layer base <TARGET>` (then commits already pushed need `--yes`).
-//! They are built on its target from then on, or, landed in the trunk, have
+//! commit, with only their own commits (`reparent`): by the hook unasked
+//! once the base's branch is gone (until then it keeps following the base,
+//! and the landing is only said), or by `layer base <TARGET>` (then commits
+//! already pushed need `--yes`). They are built on its target from then on, or, landed in the trunk, have
 //! no base any more (`built_on`). A branch on the trunk isn't moved at turn
 //! boundaries: following the trunk is on request.
 //!
 //! - `land`: a base's target, whether a parent base landed there (cached),
 //!   the trunk.
+//! - `layers`: moving a workspace that shows layers.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -59,12 +61,12 @@ use crate::git::{self, stack};
 use crate::refusal::Refusal;
 use crate::settings::{self, Local};
 use crate::state::StateDir;
-use crate::state::lens::{Applied, Lens};
 use crate::state::restack::{self, Intent, Mode, Recovery};
 use crate::state::retire::{check_name, index_matches_head};
 use crate::store::Store;
 
 pub(crate) mod land;
+mod layers;
 
 /// How many paths a line of output names before "and N more".
 const SHOWN_PATHS: usize = 5;
@@ -100,7 +102,9 @@ pub fn base(
     if name == target {
         super::usage(format!("{name} can't be built on itself"));
     }
-    // First, so what is said is about where it is now.
+    // First, so what is said is about where it is now: a move interrupted
+    // finished, its workspace's layers back.
+    layers::resume(&StateDir::of(&common_dir, &name))?;
     finish_landing(&common_dir, &name)?;
     let local = Local::read(&common_dir);
     let trunk = land::is_trunk(&common_dir, &local, target);
@@ -108,9 +112,6 @@ pub fn base(
     if trunk && parent.is_none() {
         println!("{name}'s base is {target} already; nothing to do");
         return Ok(());
-    }
-    if let Some(why) = layers_shown(&common_dir, &name, target, frozen && !trunk)? {
-        return Err(Refusal::Changes.error(format!("{name} {why}")));
     }
     // Where its base landed: the landing followed, only its own commits
     // moved (onto the landing commit, as the hook does).
@@ -292,24 +293,6 @@ fn base_all(common_dir: &Path, yes: bool) -> Result<()> {
     })
 }
 
-/// Why branch `name` can't move onto `target` now, if its workspace shows
-/// layers: a branch with a base can't show them (not yet), so a move isn't
-/// tried. `frozen`: `target` is asked for with `--frozen`.
-fn layers_shown(
-    common_dir: &Path,
-    name: &str,
-    target: &str,
-    frozen: bool,
-) -> Result<Option<String>> {
-    if !lensed(&StateDir::of(common_dir, name))? {
-        return Ok(None);
-    }
-    Ok(Some(format!(
-        "can't move while layers are shown: `gitfold layer remove --all`, then {}",
-        base_command(target, frozen, true)
-    )))
-}
-
 /// `gitfold layer base TARGET`, with `--frozen` if `frozen`; `tick`: in
 /// backticks.
 pub(super) fn base_command(target: &str, frozen: bool, tick: bool) -> String {
@@ -325,30 +308,12 @@ fn frozen_onto(common_dir: &Path, local: &Local, name: &str, target: &str) -> bo
     local.restack_manual(name) && !land::is_trunk(common_dir, local, target)
 }
 
-/// `layers_shown` for a move of branch `name` onto `target` (as users name
-/// it) by `restack_branch`, as its outcome.
-fn layers_wait(
-    common_dir: &Path,
-    local: &Local,
-    name: &str,
-    target: &str,
-) -> Result<Option<Outcome>> {
-    let frozen = frozen_onto(common_dir, local, name, target);
-    Ok(layers_shown(common_dir, name, target, frozen)?.map(Outcome::Waits))
-}
-
-/// What to run to bring branch `name` onto `target` (as users name it): `gitfold layer
-/// base TARGET`, with `--frozen` for a frozen base (unless `target` is the
-/// trunk, which takes the base away), after `gitfold layer remove --all` if
-/// its workspace shows layers (a move waits for that), so the advice given
-/// is never refused for it. `tick`: each command in backticks.
+/// What to run to bring branch `name` onto `target` (as users name it):
+/// `gitfold layer base TARGET`, with `--frozen` for a frozen base (unless
+/// `target` is the trunk, which takes the base away), so following it
+/// doesn't unfreeze it. `tick`: in backticks.
 fn advice(common_dir: &Path, local: &Local, name: &str, target: &str, tick: bool) -> String {
-    let base = base_command(target, frozen_onto(common_dir, local, name, target), tick);
-    let q = if tick { "`" } else { "" };
-    match lensed(&StateDir::of(common_dir, name)).unwrap_or(false) {
-        true => format!("{q}gitfold layer remove --all{q}, then {base}"),
-        false => base,
-    }
+    base_command(target, frozen_onto(common_dir, local, name, target), tick)
 }
 
 /// Whether `name` is the trunk (see `land`): a branch on it has no base.
@@ -386,7 +351,15 @@ pub fn declare(common_dir: &Path, name: &str, parent: &str, base: ObjectId) -> R
     settings::set_parent(common_dir, name, Some(parent))?;
     settings::set_restack_blocked(common_dir, name, None)?;
     stack::set_base(common_dir, name, base)?;
+    moved_now(common_dir, name)?;
     land::record(common_dir, name, parent, base)
+}
+
+/// Records that `name` was moved onto its base now (the listing's "last
+/// moved"): in config, since a ref file's time goes when refs are packed.
+fn moved_now(common_dir: &Path, name: &str) -> Result<()> {
+    let now = crate::fsutil::epoch_secs(std::time::SystemTime::now());
+    settings::set_moved(common_dir, name, Some(now))
 }
 
 /// Forgets that `name` is built on another branch: its base, how it
@@ -397,6 +370,7 @@ fn forget_base(common_dir: &Path, name: &str) -> Result<()> {
     settings::set_restack_blocked(common_dir, name, None)?;
     settings::set_landing(common_dir, name, None)?;
     settings::set_base_on_target(common_dir, name, None)?;
+    settings::set_moved(common_dir, name, None)?;
     let _ = std::fs::remove_file(StateDir::of(common_dir, name).dir.join(TOLD));
     stack::drop_base(common_dir, name)
 }
@@ -556,7 +530,7 @@ enum Outcome {
         onto: String,
         rebase: String,
     },
-    /// Not now: why (uncommitted work in the way, git busy, layers shown).
+    /// Not now: why (uncommitted work in the way, git busy).
     Waits(String),
     /// Not at all as it stands: why (a merge in its commits, no base,
     /// commits already pushed).
@@ -762,11 +736,12 @@ fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
 
 /// Moves branch `name` onto its base's tip, if it moved, or onto where its
 /// parent base landed, if its base was merged (see the module doc); with
-/// `dry_run`, only says what it would do. `auto` (the hook, not
-/// asked by anyone): a parent that only looks squash-merged (found by
-/// content) is followed only if its branch is gone, here or on its remote;
-/// else it is only said. Its callers finish an interrupted move first
-/// (`finish_landing`).
+/// `dry_run`, only says what it would do. `auto` (the hook, not asked by
+/// anyone): a landing (of any kind) is followed only once the base's branch
+/// is gone, here or on its remote; until then the branch keeps following
+/// its base as before, and the landing is only said (`LooksLanded`, when
+/// nothing else is to be said). Its callers finish an interrupted move
+/// first (`finish_landing`).
 fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> Result<Outcome> {
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
@@ -775,29 +750,50 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
     let tip = tip_of(common_dir, name)?;
     let resolved = land::resolve(common_dir, &parent)?;
     let base = own_base(common_dir, name, resolved.as_ref(), tip)?;
+    let mut looks = None;
     if let Some(base) = &base
         && let Some((target, landing)) = landed(common_dir, &local, name, &parent, base.commit)?
     {
-        // Found by content, or by a record that may be stale (a target
-        // reset to a later commit, say): followed unasked only once the
-        // parent is gone.
-        let guessed = matches!(landing.how, stack::How::Squashed | stack::How::FastForward);
-        if auto && guessed && !land::gone(common_dir, &local, &parent)? {
-            return Ok(Outcome::LooksLanded(Landed {
-                parent: parent.clone(),
-                target: target.pr_base.clone(),
-                landing,
-            }));
+        // A merge into main may be one of several (the base goes on), and
+        // a squash is found by content, so main making the same change on
+        // its own looks the same: followed unasked only once the base is
+        // gone.
+        if !auto || land::gone(common_dir, &local, &parent)? {
+            return reparent(
+                common_dir, name, &parent, &target, landing, base, tip, dry_run,
+            );
         }
-        if let Some(why) = layers_wait(common_dir, &local, name, &target.pr_base)? {
-            return Ok(why);
-        }
-        return reparent(
-            common_dir, name, &parent, &target, landing, base, tip, dry_run,
-        );
+        looks = Some(Landed {
+            parent: parent.clone(),
+            target: target.pr_base.clone(),
+            landing,
+        });
     }
+    let outcome = onto_parent(
+        common_dir, &local, name, &parent, tip, resolved, base, dry_run,
+    )?;
+    Ok(match (looks, outcome) {
+        (Some(landed), Outcome::UpToDate | Outcome::BaseMoved) => Outcome::LooksLanded(landed),
+        (_, outcome) => outcome,
+    })
+}
+
+/// `restack_branch` onto the tip of base `parent` (`resolved`), its own
+/// commits starting after `base`.
+#[allow(clippy::too_many_arguments)]
+fn onto_parent(
+    common_dir: &Path,
+    local: &Local,
+    name: &str,
+    parent: &str,
+    tip: ObjectId,
+    resolved: Option<(String, ObjectId)>,
+    base: Option<stack::Base>,
+    dry_run: bool,
+) -> Result<Outcome> {
+    let parent = parent.to_string();
     let (Some((_, parent_tip)), Some(base)) = (resolved, base) else {
-        let trunk = land::main_name(common_dir, &local);
+        let trunk = land::main_name(common_dir, local);
         return Ok(Outcome::Refused(format!(
             "its base {parent} is missing: `gitfold layer base <BRANCH>` builds it on another, \
              `gitfold layer base {trunk}` on {trunk} with no other base"
@@ -815,14 +811,12 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
             "gitfold: base",
         )?;
         settings::set_restack_blocked(common_dir, name, None)?;
+        moved_now(common_dir, name)?;
         land::record(common_dir, name, &parent, parent_tip)?;
         return Ok(match base.commit == parent_tip {
             true => Outcome::UpToDate,
             false => Outcome::BaseMoved,
         });
-    }
-    if let Some(why) = layers_wait(common_dir, &local, name, &parent)? {
-        return Ok(why);
     }
     let new = stack::count(common_dir, base.commit, parent_tip)?;
     let onto = (parent.as_str(), parent.as_str());
@@ -1037,11 +1031,6 @@ fn copy_onto(
 ) -> Result<Copied> {
     let local = Local::read(common_dir);
     let state = StateDir::of(common_dir, name);
-    if lensed(&state)? {
-        return Ok(Copied::Stop(Outcome::Waits(
-            "can't move while layers are shown: `gitfold layer remove --all` first".into(),
-        )));
-    }
     let computed = git::with_repo(|repo| stack::restack(repo, base.commit, onto, tip))?;
     let (new_tip, dropped) = match computed {
         stack::Restack::Merge(commit) => {
@@ -1084,12 +1073,13 @@ fn copy_onto(
         parent_tip: onto,
         stack_old: base.stored,
     };
-    let files = match move_branch(&state, intent)? {
+    let files = match layers::with_layers_off(&state, || move_branch(&state, intent))? {
         Moved::Done(files) => files,
         Moved::Already => return Ok(Copied::Stop(Outcome::UpToDate)),
         Moved::Waits(why) => return Ok(Copied::Stop(Outcome::Waits(why))),
     };
     settings::set_restack_blocked(common_dir, name, None)?;
+    moved_now(common_dir, name)?;
     Ok(Copied::Moved { files, dropped })
 }
 
@@ -1140,12 +1130,6 @@ fn on_parent(
             && stack::is_ancestor(common_dir, parent_tip, tip)?))
 }
 
-/// Whether the workspace in `state`, if it has opened, shows layers, as
-/// stored or as applied.
-fn lensed(state: &StateDir) -> Result<bool> {
-    Ok(state.opened() && (Lens::read(state)?.is_on() || Applied::read(state)?.layers()?.is_on()))
-}
-
 /// An interrupted restack of the workspace in `state` finished or undone
 /// first (`state::restack`); why not, if it can't be.
 fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
@@ -1187,6 +1171,14 @@ fn moved_meanwhile(state: &StateDir, intent: &Intent) -> Result<Option<Moved>> {
 /// `git read-tree -m -u <from> <to>` in the workspace at `dir`.
 fn read_tree(dir: &Path, from: ObjectId, to: ObjectId) -> Result<std::process::Output> {
     let (from, to) = (from.to_string(), to.to_string());
+    // The index's stat data refreshed first: `read-tree -m` doesn't, and
+    // files whose time changed (layers taken off: restamped) would look
+    // changed. Changes it finds are for `read-tree` to judge.
+    git::cmd::git()
+        .arg("-C")
+        .arg(dir)
+        .args(["update-index", "-q", "--refresh"])
+        .output()?;
     Ok(git::cmd::git()
         .arg("-C")
         .arg(dir)
@@ -1399,6 +1391,7 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
 /// told before (a block per base tip, anything else while it says the same:
 /// `restack-told` in the state directory).
 pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
+    layers::resume(&StateDir::of(common_dir, name))?;
     // A move onto a new base interrupted: finished first, so the base it is
     // checked against is the one it moved onto.
     finish_landing(common_dir, name)?;

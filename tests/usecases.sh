@@ -4,7 +4,9 @@
 # building on a lead's unfinished work, live, frozen and commits-only
 # layers, a release tag, two layers on one file, a shared append-only file,
 # a denied edit, a stack of PRs, a frozen base, pushed commits, a base that
-# landed, snapshots of several agents' work, a proposal.
+# landed, a base shown as a layer too, a child on the lead's branch, a layer
+# and a blended file on a branch with a base, snapshots of several agents'
+# work, a proposal.
 # usage: tests/usecases.sh (or with the others: tests/run.sh); sections as
 # in tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -254,14 +256,85 @@ R branch api
 commit_on api api.txt one
 "$BIN" -C "$REPO" branch ui --base api >/dev/null
 mount_fs
-U=$MNT/ui
-echo wip >>"$MNT/api/api.txt"
-out=$("$BIN" -C "$U" layer add api 2>&1); rc=$?
-eq "UC19: layers on a branch with a base: refused (exit 4)" "4" "$rc"
-check "UC19: saying what to do instead" has "$out" \
-    "show api's work with a snapshot (\`gitfold snapshot api\`), or take ui off its base first (\`gitfold layer base main\`)"
-eq "UC19: nothing changed" "one|No layers." "$(cat "$U/api.txt")|$("$BIN" -C "$U" layer | tail -1)"
-eq "UC19: the branch untouched" "$(R rev-parse api)" "$(R rev-parse ui)"
+U=$MNT/ui A=$MNT/api
+echo wip >>"$A/api.txt"
+check "UC19: a layer of the base, on a branch built on it" "$BIN" -C "$U" layer add api
+eq "UC19: api's uncommitted work on top of its commits" "one|wip" "$(paste -sd'|' "$U/api.txt")"
+check "UC19: read-only" fails sh -c "echo x >>'$U/api.txt'"
+eq "UC19: git sees nothing of it" "" "$(git -C "$U" status --short)"
+echo mine >"$U/ui.txt"; G "$U" add ui.txt; G "$U" commit -qm "ui: own"
+eq "UC19: ui's commit holds only its own change" "ui.txt" "$(R diff --name-only api ui)"
+# api commits that work and goes on: ui moves onto it at its turn, the
+# layer stays, showing only what api hasn't committed.
+G "$A" commit -qam "api: wip"; echo more >>"$A/api.txt"
+turn_ends "$A"
+out=$(turn_starts "$U")
+check "UC19: the turn says it moved" has "$out" "was moved onto its base api"
+eq "UC19: ui on api's new commit" "$(R rev-parse api)" "$(R rev-parse ui^)"
+eq "UC19: its own commit kept, alone" "ui.txt|mine" "$(R diff --name-only api ui)|$(cat "$U/ui.txt")"
+eq "UC19: the layer shows api's new work" "one|wip|more" "$(paste -sd'|' "$U/api.txt")"
+eq "UC19: still a layer, still read-only" "api all work live, last HH:MM|yes" \
+    "$(row "$U" api)|$(sh -c "echo x >>'$U/api.txt'" 2>/dev/null && echo no || echo yes)"
+eq "UC19: git still sees nothing of it" "" "$(git -C "$U" status --short)"
+check "UC19: the base line" has "$(listing "$U")" "Base: api, live your 1 commit sits on api"
+check "UC19: when it last moved" has "$(listing "$U")" "last moved HH:MM"
+# Asked for: the same.
+G "$A" commit -qam "api: more"
+check "UC19: layer base api moves it now" "$BIN" -C "$U" layer base api
+eq "UC19: on api's tip, the layer there" "$(R rev-parse api)|one|wip|more" \
+    "$(R rev-parse ui^)|$(paste -sd'|' "$U/api.txt")"
+eq "UC19: git clean" "" "$(git -C "$U" status --short)"
+}
+
+# UC24: a child shows the lead's uncommitted contract, then builds on the
+# lead's branch: its own commits go onto the lead's, the contract still
+# shows on top.
+a_child_on_the_leads_branch() {
+mkdir "$REPO/api"; echo 'fn v1() {}' >"$REPO/api/contract.rs"; R add -A; R commit -qm api
+R branch lead; R branch child
+mount_fs
+L=$MNT/lead C=$MNT/child
+echo 'fn shared() {}' >"$L/api/shared.rs"; G "$L" add -A; G "$L" commit -qm "lead: shared"
+echo 'fn draft() {}' >>"$L/api/contract.rs"
+"$BIN" -C "$C" layer add lead >/dev/null
+echo 'use shared;' >"$C/client.rs"; G "$C" add client.rs; G "$C" commit -qm "child: client"
+check "UC24: the child builds on the lead's branch" "$BIN" -C "$C" layer base lead
+eq "UC24: its commit on the lead's" "$(R rev-parse lead)|client.rs" "$(R rev-parse child^)|$(R diff --name-only lead child)"
+eq "UC24: the contract still shows, uncommitted part too" "fn v1() {}|fn draft() {}" "$(paste -sd'|' "$C/api/contract.rs")"
+check "UC24: read-only" fails sh -c "echo x >>'$C/api/contract.rs'"
+check "UC24: what the lead committed is the child's base now: writable" sh -c "echo '// ok' >>'$C/api/shared.rs'"
+eq "UC24: git sees only that" " M api/shared.rs" "$(git -C "$C" status --short)"
+G "$C" checkout -q -- api/shared.rs
+check "UC24: the listing: base and layer" sh -c "'$BIN' -C '$C' layer | grep -q '^Base: lead, live' && '$BIN' -C '$C' layer | grep -q '^lead '"
+}
+
+# UC25: a layer of another branch while built on api, with a blended file:
+# api's new commits move the branch, the layer stays, blends and the
+# layers commit come back.
+an_unrelated_layer_on_a_base() {
+printf 'CHANGELOG.md merge=union\n' >"$REPO/.gitattributes"; printf '# log\n' >"$REPO/CHANGELOG.md"
+R add -A; R commit -qm log
+R branch api; R branch c
+"$BIN" -C "$REPO" branch ui --base api >/dev/null
+mount_fs
+U=$MNT/ui A=$MNT/api
+echo '- c: thing' >>"$MNT/c/CHANGELOG.md"; echo c >"$MNT/c/c.txt"
+"$BIN" -C "$U" layer add c >/dev/null
+echo '- ui: screen' >>"$U/CHANGELOG.md"; G "$U" commit -qam "ui: log"
+for _ in $(seq 30); do [ "$(R show ui:CHANGELOG.md | wc -l)" = 2 ] && break; sleep 0.1; done
+eq "UC25: ui's commit holds only its own line" "# log|- ui: screen" "$(R show ui:CHANGELOG.md | paste -sd'|')"
+echo api >"$A/api.txt"; G "$A" add api.txt; G "$A" commit -qm "api: more"
+out=$(turn_starts "$U")
+check "UC25: moved onto api at the turn" has "$out" "was moved onto its base api"
+eq "UC25: on api's tip" "$(R rev-parse api)" "$(R rev-parse ui~1)"
+eq "UC25: api's file, c's layer" "api|c" "$(cat "$U/api.txt")|$(cat "$U/c.txt")"
+eq "UC25: the blend: c's line and ui's" "# log|- c: thing|- ui: screen" "$(LC_ALL=C sort "$U/CHANGELOG.md" | paste -sd'|')"
+check "UC25: HEAD at a layers commit again" has "$(git -C "$U" log -1 --format=%s)" "gitfold layers"
+eq "UC25: git sees nothing of c" "" "$(git -C "$U" status --short)"
+eq "UC25: ui's commits hold only its own changes" "CHANGELOG.md" "$(R diff --name-only api ui)"
+echo '- ui: more' >>"$U/CHANGELOG.md"; G "$U" commit -qam "ui: more"
+for _ in $(seq 30); do [ "$(R show ui:CHANGELOG.md | wc -l)" = 3 ] && break; sleep 0.1; done
+eq "UC25: commits still go onto the branch, own lines only" "# log|- ui: screen|- ui: more" "$(R show ui:CHANGELOG.md | paste -sd'|')"
 }
 
 # UC20-UC22: snapshots.
@@ -311,6 +384,8 @@ section "use cases: two layers on one file" two_layers_on_one_file
 section "use cases: an append-only file" an_append_only_file
 section "use cases: a stack of PRs" a_stack_of_prs
 section "use cases: a base and a layer" a_base_and_a_layer
+section "use cases: a child on the lead's branch" a_child_on_the_leads_branch
+section "use cases: an unrelated layer on a base" an_unrelated_layer_on_a_base
 section "use cases: snapshots" snapshots_of_work
 section "use cases: a proposal" a_proposal
 finish

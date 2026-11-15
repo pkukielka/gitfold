@@ -3,7 +3,9 @@
 # moves of branches with no workspace, of an unmounted workspace and of an
 # open one (by the UserPromptSubmit hook and by layer base again),
 # conflicts, uncommitted work in the way, commits already pushed, --frozen,
-# taking the base away (layer base main), landings, and list's tree and notes.
+# taking the base away (layer base main), landings (followed unasked only
+# once the base is gone), moves with layers shown (also killed half-way),
+# and list's tree and notes.
 # usage: tests/stacks.sh (or with the others: tests/run.sh); sections as in
 # tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -22,6 +24,7 @@ commit_on() {
 parent_is() { [ "$(R rev-parse "$1^")" = "$(R rev-parse "$2")" ]; }
 # Runs Claude Code's UserPromptSubmit hook in directory $1.
 prompt_hook() { (cd "$1" && "$BIN" layer --claude-hook user-prompt-submit); }
+has() { grep -qF -- "$2" <<<"$1"; }
 stack_ref() { R rev-parse -q --verify "refs/gitfold-stack/$1"; }
 # `gitfold layer base` for branch $1, the rest its arguments.
 base() { local b=$1; shift; "$BIN" -C "$REPO" layer base -w "$b" "$@"; }
@@ -261,19 +264,25 @@ W=$MNT/p2
 echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm "p2 own"
 echo la >>"$MNT/la/a.txt"
 "$BIN" -C "$W" layer add la >/dev/null
+echo n0 >"$MNT/p1/n0.txt"; G "$MNT/p1" add n0.txt; G "$MNT/p1" commit -qm "p1 n0"
 out=$(base p2 p1 2>&1); rc=$?
-eq "layers shown: layer base refused (exit 4), saying what to run" "4 yes" \
-    "$rc $(grep -qF "p2 can't move while layers are shown: \`gitfold layer remove --all\`, then \`gitfold layer base p1\`" <<<"$out" && echo yes)"
-eq "before anything changed" "|" "$(R config branch.p2.gitfoldParent)|$(stack_ref p2)"
-# Layers on a branch with a base anyway (as an earlier gitfold allowed).
-R config branch.p2.gitfoldParent p1; R update-ref refs/gitfold-stack/p2 p1
+eq "layers shown: layer base moves it" "0|p1|$(R rev-parse p1)" "$rc|$(R config branch.p2.gitfoldParent)|$(R rev-parse p2^)"
+eq "the layer still shows, git sees only its own" "a la|n0|" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n0.txt")|$(git -C "$W" status --short)"
+eq "nothing left taken off" "no" "$(test -e "$COMMON/gitfold/p2/lens-off" && echo yes || echo no)"
+echo m0 >"$MNT/p1/m0.txt"; G "$MNT/p1" add m0.txt; G "$MNT/p1" commit -qm "p1 m0"
+eq "list: what it needs" "p1 (needs update: gitfold layer base p1)" "$(listed p2)"
+# Uncommitted work in the way: it waits, the layers and the work kept.
+echo mine >"$W/m0.txt"
+out=$(prompt_hook "$W")
+eq "the hook: waits for the work in the way" yes "$(grep -q 'waits: uncommitted changes to m0.txt overlap the move' <<<"$out" && echo yes)"
+eq "the layer and the work kept" "a la|mine" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/m0.txt")"
+rm "$W/m0.txt"
+eq "the hook moves it" yes "$(prompt_hook "$W" | grep -q 'was moved onto its base p1' && echo yes)"
+eq "on p1, the layer shown" "$(R rev-parse p1)|a la|m0" "$(R rev-parse p2^)|$(paste -sd' ' "$W/a.txt")|$(cat "$W/m0.txt")"
+check "onto another base with the layers" base p2 other
+eq "on other, the layer shown" "other|$(R rev-parse other)|a la" "$(R config branch.p2.gitfoldParent)|$(R rev-parse p2^)|$(paste -sd' ' "$W/a.txt")"
+check "and back" base p2 p1
 echo n >"$MNT/p1/n.txt"; G "$MNT/p1" add n.txt; G "$MNT/p1" commit -qm "p1 n"
-eq "list: what it needs, the layers removed first" "p1 (needs update: gitfold layer remove --all, then gitfold layer base p1)" "$(listed p2)"
-eq "the hook: it waits, and what to run" yes \
-    "$(prompt_hook "$W" | grep -qF "waits: can't move while layers are shown: \`gitfold layer remove --all\`, then \`gitfold layer base p1\`" && echo yes)"
-tip=$(R rev-parse p2)
-out=$(base p2 other 2>&1); rc=$?
-eq "onto another base: refused, nothing changed" "4 p1 $tip" "$rc $(R config branch.p2.gitfoldParent) $(R rev-parse p2)"
 "$BIN" -C "$W" layer remove --all >/dev/null
 for _ in $(seq 30); do [ "$(cat "$COMMON/gitfold/p2/base")" = "$(R rev-parse p2)" ] && break; sleep 0.1; done
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
@@ -482,6 +491,23 @@ eq "list: not under a base" "h2" "$(tree | grep h2)"
 eq "main's file shows, own work kept" "moved-on| M a.txt" "$(cat "$W/m.txt")|$(git -C "$W" status --short)"
 commit_on main later.txt later
 eq "main moving on: the hook leaves it" "|$(R rev-parse h2)" "$(prompt_hook "$W")|$(R rev-parse h2)"
+
+# A merge commit too is only said while the base is there; meanwhile the
+# branch follows the base as before.
+R branch j1; commit_on j1 j1.txt j1
+base h2 j1 >/dev/null
+R merge -q --no-ff --no-edit j1
+tip=$(R rev-parse h2)
+out=$(prompt_hook "$W")
+eq "merged, j1 still there: said, nothing moved" "yes|$tip" \
+    "$(grep -qF "j1 was merged into main by $(R rev-parse --short=12 main), but j1 is still there; \`gitfold layer base main\` moves h2 there" <<<"$out" && echo yes)|$(R rev-parse h2)"
+check "list says it" has "$("$BIN" -C "$REPO" list)" "j1 landed in main: gitfold layer base main moves it there"
+commit_on j1 j1b.txt more
+eq "j1 goes on: the hook follows it" "yes|$(R rev-parse j1)" \
+    "$(prompt_hook "$W" | grep -q 'was moved onto its base j1' && echo yes)|$(R rev-parse h2^)"
+R merge -q --no-ff --no-edit j1; R branch -q -D j1
+out=$(prompt_hook "$W")
+check "j1 gone: moved onto the merge" landed_on h2 "$(R rev-parse main)" main
 }
 
 # `gitfold layer base $2 -w $1` (the rest its arguments), interrupted right
@@ -545,7 +571,60 @@ check "w2's file shows" test -e "$W/w2b.txt"
 check "a2's later ones don't" test ! -e "$W/a2c.txt"
 }
 
+# The next gitfold command moving branch $1 dies (SIGKILL) right after the
+# branch moved: a reference-transaction hook kills git's parent, then
+# removes itself.
+crash_after_move() {
+    local hook=$COMMON/hooks/reference-transaction
+    mkdir -p "$COMMON/hooks"
+    printf '#!/bin/sh\n[ "$1" = committed ] || exit 0\ngrep -q " refs/heads/%s$" || exit 0\nrm -f "$0"\nkill -9 $(awk "{print \\$4}" /proc/$PPID/stat)\n' \
+        "$1" >"$hook"
+    chmod +x "$hook"
+}
+
+# A move of a workspace showing layers, killed half-way: the layers come
+# back, pinned again, the move finished.
+an_interrupted_move_with_layers() {
+R branch p1; R branch la
+"$BIN" -C "$REPO" branch p2 --base p1 >/dev/null
+mount_fs
+W=$MNT/p2 S=$COMMON/gitfold/p2
+echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm "p2 own"
+echo la >>"$MNT/la/a.txt"
+"$BIN" -C "$W" layer add la >/dev/null
+echo n >"$MNT/p1/n.txt"; G "$MNT/p1" add n.txt; G "$MNT/p1" commit -qm "p1 n"
+crash_after_move p2
+base p2 p1 >/dev/null 2>&1
+check "killed: the branch moved" parent_is p2 p1
+for _ in $(seq 50); do [ ! -e "$S/lens-off" ] && [ ! -e "$S/restack" ] && break; sleep 0.1; done
+eq "mounted: the daemon finishes it and puts the layers back" "no|no|$(R rev-parse p1)" \
+    "$(test -e "$S/lens-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
+for _ in $(seq 30); do [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
+eq "the layer shows, the new file too, git sees only its own" "a la|n|" \
+    "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n.txt")|$(git -C "$W" status --short)"
+eq "the listing: the layer and the base" "la all work" "$("$BIN" -C "$W" layer | awk '$1 == "la" {print $1, $2, $3}')"
+
+# Unmounted: left half-way until it opens.
+"$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
+# p1 gets a commit by plumbing (its workspace has it checked out).
+export GIT_INDEX_FILE=$T/p1.index
+R read-tree p1; R update-index --add --cacheinfo "100644,$(echo n2 | R hash-object -w --stdin),n2.txt"
+R update-ref refs/heads/p1 "$(R commit-tree "$(R write-tree)" -p p1 -m "p1 n2")"
+unset GIT_INDEX_FILE
+crash_after_move p2
+base p2 p1 >/dev/null 2>&1
+eq "killed unmounted: moved, the layers off, the intent left" "$(R rev-parse p1)|yes|yes" \
+    "$(R rev-parse p2^)|$(test -e "$S/lens-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)"
+mount_fs
+cat "$W/own.txt" >/dev/null
+for _ in $(seq 50); do [ ! -e "$S/lens-off" ] && [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
+eq "opened: finished, the layers back" "no|no|$(R rev-parse p1)" \
+    "$(test -e "$S/lens-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
+eq "the layer, the new file, git clean" "a la|n2|" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n2.txt")|$(git -C "$W" status --short)"
+}
+
 section "stacks: branches with no workspace" branches_with_no_workspace
+section "stacks: an interrupted move with layers" an_interrupted_move_with_layers
 section "stacks: an interrupted move onto another base" an_interrupted_move_onto_another_base
 section "stacks: a parent that landed" a_parent_that_landed
 section "stacks: a branch on the local trunk" a_branch_on_the_local_trunk

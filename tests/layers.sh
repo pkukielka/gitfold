@@ -256,6 +256,16 @@ eq "built on a base: what follows it" "Base: api, live your 1 commit sits on api
 R config branch.me.gitfoldRestack manual
 eq "and when it doesn't" "Base: api, frozen your 1 commit sits on api; \`gitfold layer base api --frozen\` updates it" \
     "$(listing "$W" | head -1)"
+R config --unset branch.me.gitfoldRestack
+check "no move recorded: no time" fails grep -q "last moved" <<<"$(listing "$W")"
+# A branch with a base shows layers too; when it moved is stored, so
+# packing refs doesn't lose it.
+check "a layer on a branch with a base" "$BIN" -C "$W" layer add live
+R switch -q api; echo two >"$REPO/api2.txt"; R add api2.txt; R commit -qm "api: two"; R switch -q main
+check "moved onto api with the layer shown" "$BIN" -C "$W" layer base api
+R pack-refs --all
+eq "when it last moved, after the refs are packed" " last moved HH:MM" "$(listing "$W" | sed -n 2p)"
+eq "the layer still there" "live" "$(layer_names "$W")"
 }
 
 layers_changing_one_file() {

@@ -43,7 +43,10 @@
 //!
 //! Meanwhile the base doesn't follow the branch (`rebase`): moving it would
 //! copy the layers' files into the workspace's own. Commits still work; the
-//! base catches up once no layer shows.
+//! base catches up once no layer shows, and before layers go on in a workspace
+//! showing none (`catch_up_before_layers`). A move of the branch onto its
+//! base takes the layers off for the move (`state::lens::OFF`: what shows is
+//! then none, whatever is stored) and puts them back after.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -207,7 +210,7 @@ impl Workspace {
 
     /// Whether the stored layers differ from those applied (a cheap read).
     pub(super) fn lens_pending(&self) -> bool {
-        let stored = lens::stored_bytes(&self.state).unwrap_or_default();
+        let stored = lens::shown_bytes(&self.state).unwrap_or_default();
         stored != self.layers.read().applied.lens
     }
 
@@ -260,8 +263,8 @@ impl Workspace {
                 "{branch}: git is busy ({busy}); switch its layers when it is done"
             )));
         }
-        let stored = Lens::read(&self.state)?;
-        let stored_bytes = lens::stored_bytes(&self.state)?;
+        let (stored, stored_bytes) = lens::to_show(&self.state)?;
+        self.catch_up_before_layers(store, &stored)?;
         let base = self.layers.read().base;
         let base_tree = git::resolve(&base.to_string())?.tree;
         let view = lens::view(&self.state.common_dir, &base, &stored)?;
@@ -338,6 +341,41 @@ impl Workspace {
             Some(e) => Err(e),
             None => Ok(switched(branch, plan.lens_on, changed, git_off, notes)),
         }
+    }
+
+    /// Before layers go on in a workspace showing none: its base catches up
+    /// with its branch first (`rebase`), as the sync thread would have
+    /// soon, since the base waits while layers show. After a move of the
+    /// branch onto its base (`cli::stack`, which takes the layers off for
+    /// it), the files the move wrote are then the new base's, not the
+    /// workspace's own, which would hide the layers' at those paths. Fails
+    /// (the switch refused, retried) if it can't catch up now.
+    fn catch_up_before_layers(&self, store: &Store, stored: &Lens) -> Result<()> {
+        let (none_shown, base) = {
+            let layers = self.layers.read();
+            (
+                !layers.lens_on && layers.applied.head.is_none(),
+                layers.base,
+            )
+        };
+        if !stored.is_on() || !none_shown {
+            return Ok(());
+        }
+        let tip = git::branch_tip(&self.state.branch)?;
+        if tip.id == base {
+            return Ok(());
+        }
+        let rebased = self.rebase(store, &tip, true);
+        self.rebase_failed
+            .store(rebased.is_err(), std::sync::atomic::Ordering::Relaxed);
+        rebased?;
+        if self.layers.read().base != tip.id {
+            return Err(Refusal::Changes.error(format!(
+                "{}: its base is catching up with its branch; its layers show once it has",
+                self.state.branch
+            )));
+        }
+        Ok(())
     }
 
     /// The `.git` content after a switch: the registration, or with git not
@@ -671,7 +709,7 @@ impl Workspace {
     /// every `RETRY_AFTER`, then `sync_lens_locked`.
     pub(super) fn sync_lens(&self, store: &Store) -> Result<()> {
         if self.lens_pending() {
-            let stored = lens::stored_bytes(&self.state).unwrap_or_default();
+            let stored = lens::shown_bytes(&self.state).unwrap_or_default();
             let retry = {
                 let refused = self.lens_refused.lock();
                 refused

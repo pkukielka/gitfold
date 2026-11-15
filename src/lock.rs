@@ -87,6 +87,18 @@ pub fn wait(path: &Path) -> Result<FileLock> {
     }
 }
 
+/// `wait`, without waiting: `None` if someone holds it.
+pub fn try_wait(path: &Path) -> Result<Option<FileLock>> {
+    let context = || format!("locking {}", path.display());
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(context)?;
+    let taken = flock(&file).with_context(context)?;
+    Ok(taken.then_some(FileLock { _file: file }))
+}
+
 /// An exclusive, non-blocking `flock`: whether it was taken.
 pub fn flock(file: &fs::File) -> std::io::Result<bool> {
     let fd = std::os::fd::AsRawFd::as_raw_fd(file);
