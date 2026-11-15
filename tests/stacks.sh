@@ -413,7 +413,7 @@ echo mine >>"$W/a.txt"
 commit_on main m.txt moved-on
 s=$(squash h1)
 tip=$(R rev-parse h2)
-eq "it only looks merged, h1 still there: the hook says so, moves nothing" "gitfold: h2's base h1 looks squash- or rebase-merged into main as ${s:0:12}, but h1 is still there; \`gitfold layer base h1\` moves it there; suggest it to the user rather than running it yourself: it rewrites h2's history.|$tip" \
+eq "it only looks merged, h1 still there: the hook says so, moves nothing" "gitfold: h2's base h1 looks squash- or rebase-merged into main as ${s:0:12}, but h1 is still there; \`gitfold layer base h1\` moves h2 onto main with only its own commits; suggest it to the user rather than running it yourself: it rewrites h2's history.|$tip" \
     "$(prompt_hook "$W")|$(R rev-parse h2)"
 eq "once" "" "$(prompt_hook "$W")"
 R branch -q -D h1
