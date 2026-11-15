@@ -365,7 +365,12 @@ impl Workspaces {
         snapshots: &Snapshots,
         path: &str,
     ) -> Result<u64, Errno> {
-        if let Some(&slot) = self.by_path.lock().get(path) {
+        let registered = self.by_path.lock().get(path).copied();
+        if let Some(slot) = registered {
+            // A namespace left empty is gone, as listings show it.
+            if self.is_namespace(slot) && self.namespace_empty(path) {
+                return Err(Errno::ENOENT);
+            }
             return Ok(inode::ws(slot, 0));
         }
         if let Some(spec) = path.strip_prefix('@') {

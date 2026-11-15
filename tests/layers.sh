@@ -597,9 +597,11 @@ out=$("$BIN" -C "$W" propose api.txt)
 eq "propose: a copy of the layer's work; the next turn shows the edits" "yes yes" \
     "$(echo "$out" | grep -q "branch lead-prop/me, a copy of lead's work, uncommitted included" && echo yes) $(echo "$out" | grep -q 'your next turn shows your edits here (or now: `gitfold layer add lead-prop/me`)' && echo yes)"
 eq "the proposal shows as all work" "lead-prop/me all work live, last HH:MM" "$(listing "$W" | grep '^lead')"
+ls "$MNT/lead-prop" >/dev/null
 check "rejected" "$BIN" -C "$W" reject lead-prop/me
 eq "the layer back as it was: commits only" "lead commits only live, last HH:MM" "$(listing "$W" | grep '^lead')"
 eq "no empty folder of the proposal left" "" "$(ls "$MNT" | grep lead-prop)"
+check "nor can it be entered" test ! -e "$MNT/lead-prop"
 "$BIN" -C "$W" layer add lead --frozen >/dev/null
 "$BIN" -C "$MNT/rd" layer add lead --frozen >/dev/null
 "$BIN" -C "$W" propose api.txt >/dev/null
