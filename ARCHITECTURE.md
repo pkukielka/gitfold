@@ -163,7 +163,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/hooks/` | the push guard's `pre-push` and the shell library the worktree's hooks share (embedded) |
 | `src/git/stack.rs` | stacked branches' git side: the parent base (`refs/gitfold-stack/<branch>`, guessed by the fork point without it), restacking by plumbing, moving a branch and its stack ref in one transaction, whether a parent base landed on a target (merged, squashed, rebased) |
 | `src/git/test_repo.rs` | unit tests' scratch repository |
-| `src/git/lens.rs` | layers' git side: the view and hunk trees (blending; several layers' whole files merged), the layers (lens) and view commits, extracting commits made on the lens commit and moving the branch and HEAD in one transaction |
+| `src/git/lens.rs` | layers' git side: the view and hunk trees (blending; each layer's changes merged in per path), the layers (lens) and view commits, extracting commits made on the lens commit and moving the branch and HEAD in one transaction |
 | `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, fusermount |
@@ -259,18 +259,19 @@ term; they never appear in messages, help or the README.
   workspace, in the order added (also the name of the file storing them);
   **lensed** (*internal*; user-facing: "layers shown") means it has at
   least one.
-- **View tree** (M): the hunk tree with the layers' other changes on top,
-  whole files; where several layers change one, their 3-way merge against
-  the base's version, conflict markers kept (the base's version if they
-  can't merge at all); the lower layer while lensed.
+- **View tree** (M): the hunk tree with the layers' other changes on top:
+  at each path, each layer's change in turn as a 3-way merge (its merge
+  base's version, the path so far starting from the base's, its own),
+  conflict markers kept (the base's version where a change can't merge at
+  all); the lower layer while lensed.
 - **Blended path** (hunk path): a file `merge=union` marks in the base's
   attributes, which the base has, a layer changed and none deletes: every
   layer's change merged into the base's version. Writable; upper holds it
   with the workspace's own lines on top.
 - **Hunk tree** (H): the base's tree with only the blended paths blended.
 - **Mixed path**: a path a layer changed (or deleted) that isn't blended:
-  the layer's whole file (or the merge of several layers'), read-only,
-  unless upper has it. It belongs to every layer whose change it shows.
+  the base's version with the layers' changes merged in, read-only, unless
+  upper has it. It belongs to every layer that changed it.
 - **Layers commit** (L; *internal*: the lens commit): HEAD, detached,
   while files are blended: tree H over the branch tip, parents the tip
   and the blended layers' seals, a `gitfold-lens` header. The **view commit** (V, tree M, first parent L)
@@ -1336,9 +1337,10 @@ workspace without an agent, by the daemon once the workspace is idle; a
 (`diff-tree <merge base> <seal>`, in the order added) applied to the
 base's tree make the **view tree** (`state::lens::view`,
 `git::lens::build_view`), loaded into the shared store and used as the
-workspace's lower layer: whole files, a path several layers change merged
-as `git merge-file` merges them against the base's version (conflict
-markers kept, and listed), except files marked `merge=union`, which are
+workspace's lower layer: at each path a layer changed, its change merged
+into what is there (the base's version, or with the layers before it) as
+`git merge-file` does, against its own merge base (conflict markers kept,
+and listed), except files marked `merge=union`, which are
 **blended** (every layer's change merged into the base's version, lines
 both sides add kept both) and stay writable. While any file is blended,
 HEAD is detached at a **layers commit** (the lens commit, in the code)
@@ -1397,19 +1399,32 @@ a snapshot, with no change to any workspace.
   (propose a change, see "Proposals"; ask the layer's agent with `gitfold
   send`; `gitfold layer remove` it), naming every layer whose change the
   file shows.
-- **Several layers on one path merge; they don't stack.** Whoever added a
-  layer last used to win a path, silently hiding the other's change. Now
-  a path several layers change shows the fold of their entries, each
-  merged against the base's entry as `git merge-file` does (an entry
-  unchanged from the base, or the same on both sides, merges trivially).
-  A text conflict keeps git's markers, labelled with the layers' names,
-  so the reader sees both sides; anything that can't be merged (binary, a
-  deletion against a change, a type change) shows the base's entry. Both
-  are mixed paths (read-only, owned by every layer involved) and are
-  reported: on the switch's reply, at the next turn, and in `gitfold
-  layer`'s listing. The base's entry is the ancestor, not each layer's
-  merge base: a layer older than the base then reads as reverting the
-  base's newer change, as a single layer's whole file already does.
+- **A layer brings only its own changes, merged in per path.** A layer
+  used to apply whole files: one that changed line 50 showed its whole
+  copy, line 10 too, stale if the base fixed it after the layer started,
+  so the view silently undid the base's fix (a note said so). And whoever
+  added a layer last used to win a path. Now each path a layer changed
+  shows, for each layer in the order added, `merge(ancestor = the layer's
+  merge base's entry, ours = the path so far, starting from the base's,
+  theirs = the layer's)` as `git merge-file` does: what merging the
+  layer's branch would give, one layer and several following one rule
+  (the order doesn't matter for clean merges). Each layer is merged
+  against its own merge base, so layers started from different older
+  commits keep all their changes. Entries merge as in git: unchanged on
+  one side or alike on both, trivially (a deletion the base didn't touch
+  is a deletion; a change the base already has shows the base's, not
+  owned); a mode change on one side wins. A text conflict keeps git's
+  markers (`<<<<<<< base + A`, `>>>>>>> B`), so the reader sees both
+  sides; anything that can't be merged (binary, a deletion against a
+  change, a type change, a new file under a file that stays) shows the
+  base's entry. Both are mixed paths (read-only, owned by every layer that
+  changed them) and are reported, naming who conflicts: the base, if the
+  layer's change alone conflicts with it, else the layers before it whose
+  changes alone conflict with it (all of them if none alone does); on the
+  switch's reply, at the next turn, in the deny hook's reason and in
+  `gitfold layer`'s listing. A path the base made a directory of stays
+  the base's directory. A branch with no commit in common with the base
+  has no merge base: `layer add` refuses it.
 - **Git sees only the workspace's own work: skip-worktree and per-worktree
   excludes** (`tell_git`). The layers' paths the base tracks are marked
   skip-worktree in the worktree's own index, by an index editor
@@ -1432,8 +1447,9 @@ a snapshot, with no change to any workspace.
   appends at one place conflict in every 3-way merge, so where both sides
   only add lines both are kept, ours first (what `union` does, but only there).
   Any other conflict leaves that layer's change out, as a note on the
-  switch's reply, as does a whole-file layer version hiding a change the
-  base made since the merge base. The base's tree with only the blends is
+  switch's reply. Blending and the other paths' merges are the same 3-way
+  merge per layer; only blending resolves append conflicts, and a path is
+  one or the other, never both. The base's tree with only the blends is
   the **hunk tree** H; the view tree M is H with the whole files on top.
   Blended files have no `mixed` entry, so they are writable: a copy-up
   takes the blend, and the workspace's own lines go on top.
@@ -2156,10 +2172,11 @@ checkout" and "Running it"); this is the why and what it would take.
   to be detached (it lists the processes using it, from `/proc`, first),
   except when it or a process it runs under (its shell, `make`, ...) is
   inside the mount: it would wait for itself.
-- **Layers combine whole files, except blended ones.** A file both
+- **A workspace's own file wins whole, except blended ones.** A file both
   workspaces changed shows this workspace's version only, unless marked
-  `merge=union`; two layers' conflicting changes show conflict markers
-  the reader can't resolve here (it can only remove one of them).
+  `merge=union`; a layer's change conflicting with the base's or another
+  layer's shows conflict markers the reader can't resolve here (it can
+  only remove the layer, or ask its agent to update).
   Blending and extraction assume a blended file's lines are unique and
   their order doesn't matter where both sides append.
   A commit that changes a layer's lines waits until it is rewritten

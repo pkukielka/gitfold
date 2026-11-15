@@ -314,7 +314,7 @@ gitfold layer remove --all             # stop showing every layer
 - **The listing** (`gitfold layer`) shows `Base: <branch>` first, then one
   line per layer: what it shows (`all work`, `commits only`, `commits`) and
   how it updates (`live, last 14:07`, `frozen at 14:02`, `fixed`), then
-  `Conflict: <path> is changed by both <A> and <B>` lines, or `No layers.`
+  `Conflict: <path> ...` lines (below), or `No layers.`
 - **A layer's files are read-only here.** They are another agent's work in
   progress; a change made here would become your own copy of the file,
   hiding theirs from you and landing in your commits. Writing one fails
@@ -330,13 +330,20 @@ gitfold layer remove --all             # stop showing every layer
     yours).
 - **Whole files:** a file both you and a layer changed shows your version,
   unless it is blended (below).
-- **Several layers changing one file** show it merged (a 3-way merge
-  against your base's version). If their changes conflict, it shows git's
-  conflict markers (`<<<<<<< <A>` ... `>>>>>>> <B>`), still read-only, and
-  `gitfold layer` lists it as a conflict; a file that can't be merged at
-  all (binary, deleted by one and changed by another) shows your base's
-  version, also listed. Such a file belongs to every layer involved: ask
-  them (`gitfold send`) to agree, or `gitfold layer remove` one of them.
+- **A layer brings only its own changes.** A file it changed shows your
+  base's version with the layer's changes merged in (as merging its branch
+  would), so a fix your base got after the layer started stays. Several
+  layers changing one file are merged in one after another. If a layer
+  changed the same lines as your base or another layer, the file shows
+  git's conflict markers (`<<<<<<< base + <A>` ... `>>>>>>> <B>`), still
+  read-only, and `gitfold layer` lists it (`Conflict: <path>: <A>'s change
+  conflicts with your base`, or `... is changed by both <A> and <B>`); a
+  file that can't be merged at all (binary, deleted on one side and changed
+  on the other) shows your base's version, also listed. Such a file
+  belongs to every layer that changed it: ask them (`gitfold send`) to
+  update or agree, or `gitfold layer remove` one of them.
+- **A branch with no history in common with your base** can't be a layer
+  (`layer add` refuses, exit 4).
 - **`git status` shows only your work.** The layers' files are hidden from
   git (skip-worktree, and excluded if new): `status`, `diff`, `add -A`,
   `commit -a` see and commit only your changes, as do `gitfold changes` and

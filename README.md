@@ -564,16 +564,27 @@ commits as they are now); a revision never moves. Adding a layer again
 replaces it in place, with the flags given, and brings it up to date: the
 same command refreshes a frozen layer and makes a live one live again.
 
-A path a layer changed (or deleted) shows that layer's version; a file of
-the workspace's own at that path wins over all of them and stays writable.
-Where several layers change one file, it shows their 3-way merge against
-the base's version (as `git merge-file`): merged if their changes don't
-overlap, with git's conflict markers (`<<<<<<< agent/api`, `>>>>>>>
-agent/ui`) if they do, and the base's version if they can't be merged at
-all (a binary file, a deletion against a change, a type change). Either
-conflict is listed (`Conflict: <path> is changed by both <A> and <B>`, the
-first five, then `and N more`). Files marked for blending are the
-exception (below): they show every layer's lines and the workspace's own.
+A layer brings only its own changes, not whole files: a file it changed
+shows the base's version with the layer's changes merged in (a 3-way merge,
+as `git merge-file` does, of the file where the two diverged, the base's
+version and the layer's), what merging its branch would give. So a fix the
+base got after the layer started stays, next to the layer's change to
+another line. Several layers changing one file are merged in one after
+another, the same way, in any order. A deletion shows if the base didn't
+change the file since; a mode change merges as in git. Where a layer
+changed the same lines as the base, or as another layer, the file shows
+git's conflict markers (`<<<<<<< base + agent/api`, `>>>>>>> agent/ui`);
+where a change can't be merged at all (a binary file, a deletion against a
+change, a file turned into a symlink), it shows the base's version. Either
+is listed: `Conflict: <path>: <layer>'s change conflicts with your base`,
+or `Conflict: <path> is changed by both <A> and <B>`, the first five, then
+`and N more`. A file of the workspace's own at that path wins over all of
+them and stays writable. Files marked for blending are the exception
+(below): they show every layer's lines and the workspace's own.
+
+A branch with no commit in common with the workspace's base can't be a
+layer (`layer add` refuses it, exit 4): there would be no telling its
+changes apart.
 
 The listing (`gitfold layer` alone) shows first what the branch is built
 on (`Base: main`, or for a branch with a base, that base, whether it
@@ -585,16 +596,16 @@ for a branch without a workspace, a tag or a commit) and how it updates
 `frozen at HH:MM`; `fixed`), then the conflicts; `No layers.` if there are
 none. `add` and `remove` print a line saying what they did, then what the
 daemon did: while mounted, it shows the change at once, printing notes
-about the new view after its summary (`note: <path>: <A> and <B> change it
-and conflict: it shows git's conflict markers`, `note: <path>: <layer>'s
-change conflicts with what is below it, so it isn't blended in`, or
-`<path>: <layer>'s version is older than your base's (it hides a change
-made since); ask <layer> to update`); unmounted, it is stored and shown
-when the workspace opens. A conflict names the layers whose changes
-conflict, not every layer that changes the file. Exit codes: 3 no such
-workspace, branch, revision or layer; 4 refused, nothing changed (the
-layers shown and stored stay as they were; run it again once the cause is
-gone): git busy in the workspace (a commit in progress, a stopped rebase),
+about the new view after its summary (`note: Conflict: <path> is changed
+by both <A> and <B> (it shows git's conflict markers)`, or `note: <path>:
+<layer>'s change conflicts with what is below it, so it isn't blended
+in`); unmounted, it is stored and shown when the workspace opens. A
+conflict names the base or the layers whose changes conflict, not every
+layer that changes the file. Exit codes: 3 no such workspace, branch,
+revision or layer; 4 refused, nothing changed (the layers shown and stored
+stay as they were; run it again once the cause is gone): a branch that
+shares no history with the base, git busy in the workspace (a commit in
+progress, a stopped rebase),
 a commit made on the layers commit that can't go onto the branch yet, the
 workspace's own lines in a blended file that depend on lines that would go
 (see below); 2 usage errors (a workspace as its own layer); 1 other
@@ -616,7 +627,8 @@ its new commits as they come; it says when there is nothing to show yet.
   workspace's own file, hiding theirs and committed with this branch. To
   change one, propose a change (below), ask its agent (`gitfold send
   <BRANCH> <TEXT>`), or remove the layer (`gitfold layer remove <BRANCH>`)
-  and edit your own version. A file several layers merge is all of theirs.
+  and edit your own version. A file a layer changed is that layer's, the
+  base's lines in it too; one several layers change is all of theirs.
   In Claude Code, the plugin denies its edit tools such a file, saying this
   and naming every layer whose changes it shows.
 - **Proposals: changing a layer's file (a contract).** A typical tree: a

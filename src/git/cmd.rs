@@ -82,7 +82,7 @@ pub fn output_with_env_input(
     checked(args, out)
 }
 
-fn checked(args: &[&str], out: Output) -> Result<Vec<u8>> {
+pub(super) fn checked(args: &[&str], out: Output) -> Result<Vec<u8>> {
     if !out.status.success() {
         bail!(
             "git {} failed ({}): {}",

@@ -136,9 +136,11 @@ enum Command {
     /// with --commits or without a workspace, its commits. It is kept up to
     /// date (at its agent's turns, and when added again) unless --frozen; a
     /// tag or a commit never moves. A layer's files can't be written there,
-    /// and git sees only the workspace's own changes. Where several layers
-    /// change a file, it shows their merge, with conflict markers if they
-    /// conflict (listed). Files marked `merge=union` in .gitattributes are
+    /// and git sees only the workspace's own changes. A layer brings only its
+    /// own changes: a file it changed shows the base's version with them
+    /// merged in (as merging its branch would), one layer after another,
+    /// with conflict markers where they conflict with the base's or another
+    /// layer's (listed). Files marked `merge=union` in .gitattributes are
     /// blended instead (the layers' lines and the workspace's own, which it
     /// writes), with HEAD at a layers commit; commits made on it go onto the
     /// branch with only the workspace's changes. Where git can't be kept

@@ -284,17 +284,17 @@ check "read-only" test ! -w "$W/n.txt"
 eq "the deny hook names both" "yes yes" \
     "$(edit_hook "$W" n.txt | grep -q "n.txt shows the merge of x and y's work" && echo yes) $(edit_hook "$W" n.txt | grep -q 'gitfold layer remove x' && echo yes)"
 out=$("$BIN" -C "$W" layer add z)
-eq "a third changing the same line: conflict markers, said, naming the two that conflict" "<<<<<<< x + y|>>>>>>> z|yes" \
-    "$(grep '^<<<<<<<' "$W/n.txt")|$(grep '^>>>>>>>' "$W/n.txt")|$(echo "$out" | grep -q 'note: n.txt: y and z change it and conflict' && echo yes)"
+eq "a third changing the same line: conflict markers, said, naming the two that conflict" "<<<<<<< base + x + y|>>>>>>> z|yes" \
+    "$(grep '^<<<<<<<' "$W/n.txt")|$(grep '^>>>>>>>' "$W/n.txt")|$(echo "$out" | grep -qF "note: Conflict: n.txt is changed by both y and z (it shows git's conflict markers)" && echo yes)"
 eq "listed, naming the two that conflict (x merges)" "Conflict: n.txt is changed by both y and z" "$("$BIN" -C "$W" layer | grep Conflict)"
 eq "the deny hook names them all" "yes yes" \
-    "$(edit_hook "$W" n.txt | grep -q "the merge of x, y and z's work" && echo yes) $(edit_hook "$W" n.txt | grep -q 'The changes of y and z conflict there' && echo yes)"
+    "$(edit_hook "$W" n.txt | grep -q "the merge of x, y and z's work" && echo yes) $(edit_hook "$W" n.txt | grep -q 'Conflict: n.txt is changed by both y and z\.' && echo yes)"
 check "still read-only" fails sh -c "echo x >>'$W/n.txt'"
 eq "git sees none of it" "" "$(git -C "$W" status --short)"
 rm "$MNT/x/d/b.txt"; echo yb >>"$MNT/y/d/b.txt"
 check "add both again, now up to date" sh -c "'$BIN' -C '$W' layer add x && '$BIN' -C '$W' layer add y"
 eq "a deletion against a change: the base's version" "b" "$(cat "$W/d/b.txt")"
-eq "listed as such" "Conflict: d/b.txt is changed by both x and y (they can't be merged: it shows your base's version)" \
+eq "listed as such" "Conflict: d/b.txt is changed by both x and y (the changes can't be merged: it shows your base's version)" \
     "$("$BIN" -C "$W" layer | grep 'Conflict: d/')"
 check "remove one" "$BIN" -C "$W" layer remove z
 eq "the others merge again" "1 x 2 3 4 5 6 7 8 y" "$(tr '\n' ' ' <"$W/n.txt" | sed 's/ $//')"
