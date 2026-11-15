@@ -549,7 +549,7 @@ impl Workspace {
         rebased?;
         if self.layers.read().base != tip.id {
             return Err(Refusal::Changes.error(format!(
-                "{}: its base is catching up with its branch; its layers show once it has",
+                "{}: its files are catching up with its branch; its layers show once they have",
                 self.state.branch
             )));
         }
@@ -1166,10 +1166,10 @@ fn switched<'a>(
 ) -> String {
     let mut done = match layers_on {
         true => format!(
-            "{branch}: layers shown ({})",
-            crate::cli::plural(changed, "path changed", "paths changed")
+            "{} in {branch}",
+            crate::cli::plural(changed, "file changed", "files changed")
         ),
-        false => format!("{branch}: no layers shown"),
+        false => format!("no layers shown in {branch}"),
     };
     if let Some(why) = git_off {
         done += &format!("\nnote: git is off in it: {why}");

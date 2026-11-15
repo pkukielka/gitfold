@@ -133,7 +133,7 @@ impl Workspace {
             self.rebase(store, &from, true)?;
             if self.layers.read().base != intent.from {
                 return Ok(Some(format!(
-                    "{}: its base is catching up with its branch; retry",
+                    "{}: its files are catching up with its branch; retry",
                     self.state.branch
                 )));
             }

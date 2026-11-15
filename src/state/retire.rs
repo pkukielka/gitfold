@@ -54,7 +54,7 @@ impl Tip {
     fn note(self) -> &'static str {
         match self {
             Tip::At => "",
-            Tip::Behind => "base behind the branch tip (updated when opened in the mount)",
+            Tip::Behind => "behind the branch tip (it catches up when opened in the mount)",
             Tip::Deleted => "branch deleted",
         }
     }
@@ -167,7 +167,7 @@ pub fn check_workspace(
         if Tip::of(branch, &s.base) == Tip::Behind {
             catch_up().map_err(|e| {
                 changes(format!(
-                    "workspace {branch}: its base is behind the branch tip and catching up \
+                    "workspace {branch}: it is behind the branch tip and catching up \
                      failed ({e:#}); mount it, open it once, or use --force"
                 ))
             })?;

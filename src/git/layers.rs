@@ -269,10 +269,12 @@ enum Merged {
 /// layer's, so it brings only its own changes; conflicts reported. The
 /// paths a layer sets that B has and no layer deletes (a union needs B's
 /// version, and a deletion is whole) are given to `hunk_paths`, once, which
-/// returns those that are hunk paths.
+/// returns those that are hunk paths. Conflict markers name B `below`, as
+/// users know it (`main`, or what the branch builds on), then each layer.
 pub fn build_view(
     repo: &gix::Repository,
     base: ObjectId,
+    below: &str,
     layers: &[Pin],
     hunk_paths: &dyn Fn(&[BString]) -> Result<HashSet<BString>>,
 ) -> Result<Built> {
@@ -437,7 +439,7 @@ pub fn build_view(
                 theirs: change.item(),
             });
         }
-        let (merged, conflicted) = apply_layers(repo, in_base, &sides)?;
+        let (merged, conflicted) = apply_layers(repo, in_base, below, &sides)?;
         let mut found = Vec::new();
         for &step in &conflicted {
             let one = conflicting(repo, in_base, &sides, step)?;
@@ -509,9 +511,10 @@ struct Side<'a> {
 fn apply_layers(
     repo: &gix::Repository,
     base: Option<Item>,
+    below: &str,
     sides: &[Side],
 ) -> Result<(Merged, Vec<usize>)> {
-    let (mut acc, mut label) = (base, String::from("base"));
+    let (mut acc, mut label) = (base, below.to_string());
     let mut markers = false;
     let mut conflicted = Vec::new();
     for (step, side) in sides.iter().enumerate() {
@@ -547,12 +550,15 @@ fn conflicting(
     step: usize,
 ) -> Result<(Vec<usize>, bool)> {
     let side = sides[step];
-    if !apply_layers(repo, base, &[side])?.1.is_empty() {
+    if !apply_layers(repo, base, "", &[side])?.1.is_empty() {
         return Ok((vec![side.layer], true));
     }
     let mut with = Vec::new();
     for &before in &sides[..step] {
-        if apply_layers(repo, base, &[before, side])?.1.contains(&1) {
+        if apply_layers(repo, base, "", &[before, side])?
+            .1
+            .contains(&1)
+        {
             with.push(before.layer);
         }
     }
@@ -617,7 +623,7 @@ fn merge_entries(
         return Ok(Merged::Unmergeable);
     }
     let labels = text::Labels {
-        ancestor: Some("merge base".into()),
+        ancestor: Some("before".into()),
         current: Some(ours_label.into()),
         other: Some(theirs_label.into()),
     };
@@ -1344,7 +1350,7 @@ mod tests {
         let base = scenario(&r);
         let repo = r.open();
         let names = ["contracts", "a", "b"];
-        let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
+        let view = build_view(&repo, base, "main", &stack(&r, base, &names), &registries).unwrap();
         assert_eq!(view.notes, []);
         let base_tree = tree_of(&r, base);
         assert_eq!(r.diff(base_tree, view.hunk_tree), "M\tregistry.txt");
@@ -1404,7 +1410,7 @@ mod tests {
         r.write("registry.txt", &(lines(3, "entry_base") + "entry_up\n"));
         let new = r.commit("upstream");
         let repo = r.open();
-        let view = build_view(&repo, new, &stack(&r, old, &["a"]), &registries).unwrap();
+        let view = build_view(&repo, new, "main", &stack(&r, old, &["a"]), &registries).unwrap();
         assert_eq!(view.notes, []);
         assert_eq!(
             r.show(view.view_tree, "src/util.c"),
@@ -1456,13 +1462,13 @@ mod tests {
             .replace("util4\n", "util4 UP\n")
             .replace("util6\n", "util6 NEW\n")
             .replace("util8\n", "util8 HIGH");
-        let view = build_view(&repo, new, &layers, &registries).unwrap();
+        let view = build_view(&repo, new, "main", &layers, &registries).unwrap();
         assert_eq!(view.notes, []);
         assert_eq!(r.show(view.view_tree, "src/util.c"), expected);
         assert_eq!(view.mixed.get(BStr::new("src/util.c")), Some(&vec![0, 1]));
         // In the other order too.
         layers.reverse();
-        let view = build_view(&repo, new, &layers, &registries).unwrap();
+        let view = build_view(&repo, new, "main", &layers, &registries).unwrap();
         assert_eq!(view.notes, []);
         assert_eq!(r.show(view.view_tree, "src/util.c"), expected);
     }
@@ -1503,7 +1509,7 @@ mod tests {
         r.write("blob.bin", "bin\0one FIX\n");
         let new = r.commit("new");
         let repo = r.open();
-        let view = build_view(&repo, new, &stack(&r, old, &["b"]), &registries).unwrap();
+        let view = build_view(&repo, new, "main", &stack(&r, old, &["b"]), &registries).unwrap();
 
         // Different lines: both.
         assert_eq!(
@@ -1515,7 +1521,7 @@ mod tests {
         // The same line: git's conflict markers, the base's side first.
         let same = r.show(view.view_tree, "same.rs");
         assert!(
-            same.contains("<<<<<<< base\nline10 FIX\n=======\nline10 B\n>>>>>>> b\n"),
+            same.contains("<<<<<<< main\nline10 FIX\n=======\nline10 B\n>>>>>>> b\n"),
             "{same}"
         );
         // Deleted, unchanged on the base: gone. Deleted, changed on the
@@ -1588,7 +1594,7 @@ mod tests {
         r.write("f", "base's file\n");
         let new = r.commit("new");
         let repo = r.open();
-        let view = build_view(&repo, new, &stack(&r, old, &["b"]), &registries).unwrap();
+        let view = build_view(&repo, new, "main", &stack(&r, old, &["b"]), &registries).unwrap();
         assert_eq!(r.show(view.view_tree, "d/inner"), "base's");
         assert_eq!(r.show(view.view_tree, "e/inner"), "inner B");
         assert_eq!(r.show(view.view_tree, "f"), "base's file");
@@ -1622,7 +1628,7 @@ mod tests {
         );
         let new = r.commit("new");
         let repo = r.open();
-        let view = build_view(&repo, new, &stack(&r, old, &["b"]), &registries).unwrap();
+        let view = build_view(&repo, new, "main", &stack(&r, old, &["b"]), &registries).unwrap();
         assert_eq!(view.notes, []);
         assert!(view.mixed.is_empty());
         assert_eq!(view.view_tree, tree_of(&r, new));
@@ -1656,7 +1662,14 @@ mod tests {
         );
         let repo = r.open();
 
-        let view = build_view(&repo, base, &stack(&r, base, &["x", "y"]), &registries).unwrap();
+        let view = build_view(
+            &repo,
+            base,
+            "main",
+            &stack(&r, base, &["x", "y"]),
+            &registries,
+        )
+        .unwrap();
         assert_eq!(view.notes, []);
         assert_eq!(
             r.show(view.view_tree, "registry.txt"),
@@ -1664,8 +1677,14 @@ mod tests {
         );
         assert_eq!(view.union.get(BStr::new("registry.txt")), Some(&vec![0, 1]));
 
-        let view =
-            build_view(&repo, base, &stack(&r, base, &["p", "x", "q"]), &registries).unwrap();
+        let view = build_view(
+            &repo,
+            base,
+            "main",
+            &stack(&r, base, &["p", "x", "q"]),
+            &registries,
+        )
+        .unwrap();
         assert_eq!(
             view.notes,
             [Note::NotInUnion {
@@ -1769,14 +1788,14 @@ mod tests {
             others,
         };
         for order in [[("a", a), ("b", b)], [("b", b), ("a", a)]] {
-            let view = build_view(&repo, base, &pins(base, &order), &registries).unwrap();
+            let view = build_view(&repo, base, "main", &pins(base, &order), &registries).unwrap();
             assert_eq!(r.show(view.view_tree, "registry.txt"), made.trim_end());
             assert_eq!(view.union.get(BStr::new("registry.txt")), Some(&vec![0, 1]));
             let b_ix = order.iter().position(|(n, _)| *n == "b").unwrap();
             assert_eq!(view.notes, [among(b_ix, vec![1 - b_ix])]);
         }
 
-        let view = build_view(&repo, base, &pins(base, &[("b", b)]), &registries).unwrap();
+        let view = build_view(&repo, base, "main", &pins(base, &[("b", b)]), &registries).unwrap();
         assert_eq!(
             r.show(view.view_tree, "registry.txt"),
             "alpha\ncharlie\nzulu"
@@ -1834,6 +1853,7 @@ mod tests {
         let view = build_view(
             &repo,
             base,
+            "main",
             &stack(&r, base, &["top", "bottom"]),
             &registries,
         )
@@ -1847,9 +1867,9 @@ mod tests {
         assert_eq!(view.notes, []);
 
         let names = ["top", "bottom", "other"];
-        let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
+        let view = build_view(&repo, base, "main", &stack(&r, base, &names), &registries).unwrap();
         let shown = r.show(view.view_tree, "src/util.c");
-        assert!(shown.contains("<<<<<<< base + top + bottom\n"), "{shown}");
+        assert!(shown.contains("<<<<<<< main + top + bottom\n"), "{shown}");
         assert!(
             shown.contains("util8 BOTTOM\n=======\nutil8 OTHER\n"),
             "{shown}"
@@ -1874,6 +1894,7 @@ mod tests {
         let view = build_view(
             &repo,
             base,
+            "main",
             &stack(&r, base, &["gone", "edit"]),
             &registries,
         )

@@ -98,7 +98,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
             let base = state.read_base()?.id;
             let note = base_note(branch, &base);
             if !note.is_empty() {
-                eprintln!("note: {branch}: {note}; its changes are against the stored base");
+                eprintln!("note: {branch}: {note}; its changes are against the commit it last had");
             }
             let s = status::status(&store, &state)?;
             let uncommitted: Vec<_> = s.changed.into_iter().chain(s.deleted).collect();
