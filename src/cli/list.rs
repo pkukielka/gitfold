@@ -123,6 +123,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         return Ok(());
     }
     let store = Store::default();
+    let mounted = matches!(crate::mount_table::mount_of(&common_dir), Ok(Some(_)));
     let lines = match stat {
         true => format!(" {:>8} {:>8}", "+lines", "-lines"),
         false => String::new(),
@@ -178,8 +179,14 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         };
         let task = TaskDir::with(&local, &common_dir, &w.branch);
         let last = last_change(&w.state, &s, &task).map_or("-".into(), age);
-        // What the agent says it is doing, then what gitfold notes.
-        let notes: Vec<String> = (Some(base_note(&w.branch, &s.base)).filter(|n| !n.is_empty()))
+        // What the agent says it is doing, then what gitfold notes. Mounted,
+        // a base behind its branch catches up within seconds (a commit, a
+        // move onto its base): not worth a note.
+        let note = match mounted && git::branch_exists(&w.branch) {
+            true => "",
+            false => base_note(&w.branch, &s.base),
+        };
+        let notes: Vec<String> = (Some(note).filter(|n| !n.is_empty()))
             .map(str::to_string)
             .into_iter()
             .chain(notes)

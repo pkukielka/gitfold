@@ -36,7 +36,9 @@ pub fn watch(repo: &Path, args: WatchArgs) -> Result<()> {
         Some((b, d)) => (b.to_string(), d),
         None => match crate::cli::branch_or_current(None, repo) {
             Ok(b) => (b, target.as_str()),
-            Err(_) => bail!("not in a gitfold workspace: name the task as <BRANCH>:<DIR>"),
+            Err(_) => {
+                bail!("not in a workspace: run it inside one, or name the task as <BRANCH>:<DIR>")
+            }
         },
     };
     let dir = dir.trim_matches('/');
