@@ -755,7 +755,7 @@ fn copy_onto(
     let state = StateDir::of(common_dir, name);
     if state.opened() && lensed(&state)? {
         return Ok(Copied::Stop(Outcome::Waits(
-            "layers are shown in its workspace; `gitfold lens off` first".into(),
+            "layers are shown in its workspace; `gitfold layer remove --all` first".into(),
         )));
     }
     let computed = git::with_repo(|repo| stack::restack(repo, base.commit, onto, tip))?;

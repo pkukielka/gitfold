@@ -285,19 +285,29 @@ even on a huge tree. Each workspace then changes on its own.
 
 ## Layers
 
-A **layer** is another workspace's work (uncommitted included) shown in
-yours: its changed files over your base, under your own changes. Several
+A **layer** is another branch's work shown in your workspace, read-only:
+its changed files over your base, under your own changes. For a branch
+with a workspace that is its work as it is, uncommitted included. Several
 agents building parts of one change can then build and test against each
-other's work as it is, without merging or committing anything.
+other's work as it is, without merging or committing anything. A layer
+never changes your commits: they hold only your own changes.
 
 ```
-gitfold layer list                # bottom first: on/off, the branch, its seal
-gitfold layer add agent/api       # show agent/api's work here, as now
-gitfold layer off agent/api       # hide it (kept; `on` shows it again)
-gitfold layer update              # every layer to its workspace's work as now
-gitfold lens off                  # hide every layer
+gitfold layer                          # your base, your layers, their conflicts
+gitfold layer add agent/api            # agent/api's work, kept up to date
+gitfold layer add agent/api --frozen   # its work as it is right now, never updated
+gitfold layer add agent/api --commits  # only what it has committed, kept up to date
+gitfold layer add v1.2                 # a tag or a commit: fixed
+gitfold layer remove agent/api         # stop showing it
+gitfold layer remove --all             # stop showing every layer
 ```
 
+- **Adding a layer again replaces it** with the flags you give, and brings
+  it up to date (a frozen one too). A branch is never shown twice.
+- **The listing** (`gitfold layer`) shows `Base: <branch>` first, then one
+  line per layer: what it shows (`all work`, `commits only`, `commits`) and
+  how it updates (`live, last 14:07`, `frozen at 14:02`, `fixed`), then
+  `Conflict: <path> is changed by both <A> and <B>` lines, or `No layers.`
 - **A layer's files are read-only here.** They are another agent's work in
   progress; a change made here would become your own copy of the file,
   hiding theirs from you and landing in your commits. Writing one fails
@@ -308,43 +318,52 @@ gitfold lens off                  # hide every layer
     place, and its agent accepts it;
   - **ask its agent** to change it: `gitfold send <BRANCH> -s "<file>" "<what
     and why>"`; it shows here once they have made it (next turn);
-  - or **`gitfold layer off <BRANCH>`**, then edit your own version (a file
-    of yours at a layer's path always wins over the layer, and stays yours).
+  - or **`gitfold layer remove <BRANCH>`**, then edit your own version (a
+    file of yours at a layer's path always wins over the layer, and stays
+    yours).
 - **Whole files:** a file both you and a layer changed shows your version,
   unless it is blended (below).
+- **Several layers changing one file** show it merged (a 3-way merge
+  against your base's version). If their changes conflict, it shows git's
+  conflict markers (`<<<<<<< <A>` ... `>>>>>>> <B>`), still read-only, and
+  `gitfold layer` lists it as a conflict; a file that can't be merged at
+  all (binary, deleted by one and changed by another) shows your base's
+  version, also listed. Such a file belongs to every layer involved: ask
+  them (`gitfold send`) to agree, or `gitfold layer remove` one of them.
 - **`git status` shows only your work.** The layers' files are hidden from
   git (skip-worktree, and excluded if new): `status`, `diff`, `add -A`,
   `commit -a` see and commit only your changes, as do `gitfold changes` and
   `list`. Commit and push normally (with blended files, see below). If git
   refuses to touch a file you didn't change (a merge or rebase over a
-  layer's file), run `gitfold lens off` and retry.
+  layer's file), run `gitfold layer remove --all` and retry.
 - **Blended files: a file several agents add to.** For a registry, a
   manifest or a module list that you and a layer both append to, mark it in
   the base's attributes so it shows everyone's lines instead of one whole
-  file: add `<path> gitfold-blend=hunk` (e.g. `registry.txt
-  gitfold-blend=hunk`) to `.gitattributes` and commit it before adding the
-  layers (your base doesn't move while layers show), or, uncommitted, to
-  `$(git rev-parse --git-common-dir)/info/attributes`, then `gitfold layer
-  update`. Only files your base has are blended. A blended file shows the
-  base's version with every layer's lines and stays writable: add your
-  lines anywhere (lines both sides add at one place are all kept). A
-  `note:` after `gitfold layer` says if a layer's change to it couldn't be
-  blended in.
+  file: add `<path> merge=union` (e.g. `registry.txt merge=union`) to
+  `.gitattributes` and commit it before adding the layers (your base
+  doesn't move while layers show), or, uncommitted, to `$(git rev-parse
+  --git-common-dir)/info/attributes`, then add the layers again (`gitfold
+  layer add <BRANCH>`). Only files your base has are blended. A blended
+  file shows the base's version with every layer's lines and stays
+  writable: add your lines anywhere (lines both sides add at one place are
+  all kept). A `note:` after `gitfold layer add` says if a layer's change
+  to it couldn't be blended in.
 - **With blended files, git shows and commits only your lines.** HEAD is
-  then detached at a lens commit (`git log -1`: `gitfold lens: <you> +
+  then detached at a layers commit (`git log -1`: `gitfold layers: <you> +
   <layers> (commits go to <you>; never push this commit)`), and `git
   status`/`git diff` show only your lines in a blended file. **Commit
   normally**: within about a second gitfold puts each commit onto your
-  branch with only your changes and moves HEAD to a new lens commit, so
+  branch with only your changes and moves HEAD to a new layers commit, so
   the commit id you saw changes (`git log <your-branch>` has the real one).
-  `git log -1` showing `gitfold lens:` again means it is on your branch.
-- **Never push HEAD from a lens** (`git push origin HEAD:<branch>`, or
-  `--no-verify`): the lens commit holds other agents' uncommitted work, and
-  a push guard refuses it. **`git push origin <your-branch>` is fine.**
+  `git log -1` showing `gitfold layers:` again means it is on your branch.
+- **Never push HEAD while it is a layers commit** (`git push origin
+  HEAD:<branch>`, or `--no-verify`): it holds other agents' uncommitted
+  work, and a push guard refuses it. **`git push origin <your-branch>` is
+  fine.**
 - **A commit that waits: it depends on a layer's lines.** If `git log -1`
-  still shows your commit (not `gitfold lens:`) after a few seconds, or
-  `gitfold layer`/`gitfold lens off` exit 4 with `commit <id> can't go onto
-  the branch alone (it changes lines of a layer's)`, that commit removed or
+  still shows your commit (not `gitfold layers:`) after a few seconds, or
+  `gitfold layer add`/`remove` exit 4 with `commit <id> can't go onto the
+  branch alone (it changes lines of a layer's)`, that commit removed or
   changed another agent's lines in a blended file. It can't go onto your
   branch without their uncommitted work, so it and any later commit stay
   off your branch. Put their lines back as the file showed them (`git diff
@@ -352,22 +371,23 @@ gitfold lens off                  # hide every layer
   and `git commit -a --amend` (if it is your last commit; if not, stop and
   tell the user). To change their lines, ask their agent with `gitfold send`.
 - **Don't `git switch`, `checkout <branch>`, `reset --soft` or `rebase`
-  while lensed**, nor `--amend` once `git log -1` shows `gitfold lens:`
-  (that amends the lens commit): HEAD leaving the lens commit's
-  line turns git off (below). Run **`gitfold lens off`** first (HEAD goes
-  back on your branch; your uncommitted lines stay as changes).
-- **`fatal: not a git repository: /LENS ON (<layers>): git is off here
+  while layers show**, nor `--amend` once `git log -1` shows `gitfold
+  layers:` (that amends the layers commit): HEAD leaving the layers
+  commit's line turns git off (below). Run **`gitfold layer remove --all`**
+  first (HEAD goes back on your branch; your uncommitted lines stay as
+  changes).
+- **`fatal: not a git repository: /LAYERS SHOWN (<layers>): git is off here
   (<why>)`** means gitfold couldn't hide the layers from git here (sparse
-  checkout, a split or sparse index, HEAD taken off the lens commit), so it
-  turned git off rather than let you commit others' work. The files still
-  show. Run `gitfold lens off` to use git again; `gitfold` commands keep
-  working meanwhile.
+  checkout, a split or sparse index, HEAD taken off the layers commit), so
+  it turned git off rather than let you commit others' work. The files
+  still show. Run `gitfold layer remove --all` to use git again; `gitfold`
+  commands keep working meanwhile.
 - **Layers move between turns, not during them.** With the gitfold plugin, a
   workspace shown as a layer is sealed when its session stops, and your
-  layers move to the newest seals when your next prompt starts; you are
-  then told which layers changed (files you read from them may have
+  live layers move to their newest work when your next prompt starts; you
+  are then told which layers changed (files you read from them may have
   changed: read them again). Without the plugin, or for a workspace no
-  session runs in, `gitfold layer update`.
+  session runs in, `gitfold layer add <BRANCH>` brings it up to date.
 - **Changed files get a fresh time** at each switch, so incremental builds
   rebuild them.
 
@@ -385,14 +405,14 @@ gitfold track-reads agent/child-1 on                 # who read what (shown by c
 ```
 
 The workspace a layer is added to must have been opened (else exit 3); a
-layer's branch without a workspace shows its last commit.
+layer of a branch without a workspace shows its commits.
 
 Children can also be layers of each other, or of a reviewer's workspace. To
 **check the work together**, mix it into a snapshot (`cd $(gitfold mix
 agent/contracts agent/child-1 agent/child-2)`, see the merge previews
 above), or add the children as layers of a workspace that builds and tests
-them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
-<BRANCH>` prints one workspace's uncommitted work as a commit, to open as
+them (`gitfold layer add`, then `gitfold layer remove --all` when done).
+`gitfold seal <BRANCH>` prints one workspace's uncommitted work as a commit, to open as
 `<mount>/@<sha>`.
 
 ### Contracts: proposing a change, consent of the affected
@@ -407,7 +427,7 @@ them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
    instead.
 2. Edit the files **there** (the path printed; not in your workspace,
    where they stay read-only). Keep the change minimal: others build on
-   these files. Run `gitfold layer update` to see the edits in your
+   these files. Run `gitfold layer add <branch>` to see the edits in your
    workspace, then build and test your own work against them.
 3. Tell the layer's agent: `gitfold send <layer> -s "proposal" "<branch>:
    <what changed and why>"`. Wait for its answer in your inbox: `contract
@@ -445,7 +465,7 @@ them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
    a reason the proposer can act on.
 
 **A child told `contract changed`** reads the message (the changed lines),
-re-reads the files it uses (run `gitfold layer update` first if the message
+re-reads the files it uses (run `gitfold layer add <layer>` first if the message
 came mid-turn: the layer moves at your next prompt), and adapts its work.
 
 ## Stacked branches
@@ -471,7 +491,7 @@ gitfold stack list                # the stacks, with what each needs
   `gitfold stack sync`.
 - Uncommitted changes to a file the restack changes: it waits, and tells
   you which; commit or stash them, and it happens at the next turn.
-- It is refused while layers are shown (`gitfold lens off` first).
+- It is refused while layers are shown (`gitfold layer remove --all` first).
 - When the parent is merged into main (a merge, squash, rebase merge or
   fast-forward), your branch moves onto that merge with only its own
   commits and is stacked on main from then on; you are told. Suggest the

@@ -614,7 +614,7 @@ impl Workspace {
             // Left L's line (amended, reset): kept, and said so.
             let left = left_ref(&self.state.id);
             git::cmd::run(common_dir, &["update-ref", &left, &h.to_string()])?;
-            log::warn!("{branch}: HEAD had left the lens commit; {h} is kept at {left}");
+            log::warn!("{branch}: HEAD had left the layers commit; {h} is kept at {left}");
         }
         if head.is_some() {
             let full = format!("refs/heads/{branch}");
@@ -763,7 +763,7 @@ impl Workspace {
             return Ok(());
         }
         let Some(head) = detached_head(admin) else {
-            return self.surrender("HEAD left the lens commit");
+            return self.surrender("HEAD left the layers commit");
         };
         if head == l || *self.lens_blocked.lock() == Some(head) {
             return Ok(());
@@ -794,7 +794,7 @@ impl Workspace {
             Ok(Some(git::lens::extract(repo, &lens, l, tip.id, &chain)?))
         })?;
         let Some(done) = done else {
-            return self.surrender("HEAD left the lens commit's line");
+            return self.surrender("HEAD left the layers commit's line");
         };
         if let Some(blocked) = &done.blocked {
             let paths: Vec<String> = (blocked.conflicts.iter())
@@ -817,7 +817,7 @@ impl Workspace {
             self.layers.write().applied = applied;
             *self.lens_blocked.lock() = None;
             log::info!(
-                "{branch}: {} commit(s) made on the lens extracted",
+                "{branch}: {} commit(s) made on the layers commit moved onto the branch",
                 done.extracted.len()
             );
         }
