@@ -17,7 +17,7 @@ use crate::settings::Local;
 use crate::state::StateDir;
 use crate::state::lens::{Layer, Lens, Shows, Updates, View, and_list};
 use crate::state::retire::check_name;
-use crate::state::seal;
+use crate::state::{follow, seal};
 use crate::store::Store;
 
 /// How many conflicting paths the listing names before "and N more".
@@ -294,13 +294,14 @@ fn updates(layer: &Layer) -> String {
 
 /// `gitfold layer --claude-hook user-prompt-submit`: at the start of a turn,
 /// the live layers of the workspace the session is in move to their latest
-/// work (`latest_work`: an agent's workspace as `gitfold snapshot
+/// work (`state::follow`: an agent's workspace as `gitfold snapshot
 /// --claude-hook stop` took it when its last turn ended, one without an
 /// agent as it is now), so what shows changes only between turns, never
 /// half-way through another's; a branch built on a base is moved onto its
-/// new commits first (`stack::hook_context`). What changed is printed,
-/// which becomes context. Does nothing outside a workspace with layers or a
-/// base; errors are only logged.
+/// new commits first (`stack::hook_context`). Records that the workspace
+/// has an agent (`seal::turn_started`): the daemon leaves its layers to its
+/// turns. What changed is printed, which becomes context. Does nothing
+/// outside a workspace with layers or a base; errors are only logged.
 pub fn layer_hook(event: &str) -> Result<()> {
     if event == "pre-tool-use" {
         return deny_hook();
@@ -317,56 +318,33 @@ pub fn layer_hook(event: &str) -> Result<()> {
             Err(e) => log::debug!("gitfold layer --claude-hook: moving {name}: {e:#}"),
         }
         let state = StateDir::of(&common_dir, &name);
+        if state.opened()
+            && let Err(e) = seal::turn_started(&state)
+        {
+            log::debug!("gitfold layer --claude-hook: {e:#}");
+        }
         let live = |lens: &Lens| lens.layers.iter().any(|l| l.updates == Updates::Live);
         // Most turns: nothing to lock for.
         if !live(&Lens::read(&state)?) {
             return Ok(());
         }
-        let _lock = crate::state::lens::lock(&state)?;
-        let mut lens = Lens::read(&state)?;
-        let (mut moved, mut stored) = (Vec::new(), false);
-        let local = Local::read(&common_dir);
-        let base = state.read_base()?.id;
-        for layer in &mut lens.layers {
-            if layer.updates != Updates::Live {
-                continue;
-            }
-            // One layer that can't move now (its workspace busy, say) leaves
-            // the others to move.
-            let files = match follow(&common_dir, &local, base, layer) {
-                Ok(Some(files)) => files,
-                Ok(None) => continue,
-                Err(e) => {
-                    log::debug!("gitfold layer --claude-hook: layer {}: {e:#}", layer.branch);
-                    continue;
-                }
-            };
-            stored = true;
-            // The same files (its snapshot of what its tip has): nothing to
-            // say, nor a move to show.
-            if files == 0 {
-                continue;
-            }
-            layer.moved = now();
-            moved.push(format!(
-                "{} ({})",
-                layer.branch,
-                super::plural(files, "file changed", "files changed")
-            ));
-        }
-        if !stored {
+        let lock = crate::state::lens::lock(&state)?;
+        let followed = follow::follow_live(
+            &Store::default(),
+            &state,
+            &lock,
+            |_| true,
+            || apply(&common_dir, &name),
+        )?;
+        let Some(followed) = followed.filter(|f| !f.moved.is_empty()) else {
             return Ok(());
-        }
-        let applied = store_and_apply(&common_dir, &state, &lens)?;
-        if moved.is_empty() {
-            return Ok(());
-        }
+        };
         println!(
             "gitfold: the layers shown in this workspace moved to their latest work: {}. \
              Files you read from them may have changed.",
-            moved.join(", ")
+            followed.moved.join(", ")
         );
-        for note in applied.lines().filter(|l| l.starts_with("note: ")) {
+        for note in followed.applied.lines().filter(|l| l.starts_with("note: ")) {
             println!("gitfold: {note}");
         }
         Ok(())
@@ -374,72 +352,6 @@ pub fn layer_hook(event: &str) -> Result<()> {
         log::debug!("gitfold layer --claude-hook: {e:#}");
     }
     Ok(())
-}
-
-/// Moves live `layer` (of a workspace on `base`) to where it is now
-/// (`newest`): how many files changed, `None` if it didn't move.
-fn follow(
-    common_dir: &Path,
-    local: &Local,
-    base: ObjectId,
-    layer: &mut Layer,
-) -> Result<Option<usize>> {
-    let Some((newest, shows)) = newest(common_dir, local, layer)? else {
-        return Ok(None);
-    };
-    if newest == layer.seal {
-        return Ok(None);
-    }
-    let (from, to) = (
-        git::resolve(&layer.seal.to_string())?,
-        git::resolve(&newest.to_string())?,
-    );
-    let files = git::with_repo(|repo| git::lens::delta(repo, from.tree, to.tree))?.len();
-    layer.merge_base = git::merge_base(base, newest)?;
-    layer.seal = newest;
-    layer.shows = shows;
-    Ok(Some(files))
-}
-
-/// Where live `layer` is now, and what it shows there: its workspace's
-/// work (`latest_work`), or with `--commits` or without a workspace, its
-/// branch's tip (`None` if the branch is gone).
-fn newest(common_dir: &Path, local: &Local, layer: &Layer) -> Result<Option<(ObjectId, Shows)>> {
-    if !git::branch_exists(&layer.branch) {
-        return Ok(None);
-    }
-    let theirs = StateDir::of(common_dir, &layer.branch);
-    if layer.shows != Shows::CommitsOnly && theirs.opened() {
-        let work = latest_work(&Store::default(), &theirs)?;
-        return Ok(work.map(|work| (work, Shows::Work)));
-    }
-    let shows = tip_shows(local, &layer.branch, layer.shows == Shows::CommitsOnly);
-    Ok(Some((git::branch_tip(&layer.branch)?.id, shows)))
-}
-
-/// The work of the workspace in `theirs` a live layer shows (see
-/// `state::seal`): an agent's (one whose `Stop` hook ran) as it was at the
-/// end of its last turn, never half-way through one; one without an agent
-/// (a person's, a proposal edited from another workspace) has no turns, so
-/// a fresh snapshot, as it is now. An agent's that wasn't shown when its
-/// last turn ended has none to follow (`None`): the layer stays as it was
-/// added.
-fn latest_work(store: &Store, theirs: &StateDir) -> Result<Option<ObjectId>> {
-    Ok(match seal::driven(theirs) {
-        seal::Driven::Agent(last_turn) => last_turn,
-        seal::Driven::Person => Some(seal::seal(store, theirs, seal::By::Other)?.commit),
-    })
-}
-
-/// What a layer showing the tip of `branch` shows: only its commits with
-/// `commits`; all work for a proposal (a workspace to edit, its work shown as
-/// all work even before it first opens: its tip, then); else its commits.
-fn tip_shows(local: &Local, branch: &str, commits: bool) -> Shows {
-    match commits {
-        true => Shows::CommitsOnly,
-        false if local.proposal(branch).is_some() => Shows::Work,
-        false => Shows::Commits,
-    }
 }
 
 /// `gitfold layer --claude-hook pre-tool-use`: denies Claude Code's edit
@@ -592,14 +504,14 @@ pub(super) fn layer_of(
         check_name(branch)?;
         let theirs = StateDir::of(common_dir, branch);
         if theirs.opened() && !commits {
-            // Live: as it follows it (`latest_work`), else as it is now.
+            // Live: as it follows it (`follow::latest_work`), else as it is now.
             let work = match (frozen, seal::driven(&theirs)) {
                 (false, seal::Driven::Agent(Some(last_turn))) => last_turn,
                 _ => seal::seal(store, &theirs, seal::By::Other)?.commit,
             };
             (work, Shows::Work, updates)
         } else {
-            let shows = tip_shows(&Local::read(common_dir), branch, commits);
+            let shows = follow::tip_shows(&Local::read(common_dir), branch, commits);
             (git::branch_tip(branch)?.id, shows, updates)
         }
     } else {
@@ -670,13 +582,7 @@ fn add_command(layer: &Layer) -> String {
 /// stored before are put back, so what is stored is what shows.
 pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
     refuse_if_moving(common_dir, state)?;
-    let before = crate::state::lens::stored_bytes(state)?;
-    lens.write(state)?;
-    apply(common_dir, &state.branch).inspect_err(|_| {
-        if let Err(e) = crate::state::lens::store_bytes(state, &before) {
-            log::warn!("putting the layers back: {e:#}");
-        }
-    })
+    crate::state::lens::store_and_show(state, lens, || apply(common_dir, &state.branch))
 }
 
 /// Refuses changing the layers of the workspace in `state` while it is

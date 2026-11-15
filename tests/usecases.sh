@@ -4,7 +4,8 @@
 # building on a lead's unfinished work, live, frozen and commits-only
 # layers, a release tag, two layers on one file, a shared append-only file,
 # a denied edit, a stack of PRs, a frozen base, pushed commits, a base that
-# landed, snapshots of several agents' work, a proposal.
+# landed, snapshots of several agents' work, a proposal, a person working
+# without an agent.
 # usage: tests/usecases.sh (or with the others: tests/run.sh); sections as
 # in tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -42,6 +43,7 @@ echo 'fn v2() {}' >>"$REPO/api/contract.rs"; R commit -qam v2
 R branch lead; R branch child; R branch lib; R branch feature-x
 mount_fs
 L=$MNT/lead C=$MNT/child
+ls "$C" >/dev/null; turn_starts "$C" >/dev/null   # an agent's: its layers move at its turns
 echo 'fn draft() {}' >>"$L/api/contract.rs"
 check "UC1: show the lead's unfinished work" "$BIN" -C "$C" layer add lead
 check "UC1: the child sees the draft" grep -q draft "$C/api/contract.rs"
@@ -290,6 +292,7 @@ mkdir "$REPO/api"; echo 'fn v1() {}' >"$REPO/api/contract.rs"; R add -A; R commi
 R branch lead; R branch child
 mount_fs
 L=$MNT/lead C=$MNT/child
+ls "$C" >/dev/null; turn_starts "$C" >/dev/null   # an agent's: its layers move at its turns
 echo 'fn draft() {}' >>"$L/api/contract.rs"
 "$BIN" -C "$C" layer add lead >/dev/null
 out=$("$BIN" -C "$C" propose api/contract.rs 2>&1)
@@ -305,6 +308,33 @@ check "UC23: the child sees it after its turn" grep -q wanted "$C/api/contract.r
 eq "UC23: the lead shown again" "lead" "$(listing "$C" | awk '/^LAYER/{t=1;next} t&&NF{print $1; exit}')"
 }
 
+# UC24: a person works in a workspace with no agent; the lead's agent works
+# on. The person's layer of the lead follows by itself, between the
+# person's edits.
+a_person_without_an_agent() {
+mkdir "$REPO/api"; echo 'fn v1() {}' >"$REPO/api/contract.rs"; R add -A; R commit -qm api
+R branch lead; R branch me
+mount_fs
+L=$MNT/lead P=$MNT/me
+echo 'fn draft() {}' >>"$L/api/contract.rs"
+"$BIN" -C "$P" layer add lead >/dev/null
+check "UC24: the person sees the lead's draft" grep -q draft "$P/api/contract.rs"
+echo 'fn second() {}' >>"$L/api/contract.rs"; turn_ends "$L"
+for _ in $(seq 150); do grep -q second "$P/api/contract.rs" && break; sleep 0.1; done
+check "UC24: the lead's next turn shows within seconds, no command run" grep -q second "$P/api/contract.rs"
+eq "UC24: listed as moved" "lead all work live, last HH:MM" "$(row "$P" lead)"
+echo 'fn third() {}' >>"$L/api/contract.rs"; turn_ends "$L"
+seen=no
+for i in $(seq 10); do
+    echo "note $i" >>"$P/notes.txt"; sleep 0.5
+    grep -q third "$P/api/contract.rs" && seen=yes
+done
+eq "UC24: not while the person is editing" "no" "$seen"
+for _ in $(seq 150); do grep -q third "$P/api/contract.rs" && break; sleep 0.1; done
+check "UC24: but once they pause" grep -q third "$P/api/contract.rs"
+eq "UC24: git sees only the person's own file" "?? notes.txt" "$(git -C "$P" status --short)"
+}
+
 section "use cases: a child builds on the lead" a_child_builds_on_the_lead
 section "use cases: modes, own files, mistakes" modes_own_files_and_mistakes
 section "use cases: two layers on one file" two_layers_on_one_file
@@ -313,4 +343,5 @@ section "use cases: a stack of PRs" a_stack_of_prs
 section "use cases: a base and a layer" a_base_and_a_layer
 section "use cases: snapshots" snapshots_of_work
 section "use cases: a proposal" a_proposal
+section "use cases: a person without an agent" a_person_without_an_agent
 finish
