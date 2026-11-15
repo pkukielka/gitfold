@@ -877,11 +877,15 @@ bad=$(R rev-parse --short=12 child)
 wait_until 'has "$(listing "$C")" WARNING' 50
 out=$(listing "$C")
 check "the listing warns: the commit" has "$out" "WARNING: commit $bad (child: by libgit2) on child"
-check "whose lines, in which file" has "$out" "has lead's uncommitted lines in api.rs: \"class Api {\""
-check "and how to undo it" has "$out" "git reset --soft $bad^"
+check "whose lines, in which file" has "$out" "adds lead's uncommitted line \"class Api {\" to api.rs"
+check "and how to undo it: a mixed reset" has "$out" "git reset $bad^\` (your files"
+check "not a soft one (the guard refuses its commit again)" fails has "$out" "--soft"
 check "the turn's notes too" has "$(turn_starts "$C")" "WARNING: commit $bad"
 check "and the log" grep -q "commit $bad (child: by libgit2)" "$LOG"
-G "$C" reset -q --soft HEAD~1; G "$C" reset -q
+# The advice, followed: the commit goes, and git sees the file as before
+# (the own line committed, the lead's lines and the waiting edit not).
+G "$C" reset -q "$bad^"
+eq "git reset <c>^: the commit is gone" "$tip" "$(R rev-parse child)"
 wait_until '! has "$(listing "$C")" WARNING' 50
 check "taken out: no warning" fails has "$(listing "$C")" WARNING
 eq "git sees the waiting edits as before" "" "$(git -C "$C" status --short)"
@@ -921,6 +925,249 @@ eq "the waiting edit is an ordinary change" "+    fn m() {}" "$(git -C "$P" diff
 check "none listed" fails has "$(listing "$P")" "waiting edit"
 }
 
+## The review of waiting edits and the guard (reviews/v2-round1): content
+## safety. No loss (I1): nothing git does loses the workspace's own lines,
+## its waiting edits or a layer's lines shown. No leak (I2): no commit on
+## the branch brings an editable or union layer's uncommitted work.
+
+# The lead's main version of api.rs is $1; the child is built on the lead,
+# an agent's (its layers move at its turns): L, C.
+built_on_the_lead() {
+printf "$1" >"$REPO/api.rs"; R add -A; R commit -qm api
+R branch lead
+"$BIN" -C "$REPO" branch child --edit lead >/dev/null || fail "branch child --edit lead"
+mount_fs
+L=$MNT/lead C=$MNT/child
+turn_starts "$C" >/dev/null
+}
+# The lead's api.rs becomes $1 (uncommitted), shown to the child at its turn.
+lead_drafts() { printf "$1" >"$L/api.rs"; turn_ends "$L" >/dev/null; turn_starts "$C" >/dev/null; }
+# git's view of api.rs in the child: its diff's changed lines, one line.
+git_sees() { git -C "$C" diff -- "${1:-api.rs}" | grep '^[-+][^-+]' | paste -sd'|'; }
+
+# Stash and pop of an own change next to the lead's line keep the lead's
+# line (correctness 1); a layer's lines moved or reordered wait, never
+# reaching git as the child's, never deleting its own (correctness 4).
+waiting_edits_survive_git() {
+printf 'use b;\nuse c;\n\nfn a() {\n    x();\n}\n\nfn c() {\n}\n' >"$REPO/api2.rs"
+built_on_the_lead 'a\nb\nc\n'
+lead_drafts 'a\nb\nL\nc\n'
+printf 'a\nB\nL\nc\n' >"$C/api.rs"
+eq "an own change next to the lead's line: git sees it alone" "-b|+B" "$(git_sees)"
+check "git stash" G "$C" stash -q
+eq "stashed: the lead's line stays" "a|b|L|c" "$(paste -sd'|' "$C/api.rs")"
+check "git stash pop" G "$C" stash pop -q
+eq "popped: the own change back, the lead's line kept" "a|B|L|c" "$(paste -sd'|' "$C/api.rs")"
+eq "git sees the own change alone" "-b|+B" "$(git_sees)"
+check "no waiting edit made of it" fails has "$(listing "$C")" "waiting edit"
+G "$C" checkout -q -- api.rs
+
+# Imports sorted with the lead's among them; the lead's function moved
+# above the child's.
+printf 'use b;\nuse c;\nuse a;\n\nfn a() {\n    x();\n}\n\nfn b() {\n    let q = 1;\n}\n\nfn c() {\n}\n' >"$L/api2.rs"
+turn_ends "$L" >/dev/null; turn_starts "$C" >/dev/null
+printf 'use a;\nuse b;\nuse c;\n\nfn b() {\n    let q = 1;\n}\n\nfn a() {\n    x();\n}\n\nfn c() {\n}\n' >"$C/api2.rs"
+eq "imports sorted, the lead's function moved first: git sees nothing" "" "$(git_sees api2.rs)"
+check "listed as waiting" has "$(listing "$C")" "waiting edits in api2.rs"
+G "$C" commit -qam "child: whatever git sees" 2>/dev/null
+check "the branch never gets the lead's import" fails grep -q 'use a;' <(R show child:api2.rs)
+check "nor its function" fails grep -q 'fn b()' <(R show child:api2.rs)
+check "and keeps the child's" grep -q 'fn a()' <(R show child:api2.rs)
+}
+
+# Conflicts: markers and what is between them never reach git, whether the
+# child's side is a waiting edit or its own committed line (correctness 3,
+# the UX review's serious item); listed; edited out, git sees no revert.
+conflicts_never_reach_git() {
+built_on_the_lead '// api\nfn keep() {}\n'
+lead_drafts '// api\nfn keep() {}\nfn a() { v1 }\n'
+printf '// api\nfn keep() {}\nfn a() { child }\n' >"$C/api.rs"
+lead_drafts '// api\nfn keep() {}\nfn a() { v2 }\n'
+check "the waiting edit conflicts: markers" grep -q '^<<<<<<<' "$C/api.rs"
+check "labelled yours, not as waiting edits" grep -q '^<<<<<<< yours' "$C/api.rs"
+echo own >"$C/own.txt"; G "$C" add own.txt
+eq "git sees nothing of the conflict" "A  own.txt" "$(git -C "$C" status --short)"
+G "$C" commit -qam "child: own"
+check "the commit holds no marker" fails grep -q '<<<<<<<' <(R show child:api.rs)
+eq "nor the lead's lines" "// api|fn keep() {}" "$(R show child:api.rs | paste -sd'|')"
+out=$(listing "$C")
+check "listed as a conflict" has "$out" "Conflict: api.rs: your changes conflict with lead's newer work"
+check "saying git sees none of it" has "$out" "git sees none of your changes to it"
+# A committed own line the lead's newer work changes too.
+printf '// api\nfn keep() { mine }\nfn a() { v2 }\n' >"$C/api.rs"
+G "$C" commit -qam "child: keep"
+lead_drafts '// api\nfn keep() { lead }\nfn a() { v2 }\n'
+check "the committed line conflicts with the lead's: markers" grep -q '^<<<<<<<' "$C/api.rs"
+eq "git sees no change: not the markers, not a revert of its commit" "" "$(git -C "$C" status --short)"
+G "$C" reset -q --hard
+check "reset --hard: the conflict stays, for the child to resolve" grep -q '^<<<<<<<' "$C/api.rs"
+printf '// api\nfn keep() { mine }\nfn a() { v2 }\n' >"$C/api.rs"
+eq "resolved for its own line: git sees no revert of it" "" "$(git_sees)"
+check "the line, changing the lead's, waits" has "$(listing "$C")" "1 waiting edit in api.rs"
+check "no conflict listed" fails has "$(listing "$C")" "Conflict"
+}
+
+# Deleting a file the lead changed: git sees it, the guard refuses
+# committing it, `git checkout` brings it back (correctness 13), which is
+# also how waiting edits are dropped. The lead's new file can't go, nor a
+# file of the lead's be moved elsewhere.
+deleting_the_leads_files() {
+built_on_the_lead '// api\n'
+printf 'fn draft() {}\n' >"$L/new.rs"
+lead_drafts '// api\nclass Api {\n    fn a() {}\n}\n'
+tip=$(R rev-parse child)
+rm "$C/api.rs"
+eq "deleted: git sees it" " D api.rs" "$(git -C "$C" status --short)"
+out=$(G "$C" commit -qam "child: no api" 2>&1); rc=$?
+check "committing the deletion: refused" test "$rc" != 0
+check "saying why" has "$out" "deletes api.rs, which has lead's uncommitted work"
+eq "the branch didn't move" "$tip" "$(R rev-parse child)"
+check "listed" has "$(listing "$C")" "api.rs is deleted here, but it has lead's uncommitted work"
+check "git checkout brings it back" G "$C" checkout -- api.rs
+eq "with the lead's lines" "// api|class Api {|    fn a() {}|}" "$(paste -sd'|' "$C/api.rs")"
+eq "git clean" "" "$(git -C "$C" status --short)"
+# A waiting edit dropped the same way.
+printf '// api\nclass Api {\n    fn a() { mine }\n}\n' >"$C/api.rs"
+check "a waiting edit" has "$(listing "$C")" "1 waiting edit in api.rs"
+rm "$C/api.rs"; G "$C" checkout -- api.rs
+eq "rm, git checkout: as the lead has it" "// api|class Api {|    fn a() {}|}" "$(paste -sd'|' "$C/api.rs")"
+check "the waiting edit dropped" fails has "$(listing "$C")" "waiting edit"
+check "the lead's new file can't be deleted" fails rm "$C/new.rs"
+check "it's still there" test -f "$C/new.rs"
+check "nor a file of the lead's moved away" fails mv "$C/api.rs" "$C/other.rs"
+eq "git clean" "" "$(git -C "$C" status --short)"
+}
+
+# The guard as the authority (correctness 5, 9, 10): a formatter's rewrite
+# of the lead's line, by plumbing, is refused with the right words; the
+# lead's own commits pass, a fast-forward and a cherry-pick of a frozen
+# layer's; a layer adding only new files gets a guard.
+the_guard_is_the_authority() {
+built_on_the_lead '// api\n'
+lead_drafts "// api\n    let total = compute('a', 'b');\n"
+tip=$(R rev-parse child)
+printf '// api\n    let total = compute("a", "b",);\n' >"$T/fmt.rs"
+blob=$(git -C "$C" hash-object -w --no-filters "$T/fmt.rs")
+G "$C" update-index --cacheinfo "100644,$blob,api.rs"
+out=$(G "$C" commit -qm "child: formatted" 2>&1); rc=$?
+check "a formatter's rewrite of the lead's line: refused" test "$rc" != 0
+check "naming it" has "$out" "adds lead's uncommitted line"
+check "not claiming a tool without the filter only" has "$out" "or a change to lead's lines gitfold took for yours"
+eq "the branch didn't move" "$tip" "$(R rev-parse child)"
+G "$C" reset -q
+# The lead commits: a fast-forward onto it passes.
+G "$L" commit -qam "lead: total"
+out=$(G "$C" merge -q --ff-only lead 2>&1); rc=$?
+eq "git merge --ff-only lead: done" "0" "$rc"
+eq "the branch on the lead's commit" "$(R rev-parse lead)" "$(R rev-parse child)"
+eq "nothing half-done" "" "$(git -C "$C" status --short)"
+turn_starts "$C" >/dev/null
+
+# A frozen layer whose branch committed since: its commit, cherry-picked,
+# isn't held against it.
+printf '// api\n    let total = compute(1);\nfn later() {}\n' >"$L/api.rs"
+turn_ends "$L" >/dev/null
+"$BIN" -C "$C" layer add lead --edit --frozen >/dev/null || fail "layer add lead --edit --frozen"
+G "$L" commit -qam "lead: later"
+out=$(G "$C" cherry-pick lead 2>&1); rc=$?
+eq "a cherry-pick of the frozen layer's newer commit: allowed" "0" "$rc"; [ "$rc" = 0 ] || echo "$out"
+check "it holds the lead's line" grep -q 'fn later' <(R show child:api.rs)
+}
+
+# A layer that only adds new files: the guard is installed all the same.
+a_layer_of_new_files_only() {
+built_on_the_lead '// api\n'
+printf 'fn draft() {}\n' >"$L/new.rs"; turn_ends "$L" >/dev/null; turn_starts "$C" >/dev/null
+check "the lead's new file shows" test -f "$C/new.rs"
+check "the guard's hooks are installed" test -n "$(git -C "$C" config --worktree core.hooksPath)"
+tip=$(R rev-parse child)
+out=$(G "$C" add -f new.rs 2>&1; G "$C" commit -qm "child: the lead's file" 2>&1); rc=$?
+check "committing the lead's new file: refused" test "$rc" != 0
+check "saying so" has "$out" "new.rs"
+eq "the branch didn't move" "$tip" "$(R rev-parse child)"
+G "$C" reset -q
+}
+
+# The lead made see-only: the child's own change to a file holding the
+# lead's uncommitted line stays, the lead's line doesn't reach git
+# (correctness 2).
+see_only_keeps_the_layers_lines_out() {
+printf 'fn one() {}\n' >"$REPO/lead.rs"; printf 'x1\nx2\nx3\n' >"$REPO/x.rs"; R add -A; R commit -qm files
+R branch lead
+commit_on() { R switch -q "$1"; printf '%s\n' "$3" >"$REPO/$2"; R add -A; R commit -qm "$1: $2"; R switch -q main; }
+commit_on lead lead.rs "$(printf 'fn one() {}\nfn two() {}')"
+"$BIN" -C "$REPO" branch child --edit lead >/dev/null || fail "branch child --edit lead"
+commit_on child c.txt mine
+mount_fs
+L=$MNT/lead C=$MNT/child
+turn_starts "$C" >/dev/null
+printf 'x1\nx2\nx3\nlead draft\n' >"$L/x.rs"; turn_ends "$L" >/dev/null; turn_starts "$C" >/dev/null
+printf 'x1 mine\nx2\nx3\nlead draft\n' >"$C/x.rs"
+eq "built on the lead: git sees the own change only" "-x1|+x1 mine" "$(git_sees x.rs)"
+out=$("$BIN" -C "$C" layer add lead 2>&1); rc=$?
+eq "the lead made see-only" "0" "$rc"
+check "git never sees the lead's draft line" fails grep -q 'lead draft' <(git -C "$C" diff)
+eq "the own change kept" "-x1|+x1 mine" "$(git_sees x.rs)"
+G "$C" commit -qam "child: x"
+eq "committed: the own change only" "x1 mine|x2|x3" "$(R show child:x.rs | paste -sd'|')"
+}
+
+# Two editable layers on one file: a waiting edit is the lead's or the db's
+# by the lines it changes (correctness 14).
+whose_waiting_edits() {
+printf 'a\nb\nc\nd\ne\nf\n' >"$REPO/api.rs"; R add -A; R commit -qm api
+R branch lead; R branch db
+"$BIN" -C "$REPO" branch child --edit lead >/dev/null || fail "branch child --edit lead"
+mount_fs
+L=$MNT/lead D=$MNT/db C=$MNT/child
+turn_starts "$C" >/dev/null
+"$BIN" -C "$C" layer add db --edit >/dev/null 2>&1 || fail "layer add db --edit"
+printf 'a\nlead line\nb\nc\nd\ne\nf\n' >"$L/api.rs"; turn_ends "$L" >/dev/null
+printf 'a\nb\nc\nd\ne\ndb line\nf\n' >"$D/api.rs"; turn_ends "$D" >/dev/null
+turn_starts "$C" >/dev/null
+eq "both lines show" "a|lead line|b|c|d|e|db line|f" "$(paste -sd'|' "$C/api.rs")"
+printf 'a\nlead line changed\nb\nc\nd\ne\ndb line\nf\n' >"$C/api.rs"
+out=$(listing "$C")
+check "the waiting edit is the lead's" has "$out" "1 waiting edit in api.rs: it changes lead's uncommitted lines"
+check "not the db's" fails has "$out" "db's uncommitted"
+}
+
+# A union file's memo: what git checked out from another branch, then
+# reset in the index, is cleaned again (correctness 8); and a branch made
+# with --edit shows the layer's work at its first look (surprise 1); and
+# the deny hook survives its reader going away (surprise 7).
+memo_at_once_and_a_closed_pipe() {
+echo 'CHANGELOG merge=union' >"$REPO/.gitattributes"; printf 'v0\n' >"$REPO/CHANGELOG"
+R add -A; R commit -qm changelog
+R branch api; R branch child
+R switch -q api; printf 'v0\nc1\n' >"$REPO/CHANGELOG"; R commit -qam "api: c1"; R switch -q main
+mount_fs
+A=$MNT/api C=$MNT/child
+echo u1 >>"$A/CHANGELOG"
+"$BIN" -C "$C" layer add api >/dev/null || fail "layer add api"
+eq "the child sees api's lines" "v0|c1|u1" "$(paste -sd'|' "$C/CHANGELOG")"
+G "$C" checkout -q api -- CHANGELOG
+G "$C" reset -q CHANGELOG
+# As in plain git, the file keeps api's committed line as a change; the
+# memo, made for the index then, doesn't speak for it now: api's
+# uncommitted line stays out.
+eq "checked out from api, then reset: git sees the checked-out line only" "+c1" "$(git_sees CHANGELOG)"
+G "$C" checkout -q -- CHANGELOG
+eq "checked out from the index again: git sees nothing" "" "$(git -C "$C" status --short)"
+eq "and the file shows api's lines once each" "v0|c1|u1" "$(paste -sd'|' "$C/CHANGELOG")"
+
+echo 'fn draft() {}' >"$A/draft.rs"
+"$BIN" -C "$REPO" branch kid --edit api >/dev/null || fail "branch kid --edit api"
+eq "a branch built on api: its work shows at the first look" "fn draft() {}" "$(cat "$MNT/kid/draft.rs" 2>&1)"
+
+echo x >>"$A/a.txt"
+"$BIN" -C "$C" layer add api >/dev/null
+printf '{"tool_name":"Edit","cwd":"%s","tool_input":{"file_path":"%s"}}' "$C" a.txt |
+    "$BIN" layer --claude-hook pre-tool-use 2>"$T/hook.err" | true
+check "the deny hook, its reader gone: no panic" fails grep -q panicked "$T/hook.err"
+}
+
+
 section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
 section "layers: several changing one file" layers_changing_one_file
@@ -936,4 +1183,12 @@ section "layers: on the workspace's own commits" layers_on_the_workspaces_own_co
 section "layers: moving by themselves in a workspace with union files" layers_move_by_themselves_in_a_workspace_with_union_files
 section "layers: waiting edits in more files, the safety net" waiting_edits_in_more_files
 section "layers: waiting edits without an agent" waiting_edits_without_an_agent
+section "safety: waiting edits survive git (stash, reorders)" waiting_edits_survive_git
+section "safety: conflicts never reach git" conflicts_never_reach_git
+section "safety: deleting the lead's files" deleting_the_leads_files
+section "safety: the guard is the authority" the_guard_is_the_authority
+section "safety: a layer of new files only" a_layer_of_new_files_only
+section "safety: see-only keeps the layer's lines out" see_only_keeps_the_layers_lines_out
+section "safety: whose waiting edits" whose_waiting_edits
+section "safety: the memo, at once, a closed pipe" memo_at_once_and_a_closed_pipe
 finish
