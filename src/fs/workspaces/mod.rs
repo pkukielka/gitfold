@@ -31,7 +31,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::workspace::Workspace;
+use super::workspace::{Activities, Workspace};
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
 use crate::git::promisor;
@@ -93,6 +93,9 @@ pub struct Workspaces {
     mtime: Mutex<SystemTime>,
     /// The session's, to tell the kernel what a layer switch changed.
     notifier: std::sync::OnceLock<fuser::Notifier>,
+    /// The open workspaces' writes, for one's sync thread to tell whether
+    /// another's work changed (see `workspace::follow`).
+    activities: Activities,
 }
 
 impl Workspaces {
@@ -118,6 +121,7 @@ impl Workspaces {
             requests: RwLock::new(false),
             mtime: Mutex::new(SystemTime::now()),
             notifier: std::sync::OnceLock::new(),
+            activities: Default::default(),
         }
     }
 
@@ -325,6 +329,7 @@ impl Workspaces {
             let entry = &mut self.list.write()[slot as usize].1;
             if result.is_ok() {
                 *entry = Registered::Removed;
+                self.activities.lock().remove(branch);
             } else {
                 ws.removing.store(false, Ordering::Release);
                 *entry = Registered::Workspace(ws);
@@ -529,7 +534,14 @@ impl Workspaces {
         if let Some(notifier) = self.notifier.get() {
             ws.set_kernel(notifier.clone(), slot);
         }
-        watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
+        (self.activities.lock()).insert(branch.to_string(), ws.activity());
+        let activities = self.activities.clone();
+        watch(
+            Arc::downgrade(&ws),
+            store.clone(),
+            activities,
+            branch.to_string(),
+        );
         self.prewarm(branch);
         Ok(inode::ws(slot, 0))
     }
@@ -541,8 +553,10 @@ const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
 /// How often workspaces check whether their branch moved (see `workspace::rebase`).
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Keeps the workspace's base at its branch tip while the workspace exists.
-fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
+/// Keeps the workspace's base at its branch tip while the workspace exists,
+/// and its live layers up to date if no agent works in it (see
+/// `workspace::follow`).
+fn watch(ws: Weak<Workspace>, store: Arc<Store>, activities: Activities, branch: String) {
     let name = format!("sync {branch}");
     let spawned = thread::Builder::new().name(name).spawn({
         let branch = branch.clone();
@@ -567,6 +581,7 @@ fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
                         }
                     }
                 }
+                ws.follow_layers(&store, &activities);
             }
         }
     });

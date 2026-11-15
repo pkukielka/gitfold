@@ -63,9 +63,15 @@ pub type LayersLock = crate::lock::FileLock;
 /// in its state directory. Taken across each read-modify-write of the
 /// stored layers, so two at once (a hook moving live layers while `layer
 /// add` runs, a proposal accepted meanwhile) don't lose one's change. The
-/// daemon only reads them, and takes no such lock.
+/// daemon only reads them, but when it moves the live layers of a workspace
+/// without an agent (`try_lock`, see `state::follow`).
 pub fn lock(state: &StateDir) -> Result<LayersLock> {
     crate::lock::wait(&state.dir.join(LOCK))
+}
+
+/// `lock` without waiting: `None` while a command holds it.
+pub fn try_lock(state: &StateDir) -> Result<Option<LayersLock>> {
+    crate::lock::try_take(&state.dir.join(LOCK))
 }
 
 /// What a layer shows of its branch.
@@ -591,6 +597,24 @@ pub fn store_bytes(state: &StateDir, data: &[u8]) -> Result<()> {
         };
     }
     Ok(write_atomic(&path, data)?)
+}
+
+/// Stores `lens` for the workspace in `state`, then has it shown (`show`:
+/// the daemon's switch, asked or run); says what `show` did. If `show`
+/// fails, the layers stored before are put back, so what is stored is what
+/// shows. Called under `lock`.
+pub fn store_and_show(
+    state: &StateDir,
+    lens: &Lens,
+    show: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    let before = stored_bytes(state)?;
+    lens.write(state)?;
+    show().inspect_err(|_| {
+        if let Err(e) = store_bytes(state, &before) {
+            log::warn!("putting the layers back: {e:#}");
+        }
+    })
 }
 
 #[cfg(test)]
