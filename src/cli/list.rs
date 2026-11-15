@@ -123,18 +123,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         return Ok(());
     }
     let store = Store::default();
-    // Mounted, the workspaces the daemon has open: their bases catch up by
-    // themselves.
-    let open: std::collections::HashSet<String> = match crate::mount_table::mount_of(&common_dir) {
-        Ok(Some(_)) => {
-            let request = crate::daemon::control::Request::Open;
-            match crate::daemon::control::request(&common_dir, &request, None) {
-                Ok(Some(open)) => open.lines().map(str::to_string).collect(),
-                _ => Default::default(),
-            }
-        }
-        _ => Default::default(),
-    };
+    let open = open_workspaces(&common_dir);
     let lines = match stat {
         true => format!(" {:>8} {:>8}", "+lines", "-lines"),
         false => String::new(),
@@ -148,11 +137,12 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             0 => branch.clone(),
             d => format!("{}└─ {branch}", "   ".repeat(d - 1)),
         };
-        let parent = local.parent(&branch).unwrap_or_else(|| "-".into());
+        let parent = local.parent(&branch);
         let mut notes = super::stack::notes(&common_dir, &local, &branch);
-        if local.parent(&branch).is_some() && local.restack_manual(&branch) {
+        if parent.is_some() && local.restack_manual(&branch) {
             notes.insert(0, "frozen".into());
         }
+        let parent = parent.unwrap_or_else(|| "-".into());
         // A base or a branch built on one, without a workspace.
         let Some(w) = list.iter().find(|w| w.branch == branch) else {
             let dashes = match stat {
@@ -219,6 +209,19 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Mounted, the branches whose workspaces the daemon has open: their bases
+/// catch up by themselves.
+fn open_workspaces(common_dir: &Path) -> std::collections::HashSet<String> {
+    if !matches!(crate::mount_table::mount_of(common_dir), Ok(Some(_))) {
+        return Default::default();
+    }
+    let request = crate::daemon::control::Request::Open;
+    match crate::daemon::control::request(common_dir, &request, None) {
+        Ok(Some(open)) => open.lines().map(str::to_string).collect(),
+        _ => Default::default(),
+    }
 }
 
 /// The branches `list` shows, in order, each with how deep it is in its
