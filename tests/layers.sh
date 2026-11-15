@@ -95,7 +95,7 @@ A	n1.txt" "$("$BIN" -C "$REPO" changes m1)"
 snap() { "$BIN" -C "$REPO" snapshot "$1" 2>/dev/null | sed "s/.*@//"; }
 # The layers the listing of workspace $2 (or the one $1 is in) names, on one
 # line.
-layer_names() { "$BIN" -C "$1" layer ${2:+-w "$2"} | awk '/^LAYER/{t=1;next} t&&!NF{exit} t{print $1}' | paste -sd' '; }
+layer_names() { "$BIN" -C "$1" layer ${2:+-w "$2"} | awk '/^LAYER/{t=1;next} t&&(!NF||/^Your /){exit} t{print $1}' | paste -sd' '; }
 # The listing, its times as HH:MM and its columns' spaces squeezed.
 listing() { "$BIN" -C "$1" layer | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/g' | tr -s ' '; }
 # Claude Code's Edit of file $2 in directory $1, through the deny hook.
@@ -185,7 +185,7 @@ admin=$COMMON/worktrees/gitfold-ws-me
 touch "$admin/index.lock"
 out=$("$BIN" -C "$W" layer add la 2>&1); rc=$?
 rm -f "$admin/index.lock"
-eq "git busy: refused (exit 4), nothing stored" "4 No layers." "$rc $("$BIN" -C "$W" layer | tail -1)"
+eq "git busy: refused (exit 4), nothing stored" "4 No layers." "$rc $("$BIN" -C "$W" layer | head -1)"
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
 eq "unmounted: stored, shown when it opens" "me: not mounted; its layers show when it opens" \
     "$("$BIN" -C "$REPO" layer add la -w me | tail -1)"
@@ -215,14 +215,13 @@ check "add: live, --frozen, --commits, a branch without a workspace, a tag" sh -
     '$BIN' -C '$W' layer add v1.2"
 eq "each one's work shows" "live|fz|cm|no|p|t" \
     "$(cat "$W/live.txt")|$(cat "$W/frozen.txt")|$(cat "$W/cm.txt")|$(test -e "$W/cu.txt" && echo yes || echo no)|$(cat "$W/p.txt")|$(cat "$W/t.txt")"
-eq "the listing: the base, then what each shows and how it updates" "Base: main
-
-LAYER SHOWS UPDATES
+eq "the listing: what each shows and how it updates, then what your commits sit on" "LAYER SHOWS UPDATES YOUR COMMITS
 live all work live, last HH:MM
 frozen all work frozen at HH:MM
 commits commits only live, last HH:MM
 plain commits live, last HH:MM
-v1.2 commits fixed" "$(listing "$W")"
+v1.2 commits fixed
+Your commits sit on main." "$(listing "$W")"
 echo live2 >>"$MNT/live/live.txt"; echo fz2 >>"$MNT/frozen/frozen.txt"
 snap live >/dev/null; snap frozen >/dev/null
 echo cm2 >"$MNT/commits/cm2.txt"; G "$MNT/commits" add cm2.txt; G "$MNT/commits" commit -qm cm2
@@ -247,25 +246,26 @@ check "remove one" "$BIN" -C "$W" layer remove plain
 eq "gone" "live frozen commits v1.2|no" "$(layer_names "$W")|$(test -e "$W/p.txt" && echo yes || echo no)"
 check "neither a branch nor a revision (exit 3)" sh -c "'$BIN' -C '$W' layer add nope; [ \$? = 3 ]"
 check "remove --all" "$BIN" -C "$W" layer remove --all
-eq "no layers" "Base: main
-No layers." "$("$BIN" -C "$W" layer)"
-R branch api plain; R config branch.me.gitfoldParent api
+eq "no layers" "No layers.
+Your commits sit on main." "$("$BIN" -C "$W" layer)"
+R branch api plain
 echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm own
-eq "built on a base: what follows it" "Base: api, live your 1 commit sits on api; it moves when api gets new commits" \
-    "$(listing "$W" | head -1)"
-R config branch.me.gitfoldRestack manual
-eq "and when it doesn't" "Base: api, frozen your 1 commit sits on api; \`gitfold layer base api --frozen\` updates it" \
-    "$(listing "$W" | head -1)"
-R config --unset branch.me.gitfoldRestack
-check "no move recorded: no time" fails grep -q "last moved" <<<"$(listing "$W")"
-# A branch with a base shows layers too; when it moved is stored, so
-# packing refs doesn't lose it.
-check "a layer on a branch with a base" "$BIN" -C "$W" layer add live
+out=$("$BIN" -C "$W" layer add api --edit)
+eq "built on api: says what it moves" "moves 1 commit of me onto api" "$(head -1 <<<"$out")"
+eq "the listing: built on, your commits" "api commits live, last HH:MM built on: your 1 commit sits on it" \
+    "$(listing "$W" | grep '^api')"
+check "and not on main" fails grep -q "sit on main" <<<"$(listing "$W")"
+check "a see-only layer next to it" "$BIN" -C "$W" layer add live
+check "editable layers stored as such" grep -qP '^layer api\t.*\tedit$' "$COMMON/gitfold/me/layers"
 R switch -q api; echo two >"$REPO/api2.txt"; R add api2.txt; R commit -qm "api: two"; R switch -q main
-check "moved onto api with the layer shown" "$BIN" -C "$W" layer base api
+eq "api moved on: needs a move" "Note: needs update: its next turn, or \`gitfold layer add <LAYER> --edit\`" \
+    "$(listing "$W" | grep '^Note')"
+check "moved onto api's new commit with the layer shown" "$BIN" -C "$W" layer add api --edit
+eq "on api's tip, with its own commit" "$(R rev-parse api)|own.txt" "$(R rev-parse me^)|$(R diff --name-only api me)"
+eq "api's new file shows, the other layer still there" "two|api live" "$(cat "$W/api2.txt")|$(layer_names "$W")"
+eq "git: only its own" "" "$(git -C "$W" status --short)"
 R pack-refs --all
-eq "when it last moved, after the refs are packed" " last moved HH:MM" "$(listing "$W" | sed -n 2p)"
-eq "the layer still there" "live" "$(layer_names "$W")"
+eq "after the refs are packed, the same" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-own/me)"
 }
 
 layers_changing_one_file() {
@@ -331,19 +331,10 @@ out=$("$BIN" -C "$W" layer add main)
 eq "a live layer of the branch the base came from: said when there is nothing to show yet" "yes" \
     "$(echo "$out" | head -1 | grep -q '(nothing to show yet: all of main is in your base already' && echo yes)"
 R update-ref refs/remotes/origin/main main; R config gitfold.trunk origin/main
-eq "the trunk a remote's branch: the base line says the branch" "Base: main" "$(listing "$W" | head -1)"
+eq "the trunk a remote's branch: named as the branch" "Your commits sit on main." "$(listing "$W" | grep 'sit on')"
 R config --unset gitfold.trunk
-"$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
-# As a build before --frozen and --commits stored them (version 1).
-snapshot=$(R rev-parse "$(R for-each-ref --sort=-refname --count=1 --format='%(refname)' refs/gitfold-snapshot/o2)")
-printf 'version 1\nlayer o2\ton\t%s\t%s\nlayer o3\toff\t%s\t%s\n' "$snapshot" "$(R rev-parse main)" "$snapshot" "$(R rev-parse main)" \
-    >"$COMMON/gitfold/me/layers"
-mount_fs
-for _ in $(seq 50); do [ ! -e "$W/o4.txt" ] && break; sleep 0.1; done
-eq "an earlier build's layers file: shown layers live, hidden ones dropped" "o2|o2 all work live, last HH:MM|o2" \
-    "$(cat "$W/o2.txt")|$(listing "$W" | grep '^o')|$(layer_names "$W")"
-check "and remove --all works" "$BIN" -C "$W" layer remove --all
-eq "nothing shown" "no|No layers." "$(test -e "$W/o2.txt" && echo yes || echo no)|$("$BIN" -C "$W" layer | tail -1)"
+check "remove --all" "$BIN" -C "$W" layer remove --all
+eq "nothing shown" "no|No layers." "$(test -e "$W/o2.txt" && echo yes || echo no)|$("$BIN" -C "$W" layer | head -1)"
 }
 
 # Claude Code's hooks in workspace directory $1: its turn ends (Stop) or
@@ -536,7 +527,7 @@ read_file "$MNT/c1/api.txt" "$MNT/c2/api.txt" "$MNT/c3/a.txt" "$MNT/c5/api.txt"
 echo 'get(1)' >"$MNT/c1/use.txt"; echo 'put(2)' >"$MNT/c2/use.txt"; echo 'get(4)' >"$MNT/c4/use.txt"
 "$BIN" -C "$MNT/c4" propose api.txt >/dev/null                                   # c4 shows a proposal of its own
 eq "the deny hook offers building on the layer first, then a proposal" "yes" \
-    "$(edit_hook "$MNT/c1" api.txt | grep -q 'build on contracts: `gitfold layer base contracts`.*Or run `gitfold propose api.txt`' && echo yes)"
+    "$(edit_hook "$MNT/c1" api.txt | grep -q 'build on contracts: `gitfold layer add contracts --edit`.*Or run `gitfold propose api.txt`' && echo yes)"
 check "proposing outside a layer's workspace: no such layer (exit 3)" \
     sh -c "cd '$MNT/c1' && '$BIN' propose api.txt --layer c2; [ \$? = 3 ]"
 out=$(cd "$MNT/c1" && "$BIN" propose api.txt 2>&1)
@@ -700,7 +691,7 @@ eq "remove the proposal: the layer it stood in for shown again as it was, the pr
 "$BIN" -C "$W" layer add lead-prop/me >/dev/null
 out=$("$BIN" -C "$W" layer remove lead)
 eq "remove the layer while its proposal shows: removed, saying the proposal stays" "yes|No layers." \
-    "$(echo "$out" | head -1 | grep -q "it showed your proposal lead-prop/me, which stays: \`gitfold reject lead-prop/me\` drops it" && echo yes)|$("$BIN" -C "$W" layer | tail -1)"
+    "$(echo "$out" | head -1 | grep -q "it showed your proposal lead-prop/me, which stays: \`gitfold reject lead-prop/me\` drops it" && echo yes)|$("$BIN" -C "$W" layer | head -1)"
 "$BIN" -C "$W" reject lead-prop/me >/dev/null
 "$BIN" -C "$W" layer add plain >/dev/null
 out=$("$BIN" -C "$W" propose p.txt)
@@ -716,7 +707,7 @@ eq "a layer without a workspace: a copy of its commits, shown as all work" "yes|
 layers_on_the_workspaces_own_commits() {
 printf '1\n2\n3\n4\n5\n6\n7\n8\n' >"$REPO/p.txt"; cp "$REPO/p.txt" "$REPO/q.txt"; R add -A; R commit -qm p
 R branch api
-"$BIN" -C "$REPO" branch web --base api >/dev/null
+"$BIN" -C "$REPO" branch web --edit api >/dev/null
 mount_fs
 A=$MNT/api W=$MNT/web
 ls "$A" "$W" >/dev/null
@@ -725,7 +716,7 @@ echo w >"$W/w.txt"
 "$BIN" -C "$A" layer add web >/dev/null
 sed -i 's/^3$/3 api/' "$A/p.txt"; G "$A" commit -qam "api 3"
 eq "api committed; its base waits for the layers" "$(R rev-parse api^)" "$(cat "$COMMON/gitfold/api/base")"
-"$BIN" -C "$REPO" layer base api -w web >/dev/null
+"$BIN" -C "$REPO" layer add api --edit -w web >/dev/null
 sed -i 's/^3 api$/3 web/' "$W/p.txt"
 out=$(turn_starts "$A")
 eq "web's new work shows in api" yes "$(grep -q 'moved to their latest work: web' <<<"$out" && echo yes)"
@@ -811,7 +802,7 @@ eq "not tried again every round" "$before" "$(stat -c %Y.%y "$COMMON/gitfold/pe/
 section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
 section "layers: several changing one file" layers_changing_one_file
-section "layers: following a workspace as it is now; v1 files; at once" layers_follow_the_workspace_as_it_is_now
+section "layers: following a workspace as it is now; at once" layers_follow_the_workspace_as_it_is_now
 section "layers: of an agent and of a person" layers_of_an_agent_and_of_a_person
 section "layers: moving by themselves without an agent" layers_move_by_themselves_without_an_agent
 section "layers: union files, the layers commit" union_files_and_the_layers_commit

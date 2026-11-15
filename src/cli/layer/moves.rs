@@ -201,7 +201,7 @@ fn current_parts(own: Option<ObjectId>, layers: &Layers) -> Result<Vec<Part>> {
 /// layer's tip if it is live (or named in `refresh`), else the commit it
 /// sits on now; then what a landing left (the main branch at its landing
 /// commit), while other editable layers remain.
-pub fn wanted_parts(built: &Built, refresh: &[&str]) -> Result<Vec<Part>> {
+pub fn wanted_parts(common_dir: &Path, built: &Built, refresh: &[&str]) -> Result<Vec<Part>> {
     let mut parts = Vec::new();
     for l in built.layers.editable() {
         let now = built.on(&l.branch);
@@ -215,13 +215,10 @@ pub fn wanted_parts(built: &Built, refresh: &[&str]) -> Result<Vec<Part>> {
         };
         parts.push((l.branch.clone(), commit));
     }
+    // What a landing left: main at its landing commit (`after_landing`).
     if !parts.is_empty() {
-        let names = built.layers.editable_names();
-        parts.extend(
-            (built.parts.iter())
-                .filter(|(n, _)| !names.contains(n))
-                .cloned(),
-        );
+        let main = land::main_name(common_dir, &Local::read(common_dir));
+        parts.extend(built.parts.iter().filter(|(n, _)| *n == main).cloned());
     }
     Ok(parts)
 }
@@ -323,6 +320,15 @@ pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
             false => Outcome::BaseMoved,
         });
     }
+    if plan.asked {
+        let own_count = stack::count(common_dir, base, tip)?;
+        println!(
+            "{}moves {} of {name} {}",
+            plan.prefix,
+            plural(own_count, "commit", "commits"),
+            plan.said
+        );
+    }
     if let Some(off) = plan.off {
         let dependent = git::with_repo(|repo| stack::dependent(repo, base, onto, tip))?;
         if !dependent.is_empty() {
@@ -351,14 +357,7 @@ pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
         }
         stack::Move::Done { tip, dropped, .. } => (tip, dropped.len()),
     };
-    let own_count = stack::count(common_dir, base, tip)?;
     if plan.asked {
-        println!(
-            "{}moves {} of {name} {}",
-            plan.prefix,
-            plural(own_count, "commit", "commits"),
-            plan.said
-        );
         if !plan.yes
             && let Some(why) = pushed(common_dir, name, base, tip)?
         {
@@ -688,7 +687,7 @@ pub fn follow(common_dir: &Path, name: &str) -> Result<(Outcome, Vec<Landed>, Ve
     if built.layers.editable().next().is_none() {
         return Ok((Outcome::UpToDate, Vec::new(), Vec::new()));
     }
-    let mut parts = wanted_parts(&built, &[])?;
+    let mut parts = wanted_parts(common_dir, &built, &[])?;
     let mut next = None;
     let mut seen = Vec::new();
     let mut working = Built {
@@ -842,7 +841,7 @@ pub fn notes(common_dir: &Path, name: &str) -> Vec<String> {
         let paths: Vec<&str> = blocked.split(' ').skip(2).collect();
         notes.push(format!("blocked: conflicts on {}", shown_str(&paths)));
     } else if notes.is_empty()
-        && let Ok(wanted) = wanted_parts(&built, &[])
+        && let Ok(wanted) = wanted_parts(common_dir, &built, &[])
         && !wanted.is_empty()
         && wanted != built.parts
     {

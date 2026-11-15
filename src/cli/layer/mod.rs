@@ -119,17 +119,14 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
     // Building on a branch, or taking a branch's commits off one, works
     // without a workspace too.
+    let stored = Layers::read(&StateDir::of(&common_dir, &name)).unwrap_or_default();
+    let editable = |b: &str| stored.find(b).is_some_and(|i| stored.layers[i].edit);
     let edits = match &args.op {
-        Some(LayerOp::Add { edit, .. }) => *edit,
-        Some(LayerOp::Remove { branch, .. }) => {
-            let stored = Layers::read(&StateDir::of(&common_dir, &name)).unwrap_or_default();
-            branch
-                .as_ref()
-                .map_or(stored.editable().next().is_some(), |b| {
-                    stored.find(b).is_some_and(|i| stored.layers[i].edit)
-                })
-        }
-        None => false,
+        Some(LayerOp::Add { edit, branch, .. }) => *edit || editable(branch),
+        Some(LayerOp::Remove { branch, .. }) => (branch.as_deref())
+            .map_or(stored.editable().next().is_some(), editable),
+        // The listing of a branch without a workspace: what it builds on.
+        None => git::branch_exists(&name) && !StateDir::of(&common_dir, &name).opened(),
     };
     let state = match edits {
         true => {
@@ -139,7 +136,8 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         false => super::opened_workspace(&common_dir, &name)?,
     };
     if args.op.is_none() {
-        print!("{}", listing(&common_dir, &state, &Layers::read(&state)?)?);
+        let (shown, _) = crate::state::layers::to_show(&state)?;
+        print!("{}", listing(&common_dir, &state, &shown)?);
         return Ok(());
     }
     let local = Local::read(&common_dir);
@@ -273,7 +271,7 @@ fn add_edit(
         own: built.own,
         parts: built.parts.clone(),
     };
-    let parts = moves::wanted_parts(&after, &[branch])?;
+    let parts = moves::wanted_parts(common_dir, &after, &[branch])?;
     let plan = moves::Plan {
         name,
         said: format!("onto {}", moves::onto_words(common_dir, &parts)),
@@ -316,7 +314,7 @@ fn see_only(
         own: built.own,
         parts: built.parts.clone(),
     };
-    let parts = moves::wanted_parts(&after, &[])?;
+    let parts = moves::wanted_parts(common_dir, &after, &[])?;
     let onto = moves::onto_words(common_dir, &parts);
     let plan = moves::Plan {
         name,
@@ -351,7 +349,7 @@ fn remove_edit(
         own: built.own,
         parts: built.parts.clone(),
     };
-    let wanted = moves::wanted_parts(&after, &[])?;
+    let wanted = moves::wanted_parts(common_dir, &after, &[])?;
     let landed = match built.on(branch) {
         Some(on) => moves::landed(common_dir, branch, on)?,
         None => None,
@@ -359,7 +357,7 @@ fn remove_edit(
     let plan = match &landed {
         // Where it landed: only the own commits move, onto the landing.
         Some(landing) => {
-            let parts = moves::wanted_parts(built, &[])?;
+            let parts = moves::wanted_parts(common_dir, built, &[])?;
             let (layers, parts) = moves::after_landing(common_dir, built, landing, &parts)?;
             println!("{}", landing.said());
             moves::Plan {
@@ -575,6 +573,13 @@ fn updates(layer: &Layer) -> String {
     }
 }
 
+/// A line of the hook's context: whoever reads it may stop early (a closed
+/// pipe isn't an error).
+fn hook_say(text: &str) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stdout(), "{text}");
+}
+
 /// `gitfold layer --claude-hook user-prompt-submit`: at the start of a turn,
 /// the workspace the session is in follows its editable layers' new commits
 /// (`moves::hook_context`), then its live layers move to their latest work
@@ -601,7 +606,7 @@ pub fn layer_hook(event: &str) -> Result<()> {
             match moves::hook_context(&common_dir, &name) {
                 Ok((context, done)) => {
                     if let Some(context) = context {
-                        println!("{context}");
+                        hook_say(&context);
                     }
                     if !done {
                         hold = editable;
@@ -635,13 +640,13 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let Some(followed) = followed.filter(|f| !f.moved.is_empty()) else {
             return Ok(());
         };
-        println!(
+        hook_say(&format!(
             "gitfold: the layers shown in this workspace moved to their latest work: {}. \
              Files you read from them may have changed.",
             followed.moved.join(", ")
-        );
+        ));
         for note in followed.applied.lines().filter(|l| l.starts_with("note: ")) {
-            println!("gitfold: {note}");
+            hook_say(&format!("gitfold: {note}"));
         }
         Ok(())
     })() {
