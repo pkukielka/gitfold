@@ -49,6 +49,12 @@ impl Refusal {
         })
     }
 
+    /// This refusal, with why said already: no message (`main` prints
+    /// nothing for it, only its exit code tells).
+    pub fn said(self) -> anyhow::Error {
+        self.error("")
+    }
+
     /// The refusal `e` carries, if any.
     pub fn of(e: &anyhow::Error) -> Option<Refusal> {
         e.chain()

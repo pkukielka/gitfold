@@ -24,9 +24,16 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         prewarm,
         track_reads,
         edit,
+        base,
         claude_hook: _,
     } = args;
     let name = name.as_deref().context("name the branch")?;
+    if let Some(layer) = base {
+        super::usage(format!(
+            "--base is gone: `gitfold branch {name} --edit {layer}` builds the new branch on \
+             {layer}"
+        ));
+    }
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
     if with_changes {
@@ -235,6 +242,9 @@ pub struct BranchArgs {
     /// ones.
     #[arg(long, value_name = "BRANCH", conflicts_with_all = ["from", "with_changes"])]
     pub edit: Option<String>,
+    /// Gone (now --edit): said so.
+    #[arg(long, hide = true, value_name = "BRANCH")]
+    pub base: Option<String>,
     /// As Claude Code's `WorktreeCreate` hook (`worktree-create`): its
     /// worktree a workspace of branch `worktree-<name>`, the path printed; a
     /// git worktree in a repository not used with gitfold. See

@@ -140,8 +140,10 @@ fn start(mountpoint: &Path, log: &Path) -> Result<()> {
             // It failed: its error is the last thing it logged.
             let logged = fs::read(log).unwrap_or_default();
             let ours = String::from_utf8_lossy(logged.get(ours_from..).unwrap_or_default());
-            let error = match ours.rfind("Error: ") {
-                Some(at) => ours[at + "Error: ".len()..].trim(),
+            let at = (ours.rfind("\nerror: ").map(|at| at + 1))
+                .or_else(|| ours.starts_with("error: ").then_some(0));
+            let error = match at {
+                Some(at) => ours[at + "error: ".len()..].trim(),
                 None => ours.trim(),
             };
             if error.is_empty() {

@@ -182,6 +182,11 @@ pub fn dependent(
 /// builds on several editable layers (`merge_parts`).
 const MERGE_SUBJECT: &str = "gitfold: built on";
 
+/// Whether `subject` is a merge commit's `merge_parts` made.
+pub fn is_merge_subject(subject: &str) -> bool {
+    subject.starts_with(MERGE_SUBJECT)
+}
+
 /// What a branch with several editable layers builds on: one commit, the
 /// merge of `parts` (the layers' names and the commits of theirs it builds
 /// on, in order), made with a fixed identity and date (as snapshots), so

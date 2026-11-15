@@ -49,16 +49,27 @@ eq "its editable layer stored" "p1" "$(editable p2)"
 eq "and where its own commits start" "$(R rev-parse p1)" "$(own_ref p2)"
 check "no config key for it" test -z "$(R config --get-regexp 'branch\.p2\.' || true)"
 commit_on p2 p2.txt two
-eq "layer add --edit again: up to date" "layer p1 updated: commits, live, last HH:MM, built on" \
+eq "layer add --edit again: up to date" "layer p1 updated: commits (no workspace), live, last HH:MM, built on" \
     "$(lay p2 add p1 --edit | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/')"
-lay p1 add p2 --edit >/dev/null 2>&1; rc=$?
-eq "a cycle: a usage error (exit 2)" 2 "$rc"
+out=$(lay p1 add p2 --edit 2>&1); rc=$?
+eq "a cycle: a usage error (exit 2), said plainly" "2|error: p1 can't build on p2: p2 already builds on p1" \
+    "$rc|$(head -1 <<<"$out")"
+out=$(lay p2 base p1 2>&1); rc=$?
+eq "layer base: gone, pointing to --edit (exit 2)" "2|error: \`gitfold layer base\` is gone: \`gitfold layer add p1 --edit\` builds on p1, \`gitfold layer remove p1\` takes your commits off it" \
+    "$rc|$(head -1 <<<"$out")"
+out=$("$BIN" -C "$REPO" branch p9 --base p1 2>&1); rc=$?
+eq "branch --base: gone, pointing to --edit (exit 2)" "2|error: --base is gone: \`gitfold branch p9 --edit p1\` builds the new branch on p1|" \
+    "$rc|$(head -1 <<<"$out")|$(R branch --list p9)"
+out=$(lay p2 remove 2>&1); rc=$?
+eq "layer remove of nothing named (exit 2)" "2|error: name a layer, or --all" "$rc|$(head -1 <<<"$out")"
+out=$(lay p2 remove nosuch 2>&1); rc=$?
+eq "not a layer (exit 3): where to look" "3|error: nosuch isn't a layer of p2 (\`gitfold layer\` lists them)" "$rc|$out"
 lay p2 add p2 --edit >/dev/null 2>&1; rc=$?
 eq "a branch on itself: a usage error (exit 2)" 2 "$rc"
 lay p2 add main --edit >/dev/null 2>&1; rc=$?
 eq "main can't be edited on: a usage error (exit 2)" 2 "$rc"
 commit_on p1 a.txt fix
-eq "list: what it builds on, and what it needs" "p1 (needs update: its next turn, or \`gitfold layer add <LAYER> --edit\`)" "$(listed p2)"
+eq "list: what it builds on, and what it needs" "p1 (needs update: p1 has new commits; \`gitfold layer add p1 --edit\` moves p2 onto them (or its next turn))" "$(listed p2)"
 mine=$(R rev-parse p2)
 out=$(lay p2 add p1 --edit)
 eq "again: says what it moves, then moves it" "moves 1 commit of p2 onto p1
@@ -105,7 +116,7 @@ R push -q -u origin p2 2>/dev/null
 pushed=$(R rev-parse p2)
 out=$(lay p2 add p1 --edit 2>&1); rc=$?
 eq "pushed: says what it would move, refuses (exit 4)" "4 yes yes" \
-    "$rc $(grep -qx 'moves 2 commits of p2 onto p1' <<<"$out" && echo yes) $(grep -q '^p2: not moved: 2 of them are pushed already (origin/p2).*--yes moves them' <<<"$out" && echo yes)"
+    "$rc $(grep -qx 'would move 2 commits of p2 onto p1' <<<"$out" && echo yes) $(grep -q '^p2: not moved: 2 of them are pushed already (origin/p2).*--yes moves them' <<<"$out" && echo yes)"
 eq "nothing moved" "$pushed" "$(R rev-parse p2)"
 out=$(lay p2 add p1 --edit --yes)
 eq "--yes: moved, and the force-push to run printed" "moves 2 commits of p2 onto p1
@@ -137,7 +148,7 @@ check "on main" parent_is r2 main
 eq "without p1's work" "" "$(R ls-tree --name-only r2 p1.txt)"
 eq "nothing built on, no own ref, not in list" "||" "$(editable r2)|$(own_ref r2)|$(listed r2)"
 eq "p2's commit changes p1's lines: it can't come off p1" "4" "$(lay p2 remove p1 >/dev/null 2>&1; echo $?)"
-eq "p3 on p2's old commits, said" "p2 (needs update: its next turn, or \`gitfold layer add <LAYER> --edit\`)" "$(listed p3)"
+eq "p3 on p2's old commits, said" "p2 (needs update: p2 has new commits; \`gitfold layer add p2 --edit\` moves p3 onto them (or its next turn))" "$(listed p3)"
 eq "branch --edit main: an ordinary branch" "created branch o built on main; open it under the mount as o (gitfold mount)|" \
     "$("$BIN" -C "$REPO" branch o --edit main)|$(editable o)"
 
@@ -148,10 +159,12 @@ commit_on q2 q.txt "$(printf 'one\ntwo mine')"
 tip=$(R rev-parse q2)
 out=$(lay q2 remove q1 2>&1); rc=$?
 eq "commits changing its lines: refused (exit 4), listed" "4 yes" \
-    "$rc $(grep -q "^q2: not moved: 1 commit change q1's lines, so they can't stand without q1: $(R rev-parse --short=12 q2) q2: q.txt (q.txt)" <<<"$out" && echo yes)"
+    "$rc $(grep -q "^q2: not moved: 1 commit changes q1's lines, so it can't stand without q1: $(R rev-parse --short=12 q2) q2: q.txt (q.txt)" <<<"$out" && echo yes)"
 eq "nothing moved, still built on it" "$tip|q1" "$(R rev-parse q2)|$(editable q2)"
 out=$(lay q2 add q1 2>&1); rc=$?
-eq "nor made see-only (exit 4)" "4 yes|q1" "$rc $(has "$out" "q1 becomes see-only: moves 1 commit of q2 off q1, onto main (q1 stays shown, read-only)" && echo yes)|$(editable q2)"
+eq "see-only without a workspace: refused (exit 3)" "3 error: q2 has no workspace: see-only layers show in a workspace; to build on q1 use --edit|q1" \
+    "$rc $out|$(editable q2)"
+eq "nothing more said after the refusal" "" "$(lay q2 remove q1 2>&1 | grep -i '^error')"
 
 # --frozen: built on it once, not followed after.
 R branch z; commit_on z z.txt z
@@ -174,6 +187,34 @@ out=$(lay tm add q1 --edit 2>&1); rc=$?
 eq "tracking main: moved without --yes, no push suggested" "0||$(R rev-parse q1)" \
     "$rc|$(grep -i 'push' <<<"$out")|$(R rev-parse tm^)"
 eq "list: no push either" "q1" "$(listed tm)"
+
+# No commits of its own: it now builds on the layer, nothing moved said.
+R branch nb
+eq "no commits of its own: said plainly" "nb now builds on q1" "$(lay nb add q1 --edit | sed -n 1p)"
+
+# Its editable layers conflicting with each other: who, where, what to do.
+R branch k1; commit_on k1 k.txt k1
+R branch k2; commit_on k2 k2.txt k2
+"$BIN" -C "$REPO" branch kk --edit k1 >/dev/null
+lay kk add k2 --edit >/dev/null 2>&1
+commit_on k2 k.txt k2-side
+eq "its layers conflicting: said, with what to do" "k1+k2 (k1 and k2 conflict with each other on k.txt: ask one of them to resolve it, or \`gitfold layer remove k2\`)" \
+    "$(listed kk)"
+}
+
+# What the turn says after a move with no commits of its own: nothing was
+# rewritten, nothing to push, gitfold's merge of its layers not a commit.
+the_turns_words() {
+R branch f1; R branch f2
+"$BIN" -C "$REPO" branch fw --edit f1 >/dev/null
+mount_fs
+W=$MNT/fw
+"$BIN" -C "$W" layer add f2 --edit >/dev/null
+echo n >"$MNT/f1/n.txt"; G "$MNT/f1" add n.txt; G "$MNT/f1" commit -qm "f1 n"
+out=$(prompt_hook "$W")
+eq "moved up onto them: their commits named, nothing rewritten, no push" "yes|no|no" \
+    "$(has "$out" "this branch, fw, was moved onto f1 and f2's new commits (f1 n); files changed under you: n.txt." && echo yes)|$(has "$out" rewritten && echo yes || echo no)|$(has "$out" push && echo yes || echo no)"
+eq "on the merge of their tips" "$(R rev-parse f1) $(R rev-parse f2)" "$(R log -1 --format=%P fw)"
 }
 
 an_open_workspace() {
@@ -181,7 +222,7 @@ R branch p1
 "$BIN" -C "$REPO" branch p2 --edit p1 >/dev/null
 mount_fs
 W=$MNT/p2
-eq "the listing: no commits of its own yet" "p1 commits live, last HH:MM built on: no commits of your own yet on it" \
+eq "the listing: no commits of its own yet" "p1 commits (no workspace) live, last HH:MM built on: no commits of yours yet" \
     "$("$BIN" -C "$W" layer | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/' | tr -s ' ' | grep '^p1')"
 echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm "p2 own"
 # Its agent's uncommitted work: unstaged, staged and untracked.
@@ -191,7 +232,7 @@ echo fix >>"$MNT/p1/a.txt"; echo more >"$MNT/p1/p1b.txt"
 G "$MNT/p1" add -A; G "$MNT/p1" commit -qm "review fix"
 out=$(prompt_hook "$W")
 eq "the hook moves it, and says so" yes \
-    "$(grep -qF "gitfold: this branch, p2, was moved onto p1's new commits (review fix); files changed under you: a.txt, p1b.txt. Its history was rewritten." <<<"$out" && echo yes)"
+    "$(grep -qF "gitfold: this branch, p2, was moved onto p1's new commits (review fix); files changed under you: a.txt, p1b.txt. Its own commits were rewritten on top of them." <<<"$out" && echo yes)"
 check "onto the layer's tip" parent_is p2 p1
 eq "the new content shows" "a
 fix|more" "$(cat "$W/a.txt")|$(cat "$W/p1b.txt")"
@@ -249,6 +290,16 @@ check "layer add --edit --frozen again moves it" "$BIN" -C "$W" layer add p1 --e
 check "m.txt shows" test -e "$W/m.txt"
 check "layer add --edit again: live" "$BIN" -C "$W" layer add p1 --edit
 check "live again" has "$("$BIN" -C "$W" layer | grep '^p1')" "live"
+
+# Made see-only while a commit changes its lines: what it would move said,
+# then why not; nothing more.
+printf 'a\nfix mine\n' >"$W/a.txt"; G "$W" commit -qam "p2 a"
+tip=$(R rev-parse p2)
+out=$("$BIN" -C "$W" layer add p1 2>&1); rc=$?
+eq "see-only refused (exit 4): would move, why, nothing more" "4|making p1 see-only would move 2 commits of p2 off p1, onto main (p1 stays shown, read-only)|p2: not moved: 1 commit changes p1's lines, so it can't stand without p1: $(R rev-parse --short=12 p2) p2 a (a.txt). Keep p1 editable, or change it not to depend on its lines|" \
+    "$rc|$(sed -n 1p <<<"$out")|$(sed -n 2p <<<"$out")|$(sed -n 3p <<<"$out")"
+eq "nothing moved, still editable" "$tip|p1" "$(R rev-parse p2)|$(editable p2)"
+G "$W" reset -q --hard HEAD~1
 
 # A conflict: nothing moves, said once.
 echo theirs >"$MNT/p1/own.txt"; G "$MNT/p1" add own.txt; G "$MNT/p1" commit -qm "p1 own"
@@ -374,7 +425,7 @@ commit_on main m.txt moved-on
 # A squash merge: said while the branch is there; layer remove follows it.
 pair p1 p2
 s=$(squash p1)
-eq "list: it looks merged, the hint names layer remove" "p1 (p1 looks merged into main: \`gitfold layer remove p1\` moves it there)" "$(listed p2)"
+eq "list: it looks merged, the hint names layer remove" "p1 (p1 looks merged into main: \`gitfold layer remove p1\` moves p2 onto main with only its own commits)" "$(listed p2)"
 out=$(lay p2 remove p1)
 eq "layer remove: onto the landing commit, saying so first" "p1 looks merged into main as ${s:0:12}
 moves 1 commit of p2 off p1, onto main at ${s:0:12}" "$(head -2 <<<"$out")"
@@ -490,7 +541,7 @@ tip=$(R rev-parse h2)
 out=$(prompt_hook "$W")
 eq "merged, j1 still there: said, nothing moved" "yes|$tip" \
     "$(grep -qF "j1 was merged into main by $(R rev-parse --short=12 main), but j1 is still there" <<<"$out" && echo yes)|$(R rev-parse h2)"
-check "list says it" has "$("$BIN" -C "$REPO" list)" "j1 merged into main: \`gitfold layer remove j1\` moves it there"
+check "list says it" has "$("$BIN" -C "$REPO" list)" "j1 merged into main: \`gitfold layer remove j1\` moves h2 onto main with only its own commits"
 commit_on j1 j1b.txt more
 eq "j1 goes on: the hook follows it" "yes|$(R rev-parse j1)" \
     "$(prompt_hook "$W" | grep -q 'was moved onto j1' && echo yes)|$(R rev-parse h2^)"
@@ -630,6 +681,7 @@ section "moves: a layer that landed" a_layer_that_landed
 section "moves: a stale local main" a_stale_local_main
 section "moves: a landed layer, an open workspace" a_landed_layer_in_an_open_workspace
 section "moves: two layers landing at once" two_layers_landing_at_once
+section "moves: the turn's words" the_turns_words
 section "moves: an open workspace" an_open_workspace
 section "moves: layers, an unmounted workspace" layers_or_an_unmounted_workspace
 finish

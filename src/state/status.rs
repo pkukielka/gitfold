@@ -135,8 +135,15 @@ impl Status {
 
 /// The changes of the workspace stored in `state`.
 pub fn status(store: &Store, state: &StateDir) -> Result<Status> {
+    status_at(store, state, state.read_base()?)
+}
+
+/// `status`, against commit `base` instead of the stored base: its branch's
+/// tip where the stored base waits behind it (a commit made while layers
+/// show leaves copies of the committed files in upper, which are no
+/// changes against the tip).
+pub fn status_at(store: &Store, state: &StateDir, base: git::Commit) -> Result<Status> {
     let common_dir = &state.common_dir;
-    let base = state.read_base()?;
     let tree = store.load_tree(base.tree)?;
     let (whiteouts, opaque) = Markers::read(&state.markers())?;
     let upper = state.upper();
