@@ -163,7 +163,7 @@ impl Edited {
         let binary = [&base, &shown, &tip].iter().any(|d| is_binary(d));
         let shown = match binary {
             true => shown,
-            false => merge3(&base, &shown, &tip, keep_conflicts()).unwrap_or(shown),
+            false => keeping_every_line(&base, &shown, &tip).unwrap_or(shown),
         };
         Edited { base: tip, shown }
     }
@@ -363,19 +363,7 @@ impl Edited {
     /// before them; both sides kept where they touch, either first. `None`
     /// if none keeps every line.
     fn merged(&self, kept: &[u8], own: &[u8]) -> Option<Vec<u8>> {
-        let expected = expected_counts(&self.base, kept, own)?;
-        let union = gix::merge::blob::builtin_driver::text::Conflict::ResolveWithUnion;
-        let tries: [&dyn Fn() -> Option<Vec<u8>>; 5] = [
-            &|| merge3(&self.base, kept, own, keep_conflicts()),
-            &|| place(&self.base, kept, own, true),
-            &|| place(&self.base, kept, own, false),
-            &|| merge3(&self.base, kept, own, union),
-            &|| merge3(&self.base, own, kept, union),
-        ];
-        tries
-            .iter()
-            .filter_map(|t| t())
-            .find(|merged| counts(merged) == expected)
+        keeping_every_line(&self.base, kept, own)
     }
 
     /// `work` without the layers' lines and the waiting edits: what git sees.
@@ -450,6 +438,29 @@ fn diff<'a>(from: &'a [u8], to: &'a [u8]) -> impl Iterator<Item = imara_diff::Hu
         .hunks()
         .collect();
     hunks.into_iter()
+}
+
+/// `theirs` (a change of `base`) merged into `ours` (another) with every
+/// line of both kept: each line either side added, none either side
+/// removed. Tried in turn: git's 3-way merge; each of `theirs`' hunks put
+/// where its base lines are in `ours`, its insertions after the lines
+/// `ours` inserted at that spot, then before them; both sides kept where
+/// they touch, either first. `None` if none keeps every line (both
+/// changed the same lines).
+fn keeping_every_line(base: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
+    let expected = expected_counts(base, ours, theirs)?;
+    let union = gix::merge::blob::builtin_driver::text::Conflict::ResolveWithUnion;
+    let tries: [&dyn Fn() -> Option<Vec<u8>>; 5] = [
+        &|| merge3(base, ours, theirs, keep_conflicts()),
+        &|| place(base, ours, theirs, true),
+        &|| place(base, ours, theirs, false),
+        &|| merge3(base, ours, theirs, union),
+        &|| merge3(base, theirs, ours, union),
+    ];
+    tries
+        .iter()
+        .filter_map(|t| t())
+        .find(|merged| counts(merged) == expected)
 }
 
 /// `own`'s change from `base` put into `kept` (another change of `base`)
@@ -1098,6 +1109,15 @@ mod tests {
             (text(&split.own), split.waiting),
             ("a\nX mine\nb\nc\nown\n", 0)
         );
+        // The committed line right next to the layer's: rebased all the
+        // same, no phantom waiting edit (V12).
+        let f = Edited::on_tip(
+            "one\ntwo\n".into(),
+            "one\ntwo\ndraft\n".into(),
+            "one\ntwo mine\n".into(),
+        );
+        let split = f.split(b"one\ntwo mine\ndraft\n");
+        assert_eq!((text(&split.own), split.waiting), ("one\ntwo mine\n", 0));
         // The layer changes X too: its X'' shows, the workspace's X mine
         // waits, and git keeps its committed line.
         let f = Edited::on_tip(base.into(), "a\nX layer\nb\nc\n".into(), tip.into());
