@@ -1575,10 +1575,12 @@ a snapshot, with no change to any workspace.
   file's base version B and union H: clean is `merge(base = H, ours =
   file, theirs = B)`, else the file less H's added lines, once each;
   smudge is `merge(base = B, ours = H, theirs = content)`, else git's
-  union resolution if clean gives the content back exactly, else the
-  content as is (another commit's file during a bisect, say). An exact
-  round trip for content it smudged comes from a memo (hash of the output
-  → input, cleared at each switch).
+  union resolution (either side first) or each own hunk put where its
+  base lines are, if clean gives the content back exactly, else both sides
+  kept, else git's markers: never the content alone, which would lose the
+  layers' lines (they would look deleted). An exact round trip for content
+  it smudged comes from a memo (by path and hash of the output → input,
+  cleared at each switch), trusted only while the index has that input.
   - **Setup, per worktree:** `filter.gitfold-<id>.process` and `.required =
     true` in `config.worktree`, and `core.attributesFile` there pointing
     at `<admin>/gitfold-attributes` (the user's global attributes file,
@@ -1609,21 +1611,30 @@ a snapshot, with no change to any workspace.
 - **The guard** (`git::guard`, `worktree_config::install_guard`): what
   doesn't run the filter (`-c filter.<driver>.clean=cat`, `hash-object
   --no-filters`, `update-index --cacheinfo`, libgit2) can commit the
-  layers' lines. While files are union, the worktree's own `core.hooksPath`
-  is `<admin>/gitfold-hooks`:
+  layers' lines, and the filter's split can be wrong: the guard is the
+  authority. While an editable or union layer shows uncommitted work
+  (filtered files or not), the worktree's own `core.hooksPath` is
+  `<admin>/gitfold-hooks`:
   - its `reference-transaction` (state `prepared`) runs `gitfold guard
     ref-update`, and `pre-push` runs `gitfold guard pre-push`; then each
     runs the user's hook of that name. Every other hook name is a shim
     running the user's (the path found from config without the worktree
     scope, at run time);
   - the guard reads `<admin>/gitfold-guard`, which each switch writes: per
-    union path, the layers' lines that are uncommitted work (in a layer's
-    snapshot of a workspace, not in the commit the snapshot is on);
+    union path and path only editable layers changed (added, deleted),
+    per layer with uncommitted work there: its version in its snapshot,
+    the lines it adds that neither the commit the snapshot is on nor the
+    base has, and the base's lines its work removes. Each check first
+    drops what the layer's branch has committed since (frozen layers too);
   - it refuses an update of `refs/heads/<branch>` (or a push, of any ref)
-    whose new commits (`new ^old`; `--not --remotes` for a push) add such a
-    line to the path, one no parent has. Lines are compared by their words,
-    so a formatter's respacing doesn't hide one. A merge of the layer's
-    branch once it committed the lines passes.
+    whose new commits (`new ^old`; `--not --remotes` for a push; never the
+    layers' own branches' commits, so a fast-forward onto one passes) add
+    such a line, one no parent has, remove such a removed line, add the
+    layer's new file whole, delete the file, or add a conflict marker
+    there. Lines are compared as sets, without whitespace, and long ones
+    (four words or more) without punctuation too, so a formatter's
+    rewrite or a move doesn't hide one. A merge of the layer's branch once
+    it committed the lines passes.
 
   The hook sees every ref update, plumbing included (`commit-tree` and
   `update-ref`), and `--no-verify` doesn't skip it. libgit2 runs no hooks:
@@ -1638,7 +1649,8 @@ a snapshot, with no change to any workspace.
   kept in `guard-alarms` (`<commit> TAB <text>`) until the commit is no
   longer on the branch, said in the daemon's log, as `WARNING:` in the
   listing and in the turn hook's notes, naming the commit, the lines and
-  `git reset --soft <commit>^`. Rejected: rewriting such a commit (it is
+  `git reset <commit>^` (mixed: a soft reset's re-commit would be refused
+  again). Rejected: rewriting such a commit (it is
   the user's tool's, maybe pushed; a warning keeps git's history theirs).
   The guard skips lines of punctuation alone (`}`): in code they are
   everyone's, and a commit adding its own `}` isn't a leak.
@@ -1680,8 +1692,19 @@ a snapshot, with no change to any workspace.
   waiting edits. A binary file's every change waits.
   - **Stored where every edit is:** in upper, durably, and carried on each
     switch like a union file's own lines: `merge-file(old M, upper, new
-    M)`, a conflict kept with git's markers (`your waiting edits` against
-    `<layer>'s newer work`) rather than refusing the switch, and listed.
+    M)`, a conflict kept with git's markers (`yours` against `<layer>'s
+    newer work`) rather than refusing the switch, and listed. A conflict
+    is never the workspace's own: until its markers are edited out, clean
+    gives the index's version (git sees no change it didn't make: no
+    markers, no revert of committed lines). git's own version is the
+    branch tip's, the view rebased onto it, so lines committed while the
+    base waits are neither changes nor waiting edits. Content counts as
+    well as place: a hunk putting back a layer's line anywhere (a move, a
+    sort, a formatter) waits, and a split that would give git a layer's
+    line or lose a line on git's way back waits whole. Turning the layer
+    see-only strips upper to the own lines. Deleting the file is seen by
+    git and refused by the guard; `git checkout -- <file>` brings it back,
+    which is also how waiting edits are dropped.
     A crash after carrying but before the switch is recorded leaves the
     old view applied: the switch is made again, and carrying again changes
     nothing. When the layer commits the lines and the branch moves onto

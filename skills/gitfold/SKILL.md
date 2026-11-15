@@ -569,12 +569,16 @@ gitfold list                            # each branch under what it builds on, w
   edit them out. `gitfold layer add A` (see-only) and `gitfold layer remove
   A` refuse (exit 4) while you have waiting edits of A's lines: undo them,
   or wait for A to commit.
-- **`WARNING: commit <id> ... has <A>'s uncommitted lines in <file>`** (in
-  `gitfold layer` and the turn's notes) means a commit on your branch was
-  made without gitfold's filter and hooks (a GUI built on libgit2) and
-  holds another branch's unfinished lines. Take it out before pushing with
-  the `git reset --soft <id>^` it gives, and commit again with git; `git
-  push` refuses it meanwhile.
+- **`WARNING: commit <id> ... adds <A>'s uncommitted line ... to <file>`**
+  (in `gitfold layer` and the turn's notes) means a commit on your branch
+  got past gitfold's filter and hooks (a GUI built on libgit2) and holds
+  another branch's unfinished work. Take it out before pushing with the
+  `git reset <id>^` it gives (your files stay as they are), and commit
+  again with git; `git push` refuses it meanwhile.
+- **To drop your waiting edits in a file**, edit them back, or `rm` it and
+  `git checkout -- <file>` (that drops your uncommitted changes to it too).
+  A conflict in such a file (git's markers, listed as `Conflict:`) is never
+  seen by git: edit the markers out.
 - **It says first what it moves** (`moves 3 commits of p2 onto p1`; with
   no commits of your own, `p2 now builds on p1`), then what it did.
   Refused, it says what it would have moved (`would move ...`), then why
