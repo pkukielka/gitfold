@@ -413,11 +413,7 @@ fn newest(common_dir: &Path, local: &Local, layer: &Layer) -> Result<Option<(Obj
         let work = latest_work(&Store::default(), &theirs)?;
         return Ok(work.map(|work| (work, Shows::Work)));
     }
-    let shows = match layer.shows {
-        Shows::CommitsOnly => Shows::CommitsOnly,
-        _ if is_proposal(local, &layer.branch) => Shows::Work,
-        _ => Shows::Commits,
-    };
+    let shows = tip_shows(local, &layer.branch, layer.shows == Shows::CommitsOnly);
     Ok(Some((git::branch_tip(&layer.branch)?.id, shows)))
 }
 
@@ -435,10 +431,15 @@ fn latest_work(store: &Store, theirs: &StateDir) -> Result<Option<ObjectId>> {
     })
 }
 
-/// Whether `branch` is a proposal: a workspace to edit, its work shown as
-/// all work even before it first opens (its tip, then).
-fn is_proposal(local: &Local, branch: &str) -> bool {
-    local.proposal(branch).is_some()
+/// What a layer showing the tip of `branch` shows: only its commits with
+/// `commits`; all work for a proposal (a workspace to edit, its work shown as
+/// all work even before it first opens: its tip, then); else its commits.
+fn tip_shows(local: &Local, branch: &str, commits: bool) -> Shows {
+    match commits {
+        true => Shows::CommitsOnly,
+        false if local.proposal(branch).is_some() => Shows::Work,
+        false => Shows::Commits,
+    }
 }
 
 /// `gitfold layer --claude-hook pre-tool-use`: denies Claude Code's edit
@@ -590,23 +591,16 @@ pub(super) fn layer_of(
     let (seal, shows, updates) = if git::branch_exists(branch) {
         check_name(branch)?;
         let theirs = StateDir::of(common_dir, branch);
-        match (theirs.opened(), commits) {
+        if theirs.opened() && !commits {
             // Live: as it follows it (`latest_work`), else as it is now.
-            (true, false) => {
-                let work = match (frozen, seal::driven(&theirs)) {
-                    (false, seal::Driven::Agent(Some(last_turn))) => last_turn,
-                    _ => seal::seal(store, &theirs, seal::By::Other)?.commit,
-                };
-                (work, Shows::Work, updates)
-            }
-            (_, true) => (git::branch_tip(branch)?.id, Shows::CommitsOnly, updates),
-            (false, false) => {
-                let shows = match is_proposal(&Local::read(common_dir), branch) {
-                    true => Shows::Work,
-                    false => Shows::Commits,
-                };
-                (git::branch_tip(branch)?.id, shows, updates)
-            }
+            let work = match (frozen, seal::driven(&theirs)) {
+                (false, seal::Driven::Agent(Some(last_turn))) => last_turn,
+                _ => seal::seal(store, &theirs, seal::By::Other)?.commit,
+            };
+            (work, Shows::Work, updates)
+        } else {
+            let shows = tip_shows(&Local::read(common_dir), branch, commits);
+            (git::branch_tip(branch)?.id, shows, updates)
         }
     } else {
         // Stored in a line of tab-separated fields.
