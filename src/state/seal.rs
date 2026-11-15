@@ -90,11 +90,12 @@ pub fn ref_prefix(id: &str) -> String {
 }
 
 /// Seals the work of the workspace stored in `state` (see the module doc),
-/// made `by` its `Stop` hook, its owner or another command. Called by the commands
-/// themselves (`snapshot`, `layer`, the `Stop` hook), mounted or not,
-/// without the daemon: it reads the stored state (upper, markers, base) as
-/// it is, so a write in progress meanwhile may be half-seen. That is why the
-/// hooks seal at turn ends, when the workspace's agent isn't writing.
+/// made `by` its `Stop` hook, its owner or another command. Called by the
+/// commands themselves (`snapshot`, `layer`, the `Stop` hook), mounted or
+/// not, without the daemon: it reads the stored state (upper, markers,
+/// base) as it is, so a write in progress meanwhile may be half-seen. That
+/// is why the hooks seal at turn ends, when the workspace's agent isn't
+/// writing.
 pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;
