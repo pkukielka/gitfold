@@ -174,7 +174,7 @@ It runs the `gitfold` on `PATH`, or else the release matching the plugin
 
 The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove
 --claude-hook worktree-remove`, the `inbox --claude-hook` ones above, and for
-layers `gitfold seal --claude-hook stop` (`Stop`), `gitfold layer
+layers `gitfold snapshot --claude-hook stop` (`Stop`), `gitfold layer
 --claude-hook user-prompt-submit` (`UserPromptSubmit`) and `gitfold layer
 --claude-hook pre-tool-use` (`PreToolUse` on `Edit|Write|MultiEdit|NotebookEdit`). A
 plugin's `WorktreeCreate` hook doesn't run for `claude --worktree --tmux`; for
@@ -236,14 +236,16 @@ even on a huge tree. Each workspace then changes on its own.
   uncommitted work included, before merging anything:
 
   ```
-  cd $(gitfold mix main agent/task-17 agent/task-18)   # build and test there
+  cd $(gitfold snapshot main agent/task-17 agent/task-18)   # build and test there
   ```
 
-  It merges each workspace's work (its uncommitted changes as a commit,
-  `gitfold seal`), or a branch's or revision's commit, in order onto the
-  first (or `--onto <REV>`), and prints the merge as a snapshot path. No
-  workspace, index or branch changes. It exits 4 on conflicts, listing the
-  paths. The same work gives the same snapshot.
+  It merges each workspace's work (its uncommitted changes included), or a
+  branch's or revision's commit, in order onto the first (or `--onto
+  <REV>`), and prints the merge as a snapshot path. `--commits` takes only
+  the branches' commits. No workspace, index or branch changes. It exits 4
+  on conflicts, listing the paths. The same work gives the same snapshot.
+  With one branch, `gitfold snapshot <BRANCH>` shows that workspace's work
+  alone, as `<mount>/@<sha>` (unmounted, it prints the commit).
 
   Committed work only, without gitfold: make the merge commit with git and
   open it as a snapshot. No working tree, index or ref is touched (git 2.38
@@ -363,8 +365,8 @@ gitfold lens off                  # hide every layer
   show. Run `gitfold lens off` to use git again; `gitfold` commands keep
   working meanwhile.
 - **Layers move between turns, not during them.** With the gitfold plugin, a
-  workspace shown as a layer is sealed when its session stops, and your
-  layers move to the newest seals when your next prompt starts; you are
+  workspace shown as a layer is snapshotted when its session stops, and your
+  layers move to the newest snapshots when your next prompt starts; you are
   then told which layers changed (files you read from them may have
   changed: read them again). Without the plugin, or for a workspace no
   session runs in, `gitfold layer update`.
@@ -388,12 +390,10 @@ The workspace a layer is added to must have been opened (else exit 3); a
 layer's branch without a workspace shows its last commit.
 
 Children can also be layers of each other, or of a reviewer's workspace. To
-**check the work together**, mix it into a snapshot (`cd $(gitfold mix
-agent/contracts agent/child-1 agent/child-2)`, see the merge previews
-above), or add the children as layers of a workspace that builds and tests
-them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
-<BRANCH>` prints one workspace's uncommitted work as a commit, to open as
-`<mount>/@<sha>`.
+**check the work together**, merge it into a snapshot (`cd $(gitfold
+snapshot agent/contracts agent/child-1 agent/child-2)`, see the merge
+previews above), or add the children as layers of a workspace that builds
+and tests them (`gitfold layer add`, then `gitfold lens off` when done).
 
 ### Contracts: proposing a change, consent of the affected
 
