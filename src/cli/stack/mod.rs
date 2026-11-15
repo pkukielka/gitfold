@@ -92,8 +92,7 @@ pub fn base(
     if all {
         return base_all(&common_dir, yes);
     }
-    let name = super::branch_or_current(workspace, repo)
-        .map_err(|_| anyhow!("not in a workspace: run it inside one, or pass -w BRANCH"))?;
+    let name = super::workspace_or_current(workspace, repo)?;
     check_name(&name)?;
     check_name(target)?;
     git::require_branch(&name)?;

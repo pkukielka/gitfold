@@ -329,9 +329,13 @@ pub fn landing(
     let commits = touching(common_dir, from, target, &paths)?;
     let walked = commits.len().min(MAX_WALK);
     if walked < commits.len() {
+        let local = crate::settings::Local::read(common_dir);
+        let main = crate::cli::stack::land::trunk_name(common_dir, &local)
+            .unwrap_or_else(|| "main".into());
         log::warn!(
             "checking whether {base} landed: only the newest {walked} of {} commits since \
-             {from} touching its files; `gitfold layer base <TRUNK>` moves it if it landed earlier",
+             {from} touching its files; `gitfold layer base {main}` builds it on {main} if it \
+             landed earlier",
             commits.len()
         );
     }

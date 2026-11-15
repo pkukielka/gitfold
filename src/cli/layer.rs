@@ -118,7 +118,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         let target = target.as_deref().unwrap_or_default();
         return super::stack::base(repo, args.workspace, target, *frozen, *yes, *all);
     }
-    let name = super::branch_or_current(args.workspace, repo)?;
+    let name = super::workspace_or_current(args.workspace, repo)?;
     if let Some(LayerOp::Add { branch, .. }) = &args.op
         && *branch == name
     {

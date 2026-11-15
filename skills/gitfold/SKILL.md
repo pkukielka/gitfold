@@ -308,8 +308,8 @@ gitfold layer remove --all             # stop showing every layer
   it up to date (a frozen one too). A branch is never shown twice (nor
   with your proposal to change it: adding one replaces the other).
 - **Not on a branch with a base** (built on another branch than main, see
-  "Stacked branches"): `layer add` refuses (exit 4). Look at the base's
-  work with `gitfold snapshot <base>`, or take the branch off its base
+  "Bases"): `layer add` refuses (exit 4). Look at the base's work with
+  `gitfold snapshot <base>`, or take the branch off its base
   first (`gitfold layer base main`).
 - **The listing** (`gitfold layer`) shows `Base: <branch>` first, then one
   line per layer: what it shows (`all work`, `commits only`, `commits`) and

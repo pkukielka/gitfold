@@ -23,7 +23,7 @@
 //! - tip at C, index at C: nothing moved;
 //! - the branch moved on and the index describes it: forgotten;
 //! - anything else is left as it is, and reported (`forget`, for `gitfold
-//!   layer base <TRUNK>`, deletes it).
+//!   layer base main`, deletes it).
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -293,10 +293,13 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
         );
         Recovery::Undone
     } else {
+        let main =
+            crate::cli::stack::land::trunk_name(common, &crate::settings::Local::read(common))
+                .unwrap_or_else(|| "main".into());
         Recovery::Stuck(format!(
             "an interrupted move of {} onto its base, from {}: the branch and its index moved \
-             since; once its workspace is as you want it, `gitfold layer base <TRUNK> -w {}` \
-             takes it off the stack and forgets it",
+             since; once its workspace is as you want it, `gitfold layer base {main} -w {}` \
+             builds it on {main} and forgets the interrupted move",
             state.branch, intent.from, state.branch
         ))
     };
@@ -512,7 +515,10 @@ mod tests {
         let Recovery::Stuck(why) = settled(&state) else {
             panic!("not stuck")
         };
-        assert!(why.contains("gitfold layer base <TRUNK> -w p2"), "{why}");
+        assert!(
+            why.contains("`gitfold layer base main -w p2` builds it on main"),
+            "{why}"
+        );
         assert!(pending(&state));
     }
 

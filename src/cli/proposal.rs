@@ -257,7 +257,7 @@ fn caller(repo: &Path, named: Option<String>, what: &str) -> Result<String> {
 
 /// `gitfold propose`.
 pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
-    let name = super::branch_or_current(args.workspace, repo)?;
+    let name = super::workspace_or_current(args.workspace, repo)?;
     check_name(&name)?;
     let common_dir = git::init(repo)?;
     let state = StateDir::of(&common_dir, &name);

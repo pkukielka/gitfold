@@ -52,7 +52,12 @@ pub fn trunk(common_dir: &Path, local: &Local) -> Option<String> {
     }
     ["main", "master"]
         .into_iter()
-        .find(|b| git::branch_exists(b))
+        .find(|b| {
+            matches!(
+                stack::rev(common_dir, &format!("refs/heads/{b}")),
+                Ok(Some(_))
+            )
+        })
         .map(str::to_string)
 }
 

@@ -573,8 +573,8 @@ first five, then `and N more`). Files marked for blending are the
 exception (below): they show every layer's lines and the workspace's own.
 
 The listing (`gitfold layer` alone) shows first what the branch is built
-on (`Base: main`, or for a stacked branch its base, whether it follows it
-and how many commits of its own sit on it: see
+on (`Base: main`, or for a branch with a base, that base, whether it
+follows it and how many commits of its own sit on it: see
 [Bases](#bases-stacked-branches)), then one line per layer, in the order
 added: the name, what it shows (`all work`, `commits only`, or `commits`
 for a branch without a workspace, a tag or a commit) and how it updates
