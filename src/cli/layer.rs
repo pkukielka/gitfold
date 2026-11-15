@@ -68,6 +68,7 @@ pub enum LayerOp {
     /// pushed, a conflict, uncommitted work in the way, git busy, layers
     /// shown), 1 other errors, 2 usage errors.
     Base {
+        /// The branch to build on (the trunk: none, off the stack).
         #[arg(required_unless_present = "all", conflicts_with = "all")]
         target: Option<String>,
         /// Build on TARGET as it is now, and don't follow its new commits
