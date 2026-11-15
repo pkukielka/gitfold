@@ -38,12 +38,14 @@
 //!
 //! A base that landed (merged, squashed or rebased onto its own base or the
 //! trunk, `land`) has its children moved the same way onto the landing
-//! commit, with only their own commits (`reparent`): by the hook unasked
-//! once the base's branch is gone (until then it keeps following the base,
-//! and the landing is only said), or by `layer base <TARGET>` (then commits
-//! already pushed need `--yes`). They are built on its target from then on, or, landed in the trunk, have
-//! no base any more (`built_on`). A branch on the trunk isn't moved at turn
-//! boundaries: following the trunk is on request.
+//! commit, with only their own commits (`reparent`): by `layer base
+//! <TARGET>`, naming where it landed (then commits already pushed need
+//! `--yes`), or once the base's branch is gone, by the hook unasked or by
+//! `layer base <BASE>` and `--all`; until then those keep following the
+//! base, and the landing is only said. They are built on its target from
+//! then on, or, landed in the trunk, have no base any more (`built_on`). A
+//! branch on the trunk isn't moved at turn boundaries: following the trunk
+//! is on request.
 //!
 //! - `land`: a base's target, whether a parent base landed there (cached),
 //!   the trunk.
@@ -120,7 +122,7 @@ pub fn base(
         && let Some((landed_in, _)) = landing_of(&common_dir, &local, &name, parent)?
         && land::same(&common_dir, &local, &landed_in.name, target)
     {
-        update_one(&common_dir, &name, yes)?;
+        update_one(&common_dir, &name, yes, true)?;
         return frozen_after(&common_dir, &name, target, frozen && !trunk);
     }
     if trunk {
@@ -128,7 +130,7 @@ pub fn base(
     }
     match parent {
         // Again: brought up to date (onto where it landed, if it is gone).
-        Some(parent) if parent == target => update_one(&common_dir, &name, yes)?,
+        Some(parent) if parent == target => update_one(&common_dir, &name, yes, false)?,
         parent => rebase_onto(&common_dir, &name, parent.as_deref(), target, frozen, yes)?,
     }
     frozen_after(&common_dir, &name, target, frozen)
@@ -169,7 +171,7 @@ fn rebase_onto(
     };
     if on_parent(common_dir, base.commit, target_tip, tip)? {
         declare(common_dir, name, target, base.commit)?;
-        return update_one(common_dir, name, yes);
+        return update_one(common_dir, name, yes, false);
     }
     let blocked = local.restack_blocked(name);
     each(common_dir, &[name.to_string()], Some(target), |name| {
@@ -289,7 +291,7 @@ fn base_all(common_dir: &Path, yes: bool) -> Result<()> {
     // Bottom-up: a branch moves onto its base's moved commits.
     branches.sort_by_cached_key(|b| (depth(&local, b), b.clone()));
     each(common_dir, &branches, None, |name| {
-        update(common_dir, name, yes)
+        update(common_dir, name, yes, false)
     })
 }
 
@@ -469,22 +471,24 @@ fn ask(
 }
 
 /// Brings `name` up to date with its base, asked for: says what moves
-/// first, and moves commits already pushed only with `yes`.
-fn update(common_dir: &Path, name: &str, yes: bool) -> Result<Outcome> {
+/// first, and moves commits already pushed only with `yes`. `to_landing`:
+/// where its base landed was named, so the landing is followed even while
+/// the base's branch is still there (see `restack_branch`).
+fn update(common_dir: &Path, name: &str, yes: bool, to_landing: bool) -> Result<Outcome> {
     // First, so what is said is about where it is now.
     finish_landing(common_dir, name)?;
-    if let Outcome::Would { onto, base } = restack_branch(common_dir, name, true, false)?
+    if let Outcome::Would { onto, base } = restack_branch(common_dir, name, true, to_landing)?
         && let Some(why) = ask(common_dir, name, base, &onto, yes)?
     {
         return Ok(Outcome::Refused(why));
     }
-    restack_branch(common_dir, name, false, false)
+    restack_branch(common_dir, name, false, to_landing)
 }
 
 /// `update` for `name` alone, said as `each` says it.
-fn update_one(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
+fn update_one(common_dir: &Path, name: &str, yes: bool, to_landing: bool) -> Result<()> {
     each(common_dir, &[name.to_string()], None, |name| {
-        update(common_dir, name, yes)
+        update(common_dir, name, yes, to_landing)
     })
 }
 
@@ -736,13 +740,19 @@ fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
 
 /// Moves branch `name` onto its base's tip, if it moved, or onto where its
 /// parent base landed, if its base was merged (see the module doc); with
-/// `dry_run`, only says what it would do. `auto` (the hook, not asked by
-/// anyone): a landing (of any kind) is followed only once the base's branch
-/// is gone, here or on its remote; until then the branch keeps following
-/// its base as before, and the landing is only said (`LooksLanded`, when
-/// nothing else is to be said). Its callers finish an interrupted move
-/// first (`finish_landing`).
-fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> Result<Outcome> {
+/// `dry_run`, only says what it would do. A landing (of any kind) is
+/// followed when `to_landing` (`layer base` named where it landed), else only
+/// once the base's branch is gone, here or on its remote (the hook, `layer
+/// base <BASE>`, `--all`); until then the branch keeps following its base as
+/// before, and the landing is only said (`LooksLanded`, when nothing else is
+/// to be said). Its callers finish an interrupted move first
+/// (`finish_landing`).
+fn restack_branch(
+    common_dir: &Path,
+    name: &str,
+    dry_run: bool,
+    to_landing: bool,
+) -> Result<Outcome> {
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
         return Err(Refusal::NotFound.error(format!("{name} isn't built on another branch")));
@@ -758,7 +768,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
         // a squash is found by content, so main making the same change on
         // its own looks the same: followed unasked only once the base is
         // gone.
-        if !auto || land::gone(common_dir, &local, &parent)? {
+        if to_landing || land::gone(common_dir, &local, &parent)? {
             return reparent(
                 common_dir, name, &parent, &target, landing, base, tip, dry_run,
             );
@@ -1405,7 +1415,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
     }
     let told_file = StateDir::of(common_dir, name).dir.join(TOLD);
     let before = stack_base(common_dir, name);
-    let outcome = restack_branch(common_dir, name, false, true)?;
+    let outcome = restack_branch(common_dir, name, false, false)?;
     let say = |text: String| -> Result<Option<String>> {
         if std::fs::read_to_string(&told_file).is_ok_and(|told| told == text) {
             return Ok(None);

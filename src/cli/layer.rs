@@ -86,9 +86,11 @@ pub enum LayerOp {
     /// for the move and put back on the new commits. When its base lands
     /// (a merge, squash, rebase merge or fast-forward), the branch moves
     /// onto what it landed in when you name that (`gitfold layer base
-    /// main`), or by itself once the base's branch is gone; until then it
-    /// follows the base as before, and the landing is reported. Only its
-    /// own commits move. The main branch (main, master, or gitfold.trunk)
+    /// main`), or once the base's branch is gone (by itself, or with
+    /// `gitfold layer base <BASE>` or --all); until then it follows the base
+    /// as before, `gitfold layer base <BASE>` and --all included, and the
+    /// landing is reported. Only its own commits move. The main branch
+    /// (main, master, or gitfold.trunk)
     /// as TARGET takes the base away, its own commits moved onto main.
     /// gitfold never pushes: it prints the force-pushes to run. Exit codes:
     /// 3 no such branch, 4 not moved (commits already pushed, a conflict,

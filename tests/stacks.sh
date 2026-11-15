@@ -362,8 +362,13 @@ check "a rebase merge: onto its last commit, no base left" landed_on r2 "$last" 
 # A squash the maintainer tweaked.
 pair t1 t2
 R merge -q --squash t1 >/dev/null; echo tweaked >"$REPO/a.txt"; R commit -qam "t1, tweaked"
-base t2 t1 >/dev/null
-check "a tweaked squash: found too" landed_on t2 "$(R rev-parse main)" main
+tip=$(R rev-parse t2)
+eq "layer base t1 while t1 is there: the landing said, nothing moved" "t2: t1 looks squash- or rebase-merged into main as $(R rev-parse --short=12 main), but t1 is still there; \`gitfold layer base main\` moves t2 there with only its own commits|$tip|t1" \
+    "$(base t2 t1)|$(R rev-parse t2)|$(R config branch.t2.gitfoldParent)"
+eq "--all the same" "t2: t1 looks squash- or rebase-merged into main as $(R rev-parse --short=12 main), but t1 is still there; \`gitfold layer base main\` moves t2 there with only its own commits|$tip" \
+    "$("$BIN" -C "$REPO" layer base --all | grep '^t2:')|$(R rev-parse t2)"
+base t2 main >/dev/null
+check "a tweaked squash: found too, layer base main follows it" landed_on t2 "$(R rev-parse main)" main
 
 # A merge commit, into a stacked base's base.
 R branch p0; commit_on p0 p0.txt p0
@@ -381,7 +386,9 @@ pair x1 x2
 commit_on x1 x1b.txt later
 R merge -q --no-ff --no-edit x1
 base x2 x1 >/dev/null
-check "a merge of a later base tip: onto the merge" landed_on x2 "$(R rev-parse main)" main
+check "layer base x1 while x1 is there: onto x1's tip" parent_is x2 x1
+base x2 main >/dev/null
+check "a merge of a later base tip: layer base main, onto the merge" landed_on x2 "$(R rev-parse main)" main
 
 # A move onto a landing interrupted after the refs (the base not yet set):
 # the next update finishes it, rather than going back onto the base.
@@ -410,7 +417,7 @@ f1=$(R rev-parse f1)
 eq "recorded off main" "$f1 main no" "$(R config branch.f2.gitfoldBaseOnTarget)"
 R merge -q --ff-only f1
 eq "a fast-forward: moved onto it" "f2: f1 looks fast-forwarded into main up to ${f1:0:12}; moved there with its own 1 commit and now built on main. Its pull request's base should now be main: push it, then \`gh pr edit f2 --base main\`" \
-    "$(base f2 f1 | grep '^f2:')"
+    "$(base f2 main | grep '^f2:')"
 check "built on main at f1's commit" landed_on f2 "$f1" main
 # A fresh base: it was on main all along.
 R branch e1; "$BIN" -C "$REPO" branch e2 --base e1 >/dev/null; commit_on e2 e2.txt e2
