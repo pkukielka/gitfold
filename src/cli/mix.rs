@@ -127,7 +127,12 @@ fn work_of(store: &Store, common_dir: &Path, what: &str) -> Result<(String, Obje
 }
 
 /// The merge of `theirs` (named `what`) into `ours`, made with `IDENTITY`.
-fn merge(common_dir: &Path, ours: &ObjectId, theirs: &ObjectId, what: &str) -> Result<ObjectId> {
+pub(super) fn merge(
+    common_dir: &Path,
+    ours: &ObjectId,
+    theirs: &ObjectId,
+    what: &str,
+) -> Result<ObjectId> {
     let (ours_hex, theirs_hex) = (ours.to_string(), theirs.to_string());
     let out = git::cmd::command(common_dir)
         .args([

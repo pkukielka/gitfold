@@ -203,8 +203,104 @@ eq "back on the branch, the uncommitted line its change" "me| M reg.txt" \
     "$(G "$W" branch --show-current)|$(git -C "$W" status --short)"
 }
 
+# Claude Code's read-tracking hook on its Read tool, for each path.
+read_file() { for p; do printf '{"tool_name":"Read","cwd":"%s","tool_input":{"file_path":"%s"}}' "$REPO" "$p" |
+    "$BIN" track-reads --claude-hook pre-tool-use; done; }
+
+proposals_to_change_a_contract() {
+printf 'fn get(id)\n' >"$REPO/api.txt"; R add api.txt; R commit -qm api
+for b in contracts c1 c2 c3 c4 c5; do R branch $b; done
+mount_fs
+echo 'fn put(id)' >>"$MNT/contracts/api.txt"   # the root's contract, uncommitted
+echo 'fn mine(id)' >"$MNT/c5/api.txt"          # c5's own version, before the layer
+for c in c1 c2 c3 c4 c5; do ls "$MNT/$c" >/dev/null; "$BIN" -C "$REPO" layer add contracts -w $c >/dev/null; done
+for c in c1 c2 c3 c5; do "$BIN" -C "$REPO" track-reads $c on >/dev/null; done   # c4: reads unknown
+read_file "$MNT/c1/api.txt" "$MNT/c2/api.txt" "$MNT/c3/a.txt" "$MNT/c5/api.txt"
+echo 'get(1)' >"$MNT/c1/use.txt"; echo 'put(2)' >"$MNT/c2/use.txt"; echo 'get(4)' >"$MNT/c4/use.txt"
+edit_hook() { printf '{"tool_name":"Edit","cwd":"%s","tool_input":{"file_path":"api.txt"}}' "$1" |
+    "$BIN" layer --claude-hook pre-tool-use; }
+eq "the deny hook offers a proposal first" "yes" \
+    "$(edit_hook "$MNT/c1" | grep -q 'To change it, run `gitfold propose api.txt`' && echo yes)"
+check "proposing outside a layer's workspace: no such layer (exit 3)" \
+    sh -c "cd '$MNT/c1' && '$BIN' propose api.txt --layer c2; [ \$? = 3 ]"
+out=$(cd "$MNT/c1" && "$BIN" propose api.txt 2>&1)
+eq "propose: a proposal branch, where to edit" "yes yes" \
+    "$(echo "$out" | grep -q 'branch contracts-prop/c1' && echo yes) $(echo "$out" | grep -qx "  $MNT/contracts-prop/c1/api.txt" && echo yes)"
+eq "recorded as a proposal" "contracts c1" \
+    "$(R config branch.contracts-prop/c1.gitfoldProposal) $(R config branch.contracts-prop/c1.gitfoldProposedBy)"
+eq "shown in place of the layer" "on 	contracts-prop/c1" "$("$BIN" -C "$MNT/c1" layer list | cut -f1,2)"
+eq "a copy of the layer's work, uncommitted included" "fn get(id)
+fn put(id)" "$(cat "$MNT/contracts-prop/c1/api.txt")"
+printf 'fn fetch(id)\nfn put(id)\n' >"$MNT/contracts-prop/c1/api.txt"; echo 'fetch(1)' >"$MNT/c1/use.txt"
+eq "the deny hook: edit the proposal there" "yes" \
+    "$(edit_hook "$MNT/c1" | grep -q "shows your proposal contracts-prop/c1.*$MNT/contracts-prop/c1/api.txt" && echo yes)"
+(cd "$MNT/c1" && "$BIN" layer --claude-hook user-prompt-submit >/dev/null)
+eq "the next turn shows the edits" "fn fetch(id)" "$(head -1 "$MNT/c1/api.txt")"
+mkdir -p "$T/from"; printf 'fn fetch(id)\nfn put(id)\n' >"$T/from/api.txt"
+check "propose again, --from a directory: the same proposal" \
+    sh -c "'$BIN' -C '$REPO' propose -w c1 api.txt --layer contracts-prop/c1 --from '$T/from' | grep -q 'copied into it: api.txt'"
+out=$("$BIN" -C "$REPO" proposals)
+eq "proposals: who, what, consent" "contracts-prop/c1: proposed by c1, to change contracts|yes|  consent: not checked (\`gitfold consent\`)" \
+    "$(echo "$out" | head -1)|$(echo "$out" | grep -q 'api.txt | 2 +-' && echo yes)|$(echo "$out" | tail -1)"
+eq "proposals of another layer: none" "" "$("$BIN" -C "$REPO" proposals c2)"
+TEST='f=$(cut -d"(" -f1 use.txt 2>/dev/null) || exit 0; grep -q "fn $f(" api.txt || { echo "no fn $f"; exit 1; }'
+out=$("$BIN" -C "$REPO" consent contracts-prop/c1 2>&1); rc=$?
+eq "consent: a workspace's own version conflicts (exit 4)" "4 c5	yes	no	-	conflicts: api.txt" \
+    "$rc $(echo "$out" | grep '^c5')"
+"$BIN" -C "$REPO" layer rm contracts -w c5 >/dev/null
+out=$("$BIN" -C "$REPO" consent contracts-prop/c1 --test "$TEST" 2>&1); rc=$?
+eq "consent --test: who read it, merged, tested (exit 4)" "4|workspace	read	merges	test
+c1	yes	yes	passed
+c2	yes	yes	passed
+c3	no	-	-
+c4	unknown	yes	failed	exit 1: no fn get" "$rc|$(echo "$out" | sed -n '1,5p' | sed 's/ (.*//')"
+eq "the workspaces' own trees untouched" "A	use.txt|get(4)" "$("$BIN" -C "$REPO" changes c4)|$(cat "$MNT/c4/use.txt")"
+eq "proposals: the failed consent" "  consent: failed: 1 of 3 failing: c4" "$("$BIN" -C "$REPO" proposals contracts | tail -1)"
+echo 'put(4)' >"$MNT/c4/use.txt"
+out=$("$BIN" -C "$REPO" consent contracts-prop/c1 --test "$TEST" 2>&1); rc=$?
+eq "fixed: consent passes (exit 0)" "0 contracts-prop/c1: passed (3 workspaces checked)" "$rc $(echo "$out" | tail -1)"
+check "accept in another workspace: refused (exit 3)" \
+    sh -c "'$BIN' -C '$REPO' accept contracts-prop/c1 -w c2; [ \$? = 3 ]"
+check "accept of no proposal (exit 3)" sh -c "'$BIN' -C '$REPO' accept c2 -w contracts; [ \$? = 3 ]"
+echo 'fn del(id)' >>"$MNT/contracts/api.txt"
+out=$("$BIN" -C "$MNT/contracts" accept contracts-prop/c1 2>&1); rc=$?
+eq "the layer changed the file since: refused (exit 4)" "4 yes" "$rc $(echo "$out" | grep -q 'contracts changed api.txt since' && echo yes)"
+printf 'fn get(id)\nfn put(id)\n' >"$MNT/contracts/api.txt"
+out=$("$BIN" -C "$MNT/contracts" accept contracts-prop/c1 2>&1); rc=$?
+eq "accept" "0 accepted contracts-prop/c1 into contracts: api.txt" "$rc $(echo "$out" | head -1)"
+eq "written into the layer's workspace, uncommitted" "fn fetch(id)
+fn put(id)| M api.txt" "$(cat "$MNT/contracts/api.txt")|$(git -C "$MNT/contracts" status --short)"
+eq "the proposer shows the layer again, with the change" "on 	contracts|fn fetch(id)" \
+    "$("$BIN" -C "$MNT/c1" layer list | cut -f1,2)|$(head -1 "$MNT/c1/api.txt")"
+check "the proposal's branch is gone" fails R rev-parse -q --verify refs/heads/contracts-prop/c1
+eq "and its config" "" "$(R config --get-regexp 'branch\.contracts-prop' 2>&1)"
+eq "proposals: none left" "" "$("$BIN" -C "$REPO" proposals)"
+msg=$("$BIN" -C "$REPO" inbox c2)
+eq "readers told: from the layer, the changed lines" "from: contracts|subject: contract changed|yes|  -fn get(id)|  +fn fetch(id)" \
+    "$(echo "$msg" | sed -n 1p)|$(echo "$msg" | sed -n 3p)|$(echo "$msg" | grep -q '^contract api.txt changed' && echo yes)|$(echo "$msg" | grep -- '-fn')|$(echo "$msg" | grep -- '+fn')"
+eq "the proposer too (it read it)" "1" "$("$BIN" -C "$REPO" inbox c1 | grep -c '^subject: contract changed')"
+eq "not who didn't read it, or isn't known to" "|" "$("$BIN" -C "$REPO" inbox c3)|$("$BIN" -C "$REPO" inbox c4)"
+(cd "$MNT/contracts" && "$BIN" seal --claude-hook stop)
+(cd "$MNT/c2" && "$BIN" layer --claude-hook user-prompt-submit >/dev/null)
+eq "the others see it at their next turn" "fn fetch(id)" "$(head -1 "$MNT/c2/api.txt")"
+"$BIN" -C "$MNT/c2" propose api.txt >/dev/null
+check "reject in a third workspace: refused (exit 3)" \
+    sh -c "'$BIN' -C '$REPO' reject contracts-prop/c2 -w c3; [ \$? = 3 ]"
+check "reject" "$BIN" -C "$MNT/contracts" reject contracts-prop/c2 --reason "keep fetch"
+eq "the layer shown again, the proposer told why, the proposal gone" "on 	contracts|yes|" \
+    "$("$BIN" -C "$MNT/c2" layer list | cut -f1,2)|$("$BIN" -C "$REPO" inbox c2 | grep -q 'was rejected: keep fetch' && echo yes)|$(R branch --list 'contracts-prop/*')"
+"$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
+printf 'fn fetch(id)\nfn put(id)\nfn list()\n' >"$T/from/api.txt"
+check "unmounted: propose --from" "$BIN" -C "$REPO" propose -w c2 api.txt --from "$T/from"
+eq "shown in place of the layer" "on 	contracts-prop/c2" "$("$BIN" -C "$REPO" layer list -w c2 | cut -f1,2)"
+check "and accept" "$BIN" -C "$REPO" accept contracts-prop/c2 -w contracts
+eq "written into the stored workspace" "fn list()" "$(R show "$("$BIN" -C "$REPO" seal contracts 2>/dev/null):api.txt" | tail -1)"
+eq "the layer back" "contracts" "$("$BIN" -C "$REPO" layer list -w c2 | cut -f2)"
+}
+
 section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: blended files, the lens commit" blended_files_and_the_lens_commit
 section "seal: uncommitted work as a commit" seal_uncommitted_work_as_a_commit
 section "mix: workspaces merged into a snapshot" mix_workspaces_into_a_snapshot
+section "proposals: a contract changed by consent" proposals_to_change_a_contract
 finish

@@ -6,7 +6,9 @@
 //!   stacked branch `gitfoldParent` (the branch it is built on),
 //!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only) and
 //!   `gitfoldRestackBlocked` (the restack that conflicted, see
-//!   `cli::stack`);
+//!   `cli::stack`); for a proposal (`gitfold propose`), `gitfoldProposal`
+//!   (the layer it would change), `gitfoldProposedBy` (the workspace that
+//!   proposed it) and `gitfoldConsent` (the last `gitfold consent`);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again),
@@ -36,6 +38,13 @@ const RESTACK: &str = "gitfoldRestack";
 /// `branch.<branch>.gitfoldRestackBlocked`: `<parent tip> <commit> <paths>`,
 /// the restack onto that parent tip that conflicted.
 const RESTACK_BLOCKED: &str = "gitfoldRestackBlocked";
+/// `branch.<branch>.gitfoldProposal`: the layer a proposal would change.
+const PROPOSAL: &str = "gitfoldProposal";
+/// `branch.<branch>.gitfoldProposedBy`: the workspace that proposed it.
+const PROPOSED_BY: &str = "gitfoldProposedBy";
+/// `branch.<branch>.gitfoldConsent`: `<passed|failed> <the proposal's seal
+/// checked> <summary>`, the last `gitfold consent` on a proposal.
+const CONSENT: &str = "gitfoldConsent";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -161,6 +170,32 @@ impl Local {
             .collect()
     }
 
+    /// The layer proposal `branch` would change and the workspace that
+    /// proposed it, if it is a proposal.
+    pub fn proposal(&self, branch: &str) -> Option<(String, String)> {
+        let layer = self.branch(branch, PROPOSAL)?;
+        Some((layer, self.branch(branch, PROPOSED_BY).unwrap_or_default()))
+    }
+
+    /// Every proposal with the layer it would change, in config order.
+    pub fn proposals(&self) -> Vec<(String, String)> {
+        let Some(sections) = self.0.as_ref().and_then(|c| c.sections_by_name("branch")) else {
+            return Vec::new();
+        };
+        sections
+            .filter_map(|s| {
+                let branch = s.header().subsection_name()?.to_string();
+                let layer = non_empty(s.value(PROPOSAL)?.to_string())?;
+                Some((branch, layer))
+            })
+            .collect()
+    }
+
+    /// The last consent check of proposal `branch` (see `CONSENT`).
+    pub fn consent(&self, branch: &str) -> Option<String> {
+        self.branch(branch, CONSENT)
+    }
+
     /// Whether `branch` is restacked only by `gitfold stack sync`
     /// (`gitfoldRestack` is `manual`), not at its turn boundaries.
     pub fn restack_manual(&self, branch: &str) -> bool {
@@ -255,6 +290,18 @@ pub fn set_restack_blocked(git_dir: &Path, branch: &str, blocked: Option<&str>) 
         Some(blocked) => set_branch(git_dir, branch, RESTACK_BLOCKED, blocked),
         None => unset_branch(git_dir, branch, RESTACK_BLOCKED),
     }
+}
+
+/// Records branch `branch` as workspace `by`'s proposal to change layer
+/// `layer`.
+pub fn set_proposal(git_dir: &Path, branch: &str, layer: &str, by: &str) -> Result<()> {
+    set_branch(git_dir, branch, PROPOSAL, layer)?;
+    set_branch(git_dir, branch, PROPOSED_BY, by)
+}
+
+/// Records the last consent check of proposal `branch` (see `CONSENT`).
+pub fn set_consent(git_dir: &Path, branch: &str, consent: &str) -> Result<()> {
+    set_branch(git_dir, branch, CONSENT, consent)
 }
 
 /// Records `mountpoint` as where the repository is mounted

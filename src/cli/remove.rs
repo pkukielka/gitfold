@@ -73,7 +73,12 @@ pub fn remove(repo: &Path, args: RemoveArgs) -> Result<()> {
 /// One attempt at `remove`: under the repository lock, or by the daemon while
 /// mounted; the lock held otherwise (another `remove` or `prune`) is in use, so
 /// `--wait` retries.
-fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Result<String> {
+pub(super) fn remove_once(
+    common_dir: &Path,
+    name: &str,
+    force: bool,
+    check: bool,
+) -> Result<String> {
     let request = control::Request::Remove {
         name: name.to_string(),
         force,

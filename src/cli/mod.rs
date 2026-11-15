@@ -6,6 +6,8 @@
 //! - `remove`: `remove`, `prune`.
 //! - `mix`: `seal`, `mix`: workspaces' uncommitted work as commits, merged.
 //! - `layer`: `layer`, `lens`: other workspaces' work shown in one.
+//! - `proposal`: `propose`, `proposals`, `consent`, `accept`, `reject`:
+//!   changes to a layer proposed from a workspace that shows it.
 //! - `stack`: `stack`: stacked branches, restacked onto their parents.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
@@ -22,6 +24,7 @@ pub mod list;
 pub mod mix;
 pub mod mount;
 pub mod overlaps;
+pub mod proposal;
 pub mod remove;
 pub mod stack;
 

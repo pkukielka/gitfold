@@ -175,6 +175,12 @@ gitfold mix [--onto <REV>] [--commit] <BRANCH|REV>...
 gitfold layer [-w <BRANCH>] add|on|off|rm <BRANCH>
 gitfold layer [-w <BRANCH>] update|list       # other workspaces' work shown in one
 gitfold lens off [<BRANCH>]                   # hide all of a workspace's layers
+gitfold propose <PATH>... [--layer <L>] [--from <DIR>] [-w <BRANCH>]
+                                              # change a layer's files, in a fork of it
+gitfold proposals [<L>]                       # the open proposals
+gitfold consent <PROPOSAL> [--test <CMD>]     # check it with whoever read the files
+gitfold accept <PROPOSAL> [-w <L>]            # take it into the layer's workspace
+gitfold reject <PROPOSAL> [--reason <TEXT>] [-w <BRANCH>]
 gitfold stack on <PARENT> [-w <BRANCH>] [--base <REV>]
 gitfold stack off [-w <BRANCH>]               # a branch built on another's commits
 gitfold stack sync [<BRANCH>... | --all] [--dry-run]
@@ -198,12 +204,12 @@ would share, and corrupt, the stored workspace changes. The mount is read-write
 Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
 error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
-Five commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
+Six commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
-`mix` (4 conflicts), `stack sync` and `stack merged` (3 a branch not
-stacked, 4 a branch not restacked: a conflict, uncommitted work in the
-way, git busy, layers shown) and `inbox --claude-hook rewake` (2, to wake
-the session).
+`mix` (4 conflicts), `consent` (4 a workspace fails), `stack sync` and
+`stack merged` (3 a branch not stacked, 4 a branch not restacked: a
+conflict, uncommitted work in the way, git busy, layers shown) and `inbox
+--claude-hook rewake` (2, to wake the session).
 `gitfold branch` starts the branch at HEAD unless `--from` (or `--on`) says
 otherwise.
 
@@ -555,9 +561,59 @@ depend on lines that would go (see below); 2 usage errors, 1 other errors
   `chmod` fail with `EACCES`, as does creating a path a layer deleted. They
   are another agent's work in progress: a change made here would become this
   workspace's own file, hiding theirs and committed with this branch. To
-  change one, ask its agent (`gitfold send <BRANCH> <TEXT>`), or hide the
-  layer and edit your own version. In Claude Code, the plugin denies its
-  edit tools such a file, saying this.
+  change one, propose a change (below), ask its agent (`gitfold send
+  <BRANCH> <TEXT>`), or hide the layer and edit your own version. In Claude
+  Code, the plugin denies its edit tools such a file, saying this.
+- **Proposals: changing a layer's file (a contract).** A typical tree: a
+  root agent writes the interfaces in a workspace (`contracts`), each child
+  shows it as a layer and builds against it. When a child needs an
+  interface changed:
+
+  ```
+  cd ~/mnt/repo/child-3
+  gitfold propose api/billing.rs     # branch contracts-prop/child-3: a copy of
+                                     # contracts' workspace, shown here in its place
+  $EDITOR ~/mnt/repo/contracts-prop/child-3/api/billing.rs
+  gitfold layer update               # the edits show here (the next turn does too)
+  # in contracts' workspace (the root):
+  gitfold proposals                  # who proposed what (diff stat), consent so far
+  gitfold consent contracts-prop/child-3 --test 'cargo check'
+  gitfold accept contracts-prop/child-3     # or: gitfold reject ... --reason <TEXT>
+  ```
+
+  `propose <PATH>... [--layer <L>] [--from <DIR>] [-w <WS>]` forks the
+  layer's workspace (`branch --with-changes`, with its uncommitted work)
+  into `<L>-prop/<WS>` (the layer defaults to the one whose file the first
+  path shows; paths are relative to the current directory in the
+  workspace), copies `<DIR>/<PATH>` there with `--from`, and puts the
+  proposal in the layer's place in the workspace's stack. There the files
+  are yours: edit them in its workspace. Proposing again adds to the same
+  proposal. It is recorded in config (`branch.<proposal>.gitfoldProposal`
+  and `gitfoldProposedBy`), what it started from in
+  `refs/gitfold-proposal/<id>`; its changes are its work (sealed) against
+  that.
+
+  `consent <PROPOSAL> [--test <CMD>]` checks it with every workspace it
+  affects: each workspace showing the layer (or the proposal) that read a
+  file it changes, by the read records (`gitfold track-reads`), or every one
+  whose reads aren't recorded. Each one's work is mixed with the proposal
+  (`gitfold mix`), and `CMD` runs (`sh -c`, with `GITFOLD_WORKSPACE` set)
+  in the mix's snapshot; no workspace changes. It prints a table
+  (workspace, read the files: `yes`/`no`/`unknown`, merges cleanly, test,
+  then conflicts or the test's exit code, last line and snapshot), records
+  the result for `proposals`, and exits 0 if all passed, 4 if any failed.
+  `--test` needs the repository mounted.
+
+  `accept <PROPOSAL>`, in the layer's workspace (or `-w <L>`), writes the
+  files the proposal changed into it, as uncommitted work (through the
+  mount, or into its stored state unmounted); refused (exit 4) if the layer
+  changed any of them since the proposal was made. Workspaces showing the
+  proposal show the layer again, at once; those showing the layer get the
+  change at their next turn (or `gitfold layer update`); each that read the
+  files gets a message (`subject: contract changed`, the changed lines).
+  The proposal's workspace and branch are removed. `reject <PROPOSAL>
+  [--reason <TEXT>]`, in the layer's or the proposer's workspace, removes it
+  untaken, shows the layer again and tells the proposer.
 - **A switch** (any of the commands above, or the hook below) tells the
   kernel exactly what changed: the files whose content changed, the entries
   added, removed or changed in type, and their directories' listings.
