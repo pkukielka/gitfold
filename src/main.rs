@@ -148,6 +148,46 @@ enum Command {
     Layer(cli::layer::LayerArgs),
     /// Hide every layer of a workspace (see `gitfold layer`).
     Lens(cli::layer::LensArgs),
+    /// Propose a change to a layer's files (a contract) from a workspace
+    /// showing it.
+    ///
+    /// Makes branch <LAYER>-prop/<WORKSPACE>, a copy of the layer's
+    /// workspace with its uncommitted work (as `branch --with-changes`),
+    /// where the files are yours to edit (or copied from --from), and shows
+    /// it in this workspace in place of the layer. The layer's agent checks
+    /// it (`gitfold consent`) and takes it (`gitfold accept`). Run again, it
+    /// adds to the same proposal. Exit codes: 3 no such workspace or layer,
+    /// 4 git busy, 1 other errors, 2 usage errors.
+    Propose(cli::proposal::ProposeArgs),
+    /// List the open proposals: who proposed, the files changed, consent.
+    Proposals(cli::proposal::ProposalsArgs),
+    /// Check a proposal against every workspace it affects.
+    ///
+    /// For each workspace showing its layer (or it) that read a file it
+    /// changes (from the read records; every one whose reads aren't
+    /// recorded): that workspace's work mixed with the proposal (`gitfold
+    /// mix`), and --test run in the mix's snapshot. No workspace changes.
+    /// Prints a table: workspace, read the files (yes, no, unknown), merges
+    /// cleanly, test. Exit codes: 0 all passed, 4 any failed, 3 no such
+    /// proposal, 1 other errors.
+    Consent(cli::proposal::ConsentArgs),
+    /// Take a proposal into its layer's workspace.
+    ///
+    /// Writes the files it changed into the layer's workspace (uncommitted
+    /// work there, as any edit), shows the layer again where the proposal
+    /// showed, sends a message (`gitfold send`) to every workspace that read
+    /// the files, and removes the proposal's workspace and branch. Workspaces
+    /// showing the layer see the change at their next turn. Exit codes: 4
+    /// the layer changed those files since the proposal was made, 3 no such
+    /// proposal (or not this layer's), 1 other errors.
+    Accept(cli::proposal::AcceptArgs),
+    /// Remove a proposal without taking it (or withdraw your own).
+    ///
+    /// Run in its layer's workspace or its proposer's: the layer shows again
+    /// where the proposal showed, the proposer is told (with --reason), and
+    /// the proposal's workspace and branch are removed. Exit codes: 3 no such
+    /// proposal (or not one of these workspaces'), 1 other errors.
+    Reject(cli::proposal::RejectArgs),
     /// Stacked branches: a branch built on a parent branch, its own commits
     /// following the parent's new ones.
     ///
@@ -267,6 +307,11 @@ fn run() -> Result<i32> {
         }) => cli::layer::layer_hook(&event)?,
         Command::Layer(args) => cli::layer::layer(&cli::repo()?, args)?,
         Command::Lens(args) => cli::layer::lens(&cli::repo()?, args)?,
+        Command::Propose(args) => cli::proposal::propose(&cli::repo()?, args)?,
+        Command::Proposals(args) => cli::proposal::proposals(&cli::repo()?, args)?,
+        Command::Consent(args) => return cli::proposal::consent(&cli::repo()?, args),
+        Command::Accept(args) => cli::proposal::accept(&cli::repo()?, args)?,
+        Command::Reject(args) => cli::proposal::reject(&cli::repo()?, args)?,
         Command::Stack(args) => cli::stack::stack(&cli::repo()?, args)?,
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,

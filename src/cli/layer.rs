@@ -142,7 +142,18 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let state = StateDir::of(&common_dir, &name);
         let mut lens = Lens::read(&state)?;
         let mut moved = Vec::new();
+        let local = crate::settings::Local::read(&common_dir);
         for layer in &mut lens.layers {
+            // Its own proposal is edited from this session, whose end seals
+            // only this workspace: sealed here, so the edits show.
+            let theirs = StateDir::of(&common_dir, &layer.branch);
+            if local
+                .proposal(&layer.branch)
+                .is_some_and(|(_, by)| by == name)
+                && theirs.opened()
+            {
+                seal::seal(&Store::default(), &theirs)?;
+            }
             let id = crate::state::workspace_id(&layer.branch);
             let Some(&(_, newest)) = seal::list(&common_dir, &id)?.last() else {
                 continue;
@@ -187,8 +198,8 @@ pub fn layer_hook(event: &str) -> Result<()> {
 
 /// `gitfold layer --claude-hook pre-tool-use`: denies Claude Code's edit
 /// tools a file a layer shows (the filesystem would refuse it with a bare
-/// EACCES), saying whose it is and what to do instead. Allows everything
-/// else, and logs its errors.
+/// EACCES), saying whose it is and what to do instead: first, propose a
+/// change (`gitfold propose`). Allows everything else, and logs its errors.
 fn deny_hook() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     let denied = (|| -> Result<Option<String>> {
@@ -203,34 +214,30 @@ fn deny_hook() -> Result<()> {
         };
         // What is shown, which a pending switch may not have changed yet.
         let lens = crate::state::lens::Applied::read(&state)?.layers()?;
-        if !lens.is_on() {
-            return Ok(None);
-        }
-        // Its own file at that path wins: writable.
-        if std::fs::symlink_metadata(crate::state::upper_path(&state.upper(), path.as_bytes()))
-            .is_ok()
-        {
-            return Ok(None);
-        }
-        git::init(&state.common_dir)?;
-        // Most edits are of files no layer changes: told apart without
-        // building the view (it runs on every edit).
-        if !changed_by_any(&lens, path.as_bytes())? {
-            return Ok(None);
-        }
-        let base = state.read_base()?;
-        let Some(view) = crate::state::lens::view(&state.common_dir, &base.id, &lens)? else {
-            return Ok(None);
-        };
-        let Some(&i) = view.mixed.get(path.as_bytes()) else {
+        let Some(i) = owner(&state, &lens, path.as_bytes())? else {
             return Ok(None);
         };
         let owner = &lens.layers[i].branch;
+        let local = crate::settings::Local::read(&state.common_dir);
+        if let Some((layer, by)) = local.proposal(owner)
+            && by == state.branch
+        {
+            let mount = crate::mount_table::mount_of(&state.common_dir)?.unwrap_or_default();
+            let there = mount.join(owner).join(&path);
+            return Ok(Some(format!(
+                "{path} shows your proposal {owner} (a change to {layer}'s work), read-only \
+                 here: edit it there, at {}; `gitfold layer update` then shows your edits \
+                 here.",
+                there.display()
+            )));
+        }
         Ok(Some(format!(
             "{path} shows workspace {owner}'s work (a layer, read-only here): it can't be \
-             changed in this workspace. Leave it to {owner}'s agent (`gitfold send {owner} \
-             <text>` asks it), or run `gitfold layer off {owner}` to hide the layer and edit \
-             your own version."
+             changed in this workspace. To change it, run `gitfold propose {path}`: it makes \
+             a copy of {owner}'s work for you to edit (a proposal), shown here in its place, \
+             which {owner}'s agent tests against every workspace that read the file and \
+             accepts. Or leave it to {owner}'s agent (`gitfold send {owner} <text>` asks it), \
+             or run `gitfold layer off {owner}` to hide the layer and edit your own version."
         )))
     })();
     match denied {
@@ -242,6 +249,30 @@ fn deny_hook() -> Result<()> {
         Err(e) => log::warn!("gitfold layer --claude-hook pre-tool-use: {e:#}"),
     }
     Ok(())
+}
+
+/// The layer of `lens` (shown in the workspace in `state`) whose file shows
+/// at `path`, read-only there; `None` if what shows is the workspace's own or
+/// its base's.
+pub(super) fn owner(state: &StateDir, lens: &Lens, path: &[u8]) -> Result<Option<usize>> {
+    if !lens.is_on() {
+        return Ok(None);
+    }
+    // Its own file at that path wins: writable.
+    if std::fs::symlink_metadata(crate::state::upper_path(&state.upper(), path)).is_ok() {
+        return Ok(None);
+    }
+    git::init(&state.common_dir)?;
+    // Most edits are of files no layer changes: told apart without building
+    // the view (the deny hook runs on every edit).
+    if !changed_by_any(lens, path)? {
+        return Ok(None);
+    }
+    let base = state.read_base()?;
+    let Some(view) = crate::state::lens::view(&state.common_dir, &base.id, lens)? else {
+        return Ok(None);
+    };
+    Ok(view.mixed.get(path).copied())
 }
 
 /// Whether a shown layer of `lens` changes `path`: its entry there differs
@@ -277,7 +308,12 @@ pub fn lens(repo: &Path, args: LensArgs) -> Result<()> {
 
 /// The layer of `branch`'s work as now, for the workspace in `state`: its
 /// seal (its tip if it has no workspace), and where the two diverged.
-fn layer_of(store: &Store, common_dir: &Path, state: &StateDir, branch: &str) -> Result<Layer> {
+pub(super) fn layer_of(
+    store: &Store,
+    common_dir: &Path,
+    state: &StateDir,
+    branch: &str,
+) -> Result<Layer> {
     check_name(branch)?;
     let theirs = StateDir::of(common_dir, branch);
     let seal = match theirs.opened() {
@@ -295,7 +331,7 @@ fn layer_of(store: &Store, common_dir: &Path, state: &StateDir, branch: &str) ->
 /// Stores `lens` for the workspace in `state` and has the daemon show it
 /// now, if mounted; says what happened. If the daemon refuses, the layers
 /// stored before are put back, so what is stored is what shows.
-fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
+pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
     // A restack moves the base, which a switch builds the view on.
     if crate::state::restack::pending(state) {
         return Err(Refusal::Changes.error(format!(
@@ -314,7 +350,7 @@ fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<S
 }
 
 /// Has the daemon show the stored layers now, if mounted; says what happened.
-fn apply(common_dir: &Path, name: &str) -> Result<String> {
+pub(super) fn apply(common_dir: &Path, name: &str) -> Result<String> {
     let request = Request::Lens {
         branch: name.to_string(),
     };
