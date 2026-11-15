@@ -28,8 +28,12 @@ pub struct Followed {
     /// The layers that moved, with how many files changed: `B (2 files
     /// changed)`.
     pub moved: Vec<String>,
-    /// What showing them said (`show`).
+    /// What showing them said (`show`; empty if no layer moved, so nothing
+    /// was shown).
     pub applied: String,
+    /// The layers that couldn't move now (their branches): an error, only
+    /// logged.
+    pub failed: Vec<String>,
 }
 
 /// Moves the live layers of the workspace in `state` to their latest work
@@ -37,9 +41,10 @@ pub struct Followed {
 /// `lens::store_and_show`). `fresh(theirs)` says whether a person's
 /// workspace (no agent, in `theirs`) is to be snapshotted now: the hook
 /// always does, the daemon only when it was written to since. One layer that
-/// can't move now (its workspace busy, say) leaves the others to move.
-/// `None` if nothing was stored: no layer moved, or the workspace is being
-/// moved onto its base (that move goes first). Called under `lens::lock`.
+/// can't move now (its workspace busy, say) leaves the others to move, and
+/// is named in `Followed::failed`. `None` if the workspace is being moved
+/// onto its base (that move goes first: nothing done). Called under
+/// `lens::lock`.
 pub fn follow_live(
     store: &Store,
     state: &StateDir,
@@ -51,7 +56,7 @@ pub fn follow_live(
         return Ok(None);
     }
     let mut lens = Lens::read(state)?;
-    let (mut moved, mut stored) = (Vec::new(), false);
+    let (mut moved, mut stored, mut failed) = (Vec::new(), false, Vec::new());
     let local = Local::read(&state.common_dir);
     for layer in &mut lens.layers {
         if layer.updates != Updates::Live {
@@ -62,6 +67,7 @@ pub fn follow_live(
             Ok(None) => continue,
             Err(e) => {
                 log::debug!("{}: moving layer {}: {e:#}", state.branch, layer.branch);
+                failed.push(layer.branch.clone());
                 continue;
             }
         };
@@ -79,11 +85,15 @@ pub fn follow_live(
         };
         moved.push(format!("{} ({files} {what})", layer.branch));
     }
-    if !stored {
-        return Ok(None);
-    }
-    let applied = super::lens::store_and_show(state, &lens, show)?;
-    Ok(Some(Followed { moved, applied }))
+    let applied = match stored {
+        true => super::lens::store_and_show(state, &lens, show)?,
+        false => String::new(),
+    };
+    Ok(Some(Followed {
+        moved,
+        applied,
+        failed,
+    }))
 }
 
 /// Moves live `layer` to where it is now (`newest`): how many files

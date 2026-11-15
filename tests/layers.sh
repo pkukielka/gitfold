@@ -760,6 +760,54 @@ eq "the tip moved without its files (a push into it): on the base" "$base|" \
     "$(R rev-parse "$c^")|$(R ls-tree --name-only "$c" pushed.txt)"
 }
 
+# The seal of layer $2 stored for workspace $1.
+stored_seal() { awk -F'\t' -v l="layer $2" '$1 == l {print $5}' "$COMMON/gitfold/$1/lens"; }
+
+# A person's workspace with a blended file (HEAD at the layers commit): the
+# daemon moves its layers there too, sees a source's commits, and backs off
+# from a switch it can't make.
+layers_move_by_themselves_in_a_blended_workspace() {
+echo 'reg.txt merge=union' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
+R add -A; R commit -qm blendable
+R branch pe; R branch src; R branch other
+mount_fs
+P=$MNT/pe S=$MNT/src
+ls "$P" "$S" "$MNT/other" >/dev/null
+echo fromSrc >>"$S/reg.txt"; echo "s 1" >"$S/s.txt"
+"$BIN" -C "$P" layer add src >/dev/null
+eq "blended: HEAD at the layers commit" "one two fromSrc|yes" \
+    "$(paste -sd' ' "$P/reg.txt")|$(G "$P" log -1 --format=%s | grep -q '^gitfold layers' && echo yes)"
+echo "s 2" >"$S/s.txt"
+wait_for_line "$P/s.txt" "s 2" >/dev/null
+eq "a source's new work shows by itself" "s 2" "$(cat "$P/s.txt")"
+# The source shows a layer itself (its base waits) and commits: nothing
+# written through the mount, its base the same; its tip moved.
+echo o >"$MNT/other/o.txt"; "$BIN" -C "$S" layer add other >/dev/null
+G "$S" add s.txt; G "$S" commit -qm "src s"
+for _ in $(seq 100); do [ "$(R rev-parse "$(stored_seal pe src)^")" = "$(R rev-parse src)" ] && break; sleep 0.1; done
+eq "a source's commit is seen: its layer moves onto the snapshot on its tip" "$(R rev-parse src)" \
+    "$(R rev-parse "$(stored_seal pe src)^")"
+# A snapshot of the source that fails (a file it can't read): tried again
+# later, though nothing is written to it meanwhile.
+echo "u 1" >"$S/u.txt"; chmod 000 "$COMMON/gitfold/src/upper/u.txt"
+sleep 5
+chmod 644 "$COMMON/gitfold/src/upper/u.txt"
+wait_for_line "$P/u.txt" "u 1" >/dev/null
+eq "a layer that couldn't move is tried again" "u 1" "$(cat "$P/u.txt" 2>/dev/null)"
+# pe commits a change to a layer's line: it can't go onto pe alone, so no
+# switch can be made until it is amended; the daemon doesn't retry every
+# round.
+printf 'one\ntwo\n' >"$P/reg.txt"
+# (The daemon may hold the index a moment, telling git of the last move.)
+for _ in $(seq 30); do G "$P" commit -qam "pe: drops src's line" 2>/dev/null && break; sleep 0.2; done
+echo "s 3" >"$S/s.txt"
+for _ in $(seq 100); do grep -q 'pe: its layers not moved' "$LOG" && break; sleep 0.1; done
+check "the move refused" grep -q 'pe: its layers not moved' "$LOG"
+before=$(stat -c %Y.%y "$COMMON/gitfold/pe/lens")
+sleep 7
+eq "not tried again every round" "$before" "$(stat -c %Y.%y "$COMMON/gitfold/pe/lens")"
+}
+
 section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
 section "layers: several changing one file" layers_changing_one_file
@@ -772,4 +820,5 @@ section "snapshot: several merged" snapshot_of_several_merged
 section "proposals: a contract changed by consent" proposals_to_change_a_contract
 section "proposals: the layer kept as it was" proposals_keep_the_layer_as_it_was
 section "layers: on the workspace's own commits" layers_on_the_workspaces_own_commits
+section "layers: moving by themselves in a blended workspace" layers_move_by_themselves_in_a_blended_workspace
 finish

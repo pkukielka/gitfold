@@ -14,9 +14,13 @@
 //!
 //! It is checked every `CHECK_EVERY`, cheaply: a person's workspace open
 //! here is snapshotted only when it was written to (`Activity`, counted by
-//! every write through the mount) or its base moved since its last
-//! snapshot, and once it has been quiet for `SOURCE_QUIET`. A closed one is
-//! snapshotted once per mount, then when its base moves.
+//! every write through the mount), or its base or its branch moved (a
+//! commit), since its layer last moved to a snapshot of it, and once it has
+//! been quiet for `SOURCE_QUIET`. A closed one is snapshotted once per
+//! mount, then when its base or branch moves. One whose layer couldn't move
+//! is tried again after `BACK_OFF`; so is a move that failed as a whole (its
+//! switch refused: git busy, a commit made on the layers commit that can't
+//! go onto the branch), or sooner if the workspace is written to.
 //!
 //! The move is the hook's (`state::follow::follow_live`), under the layers'
 //! lock (`state::lens::try_lock`: a command holding it goes first, and the
@@ -33,6 +37,7 @@ use gix::ObjectId;
 use parking_lot::Mutex;
 
 use super::Workspace;
+use crate::git::{self, worktree};
 use crate::state::lens::Updates;
 use crate::state::{StateDir, follow, lens, seal};
 use crate::store::Store;
@@ -47,6 +52,10 @@ const CHECK_EVERY: Duration = Duration::from_secs(2);
 /// How long a person's workspace must have been quiet before a snapshot of
 /// it is taken for another's layer: a save in progress isn't half-seen.
 const SOURCE_QUIET: Duration = Duration::from_secs(1);
+
+/// How long a move that failed waits before it is tried again (see the
+/// module doc).
+const BACK_OFF: Duration = Duration::from_secs(10);
 
 /// Writes through the mount to one workspace: how many, and when the last
 /// was.
@@ -90,13 +99,23 @@ impl Activity {
     }
 }
 
+/// A person's workspace as a layer last moved to a snapshot of it: its
+/// writes (if open here), its base and its branch's tip.
+type Seen = (Option<u64>, ObjectId, Option<ObjectId>);
+
 /// What `follow_layers` keeps between checks.
 #[derive(Default)]
 pub(super) struct Following {
     checked: Option<Instant>,
-    /// Per person's workspace a layer shows: its writes (if open here) and
-    /// base when last snapshotted.
-    seen: HashMap<String, (Option<u64>, ObjectId)>,
+    /// Per person's workspace a layer shows, as the layer last moved to a
+    /// snapshot of it.
+    seen: HashMap<String, Seen>,
+    /// Per person's workspace whose layer couldn't move to a snapshot of
+    /// it: when (tried again after `BACK_OFF`).
+    source_failed: HashMap<String, Instant>,
+    /// The last move that failed as a whole: when, and this workspace's
+    /// writes then (tried again after `BACK_OFF`, or once written to).
+    refused: Option<(Instant, u64)>,
     /// The last error logged, not logged again until another.
     failed: String,
 }
@@ -136,8 +155,8 @@ impl Workspace {
             }
             Ok(None) => following.failed.clear(),
             Err(e) => {
-                // Snapshotted again next time.
-                following.seen.clear();
+                // The same again next round, most likely: after a while.
+                following.refused = Some((Instant::now(), self.activity.writes()));
                 let e = format!("{e:#}");
                 if e != following.failed {
                     log::warn!("{}: its layers not moved: {e}", self.state.branch);
@@ -147,43 +166,86 @@ impl Workspace {
         }
     }
 
+    /// Whether git is idle in it as a switch wants it (`switch`): nothing
+    /// running, HEAD on its branch, or with files blended, detached at the
+    /// layers commit.
+    fn git_quiet(&self) -> bool {
+        let state = &self.state;
+        match self.layers.read().applied.head.is_some() {
+            true => worktree::git_running(&state.common_dir, &state.admin, &state.branch).is_none(),
+            false => self.git_idle(),
+        }
+    }
+
     /// `follow_layers` once due: what moved, if anything did.
     fn follow_now(&self, store: &Store, activities: &Activities) -> anyhow::Result<Option<String>> {
         // The cheap checks first.
         if self.activity.quiet_for() < IDLE || self.lens_pending() {
             return Ok(None);
         }
+        let backing_off = (self.following.lock().refused).is_some_and(|(at, writes)| {
+            at.elapsed() < BACK_OFF && self.activity.writes() == writes
+        });
+        if backing_off {
+            return Ok(None);
+        }
         let applied = self.layers.read().applied.layers()?;
         if !(applied.layers.iter()).any(|l| l.updates == Updates::Live)
             || seal::has_agent(&self.state)
-            || !self.git_idle()
+            || !self.git_quiet()
         {
             return Ok(None);
         }
         let Some(locked) = lens::try_lock(&self.state)? else {
             return Ok(None);
         };
-        let mut seen = std::mem::take(&mut self.following.lock().seen);
+        let (seen, source_failed) = {
+            let following = self.following.lock();
+            (following.seen.clone(), following.source_failed.clone())
+        };
+        // The person's workspaces snapshotted, as they were: marked seen
+        // once their layers moved.
+        let mut tried = Vec::new();
         let fresh = |theirs: &StateDir| {
             let activity = activities.lock().get(&theirs.branch).cloned();
             if activity
                 .as_ref()
                 .is_some_and(|a| a.quiet_for() < SOURCE_QUIET)
+                || (source_failed.get(&theirs.branch)).is_some_and(|at| at.elapsed() < BACK_OFF)
             {
                 return false;
             }
             let Ok(base) = theirs.read_base() else {
                 return true;
             };
-            let now = (activity.map(|a| a.writes()), base.id);
-            seen.insert(theirs.branch.clone(), now) != Some(now)
+            let tip = git::branch_tip(&theirs.branch).ok().map(|t| t.id);
+            let now = (activity.map(|a| a.writes()), base.id, tip);
+            if seen.get(&theirs.branch) == Some(&now) {
+                return false;
+            }
+            tried.push((theirs.branch.clone(), now));
+            true
         };
         let followed =
-            follow::follow_live(store, &self.state, &locked, fresh, || self.switch(store));
-        self.following.lock().seen = seen;
-        let Some(followed) = followed?.filter(|f| !f.moved.is_empty()) else {
+            follow::follow_live(store, &self.state, &locked, fresh, || self.switch(store))?;
+        let Some(followed) = followed else {
             return Ok(None);
         };
+        {
+            let mut following = self.following.lock();
+            following.refused = None;
+            for (branch, now) in tried {
+                if followed.failed.contains(&branch) {
+                    following.source_failed.insert(branch, Instant::now());
+                } else {
+                    following.source_failed.remove(&branch);
+                    following.seen.insert(branch, now);
+                }
+            }
+        }
+        if followed.moved.is_empty() {
+            return Ok(None);
+        }
         // With what showing them noted (conflicts), as the hook says it.
         let notes = (followed.applied.lines()).filter(|l| l.starts_with("note: "));
         Ok(Some(
