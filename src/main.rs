@@ -159,8 +159,11 @@ enum Command {
     /// as in a checkout, keeping uncommitted work; one whose uncommitted
     /// work is on a path the restack changes waits, and a conflict with the
     /// parent's commits leaves the branch as it was, reported (`list` shows
-    /// both). gitfold never pushes: `stack sync` prints the force-pushes to
-    /// run. Exit codes: 3 no such branch, or not stacked, 4 a branch not
+    /// both). When the parent lands on main (or on its own parent) by a
+    /// merge, squash or rebase merge, the branch moves onto that commit with
+    /// only its own commits and is stacked there; it follows the trunk
+    /// later only by `stack sync`. gitfold never pushes: `stack sync` prints
+    /// the force-pushes to run. Exit codes: 3 no such branch, or not stacked, 4 a branch not
     /// restacked (a conflict, uncommitted work in the way, git busy, layers
     /// shown), 1 other errors, 2 usage errors.
     Stack(cli::stack::StackArgs),

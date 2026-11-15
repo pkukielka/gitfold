@@ -25,6 +25,14 @@
 //! Both workspace cases record an intent first (`state::restack`), so a
 //! crash half-way is finished or undone. Workspaces showing layers aren't
 //! restacked (v1).
+//!
+//! A parent that landed (merged, squashed or rebased onto its own parent
+//! or the trunk, `land`) has its children moved the same way onto the
+//! landing commit, with only their own commits, and stacked on its target
+//! (`reparent`). A branch on the trunk follows it only by `stack sync`.
+//!
+//! - `land`: a parent's target, whether a parent base landed there
+//!   (cached), the trunk.
 
 use std::fmt::Write as _;
 use std::path::Path;

@@ -179,6 +179,7 @@ gitfold stack on <PARENT> [-w <BRANCH>] [--base <REV>]
 gitfold stack off [-w <BRANCH>]               # a branch built on another's commits
 gitfold stack sync [<BRANCH>... | --all] [--dry-run]
                                               # restack onto the parents' new commits
+gitfold stack merged <PARENT> [--at <REV>]    # PARENT landed: its branches onto it
 gitfold stack list                            # the stacks, parents first
 gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
 gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
@@ -199,9 +200,10 @@ error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
 Five commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
-`mix` (4 conflicts), `stack sync` (3 a branch not stacked, 4 a branch not
-restacked: a conflict, uncommitted work in the way, git busy, layers shown)
-and `inbox --claude-hook rewake` (2, to wake the session).
+`mix` (4 conflicts), `stack sync` and `stack merged` (3 a branch not
+stacked, 4 a branch not restacked: a conflict, uncommitted work in the
+way, git busy, layers shown) and `inbox --claude-hook rewake` (2, to wake
+the session).
 `gitfold branch` starts the branch at HEAD unless `--from` (or `--on`) says
 otherwise.
 
@@ -725,9 +727,28 @@ gitfold stack off -w p2         # forget the parent; the history stays
   while a workspace is restacked, a `restack` intent in its state
   directory, so a crash half-way is finished or undone (one gitfold can't
   tell apart is reported, and `gitfold stack off` forgets it).
-- **Not yet.** A parent merged into main (squash merges included) isn't
-  detected. `gitfold stack on main -w p2 --base refs/gitfold-stack/p2`
-  keeps p2's base, so the next sync moves only p2's own commits onto main.
+- **A parent that landed.** When p1 is merged into main, p2 moves onto
+  main with only its own commits, and is stacked on main from then on: at
+  `stack sync` or at its agent's next turn (`p2  p1 landed on main as
+  9f8e7d (squashed or rebased); moved there with its own 2 commits and now
+  stacked on main. Its pull request's base is now main: gh pr edit p2 --base
+  main`). What counts is whether p2's parent base landed, so a fix p1 got
+  after its merge doesn't stop it. Found: a merge commit; a squash or
+  rebase merge (merging the base into a main commit touching its files
+  changes nothing), also one the maintainer tweaked, or with main editing
+  the same lines later. Not found, so not taken: a fast-forward (a parent
+  with no commits of its own looks the same), or a squash rewritten when
+  merged; `gitfold stack merged p1 [--at <REV>]` says so for every branch
+  on p1. p2 lands on the commit that merged p1, not main's tip: only its
+  own commits move, onto exactly what p1 became, and nothing else main did
+  appears in its workspace mid-task; `stack sync p2` follows main's tip
+  when wanted. A branch on the trunk isn't restacked at turn boundaries,
+  nor said to need it: following main is on request. The trunk is
+  `gitfold.trunk` if set (`git config gitfold.trunk origin/main`), else
+  the branch `origin/HEAD` names, else `main` or `master`; a parent that
+  is itself stacked lands on its own parent instead (stacked pull requests
+  merged into each other). `list` notes `parent merged: re-parent with
+  stack sync`. gitfold doesn't fetch: it sees what was fetched.
 
 ### Partial clones
 
@@ -1034,7 +1055,9 @@ mount and real git (build with `--release` first):
   files and the lens commit included (sections as above).
 - `tests/stacks.sh`: stacked branches restacked with no workspace, in an
   open workspace (by the hook and by `stack sync`) and in an unmounted
-  one; conflicts, uncommitted work in the way, manual mode, `list`'s notes.
+  one; conflicts, uncommitted work in the way, manual mode, `list`'s notes;
+  parents that landed (squash, rebase and merge commits, a tweaked squash,
+  a stacked parent's parent, an unmerged parent left alone).
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
 

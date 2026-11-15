@@ -159,7 +159,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/index_edit.rs` | editing an index git wrote (v2, v3, v4): skip-worktree bits, stat data and ids of given paths, under git's `index.lock` protocol |
 | `src/git/worktree_config.rs` | a linked worktree's own config: the excludes file for layers' new files (keeping the user's global ignore file); the push guard hooks, installed while HEAD is a lens commit |
 | `src/git/hooks/` | the push guard's `pre-push` and the shell library the worktree's hooks share (embedded) |
-| `src/git/stack.rs` | stacked branches' git side: the parent base (`refs/gitfold-stack/<branch>`, guessed by the fork point without it), restacking by plumbing, moving a branch and its stack ref in one transaction |
+| `src/git/stack.rs` | stacked branches' git side: the parent base (`refs/gitfold-stack/<branch>`, guessed by the fork point without it), restacking by plumbing, moving a branch and its stack ref in one transaction, whether a parent base landed on a target (merged, squashed, rebased) |
 | `src/git/test_repo.rs` | unit tests' scratch repository |
 | `src/git/lens.rs` | layers' git side: the view and hunk trees (blending), the lens and view commits, extracting commits made on the lens commit and moving the branch and HEAD in one transaction |
 | `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
@@ -176,7 +176,8 @@ Then, per request (`fs/workspace/`):
 | `src/cli/remove.rs` | `remove` and `prune` |
 | `src/cli/mix.rs` | `seal` and `mix` (and the `Stop` hook that seals) |
 | `src/cli/layer.rs` | `layer` and `lens` (and the hooks that move layers, restacking a stacked branch first, and deny edits of their files) |
-| `src/cli/stack.rs` | `stack` (on, off, sync, list), the restack the `UserPromptSubmit` hook does, `list`'s stack notes |
+| `src/cli/stack/mod.rs` | `stack` (on, off, sync, merged, list), the restack the `UserPromptSubmit` hook does, re-parenting the children of a parent that landed, `list`'s stack notes |
+| `src/cli/stack/land.rs` | a stacked parent's target (its own parent, or the trunk), whether a parent base landed there (cached in `.git/gitfold/.stack-landings`) |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
 | `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
@@ -199,7 +200,7 @@ Then, per request (`fs/workspace/`):
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
 | `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard) |
-| `tests/stacks.sh` | end-to-end test of stacked branches: restacks with no workspace, in an open workspace (hook and `stack sync`) and an unmounted one, conflicts, uncommitted work in the way, manual mode, `list`'s notes |
+| `tests/stacks.sh` | end-to-end test of stacked branches: restacks with no workspace, in an open workspace (hook and `stack sync`) and an unmounted one, conflicts, uncommitted work in the way, manual mode, `list`'s notes; parents that landed (squash, rebase and merge commits, a tweaked squash, a stacked parent's parent, none when unmerged) |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
@@ -1596,6 +1597,75 @@ p2's old tip, so its next restack replays exactly its own commits.
 - Replaying `merge-base(a, b)..b` and dropping commits that become empty
   (jj-style): conflicts after a squash merge (e4d).
 
+### A stacked branch's parent that landed: its base, found by content
+
+**What:** at `stack sync` and at the child's turn boundary, before a
+restack, gitfold asks whether the child's parent base B landed on the
+parent's **target**: the parent's own parent if it is stacked (stacked
+pull requests merged into each other), else the **trunk**
+(`gitfold.trunk`, else the branch `origin/HEAD` names, else `main` or
+`master`). `git::stack::landing`, cheapest first:
+
+1. B in the target's history, brought in by a merge (the first commit of
+   the target's first-parent line descending from B doesn't have B as its
+   first parent): landed at that merge.
+2. Else, if B has changes since it and the target diverged (MB): the
+   first commit S of `rev-list --ancestry-path MB..target -- <paths B
+   changed>` where `merge_trees(MB, S, B)` is S's tree, i.e. merging B
+   there changes nothing: a squash, the last commit of a rebase merge.
+
+If so, the child is **re-parented** (`cli::stack::reparent`): `B..child`
+replayed onto S like any restack (the same intent, read-tree and
+transaction, its stack ref moved to S), then `gitfoldParent` set to the
+target (config can't join the ref transaction; until it is written, the
+next sync finds the same landing and has nothing to move). Answers are
+cached per (B, target tip) in `.git/gitfold/.stack-landings`. `gitfold
+stack merged <PARENT> [--at REV]` declares a landing detection missed. A
+deleted parent (often, after a merge) still has its children's stack refs
+saying where their own commits start.
+
+**Why:**
+
+- **The base, not the parent:** a fix the parent got after its squash is
+  the parent's business; the child only needs what it sits on to have
+  landed.
+- **Content, not history, for squashes:** a squash or rebase merge makes
+  new commits. "Merging B changes nothing" caught a squash, a rebase merge,
+  a squash the maintainer tweaked elsewhere, and one after main changed
+  context lines near the parent's (the design's e4a, e5a, e5b, e5d); the
+  path-limited walk finds it after main edited the same lines again (e6),
+  and yields S. Unmerged parents said no (e4b, unit tests).
+- **Onto the landing commit S, not the target's tip** (the design's open
+  question 2): it is the smallest rewrite, only the child's own commits,
+  onto exactly what its parent became. Nothing else the trunk did since
+  lands in an agent's workspace mid-task, and a conflict can only be with
+  the parent's landed form. The pull request shows the same diff either
+  way. Following the trunk's tip is one `stack sync` later, on request.
+- **A branch on the trunk follows it on request only** (open question 3):
+  not at turn boundaries and not noted in `list`; teams differ on
+  rebasing onto main automatically, and every fetch would rewrite every
+  bottom branch.
+- **Guards:** B with nothing of its own since the merge base is trivially
+  a no-op merge, so it never counts; B on the target's first-parent line
+  is what a fresh parent (no commits yet) looks like, so a fast-forward
+  isn't taken either (`stack merged` says it). Main independently making
+  the same change counts, harmlessly: the content is there.
+- **The parent's own parent as target:** a stacked pull request is merged
+  into its base branch; looking only at the trunk would miss it until the
+  whole stack lands.
+
+**Rejected:**
+
+- Per-commit patch ids (`git cherry`, what `git rebase` skips by): they
+  don't recognise a squash of several commits (e4a).
+- The patch id of the whole range `diff MB..B` against each trunk commit:
+  missed squashes where context lines changed (e5b, e5d).
+- The forge's answer (`gh pr view`) as the source: gitfold shouldn't need a
+  forge; content settles all but a squash rewritten at merge time, which
+  `stack merged` covers.
+- Re-parenting onto the trunk's tip: pulls unrelated changes into the
+  child mid-task and widens what can conflict.
+
 ## Rejected ideas (index)
 
 | idea | why not | where |
@@ -1633,6 +1703,7 @@ p2's old tip, so its next restack replays exactly its own commits.
 | HEAD symbolic to `refs/worktree/lens` | `gc` from another worktree prunes L | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | Extraction as a plain merge (`merge=union` or not) | commits the layers' lines, or conflicts on every append | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | `git rebase --update-refs`, `update-ref` alone, `reset --keep` for restacks | skips other worktrees' branches; moves no files; loses staged state | [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout) |
+| Patch ids (`git cherry`, a whole range's) for squash merges | miss squashes of several commits, or with context changed | [landings](#a-stacked-branchs-parent-that-landed-its-base-found-by-content) |
 | The merge base instead of a stored parent base | a rewritten parent's old commits replayed | [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout) |
 
 ## Known limitations
@@ -1804,25 +1875,10 @@ compact node table and write measurements. Next:
   workspace).
 - **Stacks, next phases** (see
   [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout)).
-  *A parent that landed on trunk:* what a child needs to know is whether
-  its parent base B landed on trunk T (`origin/main`, or a configured
-  trunk), not whether the parent merged. Cheapest first: B an ancestor of
-  T (merges, fast-forwards); merging B into T's tip is a no-op
-  (`merge_trees(base = merge-base(T, B), T, B)` gives T's tree: catches
-  squash and rebase merges, also with main edited near the parent's lines);
-  the first commit S of `rev-list merge-base..T -- <paths B changed>` where
-  that merge is a no-op (main edited the parent's lines again later); a
-  forge's answer as a hint (`gh pr view`); `gitfold stack merged <PARENT>
-  [--at S]` when all else fails. Guard against a B with no changes of its
-  own (trivially a no-op). Then the child is re-parented: `B..b` replayed
-  onto S (the smallest rewrite, nothing unrelated in an agent's view
-  mid-turn; trunk's tip on request), the stack ref moved to S in the same
-  transaction, and `gitfoldParent` set to the trunk after it (config can't
-  join the transaction; a base on trunk reads as "on trunk"). Per-commit
-  patch ids (`git cherry`, what `git rebase` skips by) don't recognise a
-  squash of several commits. gitfold doesn't fetch; detection runs on what
-  was fetched. Blocked restacks would also reach the child's inbox, once
-  per parent tip. *Layers and stacks together:* a child stacked on a
+  *Landings:* a forge's answer as a hint (`gh pr view`), fast-forwards
+  told apart from fresh parents (by the target's reflog), `stack sync
+  --fetch`, and blocked restacks reaching the child's inbox, once per
+  parent tip. *Layers and stacks together:* a child stacked on a
   parent and also showing the parent's uncommitted work as a layer is the
   natural pairing, but a restack moves the base, which waits while
   lensed, so v1 refuses it. Doing both at one boundary means switching the

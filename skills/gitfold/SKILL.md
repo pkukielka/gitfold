@@ -415,6 +415,13 @@ gitfold stack list                # the stacks, with what each needs
 - Uncommitted changes to a file the restack changes: it waits, and tells
   you which; commit or stash them, and it happens at the next turn.
 - It is refused while layers are shown (`gitfold lens off` first).
+- When the parent is merged into main (a merge, squash or rebase merge),
+  your branch moves onto that merge with only its own commits and is
+  stacked on main from then on; you are told, with the `gh pr edit
+  <BRANCH> --base main` to run. It doesn't follow main's later commits by
+  itself: `gitfold stack sync` does, when you want them. A merge gitfold
+  can't recognise (a squash rewritten when merged): `gitfold stack merged
+  <PARENT>`.
 - gitfold never pushes. After a restack your branch's history is rewritten:
   push with `--force-with-lease` (`stack sync` prints the command).
 - `git config branch.<BRANCH>.gitfoldRestack manual`: only `stack sync`
