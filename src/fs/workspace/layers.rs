@@ -345,7 +345,7 @@ impl Workspace {
                 }
                 layers.base = new_base.id;
                 layers.base_tree = new_base_tree;
-                match self.drop_for_move(&mut layers, &mv.intent) {
+                match self.drop_for_move(store, &mut layers, &mv.intent) {
                     Ok(d) => dropped = d,
                     Err(e) => {
                         begun.keep();
@@ -601,6 +601,9 @@ impl Workspace {
                 continue;
             }
             match store.entry_at(layers.base_tree, path) {
+                // A file only editable layers changed is writable: git sees
+                // it whole, so what is written to it can be committed.
+                Some(Lower::File(_)) if layers.writable.contains(path) => {}
                 Some(Lower::File(_)) => {
                     plan.skipped.insert(path.clone());
                 }

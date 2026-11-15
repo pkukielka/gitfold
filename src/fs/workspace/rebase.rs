@@ -86,7 +86,7 @@ fn same(a: Option<TEntry>, b: Option<TEntry>) -> bool {
 /// What a comparison of an upper file with a stored one saw, to tell later
 /// whether the upper file changed since.
 #[derive(PartialEq)]
-struct Seen {
+pub(super) struct Seen {
     stamp: Stamp,
     len: u64,
     mode: u32,
@@ -572,7 +572,12 @@ impl Workspace {
 
     /// If the upper file at `path` has the content and mode of stored file
     /// `file_id`, what it looked like.
-    fn same_as_stored(&self, store: &Store, path: &[u8], file_id: u32) -> io::Result<Option<Seen>> {
+    pub(super) fn same_as_stored(
+        &self,
+        store: &Store,
+        path: &[u8],
+        file_id: u32,
+    ) -> io::Result<Option<Seen>> {
         let Some(rec) = store.file(file_id) else {
             return Ok(None);
         };

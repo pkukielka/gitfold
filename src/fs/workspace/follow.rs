@@ -226,8 +226,9 @@ impl Workspace {
             tried.push((theirs.branch.clone(), now));
             true
         };
-        let followed =
-            follow::follow_live(store, &self.state, &locked, fresh, || self.switch(store))?;
+        let followed = follow::follow_live(store, &self.state, &locked, &[], fresh, || {
+            self.switch(store)
+        })?;
         let Some(followed) = followed else {
             return Ok(None);
         };

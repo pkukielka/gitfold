@@ -142,7 +142,7 @@ impl Workspace {
             }
         }
         let paths = moves::index_paths(&self.state, intent)?;
-        let in_the_way = self.in_the_way(intent, &paths)?;
+        let in_the_way = self.in_the_way(store, intent, &paths)?;
         if !in_the_way.is_empty() {
             return Ok(Some(in_the_way_text(&in_the_way)));
         }
@@ -158,7 +158,7 @@ impl Workspace {
     /// workspace has work of its own: a file of its own that isn't a copy
     /// of the branch's (`moves::stale_copies`), a deletion of a file the
     /// branch has, or a file or a deleted directory above.
-    fn in_the_way(&self, intent: &Intent, paths: &[BString]) -> Result<Vec<String>> {
+    fn in_the_way(&self, store: &Store, intent: &Intent, paths: &[BString]) -> Result<Vec<String>> {
         let copies = moves::stale_copies(&self.state, intent)?;
         let from = git::resolve(&intent.from.to_string())?.tree;
         let layers = self.layers.read();
@@ -166,7 +166,7 @@ impl Workspace {
         for path in paths {
             let p: &[u8] = path.as_ref();
             let own = match std::fs::symlink_metadata(upper_path(&self.upper, p)) {
-                Ok(_) => !copies.contains(path),
+                Ok(_) => !copies.contains(path) && !self.as_shown(store, &layers, p)?,
                 Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => true,
                 Err(_) if layers.markers.whiteouts.contains(p) => {
                     git::with_repo(|repo| git::layers::lookup(repo, from, path.as_ref()))?.is_some()
@@ -186,11 +186,21 @@ impl Workspace {
     /// dropped. The paths dropped.
     pub(super) fn drop_for_move(
         &self,
+        store: &Store,
         layers: &mut Layers,
         intent: &Intent,
     ) -> Result<Vec<Vec<u8>>> {
         let mut dropped = Vec::new();
-        for path in moves::stale_copies(&self.state, intent)? {
+        let mut copies = moves::stale_copies(&self.state, intent)?;
+        // And files the same as what shows below them (written back as
+        // they were, under the view as it is before the move): no work of
+        // its own either.
+        for path in moves::index_paths(&self.state, intent)? {
+            if !copies.contains(&path) && self.as_shown(store, layers, path.as_ref())? {
+                copies.push(path);
+            }
+        }
+        for path in copies {
             let p: &[u8] = path.as_ref();
             match std::fs::remove_file(upper_path(&self.upper, p)) {
                 Err(e) if !crate::fsutil::not_found(&e) => return Err(e.into()),
@@ -212,6 +222,17 @@ impl Workspace {
             layers.markers.sync()?;
         }
         Ok(dropped)
+    }
+}
+
+impl Workspace {
+    /// Whether upper file `path` is the same as what shows below it (the
+    /// view's file): no work of its own.
+    fn as_shown(&self, store: &Store, layers: &Layers, path: &[u8]) -> Result<bool> {
+        Ok(match store.entry_at(layers.view_tree, path) {
+            Some(crate::store::Lower::File(id)) => self.same_as_stored(store, path, id)?.is_some(),
+            _ => false,
+        })
     }
 }
 

@@ -42,13 +42,15 @@ pub struct Followed {
 /// workspace (no agent, in `theirs`) is to be snapshotted now: the hook
 /// always does, the daemon only when it was written to since. One layer that
 /// can't move now (its workspace busy, say) leaves the others to move, and
-/// is named in `Followed::failed`. `None` if the workspace is being moved
-/// onto its base (that move goes first: nothing done). Called under
-/// `layers::lock`.
+/// is named in `Followed::failed`; those named in `hold` stay (editable
+/// layers whose new commits the branch couldn't move onto: they'd show as
+/// conflicts). `None` if the workspace's branch is being moved (that move
+/// goes first: nothing done). Called under `layers::lock`.
 pub fn follow_live(
     store: &Store,
     state: &StateDir,
     _locked: &LayersLock,
+    hold: &[String],
     mut fresh: impl FnMut(&StateDir) -> bool,
     show: impl FnOnce() -> Result<String>,
 ) -> Result<Option<Followed>> {
@@ -59,7 +61,7 @@ pub fn follow_live(
     let (mut moved, mut stored, mut failed) = (Vec::new(), false, Vec::new());
     let local = Local::read(&state.common_dir);
     for layer in &mut layers.layers {
-        if layer.updates != Updates::Live {
+        if layer.updates != Updates::Live || hold.contains(&layer.branch) {
             continue;
         }
         let files = match follow(store, &state.common_dir, &local, layer, &mut fresh) {

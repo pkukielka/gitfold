@@ -595,11 +595,22 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let common_dir = git::init(&repo)?;
         let state = StateDir::of(&common_dir, &name);
         // Its editable layers' new commits first, at the same boundary.
-        if Layers::read(&state)?.editable().next().is_some() {
+        let editable = Layers::read(&state)?.editable_names();
+        let mut hold = Vec::new();
+        if !editable.is_empty() {
             match moves::hook_context(&common_dir, &name) {
-                Ok(Some(context)) => println!("{context}"),
-                Ok(None) => {}
-                Err(e) => log::debug!("gitfold layer --claude-hook: moving {name}: {e:#}"),
+                Ok((context, done)) => {
+                    if let Some(context) = context {
+                        println!("{context}");
+                    }
+                    if !done {
+                        hold = editable;
+                    }
+                }
+                Err(e) => {
+                    log::debug!("gitfold layer --claude-hook: moving {name}: {e:#}");
+                    hold = editable;
+                }
             }
         }
         if state.opened()
@@ -617,6 +628,7 @@ pub fn layer_hook(event: &str) -> Result<()> {
             &Store::default(),
             &state,
             &lock,
+            &hold,
             |_| true,
             || apply(&common_dir, &name),
         )?;

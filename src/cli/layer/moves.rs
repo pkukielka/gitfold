@@ -274,11 +274,23 @@ pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
         Ok(onto) => onto,
         Err(paths) => return Ok(Outcome::Conflicting(paths)),
     };
-    // Where its own commits start: its own ref, else where it and what it
-    // moves onto met.
+    // Where its own commits start: its own ref, else where it left main, or
+    // where it and what it moves onto met, whichever is newer (a branch on
+    // main has main's commits, not its own).
     let base = match own {
         Some(own) if stack::is_ancestor(common_dir, own, tip)? => own,
-        _ => git::merge_base(onto, tip)?,
+        _ => {
+            let met = git::merge_base(onto, tip)?;
+            let local = Local::read(common_dir);
+            let main = land::main_name(common_dir, &local);
+            match land::trunk_tip(common_dir, &local, &main)? {
+                Some((_, main_tip)) => match git::merge_base_if_any(main_tip, tip)? {
+                    Some(left) if stack::is_ancestor(common_dir, met, left)? => left,
+                    _ => met,
+                },
+                None => met,
+            }
+        }
     };
     let store_next = |plan: &Plan| -> Result<()> {
         if let Some(next) = &plan.next {
@@ -713,8 +725,10 @@ pub fn follow(common_dir: &Path, name: &str) -> Result<(Outcome, Vec<Landed>, Ve
 /// layers: at the start of a turn, the session's workspace follows them
 /// (`follow`), and what happened is said as context. Nothing when nothing
 /// happened, or when what keeps it from happening was told before (a block
-/// per commit, anything else while it says the same: `move-told`).
-pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
+/// per commit, anything else while it says the same: `move-told`). With
+/// whether it is where its editable layers are (else their work stays as
+/// it shows: their new commits would show as conflicts).
+pub fn hook_context(common_dir: &Path, name: &str) -> Result<(Option<String>, bool)> {
     let state = StateDir::of(common_dir, name);
     let _lock = layers::lock(&state)?;
     let before = stack::rev(common_dir, &stack::own_ref(name))?;
@@ -795,7 +809,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
             out.push(text);
         }
     }
-    Ok((!out.is_empty()).then(|| out.join("\n")))
+    Ok(((!out.is_empty()).then(|| out.join("\n")), outcome.done()))
 }
 
 /// The paths a move changed in the session's workspace, for the hook.
