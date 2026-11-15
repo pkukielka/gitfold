@@ -1,5 +1,5 @@
-//! `gitfold branch` (a fork with `-w`), and a workspace's settings:
-//! `gitfold prewarm`, `gitfold track-reads`.
+//! `gitfold branch` (a fork with `-w`, a stacked branch with `--on`), and a
+//! workspace's settings: `gitfold prewarm`, `gitfold track-reads`.
 
 use std::path::Path;
 
@@ -23,6 +23,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         from,
         prewarm,
         track_reads,
+        on,
         claude_hook: _,
     } = args;
     let name = name.as_deref().context("name the branch")?;
@@ -53,6 +54,14 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         })?;
         set_branch_settings(repo, name, prewarm, track_reads)?;
         println!("{done}; open it as <mountpoint>/{name}");
+        return Ok(());
+    }
+    if let Some(parent) = on {
+        git::require_branch(&parent)?;
+        create(repo, name, Some(&parent))?;
+        set_branch_settings(repo, name, prewarm, track_reads)?;
+        super::stack::declare(&common_dir, name, &parent, None)?;
+        println!("created branch {name} on {parent}; open it as <mountpoint>/{name}");
         return Ok(());
     }
     create(repo, name, from.as_deref())?;
@@ -180,6 +189,10 @@ pub struct BranchArgs {
     /// --track-reads says (in git config, branch.<BRANCH>.gitfoldTrackReads).
     #[arg(long, value_name = "on|off", value_parser = BoolishValueParser::new())]
     pub track_reads: Option<bool>,
+    /// Start at PARENT's tip and stack the branch on it (`gitfold stack on`):
+    /// its commits then follow PARENT's new ones.
+    #[arg(long, value_name = "PARENT", conflicts_with_all = ["from", "with_changes"])]
+    pub on: Option<String>,
     /// As Claude Code's `WorktreeCreate` hook (`worktree-create`): its
     /// worktree a workspace of branch `worktree-<name>`, the path printed; a
     /// git worktree in a repository not used with gitfold. See

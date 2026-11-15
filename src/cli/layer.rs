@@ -24,7 +24,8 @@ pub struct LayerArgs {
     pub op: Option<LayerOp>,
     /// As Claude Code's `UserPromptSubmit` hook (`user-prompt-submit`): move
     /// the layers of the workspace the session is in to their workspaces'
-    /// newest seals (made when their sessions stopped), and say what changed.
+    /// newest seals (made when their sessions stopped), restack it onto its
+    /// parent's new commits if stacked (`gitfold stack`), and say what changed.
     /// As `PreToolUse` on Edit, Write, MultiEdit and NotebookEdit
     /// (`pre-tool-use`): deny writing a layer's file, saying why.
     #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit", "pre-tool-use"])]
@@ -119,8 +120,10 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
 /// the layers of the workspace the session is in move to their workspaces'
 /// newest seals (`gitfold seal --claude-hook stop` makes one when a session
 /// stops), so what shows changes only between turns, never half-way through
-/// another's. What changed is printed, which becomes context. Does nothing
-/// outside a workspace with layers; errors are only logged.
+/// another's; a stacked branch is restacked onto its parent's new commits
+/// first (`stack::hook_context`). What changed is printed, which becomes
+/// context. Does nothing outside a workspace with layers or a parent; errors
+/// are only logged.
 pub fn layer_hook(event: &str) -> Result<()> {
     if event == "pre-tool-use" {
         return deny_hook();
@@ -129,6 +132,13 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let repo = super::repo()?;
         let name = super::branch_or_current(None, &repo)?;
         let common_dir = git::init(&repo)?;
+        // A stacked branch first follows its parent's new commits, at the
+        // same boundary (see `stack`).
+        match super::stack::hook_context(&common_dir, &name) {
+            Ok(Some(context)) => println!("{context}"),
+            Ok(None) => {}
+            Err(e) => log::debug!("gitfold layer --claude-hook: restacking {name}: {e:#}"),
+        }
         let state = StateDir::of(&common_dir, &name);
         let mut lens = Lens::read(&state)?;
         let mut moved = Vec::new();

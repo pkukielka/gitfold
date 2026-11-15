@@ -101,7 +101,7 @@ eq "a file written outside the mount is there at once" ext "$(cat "$TK/.task/ext
 eq "git doesn't see it" "" "$(git -C "$TK" status --porcelain 2>&1)"
 eq "nor changes" "" "$("$BIN" -C "$REPO" changes tk 2>&1)"
 eq "excluded once, for every worktree" 1 "$(grep -cx '/.task' "$COMMON/info/exclude")"
-eq "list shows its status" "writing the parser" "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "tk" { $1=$2=$3=$4=$5=$6=""; sub(/^ +/, ""); print }')"
+eq "list shows its status" "writing the parser" "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "tk" { $1=$2=$3=$4=$5=$6=$7=""; sub(/^ +/, ""); print }')"
 git -C "$TK" clean -qfdx >/dev/null 2>&1
 eq "git clean -fdx leaves it" "spec yes" "$(cat "$TK/.task/spec.md" 2>&1) $(test -L "$TK/.task" && echo yes)"
 check "the link can't be removed" fails rm "$TK/.task"

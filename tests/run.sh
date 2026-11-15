@@ -8,7 +8,7 @@
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
 
-all=(manage status mount agents rebase promisor layers)
+all=(manage status mount agents rebase promisor layers stacks)
 named=$#
 [ $# -gt 0 ] || set -- "${all[@]}"
 suites=()
