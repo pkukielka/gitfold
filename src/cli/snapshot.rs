@@ -14,7 +14,7 @@ use crate::mount_table;
 use crate::refusal::Refusal;
 use crate::state::StateDir;
 use crate::state::retire::check_name;
-use crate::state::seal::{self, By, IDENTITY};
+use crate::state::snapshot::{self, By, IDENTITY};
 use crate::store::Store;
 
 #[derive(Args)]
@@ -42,7 +42,7 @@ pub struct SnapshotArgs {
 /// `gitfold snapshot --claude-hook stop`: when a session stops, seals its
 /// workspace if another workspace shows it as a layer, so layers move to the
 /// end of a turn, not into the middle of one (`gitfold layer --claude-hook`);
-/// either way records that the workspace has an agent (`seal::Driven`).
+/// either way records that the workspace has an agent (`snapshot::Driven`).
 /// Errors are only logged.
 pub fn snapshot_hook() -> Result<()> {
     if let Err(e) = (|| -> Result<()> {
@@ -53,10 +53,10 @@ pub fn snapshot_hook() -> Result<()> {
         if !state.opened() {
             return Ok(());
         }
-        if !crate::state::lens::shown_anywhere(&common_dir, &name) {
-            return seal::stopped(&state);
+        if !crate::state::layers::shown_anywhere(&common_dir, &name) {
+            return snapshot::stopped(&state);
         }
-        seal::seal(&Store::default(), &state, By::StopHook)?;
+        snapshot::seal(&Store::default(), &state, By::StopHook)?;
         Ok(())
     })() {
         log::debug!("gitfold snapshot --claude-hook: {e:#}");
@@ -94,7 +94,7 @@ pub fn snapshot(repo: &Path, args: SnapshotArgs) -> Result<()> {
             let alone = (what.iter()).map(|w| format!("`gitfold snapshot {w}{flag}`"));
             Refusal::Changes.error(format!(
                 "{e:#}\n{} show each alone",
-                crate::state::lens::and_list(alone)
+                crate::state::layers::and_list(alone)
             ))
         })?;
     }
@@ -123,7 +123,7 @@ fn work_of(
     if !commits && check_name(what).is_ok() && !what.starts_with('@') {
         let state = StateDir::of(common_dir, what);
         if state.opened() {
-            let s = seal::seal(store, &state, By::Other)?;
+            let s = snapshot::seal(store, &state, By::Other)?;
             return Ok((what.to_string(), s.commit, s.same));
         }
     }

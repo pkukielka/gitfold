@@ -9,7 +9,7 @@
 //! A blended file (`merge=union`) is sealed with the workspace's own lines
 //! only, against the base; where it added lines among other layers' lines,
 //! the seal also records what it saw there and made of it, as its second
-//! parent (`git::lens::Record`), so the workspaces showing it put those
+//! parent (`git::layers::Record`), so the workspaces showing it put those
 //! lines in the same place among the others'.
 //!
 //! Seals are made with a fixed identity and date, so the same work on the same
@@ -116,7 +116,7 @@ fn parent(state: &StateDir, base: &git::Commit, tree: ObjectId) -> ObjectId {
     let Ok(tip) = git::branch_tip(&state.branch) else {
         return base.id;
     };
-    if tip.id == base.id || super::restack::pending(state) {
+    if tip.id == base.id || super::moves::pending(state) {
         return base.id;
     }
     let after_base =
@@ -135,9 +135,9 @@ fn parent(state: &StateDir, base: &git::Commit, tree: ObjectId) -> ObjectId {
 fn has_tip(state: &StateDir, base: ObjectId, tip: &git::Commit, tree: ObjectId) -> Result<bool> {
     let mut index = None;
     git::with_repo(|repo| {
-        for (path, change) in git::lens::delta(repo, base, tip.tree)? {
+        for (path, change) in git::layers::delta(repo, base, tip.tree)? {
             let (path, theirs) = (BStr::new(&path), change.item());
-            let ours = git::lens::lookup(repo, tree, path)?;
+            let ours = git::layers::lookup(repo, tree, path)?;
             if ours == theirs {
                 continue;
             }
@@ -153,8 +153,8 @@ fn has_tip(state: &StateDir, base: ObjectId, tip: &git::Commit, tree: ObjectId) 
             if staged == theirs.map(|t| t.oid) {
                 continue;
             }
-            let ancestor = git::lens::lookup(repo, base, path)?;
-            if !git::lens::has_change(repo, ancestor, ours, theirs)? {
+            let ancestor = git::layers::lookup(repo, base, path)?;
+            if !git::layers::has_change(repo, ancestor, ours, theirs)? {
                 return Ok(false);
             }
         }
@@ -212,7 +212,7 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
     note()?;
     // The oldest go, unless a workspace's layers name them, or a live layer
     // of this one would follow it.
-    let mut named = super::lens::named_seals(&state.common_dir);
+    let mut named = super::layers::named_seals(&state.common_dir);
     if let Driven::Agent(Some(followed)) = driven(state) {
         named.insert(followed);
     }
@@ -313,7 +313,7 @@ pub fn list(common_dir: &std::path::Path, id: &str) -> Result<Vec<(u64, ObjectId
 }
 
 /// A blended file the workspace added lines to among other layers' lines:
-/// the blend it saw and its own copy (`git::lens::Record`).
+/// the blend it saw and its own copy (`git::layers::Record`).
 struct Seen {
     path: Vec<u8>,
     kind: EntryKind,
@@ -392,28 +392,28 @@ fn tree_of(
     })
 }
 
-/// The record (`git::lens::Record`) of a seal of `branch` on `base` with
+/// The record (`git::layers::Record`) of a seal of `branch` on `base` with
 /// tree `tree`, of the blended files `seen`: its commit.
 fn seen_record(branch: &str, base: ObjectId, tree: ObjectId, seen: &[Seen]) -> Result<ObjectId> {
     git::with_repo(|repo| {
         let empty = repo.write_object(gix::objs::Tree::empty())?.detach();
         let side = |pick: fn(&Seen) -> ObjectId| {
             let items = seen.iter().map(|s| {
-                let item = git::lens::Item {
+                let item = git::layers::Item {
                     kind: s.kind,
                     oid: pick(s),
                 };
-                (BStr::new(&s.path), git::lens::Change::Set(item))
+                (BStr::new(&s.path), git::layers::Change::Set(item))
             });
-            git::lens::edit_tree(repo, empty, items)
+            git::layers::edit_tree(repo, empty, items)
         };
         let (saw, made) = (side(|s| s.seen)?, side(|s| s.made)?);
-        git::lens::write_record(repo, branch, base, tree, saw, made)
+        git::layers::write_record(repo, branch, base, tree, saw, made)
     })
 }
 
 /// A commit of `tree` with parent `base` (and `record`, see
-/// `git::lens::Record`), made with `IDENTITY`.
+/// `git::layers::Record`), made with `IDENTITY`.
 fn commit(
     common_dir: &std::path::Path,
     tree: &ObjectId,
@@ -446,21 +446,21 @@ fn commit(
 /// Per blended path, the blend and the base's version (`blends`).
 type Blends = HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
 
-/// For each file the workspace in `state` shows blended (`state::lens`),
+/// For each file the workspace in `state` shows blended (`state::layers`),
 /// the blend and the base's version: a seal of it holds the upper copy with
 /// the change from the blend back to the base's version merged in (only its
 /// own lines), so a workspace showing it as a layer gets the other layers'
 /// work from them, not through it.
 fn blends(state: &StateDir, base: &git::Commit) -> Result<Blends> {
-    let applied = super::lens::Applied::read(state)?;
+    let applied = super::layers::Applied::read(state)?;
     if applied.blended.is_empty() {
         return Ok(HashMap::new());
     }
-    let Some(view) = super::lens::view(&state.common_dir, &base.id, &applied.layers()?)? else {
+    let Some(view) = super::layers::view(&state.common_dir, &base.id, &applied.layers()?)? else {
         return Ok(HashMap::new());
     };
     let content = |tree: ObjectId, path: &[u8]| -> Result<Vec<u8>> {
-        let item = git::with_repo(|repo| git::lens::lookup(repo, tree, BStr::new(path)))?;
+        let item = git::with_repo(|repo| git::layers::lookup(repo, tree, BStr::new(path)))?;
         item.map_or(Ok(Vec::new()), |i| git::read_blob(i.oid))
     };
     let mut out = HashMap::new();
@@ -480,6 +480,6 @@ fn own_lines(tmp: &std::path::Path, upper: &[u8], blend: &[u8], before: &[u8]) -
     if let Some(own) = git::merge_file(tmp, blend, upper, before)? {
         return Ok(own);
     }
-    let theirs = git::lens::added_lines(before, blend);
-    Ok(git::lens::without_lines(upper, &theirs))
+    let theirs = git::layers::added_lines(before, blend);
+    Ok(git::layers::without_lines(upper, &theirs))
 }

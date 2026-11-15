@@ -11,7 +11,7 @@
 //! conflict with the base's.
 //!
 //! A live layer follows its branch (`cli::layer`): a workspace's work as
-//! `seal::Driven` says (an agent's at the end of its last turn), or the
+//! `snapshot::Driven` says (an agent's at the end of its last turn), or the
 //! branch's tip with `--commits` or without a workspace. A frozen one stays
 //! as taken, and a revision (a tag, a commit) is fixed.
 //!
@@ -289,7 +289,7 @@ impl Lens {
     /// The subject of the layers commit of workspace `branch` showing them.
     pub fn subject(&self, branch: &str) -> String {
         let names: Vec<&str> = self.layers.iter().map(|l| l.branch.as_str()).collect();
-        git::lens::lens_subject(branch, &names)
+        git::layers::lens_subject(branch, &names)
     }
 
     pub fn find(&self, branch: &str) -> Option<usize> {
@@ -412,7 +412,7 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
     }
     let stack = (lens.layers.iter())
         .map(|l| {
-            Ok(git::lens::Pin {
+            Ok(git::layers::Pin {
                 name: l.branch.clone(),
                 seal: l.seal,
                 merge_base: merge_base(base, l)?,
@@ -427,7 +427,7 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
             .map(|(path, _)| path)
             .collect())
     };
-    let view = git::with_repo(|repo| git::lens::build_view(repo, *base, &stack, &hunk_paths))?;
+    let view = git::with_repo(|repo| git::layers::build_view(repo, *base, &stack, &hunk_paths))?;
     let name = |ix: usize| lens.layers[ix].branch.clone();
     let mut conflicts = Vec::new();
     let mut notes = Vec::new();
@@ -435,16 +435,16 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
     let hunk_layers = view.hunk_layers();
     for note in view.notes {
         notes.push(match note {
-            git::lens::Note::NotBlended { layer, path } => format!(
+            git::layers::Note::NotBlended { layer, path } => format!(
                 "{path}: {}'s change conflicts with what is below it, so it isn't blended in",
                 name(layer)
             ),
-            git::lens::Note::PlacedByBase { layer, path } => {
+            git::layers::Note::PlacedByBase { layer, path } => {
                 let note = placed_by_base(&name(layer), &path);
                 warnings.push(format!("Note: {note}"));
                 note
             }
-            git::lens::Note::Among {
+            git::layers::Note::Among {
                 layer,
                 path,
                 others,
@@ -457,7 +457,7 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
                 warnings.push(format!("Warning: {note}"));
                 note
             }
-            git::lens::Note::Conflict {
+            git::layers::Note::Conflict {
                 layers,
                 base,
                 path,
@@ -511,7 +511,7 @@ pub fn own_among(
     view: &View,
 ) -> Result<Vec<String>> {
     let content = |tree: ObjectId, path: &[u8]| -> Result<Vec<u8>> {
-        let item = git::with_repo(|repo| git::lens::lookup(repo, tree, path.into()))?;
+        let item = git::with_repo(|repo| git::layers::lookup(repo, tree, path.into()))?;
         item.map_or(Ok(Vec::new()), |i| git::read_blob(i.oid))
     };
     let mut out = Vec::new();
@@ -522,7 +522,7 @@ pub fn own_among(
             continue;
         };
         let (at_base, seen) = (content(base.tree, path)?, content(view.hunk_tree, path)?);
-        let around = git::lens::among_others(&at_base, &seen, &made);
+        let around = git::layers::among_others(&at_base, &seen, &made);
         if around.is_empty() {
             continue;
         }
@@ -531,8 +531,8 @@ pub fn own_among(
             let layer = &lens.layers[ix];
             let theirs = content(git::resolve(&layer.seal.to_string())?.tree, path)?;
             let mb = git::resolve(&merge_base(&base.id, layer)?.to_string())?;
-            let added = git::lens::added_lines(&content(mb.tree, path)?, &theirs);
-            let key = git::lens::key;
+            let added = git::layers::added_lines(&content(mb.tree, path)?, &theirs);
+            let key = git::layers::key;
             if (added.iter()).any(|l| around.iter().any(|a| key(a) == key(l))) {
                 whose.push(layer.branch.clone());
             }
@@ -548,7 +548,7 @@ pub fn own_among(
 }
 
 /// The note for a layer `layer` whose lines in blended file `path` are
-/// placed by the base's lines (`git::lens::Note::PlacedByBase`).
+/// placed by the base's lines (`git::layers::Note::PlacedByBase`).
 fn placed_by_base(layer: &str, path: &BString) -> String {
     format!(
         "{layer}'s lines in {path} are placed by your base's lines: the lines {layer} added them \

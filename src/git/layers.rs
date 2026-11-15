@@ -786,7 +786,7 @@ pub fn write_record(
     let me = gix::actor::Signature {
         name: "gitfold".into(),
         email: "gitfold@localhost".into(),
-        // 2020-01-01T00:00:00Z, as seals (`state::seal::IDENTITY`).
+        // 2020-01-01T00:00:00Z, as seals (`state::snapshot::IDENTITY`).
         time: gix::date::Time {
             seconds: 1_577_836_800,
             offset: 0,
@@ -1027,7 +1027,7 @@ fn merge3(base: &[u8], ours: &[u8], theirs: &[u8], conflict: text::Conflict) -> 
 
 // The line-set rule's helpers, shared by blending, extraction, carrying own
 // lines over a switch (`fs::workspace::lens`) and sealing them
-// (`state::seal`). Lines are compared whole but for the `\n`: two registry
+// (`state::snapshot`). Lines are compared whole but for the `\n`: two registry
 // lines differing in a `\r` are two lines.
 
 /// The lines of `data`, each with its newline (the last may have none).

@@ -8,7 +8,7 @@
 //! Restacking b onto a's tip A copies each commit C of `B..b`, oldest first,
 //! onto the copy of its parent: `merge_trees(base = C^, ours = the copy so
 //! far, theirs = C)`, with C's author, committer and message
-//! (`lens::copy_commit`). These are the commits `git rebase --onto A B b`
+//! (`layers::copy_commit`). These are the commits `git rebase --onto A B b`
 //! makes when it keeps the committer. A commit that becomes empty (a already
 //! made the same change) is dropped, as `git rebase` drops it; a merge in
 //! `B..b` is refused. Nothing moves here but in `move_refs`: b and its stack
@@ -22,7 +22,7 @@ use gix::ObjectId;
 use gix::bstr::BString;
 
 use super::cmd;
-use super::lens::{commit_tree, copy_commit, merge_trees};
+use super::layers::{commit_tree, copy_commit, merge_trees};
 
 /// The stack refs: `refs/gitfold-stack/<branch>` keeps a stacked branch's
 /// parent base.
@@ -317,7 +317,7 @@ pub fn landing(
         Err(_) => return Ok(None),
     };
     let (mb_tree, base_tree) = (commit_tree(repo, mb)?, commit_tree(repo, base)?);
-    let paths: Vec<String> = super::lens::delta(repo, mb_tree, base_tree)?
+    let paths: Vec<String> = super::layers::delta(repo, mb_tree, base_tree)?
         .into_iter()
         .map(|(path, _)| path.to_string())
         .collect();
@@ -330,7 +330,7 @@ pub fn landing(
     let walked = commits.len().min(MAX_WALK);
     if walked < commits.len() {
         let local = crate::settings::Local::read(common_dir);
-        let main = crate::cli::stack::land::main_name(common_dir, &local);
+        let main = crate::cli::layer::land::main_name(common_dir, &local);
         log::warn!(
             "checking whether {base} landed: only the newest {walked} of {} commits since \
              {from} touching its files; `gitfold layer base {main}` builds it on {main} if it \

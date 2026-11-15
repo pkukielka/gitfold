@@ -19,7 +19,7 @@ pub mod attr;
 pub mod cmd;
 pub mod index;
 pub mod index_edit;
-pub mod lens;
+pub mod layers;
 pub mod promisor;
 pub mod stack;
 #[cfg(test)]
@@ -281,7 +281,7 @@ pub fn merge_base(a: ObjectId, b: ObjectId) -> Result<ObjectId> {
 
 /// `merge_base`, or `None` if `a` and `b` share no history (git exits 1
 /// and prints nothing then). Remembered: commits never change, and views
-/// of layers ask for the same pairs again and again (`state::lens::view`).
+/// of layers ask for the same pairs again and again (`state::layers::view`).
 pub fn merge_base_if_any(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
     type Known = HashMap<(ObjectId, ObjectId), Option<ObjectId>>;
     static KNOWN: OnceLock<Mutex<Known>> = OnceLock::new();

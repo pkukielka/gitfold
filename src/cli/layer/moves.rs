@@ -31,7 +31,7 @@
 //!   repository lock: its index, its base (`fs::workspace::restack_closed`),
 //!   the refs.
 //!
-//! Both workspace cases record an intent first (`state::restack`), so a
+//! Both workspace cases record an intent first (`state::moves`), so a
 //! crash half-way is finished or undone. A workspace showing layers is moved
 //! with them taken off and put back after, over its new commits (`layers`).
 //!
@@ -57,16 +57,16 @@ use anyhow::{Result, anyhow, ensure};
 use gix::ObjectId;
 use gix::bstr::BString;
 
-use super::plural;
+use super::land;
+use crate::cli::plural;
 use crate::git::{self, stack};
 use crate::refusal::Refusal;
 use crate::settings::{self, Local};
 use crate::state::StateDir;
-use crate::state::restack::{self, Intent, Mode, Recovery};
+use crate::state::moves::{self, Intent, Mode, Recovery};
 use crate::state::retire::{check_name, index_matches_head};
 use crate::store::Store;
 
-pub(crate) mod land;
 mod layers;
 
 /// How many paths a line of output names before "and N more".
@@ -90,18 +90,20 @@ pub fn base(
     all: bool,
 ) -> Result<()> {
     if all && (frozen || workspace.is_some()) {
-        super::usage("--all updates every branch with a base: it takes neither --frozen nor -w");
+        crate::cli::usage(
+            "--all updates every branch with a base: it takes neither --frozen nor -w",
+        );
     }
     let common_dir = git::init(repo)?;
     if all {
         return base_all(&common_dir, yes);
     }
-    let name = super::workspace_or_current(workspace, repo)?;
+    let name = crate::cli::workspace_or_current(workspace, repo)?;
     check_name(&name)?;
     check_name(target)?;
     git::require_branch(&name)?;
     if name == target {
-        super::usage(format!("{name} can't be built on itself"));
+        crate::cli::usage(format!("{name} can't be built on itself"));
     }
     // First, so what is said is about where it is now: a move interrupted
     // finished, its workspace's layers back.
@@ -389,8 +391,8 @@ fn unstack(common_dir: &Path, name: &str, trunk: &str, yes: bool) -> Result<()> 
     // An interrupted move nobody can finish: the way out, as it was.
     let state = StateDir::of(common_dir, name);
     if state.opened()
-        && matches!(restack::recover(&state), Ok(Recovery::Stuck(_)) | Err(_))
-        && restack::forget(&state)?
+        && matches!(moves::recover(&state), Ok(Recovery::Stuck(_)) | Err(_))
+        && moves::forget(&state)?
     {
         forget_base(common_dir, name)?;
         println!("{off}; nothing moved, and an interrupted move's intent is forgotten");
@@ -957,9 +959,9 @@ fn finish_landing(common_dir: &Path, name: &str) -> Result<()> {
         return settings::set_landing(common_dir, name, None);
     };
     let state = StateDir::of(common_dir, name);
-    if restack::pending(&state) && state.opened() {
+    if moves::pending(&state) && state.opened() {
         // Ours, or another process's running: then left to it.
-        if let Err(e) = restack::recover(&state) {
+        if let Err(e) = moves::recover(&state) {
             log::warn!("{name}: finishing an interrupted move: {e:#}");
         }
     }
@@ -976,7 +978,7 @@ fn finish_landing(common_dir: &Path, name: &str) -> Result<()> {
             settings::set_restack_manual(common_dir, name, follows == "frozen")?;
         }
         return Ok(());
-    } else if restack::pending(&state) {
+    } else if moves::pending(&state) {
         return Ok(());
     }
     settings::set_landing(common_dir, name, None)
@@ -1170,9 +1172,9 @@ fn on_parent(
 }
 
 /// An interrupted restack of the workspace in `state` finished or undone
-/// first (`state::restack`); why not, if it can't be.
+/// first (`state::moves`); why not, if it can't be.
 fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
-    Ok(match restack::recover(state)? {
+    Ok(match moves::recover(state)? {
         Recovery::Nothing | Recovery::Finished | Recovery::Undone => Ok(()),
         Recovery::InProgress => Err("another move of it is running".into()),
         Recovery::Stuck(why) => Err(why),
@@ -1234,7 +1236,7 @@ fn apply_open(state: &StateDir, dir: &Path, intent: &Intent) -> Result<Moved> {
     if let Some(why) = state.git_busy() {
         return Ok(Moved::Waits(format!("{why} in its workspace")));
     }
-    let paths = restack::changed_paths(intent)?;
+    let paths = moves::changed_paths(intent)?;
     let held = intent.begin(state)?;
     if let Some(moved) = moved_meanwhile(state, intent)? {
         return Ok(moved);
@@ -1310,13 +1312,13 @@ fn apply_closed(state: &StateDir, intent: &Intent) -> Result<Moved> {
         git::resolve(&intent.from.to_string())?,
         git::resolve(&intent.to.to_string())?,
     );
-    let paths = restack::changed_paths(intent)?;
+    let paths = moves::changed_paths(intent)?;
     let held = intent.begin(state)?;
     if let Some(moved) = moved_meanwhile(state, intent)? {
         return Ok(moved);
     }
     let moved = crate::fs::workspace::restack_closed(&store, state.clone(), &from, &to, || {
-        restack::move_index(state, intent, false)
+        moves::move_index(state, intent, false)
     });
     let moved = match moved {
         Ok(moved) => moved,

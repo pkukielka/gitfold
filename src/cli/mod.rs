@@ -28,7 +28,6 @@ pub mod overlaps;
 pub mod proposal;
 pub mod remove;
 pub mod snapshot;
-pub mod stack;
 
 use std::path::{Path, PathBuf};
 

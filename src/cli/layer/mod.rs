@@ -1,5 +1,5 @@
 //! `gitfold layer`: other branches' work shown in a workspace, read-only,
-//! over its base (see `state::lens`), and the base itself (`layer base`,
+//! over its base (see `state::layers`), and the base itself (`layer base`,
 //! see `stack`). The layers are stored with the workspace; while mounted,
 //! the daemon shows them at once.
 
@@ -15,10 +15,13 @@ use crate::git;
 use crate::refusal::Refusal;
 use crate::settings::Local;
 use crate::state::StateDir;
-use crate::state::lens::{Layer, Lens, Shows, Updates, View, and_list};
+use crate::state::layers::{Layer, Lens, Shows, Updates, View, and_list};
 use crate::state::retire::check_name;
-use crate::state::{follow, seal};
+use crate::state::{follow, snapshot};
 use crate::store::Store;
+
+pub(crate) mod land;
+pub(super) mod moves;
 
 /// How many conflicting paths the listing names before "and N more".
 const SHOWN_CONFLICTS: usize = 5;
@@ -126,7 +129,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     }) = &args.op
     {
         let target = target.as_deref().unwrap_or_default();
-        return super::stack::base(repo, args.workspace, target, *frozen, *yes, *all);
+        return moves::base(repo, args.workspace, target, *frozen, *yes, *all);
     }
     let name = super::workspace_or_current(args.workspace, repo)?;
     if let Some(LayerOp::Add { branch, .. }) = &args.op
@@ -143,7 +146,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     }
     let local = Local::read(&common_dir);
     // Read, changed and stored with no other change in between.
-    let _lock = crate::state::lens::lock(&state)?;
+    let _lock = crate::state::layers::lock(&state)?;
     let mut lens = Lens::read(&state)?;
     let done = match args.op {
         None | Some(LayerOp::Base { .. }) => unreachable!("handled above"),
@@ -291,7 +294,7 @@ fn updates(layer: &Layer) -> String {
 /// agent as it is now), so what shows changes only between turns, never
 /// half-way through another's; a branch built on a base is moved onto its
 /// new commits first (`stack::hook_context`). Records that the workspace
-/// has an agent (`seal::turn_started`): the daemon leaves its layers to its
+/// has an agent (`snapshot::turn_started`): the daemon leaves its layers to its
 /// turns. What changed is printed, which becomes context. Does nothing
 /// outside a workspace with layers or a base; errors are only logged.
 pub fn layer_hook(event: &str) -> Result<()> {
@@ -304,14 +307,14 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let common_dir = git::init(&repo)?;
         // A branch built on a base first follows its new commits, at the
         // same boundary (see `stack`).
-        match super::stack::hook_context(&common_dir, &name) {
+        match moves::hook_context(&common_dir, &name) {
             Ok(Some(context)) => println!("{context}"),
             Ok(None) => {}
             Err(e) => log::debug!("gitfold layer --claude-hook: moving {name}: {e:#}"),
         }
         let state = StateDir::of(&common_dir, &name);
         if state.opened()
-            && let Err(e) = seal::turn_started(&state)
+            && let Err(e) = snapshot::turn_started(&state)
         {
             log::debug!("gitfold layer --claude-hook: {e:#}");
         }
@@ -320,7 +323,7 @@ pub fn layer_hook(event: &str) -> Result<()> {
         if !live(&Lens::read(&state)?) {
             return Ok(());
         }
-        let lock = crate::state::lens::lock(&state)?;
+        let lock = crate::state::layers::lock(&state)?;
         let followed = follow::follow_live(
             &Store::default(),
             &state,
@@ -366,7 +369,7 @@ fn deny_hook() -> Result<()> {
             return Ok(None);
         };
         // What is shown, which a pending switch may not have changed yet.
-        let lens = crate::state::lens::Applied::read(&state)?.layers()?;
+        let lens = crate::state::layers::Applied::read(&state)?.layers()?;
         let Some((owners, view)) = owners_in_view(&state, &lens, path.as_bytes())? else {
             return Ok(None);
         };
@@ -448,7 +451,6 @@ fn base_offer(
     layer: &Layer,
     path: &str,
 ) -> Result<Option<String>> {
-    use super::stack::land;
     let owner = &layer.branch;
     if layer.updates == Updates::Fixed
         || !git::branch_exists(owner)
@@ -469,8 +471,8 @@ fn base_offer(
     let tip = git::branch_tip(owner)?.id;
     let committed = git::with_repo(|repo| -> Result<bool> {
         let at = |commit: ObjectId| -> Result<_> {
-            let tree = git::lens::commit_tree(repo, commit)?;
-            git::lens::lookup(repo, tree, path.into())
+            let tree = git::layers::commit_tree(repo, commit)?;
+            git::layers::lookup(repo, tree, path.into())
         };
         Ok(at(layer.seal)? == at(tip)?)
     })?;
@@ -557,7 +559,7 @@ fn owners_in_view(
     if !differs_from_base(lens, base.tree, path)? {
         return Ok(None);
     }
-    let view = crate::state::lens::view(&state.common_dir, &base.id, lens)?;
+    let view = crate::state::layers::view(&state.common_dir, &base.id, lens)?;
     Ok(view.map(|view| (view.mixed.get(path).cloned().unwrap_or_default(), view)))
 }
 
@@ -566,10 +568,10 @@ fn owners_in_view(
 /// change, merged in turn, is then the base's own version).
 fn differs_from_base(lens: &Lens, base: ObjectId, path: &[u8]) -> Result<bool> {
     git::with_repo(|repo| {
-        let at = |tree: ObjectId| git::lens::lookup(repo, tree, path.into());
+        let at = |tree: ObjectId| git::layers::lookup(repo, tree, path.into());
         let in_base = at(base)?;
         for layer in &lens.layers {
-            if at(git::lens::commit_tree(repo, layer.seal)?)? != in_base {
+            if at(git::layers::commit_tree(repo, layer.seal)?)? != in_base {
                 return Ok(true);
             }
         }
@@ -606,9 +608,9 @@ pub(super) fn layer_of(
         let theirs = StateDir::of(common_dir, branch);
         if theirs.opened() && !commits {
             // Live: as it follows it (`follow::latest_work`), else as it is now.
-            let work = match (frozen, seal::driven(&theirs)) {
-                (false, seal::Driven::Agent(Some(last_turn))) => last_turn,
-                _ => seal::seal(store, &theirs, seal::By::Other)?.commit,
+            let work = match (frozen, snapshot::driven(&theirs)) {
+                (false, snapshot::Driven::Agent(Some(last_turn))) => last_turn,
+                _ => snapshot::seal(store, &theirs, snapshot::By::Other)?.commit,
             };
             (work, Shows::Work, updates)
         } else {
@@ -690,14 +692,14 @@ fn add_command(layer: &Layer) -> String {
 /// stored before are put back, so what is stored is what shows.
 pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
     refuse_if_moving(common_dir, state)?;
-    crate::state::lens::store_and_show(state, lens, || apply(common_dir, &state.branch))
+    crate::state::layers::store_and_show(state, lens, || apply(common_dir, &state.branch))
 }
 
 /// Refuses changing the layers of the workspace in `state` while it is
 /// being moved onto its base: the move moves the base a switch builds the
 /// view on.
 fn refuse_if_moving(common_dir: &Path, state: &StateDir) -> Result<()> {
-    if !crate::state::restack::pending(state) {
+    if !crate::state::moves::pending(state) {
         return Ok(());
     }
     let base = Local::read(common_dir)
@@ -751,9 +753,9 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
         let _ = writeln!(out, "{layer:<w0$}{shows:<w1$}{updates}");
     }
     let base = state.read_base()?;
-    let (conflicts, mut warnings) = match crate::state::lens::view(common_dir, &base.id, lens)? {
+    let (conflicts, mut warnings) = match crate::state::layers::view(common_dir, &base.id, lens)? {
         Some(view) => {
-            let own = crate::state::lens::own_among(state, &base, lens, &view)?;
+            let own = crate::state::layers::own_among(state, &base, lens, &view)?;
             (view.conflicts, [view.warnings, own].concat())
         }
         None => (Vec::new(), Vec::new()),
@@ -777,7 +779,6 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
 /// The listing's base line (and the lines below it): what `branch` is built
 /// on, whether it follows it, and its notes (see `stack::notes`).
 fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
-    use super::stack::land;
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(branch) else {
         let trunk = land::trunk_name(common_dir, &local).unwrap_or_else(|| "-".into());
@@ -801,10 +802,7 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
         None => format!("your commits sit on {parent}"),
     };
     let how = match (frozen || trunk, own) {
-        (true, _) => format!(
-            "{} updates it",
-            super::stack::base_command(&parent, frozen, true)
-        ),
+        (true, _) => format!("{} updates it", moves::base_command(&parent, frozen, true)),
         (false, Some(0)) => format!("it follows {parent}"),
         (false, Some(1)) => format!("it moves when {parent} gets new commits"),
         (false, _) => format!("they move when {parent} gets new commits"),
@@ -814,7 +812,7 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
     if let Some(at) = local.moved(branch) {
         let _ = writeln!(out, "{:width$}last moved {}", "", clock(at));
     }
-    for note in super::stack::notes(common_dir, &local, branch) {
+    for note in moves::notes(common_dir, &local, branch) {
         let _ = writeln!(out, "{:width$}{note}", "");
     }
     Ok(out)

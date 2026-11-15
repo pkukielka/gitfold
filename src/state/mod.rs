@@ -24,12 +24,12 @@
 
 pub mod follow;
 pub mod fork;
-pub mod lens;
+pub mod layers;
 pub mod markers;
+pub mod moves;
 pub mod reads;
-pub mod restack;
 pub mod retire;
-pub mod seal;
+pub mod snapshot;
 pub mod status;
 pub mod task;
 

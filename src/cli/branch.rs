@@ -60,9 +60,9 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         create(repo, name, Some(&parent))?;
         set_branch_settings(repo, name, prewarm, track_reads)?;
         // On the trunk, it is an ordinary branch.
-        if !super::stack::is_trunk(&common_dir, &parent) {
+        if !super::layer::moves::is_trunk(&common_dir, &parent) {
             let tip = git::branch_tip(&parent)?.id;
-            super::stack::declare(&common_dir, name, &parent, tip)?;
+            super::layer::moves::declare(&common_dir, name, &parent, tip)?;
         }
         println!(
             "created branch {name} on {parent}; {}",

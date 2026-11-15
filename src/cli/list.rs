@@ -138,7 +138,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             d => format!("{}└─ {branch}", "   ".repeat(d - 1)),
         };
         let parent = local.parent(&branch);
-        let mut notes = super::stack::notes(&common_dir, &local, &branch);
+        let mut notes = super::layer::moves::notes(&common_dir, &local, &branch);
         if parent.is_some() && local.restack_manual(&branch) {
             notes.insert(0, "frozen".into());
         }

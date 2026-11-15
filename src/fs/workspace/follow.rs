@@ -23,7 +23,7 @@
 //! go onto the branch), or sooner if the workspace is written to.
 //!
 //! The move is the hook's (`state::follow::follow_live`), under the layers'
-//! lock (`state::lens::try_lock`: a command holding it goes first, and the
+//! lock (`state::layers::try_lock`: a command holding it goes first, and the
 //! check waits for the next round), shown through `switch`, as `gitfold
 //! layer` has it shown. It is logged, one line; `gitfold layer` lists when
 //! each layer last moved.
@@ -38,8 +38,8 @@ use parking_lot::Mutex;
 
 use super::Workspace;
 use crate::git::{self, worktree};
-use crate::state::lens::Updates;
-use crate::state::{StateDir, follow, lens, seal};
+use crate::state::layers::Updates;
+use crate::state::{StateDir, follow, layers, snapshot};
 use crate::store::Store;
 
 /// How long nothing must have written to a workspace without an agent
@@ -191,12 +191,12 @@ impl Workspace {
         }
         let applied = self.layers.read().applied.layers()?;
         if !(applied.layers.iter()).any(|l| l.updates == Updates::Live)
-            || seal::has_agent(&self.state)
+            || snapshot::has_agent(&self.state)
             || !self.git_quiet()
         {
             return Ok(None);
         }
-        let Some(locked) = lens::try_lock(&self.state)? else {
+        let Some(locked) = layers::try_lock(&self.state)? else {
             return Ok(None);
         };
         let (seen, source_failed) = {

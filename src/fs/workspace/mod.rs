@@ -28,16 +28,16 @@
 //! (its changes, the removal rules, forks, the task folder), is `state`.
 
 mod follow;
-mod lens;
+mod layers;
+mod moves;
 mod nodes;
 mod reads;
 mod rebase;
-mod restack;
 mod times;
 mod write;
 
 pub use follow::{Activities, Activity};
-pub use restack::restack_closed;
+pub use moves::restack_closed;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
@@ -174,7 +174,7 @@ struct Layers {
     hunk: ObjectId,
     blended: std::collections::HashMap<Vec<u8>, Vec<usize>>,
     /// What was last applied of the layers (see `lens`).
-    applied: crate::state::lens::Applied,
+    applied: crate::state::layers::Applied,
     /// Whiteouts and opaque markers.
     markers: Markers,
     times: Times,
@@ -295,7 +295,7 @@ impl Workspace {
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,
         };
-        let lensed = lens::open_view(store, &state, &mut layers)?;
+        let lensed = layers::open_view(store, &state, &mut layers)?;
         // Copy-ups a crash interrupted; their target was never replaced.
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);

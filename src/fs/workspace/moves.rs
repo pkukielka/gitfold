@@ -14,7 +14,7 @@ use gix::objs::tree::EntryKind;
 
 use super::Workspace;
 use super::times::Stamp;
-use crate::git::{self, Commit, lens::Change};
+use crate::git::{self, Commit, layers::Change};
 use crate::state::{StateDir, ancestors};
 use crate::store::Store;
 
@@ -42,7 +42,7 @@ pub fn restack_closed(
     if layers.lens_on {
         bail!("layers are shown in it");
     }
-    let delta = git::with_repo(|repo| git::lens::delta(repo, from.tree, to.tree))?;
+    let delta = git::with_repo(|repo| git::layers::delta(repo, from.tree, to.tree))?;
     let mut in_the_way = Vec::new();
     for (path, _) in &delta {
         let path: &[u8] = path.as_ref();

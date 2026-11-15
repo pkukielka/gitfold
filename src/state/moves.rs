@@ -294,7 +294,7 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
         Recovery::Undone
     } else {
         let main =
-            crate::cli::stack::land::main_name(common, &crate::settings::Local::read(common));
+            crate::cli::layer::land::main_name(common, &crate::settings::Local::read(common));
         Recovery::Stuck(format!(
             "an interrupted move of {} onto its base, from {}: the branch and its index moved \
              since; once its workspace is as you want it, `gitfold layer base {main} -w {}` \
@@ -334,9 +334,9 @@ fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
 /// The paths the restack changes, as `git` takes them.
 pub fn changed_paths(intent: &Intent) -> Result<Vec<BString>> {
     git::with_repo(|repo| {
-        let from = git::lens::commit_tree(repo, intent.from)?;
-        let to = git::lens::commit_tree(repo, intent.to)?;
-        Ok(git::lens::delta(repo, from, to)?
+        let from = git::layers::commit_tree(repo, intent.from)?;
+        let to = git::layers::commit_tree(repo, intent.to)?;
+        Ok(git::layers::delta(repo, from, to)?
             .into_iter()
             .map(|(path, _)| path)
             .collect())

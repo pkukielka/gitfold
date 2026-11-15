@@ -17,8 +17,8 @@ use anyhow::Result;
 use gix::ObjectId;
 
 use super::StateDir;
-use super::lens::{Layer, LayersLock, Lens, Shows, Updates};
-use super::seal;
+use super::layers::{Layer, LayersLock, Lens, Shows, Updates};
+use super::snapshot;
 use crate::git;
 use crate::settings::Local;
 use crate::store::Store;
@@ -38,13 +38,13 @@ pub struct Followed {
 
 /// Moves the live layers of the workspace in `state` to their latest work
 /// (`newest`), stores them and has them shown (`show`, see
-/// `lens::store_and_show`). `fresh(theirs)` says whether a person's
+/// `layers::store_and_show`). `fresh(theirs)` says whether a person's
 /// workspace (no agent, in `theirs`) is to be snapshotted now: the hook
 /// always does, the daemon only when it was written to since. One layer that
 /// can't move now (its workspace busy, say) leaves the others to move, and
 /// is named in `Followed::failed`. `None` if the workspace is being moved
 /// onto its base (that move goes first: nothing done). Called under
-/// `lens::lock`.
+/// `layers::lock`.
 pub fn follow_live(
     store: &Store,
     state: &StateDir,
@@ -52,7 +52,7 @@ pub fn follow_live(
     mut fresh: impl FnMut(&StateDir) -> bool,
     show: impl FnOnce() -> Result<String>,
 ) -> Result<Option<Followed>> {
-    if super::restack::pending(state) {
+    if super::moves::pending(state) {
         return Ok(None);
     }
     let mut lens = Lens::read(state)?;
@@ -86,7 +86,7 @@ pub fn follow_live(
         moved.push(format!("{} ({files} {what})", layer.branch));
     }
     let applied = match stored {
-        true => super::lens::store_and_show(state, &lens, show)?,
+        true => super::layers::store_and_show(state, &lens, show)?,
         false => String::new(),
     };
     Ok(Some(Followed {
@@ -115,7 +115,7 @@ fn follow(
         git::resolve(&layer.seal.to_string())?,
         git::resolve(&newest.to_string())?,
     );
-    let files = git::with_repo(|repo| git::lens::delta(repo, from.tree, to.tree))?.len();
+    let files = git::with_repo(|repo| git::layers::delta(repo, from.tree, to.tree))?.len();
     layer.seal = newest;
     layer.shows = shows;
     Ok(Some(files))
@@ -137,8 +137,8 @@ fn newest(
     }
     let theirs = StateDir::of(common_dir, &layer.branch);
     if layer.shows != Shows::CommitsOnly && theirs.opened() {
-        let work = match seal::driven(&theirs) {
-            seal::Driven::Person if !fresh(&theirs) => None,
+        let work = match snapshot::driven(&theirs) {
+            snapshot::Driven::Person if !fresh(&theirs) => None,
             _ => latest_work(store, &theirs)?,
         };
         return Ok(work.map(|work| (work, Shows::Work)));
@@ -154,9 +154,11 @@ fn newest(
 /// fresh snapshot, as it is now. An agent's that wasn't shown when its last
 /// turn ended has none to follow (`None`): the layer stays as it was added.
 pub fn latest_work(store: &Store, theirs: &StateDir) -> Result<Option<ObjectId>> {
-    Ok(match seal::driven(theirs) {
-        seal::Driven::Agent(last_turn) => last_turn,
-        seal::Driven::Person => Some(seal::seal(store, theirs, seal::By::Other)?.commit),
+    Ok(match snapshot::driven(theirs) {
+        snapshot::Driven::Agent(last_turn) => last_turn,
+        snapshot::Driven::Person => {
+            Some(snapshot::seal(store, theirs, snapshot::By::Other)?.commit)
+        }
     })
 }
 

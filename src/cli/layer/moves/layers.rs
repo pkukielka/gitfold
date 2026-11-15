@@ -4,7 +4,7 @@
 //! once the workspace's base has caught up with them.
 //!
 //! The layers file is never changed for it (what is stored is the truth); a
-//! marker (`state::lens::OFF`) makes the daemon show none meanwhile. The
+//! marker (`state::layers::OFF`) makes the daemon show none meanwhile. The
 //! steps, each durable before the next:
 //!
 //! 1. the layers' lock taken (held throughout: nothing else changes them),
@@ -18,14 +18,14 @@
 //!    the workspace's own files;
 //! 3. the move, worked out again if the switch moved the branch (commits
 //!    made on the layers commit went onto it);
-//! 4. the marker removed (`state::lens::put_back`), the switch to the
+//! 4. the marker removed (`state::layers::put_back`), the switch to the
 //!    layers asked for: its base first catches up with the moved branch,
 //!    then the layers show over it.
 //!
 //! Interrupted anywhere, the marker stays, and whoever comes next (the
 //! daemon's sync thread for an open workspace, the next turn's hook, `layer
 //! base`, `layer add`) first finishes or undoes the move as its intent says
-//! (`state::restack`), then does step 4 (`resume`): either way the stored
+//! (`state::moves`), then does step 4 (`resume`): either way the stored
 //! layers show again, over wherever the branch is. While a move can't be
 //! finished or undone, they stay off. A switch refused at step 2
 //! (git busy, a commit that can't go onto the branch, own lines that depend
@@ -36,8 +36,8 @@ use gix::bstr::BString;
 
 use super::Moved;
 use crate::git::{self, worktree};
-use crate::state::lens::{self, Applied, Lens};
-use crate::state::restack::{self, Intent, Recovery};
+use crate::state::layers::{self, Applied, Lens};
+use crate::state::moves::{self, Intent, Recovery};
 use crate::state::{StateDir, status, upper_path};
 use crate::store::Store;
 
@@ -51,9 +51,9 @@ pub(super) fn with_layers_off(
     if !state.opened() {
         return mv();
     }
-    let _lock = lens::lock(state)?;
+    let _lock = layers::lock(state)?;
     // One interrupted before: back first, so what shows now is known.
-    if lens::put_back(state)? {
+    if layers::put_back(state)? {
         log::info!(
             "{}: layers taken off for an interrupted move put back",
             state.branch
@@ -65,7 +65,7 @@ pub(super) fn with_layers_off(
     if let Some(why) = waits(state, intent)? {
         return Ok(Moved::Waits(why));
     }
-    lens::take_off(state)?;
+    layers::take_off(state)?;
     if let Err(why) = switch_off(state) {
         put_back(state);
         return Ok(Moved::Waits(format!(
@@ -79,17 +79,17 @@ pub(super) fn with_layers_off(
 
 /// Puts back layers a move left off (it was interrupted), if any, and has
 /// them shown: for the hook and `layer base`, before anything else. The
-/// move is finished or undone first (`state::restack`), as the daemon does:
+/// move is finished or undone first (`state::moves`), as the daemon does:
 /// the layers show over where it leaves the branch, and a switch never
 /// catches the workspace's base up with a move half-way. One that can't be
 /// yet (running, or stuck) leaves them off.
 pub(super) fn resume(state: &StateDir) -> Result<()> {
-    if !lens::off(state) || !state.opened() {
+    if !layers::off(state) || !state.opened() {
         return Ok(());
     }
-    let _lock = lens::lock(state)?;
-    if restack::pending(state) {
-        match restack::recover(state) {
+    let _lock = layers::lock(state)?;
+    if moves::pending(state) {
+        match moves::recover(state) {
             Ok(Recovery::Nothing | Recovery::Finished | Recovery::Undone) => {}
             Ok(Recovery::InProgress | Recovery::Stuck(_)) => return Ok(()),
             Err(e) => {
@@ -98,7 +98,7 @@ pub(super) fn resume(state: &StateDir) -> Result<()> {
             }
         }
     }
-    if lens::put_back(state)? {
+    if layers::put_back(state)? {
         show(state);
     }
     Ok(())
@@ -141,13 +141,13 @@ fn uncommitted_on(
     blended: &std::collections::BTreeSet<Vec<u8>>,
 ) -> Result<Vec<String>> {
     let moved: std::collections::HashSet<BString> =
-        restack::changed_paths(intent)?.into_iter().collect();
+        moves::changed_paths(intent)?.into_iter().collect();
     let s = status::status(&Store::default(), state)?;
     let tip = git::resolve(&intent.from.to_string())?.tree;
     let mut out = Vec::new();
     let paths = s.changed.iter().chain(&s.deleted);
     for path in paths.filter(|p| moved.contains(p.as_slice()) && !blended.contains(*p)) {
-        let at_tip = git::with_repo(|repo| git::lens::lookup(repo, tip, path.as_slice().into()))?;
+        let at_tip = git::with_repo(|repo| git::layers::lookup(repo, tip, path.as_slice().into()))?;
         let file = upper_path(&state.upper(), path);
         let differs = match (at_tip, std::fs::symlink_metadata(&file)) {
             (None, Ok(_)) | (Some(_), Err(_)) => true,
@@ -186,7 +186,7 @@ fn shows_layers(state: &StateDir) -> Result<bool> {
 /// by then (or stays for the next to put back), and the daemon retries a
 /// switch it refused.
 fn put_back(state: &StateDir) {
-    match lens::put_back(state) {
+    match layers::put_back(state) {
         Ok(_) => show(state),
         Err(e) => log::warn!("{}: putting its layers back: {e:#}", state.branch),
     }
@@ -195,7 +195,7 @@ fn put_back(state: &StateDir) {
 /// Has the daemon show the stored layers, if mounted (else they show when
 /// the workspace opens).
 fn show(state: &StateDir) {
-    if let Err(e) = super::super::layer::apply(&state.common_dir, &state.branch) {
+    if let Err(e) = super::super::apply(&state.common_dir, &state.branch) {
         log::warn!("{}: showing its layers again: {e:#}", state.branch);
     }
 }
@@ -209,7 +209,7 @@ fn switch_off(state: &StateDir) -> Result<()> {
         Some(mount) => {
             // Opened first: the daemon switches only open workspaces.
             std::fs::metadata(mount.join(&state.branch))?;
-            super::super::layer::apply(common_dir, &state.branch)?;
+            super::super::apply(common_dir, &state.branch)?;
         }
         None => {
             let Some(_repo) = crate::lock::lock(common_dir)? else {

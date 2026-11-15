@@ -49,7 +49,7 @@ use crate::fsutil::not_found;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::state::markers::Kind;
-use crate::state::restack::{self, Recovery};
+use crate::state::moves::{self, Recovery};
 use crate::state::{ModeCheck, ancestors, join, matches_stored};
 use crate::store::{EMPTY_TREE, Lower, Store, TEntry};
 
@@ -140,16 +140,16 @@ impl Workspace {
     }
 
     fn sync_with(&self, store: &Store, fetch: bool) -> Result<()> {
-        // A restack of the branch (`state::restack`), first: while one runs,
+        // A restack of the branch (`state::moves`), first: while one runs,
         // or one a crash interrupted can't be told apart, neither the base
         // nor the layers move. One that finishes moves the branch, which the
         // rebase below then follows.
-        if restack::pending(&self.state) {
+        if moves::pending(&self.state) {
             if !self.git_idle() {
                 self.limit_touched();
                 return Ok(());
             }
-            match restack::recover(&self.state)? {
+            match moves::recover(&self.state)? {
                 Recovery::Nothing | Recovery::Finished | Recovery::Undone => {}
                 Recovery::InProgress => return Ok(()),
                 Recovery::Stuck(why) => return Err(anyhow!("{why}")),
@@ -157,7 +157,7 @@ impl Workspace {
         }
         // Layers taken off for a move that was interrupted: put back (the
         // switch below shows them).
-        crate::state::lens::put_back_if_left(&self.state)?;
+        crate::state::layers::put_back_if_left(&self.state)?;
         // With layers shown, commits made on the lens commit go onto the
         // branch (see `lens`), but the base waits, and an upper file
         // identical to a layer's mustn't be dropped as unchanged.

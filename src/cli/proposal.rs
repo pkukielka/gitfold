@@ -34,15 +34,15 @@ use gix::objs::tree::EntryKind;
 
 use crate::daemon::control;
 use crate::git;
-use crate::git::lens::{Change, Item};
+use crate::git::layers::{Change, Item};
 use crate::mount_table;
 use crate::refusal::Refusal;
 use crate::settings::{self, Local};
-use crate::state::lens::{Layer, Lens, Shows, Updates};
+use crate::state::layers::{Layer, Lens, Shows, Updates};
 use crate::state::markers::{Kind, Markers};
 use crate::state::retire::check_name;
-use crate::state::seal::IDENTITY;
-use crate::state::{self, StateDir, fork, seal};
+use crate::state::snapshot::IDENTITY;
+use crate::state::{self, StateDir, fork, snapshot};
 use crate::store::Store;
 
 #[derive(Args)]
@@ -158,14 +158,14 @@ impl Proposal {
 
     /// What it changes: paths, files only, in order.
     fn changes(&self) -> Result<Vec<(BString, Change)>> {
-        git::with_repo(|repo| git::lens::delta(repo, self.start.tree, self.work.tree))
+        git::with_repo(|repo| git::layers::delta(repo, self.start.tree, self.work.tree))
     }
 
     /// The proposed paths the layer's work `now` changed since the start:
     /// accepting would undo those changes.
     fn moved(&self, now: &git::Commit, paths: &[BString]) -> Result<Vec<String>> {
         git::with_repo(|repo| {
-            let at = |tree, path: &BString| git::lens::lookup(repo, tree, path.as_ref());
+            let at = |tree, path: &BString| git::layers::lookup(repo, tree, path.as_ref());
             let mut moved = Vec::new();
             for path in paths {
                 if at(now.tree, path)? != at(self.start.tree, path)? {
@@ -199,7 +199,7 @@ impl Proposal {
     ) -> Result<ObjectId> {
         let tree = git::with_repo(|repo| {
             let changes = changes.iter().map(|(p, c)| (p.as_ref(), *c));
-            git::lens::edit_tree(repo, now.tree, changes)
+            git::layers::edit_tree(repo, now.tree, changes)
         })?;
         let message = format!("gitfold consent: {} with {}", self.layer, self.name);
         commit(common_dir, &tree, &[now.id], &message)
@@ -236,7 +236,7 @@ fn commit(
 fn work(store: &Store, common_dir: &Path, branch: &str) -> Result<ObjectId> {
     let state = StateDir::of(common_dir, branch);
     Ok(match state.opened() {
-        true => seal::seal(store, &state, seal::By::Other)?.commit,
+        true => snapshot::seal(store, &state, snapshot::By::Other)?.commit,
         false => git::branch_tip(branch)?.id,
     })
 }
@@ -265,7 +265,7 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     let store = Store::default();
     let local = Local::read(&common_dir);
     // Read, changed and stored with no other change in between.
-    let _lock = state::lens::lock(&state)?;
+    let _lock = state::layers::lock(&state)?;
     let mut lens = Lens::read(&state)?;
     let layer = match args.layer {
         Some(layer) => layer,
@@ -436,7 +436,7 @@ fn workspace_paths(state: &StateDir, paths: &[PathBuf]) -> Result<Vec<BString>> 
 /// The layer whose file shows at `path` in the workspace in `state`, or the
 /// only layer.
 fn default_layer(state: &StateDir, lens: &Lens, path: &BString) -> Result<String> {
-    let applied = crate::state::lens::Applied::read(state)?.layers()?;
+    let applied = crate::state::layers::Applied::read(state)?.layers()?;
     match super::layer::owners(state, &applied, path)?[..] {
         [i] => return Ok(applied.layers[i].branch.clone()),
         [] => {}
@@ -605,7 +605,7 @@ fn write_stored(
     let base = state.read_base()?;
     let mut markers = Markers::open(&state.markers())?;
     let lookup =
-        |path: &[u8]| git::with_repo(|repo| git::lens::lookup(repo, base.tree, path.into()));
+        |path: &[u8]| git::with_repo(|repo| git::layers::lookup(repo, base.tree, path.into()));
     let mount = |path: &BString, why: &str| {
         anyhow::anyhow!(
             "{path}: {why} in {branch}; mount the repository to write it (nothing was written)"
@@ -832,15 +832,15 @@ fn view_with(
         }
     }
     lens.layers = layers;
-    let view = match state::lens::view(common_dir, &base.id, &lens)? {
+    let view = match state::layers::view(common_dir, &base.id, &lens)? {
         Some(view) => view.tree,
         None => base.tree,
     };
-    let own = seal::seal(store, state, seal::By::Other)?.commit;
+    let own = snapshot::seal(store, state, snapshot::By::Other)?.commit;
     let own = git::resolve(&own.to_string())?;
     let tree = git::with_repo(|repo| {
-        let changes = git::lens::delta(repo, base.tree, own.tree)?;
-        git::lens::edit_tree(repo, view, changes.iter().map(|(p, c)| (p.as_ref(), *c)))
+        let changes = git::layers::delta(repo, base.tree, own.tree)?;
+        git::layers::edit_tree(repo, view, changes.iter().map(|(p, c)| (p.as_ref(), *c)))
     })?;
     let message = format!("gitfold consent: {} with {}", state.branch, p.name);
     commit(common_dir, &tree, &[base.id], &message)
@@ -883,7 +883,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
             continue;
         }
         checked += 1;
-        let ours = seal::seal(&store, &state, seal::By::Other)?.commit;
+        let ours = snapshot::seal(&store, &state, snapshot::By::Other)?.commit;
         match super::snapshot::merge(&common_dir, &ours, &accepted, &p.name) {
             Ok(_) => {}
             Err(e) if Refusal::of(&e) == Some(Refusal::Changes) => {
@@ -1077,7 +1077,7 @@ pub fn accept(repo: &Path, args: AcceptArgs) -> Result<()> {
     if layer_state.opened() {
         // Followers move to it now and at their next turn, even those of a
         // workspace whose agent's turn is under way.
-        seal::seal(&store, &layer_state, seal::By::Owner)?;
+        snapshot::seal(&store, &layer_state, snapshot::By::Owner)?;
     }
     let mut out = String::new();
     let shown: Vec<&str> = paths.iter().map(|p| p.to_str().unwrap_or("?")).collect();
@@ -1186,7 +1186,7 @@ fn show_layer_again(
     state: &StateDir,
     accepted: bool,
 ) -> Result<String> {
-    let _lock = state::lens::lock(state)?;
+    let _lock = state::layers::lock(state)?;
     let mut lens = Lens::read(state)?;
     let Some(i) = lens.find(&p.name) else {
         return Ok(String::new());
@@ -1230,7 +1230,7 @@ fn short_diff(common_dir: &Path, p: &Proposal, changes: &[(BString, Change)]) ->
     let (start, work) = (p.start.id.to_string(), p.work.id.to_string());
     let mut lines = vec![format!("the change, as {} proposed it:", p.by)];
     for (path, change) in changes {
-        let was = git::with_repo(|repo| git::lens::lookup(repo, p.start.tree, path.as_ref()))?;
+        let was = git::with_repo(|repo| git::layers::lookup(repo, p.start.tree, path.as_ref()))?;
         let what = match (change, was) {
             (Change::Delete, _) => " (deleted)",
             (_, None) => " (new)",
@@ -1326,7 +1326,7 @@ fn sweep(common_dir: &Path) -> Result<()> {
             START_REFS,
         ],
     )?;
-    let named = crate::state::lens::named_seals(common_dir);
+    let named = crate::state::layers::named_seals(common_dir);
     let gone = |id: &str| {
         let branch = state::workspace_branch(id);
         !git::branch_exists(&branch)
