@@ -124,7 +124,7 @@ gitfold writes into the repository: worktree registrations under
 `.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
 [Cleaning up](#cleaning-up)), and `refs/gitfold-seal/*` and
-`refs/gitfold-lens/*` that keep seals and lens commits (see
+`refs/gitfold-lens/*` that keep snapshots of work and lens commits (see
 [Layers](#layers)).
 
 ## Requirements
@@ -169,9 +169,8 @@ gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
 gitfold prune                                 # delete snapshot registrations
 gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
 gitfold track-reads <BRANCH> on|off           # record a workspace's reads
-gitfold seal [<BRANCH>]                       # a workspace's uncommitted work as a commit
-gitfold mix [--onto <REV>] [--commit] <BRANCH|REV>...
-                                              # workspaces' work merged, as a snapshot
+gitfold snapshot [<BRANCH|REV>...] [--commits] [--onto <REV>]
+                                              # workspaces' work (merged), as a snapshot
 gitfold layer [-w <BRANCH>] add|on|off|rm <BRANCH>
 gitfold layer [-w <BRANCH>] update|list       # other workspaces' work shown in one
 gitfold lens off [<BRANCH>]                   # hide all of a workspace's layers
@@ -208,7 +207,7 @@ error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
 Six commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
-`mix` (4 conflicts), `consent` (4 a workspace fails, or none checked), `stack sync` and
+`snapshot` (4 conflicts), `consent` (4 a workspace fails, or none checked), `stack sync` and
 `stack merged` (3 a branch not stacked, 4 a branch not restacked: a
 conflict, uncommitted work in the way, git busy, layers shown) and `inbox
 --claude-hook rewake` (2, to wake the session).
@@ -279,6 +278,30 @@ its own snapshot (`cd <mount>/@$(git rev-parse origin/main)`). If agents grep a
 fresh snapshot immediately, consider `--prewarm content`: on chromium it reads
 everything in the background in 2.6-3.8 s (24 vs 8 threads), after which the
 first `rg` takes about 0.5 s instead of 2.9 s.
+
+**Snapshots of work, uncommitted included.** `gitfold snapshot <BRANCH>`
+shows a workspace's work as it is now in a snapshot, and prints its path,
+`<mount>/@<sha>` (default: the workspace you are in). The commit's tree is
+what the workspace shows, ignored files left out (what `gitfold changes`
+lists), its parent the workspace's base. A branch without a workspace, a
+tag or a commit gives its commit; `--commits` takes only a branch's
+commits even if it has a workspace. Several are merged, in order onto the
+first (or onto `--onto <REV>`), as `git merge-tree` does, to check work
+together:
+
+```
+cd $(gitfold snapshot main agent/api agent/client)   # build and test it there
+```
+
+Nothing in a workspace, its index or its branch changes. The commits are
+made with a fixed identity and date (`gitfold`, 2020-01-01), so the same
+work gives the same snapshot (`unchanged since its last snapshot`, on
+stderr, for one workspace); a workspace's work is kept by a ref,
+`refs/gitfold-seal/<id>/<n>`, numbered from 1, the newest 16 kept. It works
+mounted or not: unmounted it prints the commit instead of the path (and
+says so on stderr). It exits 4 on conflicts, listing the paths (`conflicts
+merging <BRANCH>:`), and 3 if a name is neither a branch nor a revision. An
+untracked nested repository is left out (logged).
 
 ### Workspaces
 
@@ -456,7 +479,7 @@ last tip, see above), as real files; `markers` records deleted files so they
 stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
-`lens` its layers, if any (see [Layers](#layers)). Seals are kept by refs
+`lens` its layers, if any (see [Layers](#layers)). Snapshots of its work are kept by refs
 `refs/gitfold-seal/<id>/<n>`, a lensed workspace's lens commit by
 `refs/gitfold-lens/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
@@ -495,32 +518,6 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 Agents working on parts of one change often need each other's work before
 it is committed: an API one of them is writing, which another calls. Layers
 show it, uncommitted included, without merging anything.
-
-**Seal.** `gitfold seal [<BRANCH>]` prints a commit of a workspace's
-uncommitted work (a seal): its tree is what the workspace shows, ignored
-files left out (what `gitfold changes` lists), its parent the workspace's
-base. Nothing in the workspace changes. It is made with a fixed identity and
-date (`gitfold`, 2020-01-01), so the same work on the same base gives the
-same commit (`unchanged since its last seal`, on stderr); each new one is
-kept by a ref, `refs/gitfold-seal/<id>/<n>`, numbered from 1, the newest 16
-kept. Open it as a snapshot, `<mount>/@<sha>`. It works mounted or not; a
-branch without a workspace exits 3. An untracked nested repository isn't
-sealed (logged).
-
-**Mix: checking work together.** `gitfold mix <BRANCH|REV>...` merges, in
-order onto the first (or onto `--onto <REV>`), each named workspace's work,
-uncommitted included (sealed), or the commit of a branch without a
-workspace or of a revision, as `git merge-tree` does, and prints the result
-as a snapshot path (`@<sha>` unmounted; `--commit` prints only the commit):
-
-```
-cd $(gitfold mix main agent/api agent/client)   # build and test it there
-```
-
-No workspace, index or branch changes. The same work gives the same commit,
-so a repeated mix reuses its snapshot. It exits 4 on conflicts, listing the
-paths (`conflicts merging <BRANCH>:`), and 1 if a name is neither a
-workspace nor a revision.
 
 **Layers in a workspace.** `gitfold layer add <BRANCH>` shows another
 workspace's work in the workspace you are in (`-w <BRANCH>` names another
@@ -711,10 +708,10 @@ depend on lines that would go (see below); 2 usage errors, 1 other errors
   files, as copied from the lens commit), and the base catches up once no
   layer shows (moving it meanwhile could copy the layers' files into the
   workspace's own).
-- **Between turns, in Claude Code.** The plugin's hooks seal a session's
-  workspace when the session stops (`gitfold seal --claude-hook stop`, only
-  if some workspace has it as a layer), and when a prompt is sent, move the
-  session's workspace's layers to their workspaces' newest seals, telling
+- **Between turns, in Claude Code.** The plugin's hooks snapshot a session's
+  workspace when the session stops (`gitfold snapshot --claude-hook stop`,
+  only if some workspace has it as a layer), and when a prompt is sent, move
+  the session's workspace's layers to their workspaces' newest snapshots, telling
   the agent which layers changed and how many files (`gitfold layer
   --claude-hook user-prompt-submit`). What a layer shows thus changes only
   between turns, never half-way through one, its agent's or the reader's.
@@ -1139,7 +1136,7 @@ mount and real git (build with `--release` first):
   Suites running side by side load the machine like `PARALLEL=1`: if a timing
   check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
-- `tests/layers.sh`: seal, mix, and layers shown in a workspace, blended
+- `tests/layers.sh`: snapshots of workspaces' work, and layers shown in a workspace, blended
   files and the lens commit included (sections as above).
 - `tests/stacks.sh`: stacked branches restacked with no workspace, in an
   open workspace (by the hook and by `stack sync`) and in an unmounted

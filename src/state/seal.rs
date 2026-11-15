@@ -2,7 +2,7 @@
 //! workspace shows (its base's tree with the changed files and without the
 //! deleted ones, ignored files left out, as `gitfold changes` lists them), its
 //! parent the base. A seal can be opened as a snapshot (`@<sha>`), mixed with
-//! other workspaces' seals (`gitfold mix`), and is what a layer shows of
+//! other workspaces' seals (`gitfold snapshot`), and is what a layer shows of
 //! another workspace (`layers`).
 //!
 //! Seals are made with a fixed identity and date, so the same work on the same
@@ -51,7 +51,7 @@ pub fn ref_prefix(id: &str) -> String {
 }
 
 /// Seals the work of the workspace stored in `state` (see the module doc).
-/// Called by the commands themselves (`seal`, `mix`, `layer`, the `Stop`
+/// Called by the commands themselves (`snapshot`, `layer`, the `Stop`
 /// hook), mounted or not, without the daemon or a lock: it reads the stored
 /// state (upper, markers, base) as it is, so a write in progress meanwhile
 /// may be half-seen. That is why the hooks seal at turn ends, when the
@@ -61,7 +61,7 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
     let base = state.read_base()?;
     let blends = blends(state, &base)?;
     let tree = tree_of(state, &base.tree, &s.changed, &s.deleted, &blends)
-        .with_context(|| format!("sealing {}", state.branch))?;
+        .with_context(|| format!("taking a snapshot of {}", state.branch))?;
     let commit = commit(&state.common_dir, &tree, &base.id, &state.branch)?;
     let seals = list(&state.common_dir, &state.id)?;
     if let Some(&(_, newest)) = seals.last()
@@ -141,7 +141,7 @@ fn tree_of(
                 // An untracked repository: git adds it as a submodule only
                 // when asked, and it has no commit of ours to name.
                 log::warn!(
-                    "{}: {} is a repository; not sealed",
+                    "{}: {} is a repository; left out",
                     state.branch,
                     String::from_utf8_lossy(path)
                 );
@@ -178,7 +178,7 @@ fn commit(
     base: &ObjectId,
     branch: &str,
 ) -> Result<ObjectId> {
-    let message = format!("gitfold seal: {branch}\n\nIts uncommitted work, on its base.");
+    let message = format!("gitfold snapshot: {branch}\n\nIts uncommitted work, on its base.");
     let out = git::cmd::command(common_dir)
         .args([
             "commit-tree",

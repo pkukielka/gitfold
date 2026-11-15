@@ -113,24 +113,19 @@ enum Command {
     /// from stdin). The branch needs no workspace yet. Exit codes: 3 no such
     /// branch, 1 other errors.
     Send(cli::inbox::SendArgs),
-    /// Print a commit of a workspace's uncommitted work, on its base.
+    /// Show workspaces' work, uncommitted included, as a read-only folder: a
+    /// snapshot to build and test.
     ///
-    /// Its tree is what the workspace shows, ignored files left out (as
-    /// `gitfold changes` lists them); its parent the workspace's base. Open it
-    /// as a snapshot, <MOUNTPOINT>/@<SHA>, or mix it with others (`gitfold
-    /// mix`). Nothing in the workspace changes; the same work gives the same
-    /// commit. Exit codes: 3 no such workspace, 1 other errors.
-    Seal(cli::mix::SealArgs),
-    /// Merge workspaces' work, uncommitted included, into a snapshot to build
-    /// and test.
-    ///
-    /// Each branch with a workspace contributes its work as `gitfold seal`
-    /// makes it, other branches and revisions their commits; they are merged in
-    /// order onto the first (or --onto) as `git merge-tree` does, and the merge
-    /// is printed as a snapshot path, <MOUNTPOINT>/@<SHA>. No workspace, index
-    /// or branch changes. Exit codes: 4 conflicts (the paths listed), 1 other
+    /// A branch with a workspace contributes its work: what the workspace
+    /// shows, ignored files left out (as `gitfold changes` lists them), on its
+    /// base. Other branches (and all with --commits) and revisions contribute
+    /// their commits. Several are merged in order onto the first (or --onto)
+    /// as `git merge-tree` does. Prints the snapshot's path,
+    /// <MOUNTPOINT>/@<SHA> (unmounted, the commit). No workspace, index or
+    /// branch changes; the same work gives the same snapshot. Exit codes: 3 no
+    /// such branch or revision, 4 conflicts (the paths listed), 1 other
     /// errors, 2 usage errors.
-    Mix(cli::mix::MixArgs),
+    Snapshot(cli::snapshot::SnapshotArgs),
     /// Show other workspaces' work in a workspace, read-only: layers.
     ///
     /// Each layer is a workspace's work (uncommitted included) as it was when
@@ -311,9 +306,8 @@ fn run() -> Result<i32> {
         // Finds the repository itself: as a hook, none is no error.
         Command::Inbox(args) => return cli::inbox::inbox(args),
         Command::Send(args) => cli::inbox::send(&cli::repo()?, args)?,
-        Command::Seal(args) if args.claude_hook.is_some() => cli::mix::seal_hook()?,
-        Command::Seal(args) => cli::mix::seal(&cli::repo()?, args)?,
-        Command::Mix(args) => cli::mix::mix(&cli::repo()?, args)?,
+        Command::Snapshot(args) if args.claude_hook.is_some() => cli::snapshot::snapshot_hook()?,
+        Command::Snapshot(args) => cli::snapshot::snapshot(&cli::repo()?, args)?,
         Command::Layer(LayerArgs {
             claude_hook: Some(event),
             ..

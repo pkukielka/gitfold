@@ -860,7 +860,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
         }
         checked += 1;
         let ours = seal::seal(&store, &state)?.commit;
-        match super::mix::merge(&common_dir, &ours, &accepted, &p.name) {
+        match super::snapshot::merge(&common_dir, &ours, &accepted, &p.name) {
             Ok(_) => {}
             Err(e) if Refusal::of(&e) == Some(Refusal::Changes) => {
                 let conflicts: Vec<String> = format!("{e:#}")

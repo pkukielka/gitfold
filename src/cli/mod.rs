@@ -4,7 +4,7 @@
 //! - `branch`: `branch` (and its forks), `prewarm`, `track-reads`.
 //! - `list`: `list`, `changes`.
 //! - `remove`: `remove`, `prune`.
-//! - `mix`: `seal`, `mix`: workspaces' uncommitted work as commits, merged.
+//! - `snapshot`: `snapshot`: workspaces' work, uncommitted included, merged.
 //! - `layer`: `layer`, `lens`: other workspaces' work shown in one.
 //! - `proposal`: `propose`, `proposals`, `consent`, `accept`, `reject`:
 //!   changes to a layer proposed from a workspace that shows it.
@@ -21,11 +21,11 @@ pub mod hook;
 pub mod inbox;
 pub mod layer;
 pub mod list;
-pub mod mix;
 pub mod mount;
 pub mod overlaps;
 pub mod proposal;
 pub mod remove;
+pub mod snapshot;
 pub mod stack;
 
 use std::path::{Path, PathBuf};

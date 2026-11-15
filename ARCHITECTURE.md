@@ -174,7 +174,7 @@ Then, per request (`fs/workspace/`):
 | `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
 | `src/cli/list.rs` | `list` and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
-| `src/cli/mix.rs` | `seal` and `mix` (and the `Stop` hook that seals) |
+| `src/cli/snapshot.rs` | `snapshot`: seals merged into a snapshot (and the `Stop` hook that seals) |
 | `src/cli/layer.rs` | `layer` and `lens` (and the hooks that move layers, restacking a stacked branch first, and deny edits of their files, offering a proposal) |
 | `src/cli/proposal.rs` | `propose`, `proposals`, `consent`, `accept` and `reject`: changes to a layer's files made in a fork of its workspace, checked against the workspaces that read them, written into the layer's workspace |
 | `src/cli/stack/mod.rs` | `stack` (on, off, sync, merged, list), the restack the `UserPromptSubmit` hook does, re-parenting the children of a parent that landed, `list`'s stack notes |
@@ -200,7 +200,7 @@ Then, per request (`fs/workspace/`):
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
-| `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard; proposals, consent, accept and reject) |
+| `tests/layers.sh` | end-to-end test of snapshots of work and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard; proposals, consent, accept and reject) |
 | `tests/stacks.sh` | end-to-end test of stacked branches: restacks with no workspace, in an open workspace (hook and `stack sync`) and an unmounted one, conflicts, uncommitted work in the way, manual mode, `list`'s notes; parents that landed (squash, rebase and merge commits, a tweaked squash, a stacked parent's parent, a merge of later parent commits, none when unmerged, an interrupted re-parent, a branch on the trunk's local branch) |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
@@ -234,6 +234,8 @@ Then, per request (`fs/workspace/`):
   `.git/gitfold/<id>/upper`.
 - **Seal**: a commit of a workspace's uncommitted work: the tree it shows,
   ignored files left out, on its base, made with a fixed identity and date.
+  An internal name: `gitfold snapshot` makes one, and user-facing text
+  calls it a snapshot.
 - **Layer**: another workspace's work shown in a workspace, read-only: one
   of its seals, as the changes since a pinned merge base. The layers of a
   workspace, bottom first, each shown or not, are its **lens** (also the
@@ -1307,7 +1309,7 @@ While any file is blended, HEAD is detached at a **lens commit** holding
 the blends, and commits made on it are **extracted** onto the branch with
 only the workspace's changes. The stack is stored
 in `lens` in the state directory; `gitfold layer` writes it and asks the
-daemon to switch (a `lens` control request). `gitfold mix` is the
+daemon to switch (a `lens` control request). `gitfold snapshot` is the
 read-only form: seals merged with `git merge-tree` into a commit opened as
 a snapshot, with no change to any workspace.
 
@@ -1457,7 +1459,7 @@ a snapshot, with no change to any workspace.
   extraction, L then built over the tip rather than the base); the base
   catches up once no layer shows.
 - **Moves at turn boundaries, by hooks:** a workspace shown as a layer is
-  sealed when its Claude Code session stops (`seal --claude-hook stop`), and
+  sealed when its Claude Code session stops (`snapshot --claude-hook stop`), and
   a reader's layers move to the newest seals when its next prompt is sent
   (`layer --claude-hook user-prompt-submit`), which tells the agent which
   changed. Neither agent sees the other's half-done turn, and nothing the
