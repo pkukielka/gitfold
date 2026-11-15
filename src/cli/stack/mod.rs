@@ -119,9 +119,7 @@ pub fn base(
         && let Some((landed_in, _)) = landing_of(&common_dir, &local, &name, parent)?
         && land::same(&common_dir, &local, &landed_in.name, target)
     {
-        each(&common_dir, std::slice::from_ref(&name), None, |name| {
-            update(&common_dir, name, yes)
-        })?;
+        update_one(&common_dir, &name, yes)?;
         return frozen_after(&common_dir, &name, target, frozen && !trunk);
     }
     if trunk {
@@ -129,11 +127,7 @@ pub fn base(
     }
     match parent {
         // Again: brought up to date (onto where it landed, if it is gone).
-        Some(parent) if parent == target => {
-            each(&common_dir, std::slice::from_ref(&name), None, |name| {
-                update(&common_dir, name, yes)
-            })?;
-        }
+        Some(parent) if parent == target => update_one(&common_dir, &name, yes)?,
         parent => rebase_onto(&common_dir, &name, parent.as_deref(), target, frozen, yes)?,
     }
     frozen_after(&common_dir, &name, target, frozen)
@@ -172,13 +166,12 @@ fn rebase_onto(
             guessed: false,
         },
     };
-    let one = [name.to_string()];
     if on_parent(common_dir, base.commit, target_tip, tip)? {
         declare(common_dir, name, target, base.commit)?;
-        return each(common_dir, &one, None, |name| update(common_dir, name, yes));
+        return update_one(common_dir, name, yes);
     }
     let blocked = local.restack_blocked(name);
-    each(common_dir, &one, Some(target), |name| {
+    each(common_dir, &[name.to_string()], Some(target), |name| {
         if let Some(why) = ask(common_dir, name, base.commit, target, yes)? {
             return Ok(Outcome::Refused(why));
         }
@@ -188,7 +181,7 @@ fn rebase_onto(
         let follows = if frozen { "frozen" } else { "live" };
         let pending = format!("{target} {target_tip} {follows}");
         settings::set_landing(common_dir, name, Some(&pending))?;
-        let outcome = match copy_onto(
+        let outcome = copy_onto(
             common_dir,
             name,
             (target, target),
@@ -196,16 +189,8 @@ fn rebase_onto(
             tip,
             target_tip,
             false,
-        )? {
-            Copied::Moved { files, dropped } => Outcome::Restacked {
-                new,
-                dropped,
-                files,
-                guessed: base.guessed,
-            },
-            Copied::Dry => Outcome::UpToDate,
-            Copied::Stop(outcome) => outcome,
-        };
+        )?
+        .outcome(new, base.guessed);
         match outcome.done() {
             // Built on it once moved there.
             true => {
@@ -462,16 +447,8 @@ fn unstack(common_dir: &Path, name: &str, trunk: &str, yes: bool) -> Result<()> 
         let onto = (trunk, trunk_ref.as_str());
         // Recorded first (see `rebase_onto`).
         settings::set_landing(common_dir, name, Some(&format!("{trunk} {trunk_tip}")))?;
-        let outcome = match copy_onto(common_dir, name, onto, &base, tip, trunk_tip, false)? {
-            Copied::Moved { files, dropped } => Outcome::Restacked {
-                new,
-                dropped,
-                files,
-                guessed: base.guessed,
-            },
-            Copied::Dry => Outcome::UpToDate,
-            Copied::Stop(outcome) => outcome,
-        };
+        let outcome = copy_onto(common_dir, name, onto, &base, tip, trunk_tip, false)?
+            .outcome(new, base.guessed);
         if !outcome.done() {
             finish_landing(common_dir, name)?;
         }
@@ -528,6 +505,13 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<Outcome> {
         return Ok(Outcome::Refused(why));
     }
     restack_branch(common_dir, name, false, false)
+}
+
+/// `update` for `name` alone, said as `each` says it.
+fn update_one(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
+    each(common_dir, &[name.to_string()], None, |name| {
+        update(common_dir, name, yes)
+    })
 }
 
 /// What one branch's move did.
@@ -691,17 +675,7 @@ fn describe(common_dir: &Path, outcome: &Outcome, name: &str, parent: &str) -> S
             if *guessed {
                 line += "; where its own commits start was guessed (from the base's reflog)";
             }
-            if *dropped > 0 {
-                let _ = write!(line, "; {dropped} of its commits made empty, dropped");
-            }
-            if let Some(files) = files {
-                let _ = write!(
-                    line,
-                    "; {} in its workspace",
-                    plural(files.len(), "file changed", "files changed")
-                );
-            }
-            line
+            line + &moved_details(*dropped, files)
         }
         Outcome::Would { onto, .. } => format!("would move onto {onto}"),
         Outcome::Landed {
@@ -716,16 +690,7 @@ fn describe(common_dir: &Path, outcome: &Outcome, name: &str, parent: &str) -> S
                 plural(*own, "commit", "commits"),
                 landed.target
             );
-            if *dropped > 0 {
-                let _ = write!(line, "; {dropped} of its commits made empty, dropped");
-            }
-            if let Some(files) = files {
-                let _ = write!(
-                    line,
-                    "; {} in its workspace",
-                    plural(files.len(), "file changed", "files changed")
-                );
-            }
+            line += &moved_details(*dropped, files);
             let _ = write!(
                 line,
                 ". Its pull request's base should now be {}: push it, then `gh pr edit {name} --base {}`",
@@ -763,6 +728,31 @@ fn describe(common_dir: &Path, outcome: &Outcome, name: &str, parent: &str) -> S
     }
 }
 
+/// The end of a line of `describe` for a move: how many of its own commits
+/// were made empty and dropped, how many files changed in its workspace.
+fn moved_details(dropped: usize, files: &Option<Vec<BString>>) -> String {
+    let mut out = String::new();
+    if dropped > 0 {
+        let _ = write!(out, "; {dropped} of its commits made empty, dropped");
+    }
+    if let Some(files) = files {
+        let _ = write!(
+            out,
+            "; {} in its workspace",
+            plural(files.len(), "file changed", "files changed")
+        );
+    }
+    out
+}
+
+/// The paths a move changed in the session's workspace, for the hook.
+fn under_you(files: Option<Vec<BString>>) -> String {
+    match files.unwrap_or_default() {
+        files if files.is_empty() => "no files changed under you".to_string(),
+        files => format!("files changed under you: {}", shown(&files)),
+    }
+}
+
 /// The parent base stored for `name`, if any.
 fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
     stack::rev(common_dir, &stack::stack_ref(name))
@@ -775,11 +765,9 @@ fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
 /// `dry_run`, only says what it would do. `auto` (the hook, not
 /// asked by anyone): a parent that only looks squash-merged (found by
 /// content) is followed only if its branch is gone, here or on its remote;
-/// else it is only said.
+/// else it is only said. Its callers finish an interrupted move first
+/// (`finish_landing`).
 fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> Result<Outcome> {
-    if !dry_run {
-        finish_landing(common_dir, name)?;
-    }
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
         return Err(Refusal::NotFound.error(format!("{name} isn't built on another branch")));
@@ -838,24 +826,18 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
     }
     let new = stack::count(common_dir, base.commit, parent_tip)?;
     let onto = (parent.as_str(), parent.as_str());
-    let (files, dropped) = match copy_onto(common_dir, name, onto, &base, tip, parent_tip, dry_run)?
-    {
-        Copied::Moved { files, dropped } => (files, dropped),
+    let copied = copy_onto(common_dir, name, onto, &base, tip, parent_tip, dry_run)?;
+    match copied {
+        Copied::Moved { .. } => land::record(common_dir, name, &parent, parent_tip)?,
         Copied::Dry => {
             return Ok(Outcome::Would {
                 onto: parent,
                 base: base.commit,
             });
         }
-        Copied::Stop(outcome) => return Ok(outcome),
-    };
-    land::record(common_dir, name, &parent, parent_tip)?;
-    Ok(Outcome::Restacked {
-        new,
-        dropped,
-        files,
-        guessed: base.guessed,
-    })
+        Copied::Stop(_) => {}
+    }
+    Ok(copied.outcome(new, base.guessed))
 }
 
 /// Where the own commits of branch `name` (at `tip`) start, on its parent
@@ -1021,6 +1003,23 @@ enum Copied {
     Dry,
     /// It didn't move: why.
     Stop(Outcome),
+}
+
+impl Copied {
+    /// As a move onto `new` new commits of the base did (`guessed`: where
+    /// its own commits start was guessed).
+    fn outcome(self, new: usize, guessed: bool) -> Outcome {
+        match self {
+            Copied::Moved { files, dropped } => Outcome::Restacked {
+                new,
+                dropped,
+                files,
+                guessed,
+            },
+            Copied::Dry => Outcome::UpToDate,
+            Copied::Stop(outcome) => outcome,
+        }
+    }
 }
 
 /// Copies the own commits of branch `name` (at `tip`, from `base`) onto
@@ -1430,11 +1429,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
         Outcome::Landed {
             landed, own, files, ..
         } => {
-            let files = files.unwrap_or_default();
-            let files = match files.is_empty() {
-                true => "no files changed under you".to_string(),
-                false => format!("files changed under you: {}", shown(&files)),
-            };
+            let files = under_you(files);
             Some(format!(
                 "gitfold: this branch's base {}; {name} is now built on {} with only its own \
                  {}; {files}. Its history was rewritten, so it needs a push with \
@@ -1468,11 +1463,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
                 true => String::new(),
                 false => format!(" ({})", subjects.join("; ")),
             };
-            let files = files.unwrap_or_default();
-            let files = match files.is_empty() {
-                true => "no files changed under you".to_string(),
-                false => format!("files changed under you: {}", shown(&files)),
-            };
+            let files = under_you(files);
             Some(format!(
                 "gitfold: this branch, {name}, was moved onto its base {parent}'s {}{what}; \
                  {files}. Its history was rewritten: push it with --force-with-lease when you \
