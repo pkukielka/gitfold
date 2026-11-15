@@ -100,6 +100,17 @@ pub fn workspace_or_current(workspace: Option<String>, repo: &Path) -> Result<St
     current_or(workspace, repo, "pass -w BRANCH")
 }
 
+/// The workspace of branch `name`, which must have opened: else refused, as
+/// no such branch or no workspace yet.
+pub fn opened_workspace(common_dir: &Path, name: &str) -> Result<crate::state::StateDir> {
+    let state = crate::state::StateDir::of(common_dir, name);
+    if !state.opened() {
+        crate::git::require_branch(name)?;
+        return Err(crate::refusal::Refusal::NotFound.error(format!("{name} has no workspace yet")));
+    }
+    Ok(state)
+}
+
 /// `branch_or_current`, saying `how` to name the branch if it is run
 /// outside every workspace without one.
 pub fn current_or(branch: Option<String>, repo: &Path, how: &str) -> Result<String> {

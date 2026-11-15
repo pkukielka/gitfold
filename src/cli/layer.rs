@@ -126,11 +126,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     }
     check_name(&name)?;
     let common_dir = git::init(repo)?;
-    let state = StateDir::of(&common_dir, &name);
-    if !state.opened() {
-        git::require_branch(&name)?;
-        return Err(Refusal::NotFound.error(format!("{name} has no workspace yet")));
-    }
+    let state = super::opened_workspace(&common_dir, &name)?;
     if args.op.is_none() {
         print!("{}", listing(&common_dir, &state, &Lens::read(&state)?)?);
         return Ok(());

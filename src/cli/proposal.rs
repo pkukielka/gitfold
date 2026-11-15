@@ -260,11 +260,7 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     let name = super::workspace_or_current(args.workspace, repo)?;
     check_name(&name)?;
     let common_dir = git::init(repo)?;
-    let state = StateDir::of(&common_dir, &name);
-    if !state.opened() {
-        git::require_branch(&name)?;
-        return Err(Refusal::NotFound.error(format!("{name} has no workspace yet")));
-    }
+    let state = super::opened_workspace(&common_dir, &name)?;
     let paths = workspace_paths(&state, &args.paths)?;
     let store = Store::default();
     let local = Local::read(&common_dir);
@@ -344,19 +340,33 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     if swapped {
         let _ = writeln!(out, "{name} shows {proposal} in place of {target} now");
     }
-    let root = mount_table::mount_of(&common_dir)?.map_or_else(
-        || format!("<mountpoint>/{proposal}"),
-        |m| m.join(&proposal).display().to_string(),
-    );
+    let mount = mount_table::mount_of(&common_dir)?;
     let edit = match copied.is_empty() {
         true => "edit",
         false => "edit further",
     };
-    let _ = writeln!(
-        out,
-        "{edit} them there (a workspace of its own, where they are yours):"
+    out += &next_steps(mount.as_deref(), &name, &target, &proposal, &paths, edit);
+    println!("{out}");
+    Ok(())
+}
+
+/// What `gitfold propose` says to do next, by workspace `name` with
+/// `proposal` to change `target`: `edit` the files at `paths` in the
+/// proposal's workspace (under `mount`, if mounted), then hand it over.
+fn next_steps(
+    mount: Option<&Path>,
+    name: &str,
+    target: &str,
+    proposal: &str,
+    paths: &[BString],
+    edit: &str,
+) -> String {
+    let root = mount.map_or_else(
+        || format!("<mountpoint>/{proposal}"),
+        |m| m.join(proposal).display().to_string(),
     );
-    for path in &paths {
+    let mut out = format!("{edit} them there (a workspace of its own, where they are yours):\n");
+    for path in paths {
         let _ = writeln!(out, "  {root}/{path}");
     }
     let _ = write!(
@@ -367,8 +377,7 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
          {proposal}`) and takes it (`gitfold accept {proposal}`), after which {name} shows \
          {target} again"
     );
-    println!("{out}");
-    Ok(())
+    out
 }
 
 /// Makes proposal `proposal` by workspace `by` to change layer `layer`: a
