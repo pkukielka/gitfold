@@ -85,7 +85,7 @@ two" "$(cat "$p/top.txt")|$(cat "$p/d/c.txt")"
 eq "a branch without a workspace: its tip" "top" \
     "$(cat "$("$BIN" -C "$REPO" snapshot m1 main)/top.txt")"
 out=$("$BIN" -C "$REPO" snapshot m1 nope 2>&1); rc=$?
-eq "neither a branch nor a revision (exit 3)" "3 Error: no branch or revision nope" "$rc $out"
+eq "neither a branch nor a revision (exit 3)" "3 error: no branch or revision nope" "$rc $out"
 eq "nothing changed in the workspaces" "M	a.txt
 A	n1.txt" "$("$BIN" -C "$REPO" changes m1)"
 }
@@ -112,8 +112,8 @@ echo lb >"$MNT/lb/lb.txt"
 echo mine >>"$W/d/c.txt"
 cat "$W/a.txt" "$W/d/b.txt" >/dev/null   # cached by the kernel before the switch
 out=$("$BIN" -C "$W" layer add la); rc=$?
-eq "add a layer: a confirmation, then what the daemon did" "0|layer la added: all work, live, last HH:MM|me: layers shown" \
-    "$rc|$(echo "$out" | sed -n 1p | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/')|$(echo "$out" | sed -n 2p | sed 's/ (.*//')"
+eq "add a layer: a confirmation, then what the daemon did" "0|layer la added: all work, live, last HH:MM|N files changed in me" \
+    "$rc|$(echo "$out" | sed -n 1p | sed -E 's/[0-9]{2}:[0-9]{2}/HH:MM/')|$(echo "$out" | sed -n 2p | sed -E 's/^[0-9]+ /N /')"
 eq "its changes show" "a
 la|nla|f" "$(cat "$W/a.txt")|$(cat "$W/nla.txt")|$(cat "$W/nd/f")"
 check "its deletions too" test ! -e "$W/d/b.txt"
@@ -173,7 +173,7 @@ R config core.sparseCheckout true
 check "sparse checkout: adding again still switches" "$BIN" -C "$W" layer add la --frozen
 eq "to the layer's work as now" "later" "$(tail -1 "$W/a.txt")"
 out=$(git -C "$W" status 2>&1); rc=$?
-eq "but git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LAYERS SHOWN (la): git is off here (sparse checkout is on). Run gitfold layer remove --all' && echo yes)"
+eq "but git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LAYERS SHOWN (la): git is off here (sparse checkout is on). To use git, remove the see-only layers: gitfold layer remove BRANCH' && echo yes)"
 R config --unset core.sparseCheckout
 check "remove the layer" "$BIN" -C "$W" layer remove la
 eq "no layers: git back" "?? own.txt" "$(git -C "$W" status --short)"
@@ -219,7 +219,7 @@ eq "the listing: what each shows and how it updates, then what your commits sit 
 live all work live, last HH:MM
 frozen all work frozen at HH:MM
 commits commits only live, last HH:MM
-plain commits live, last HH:MM
+plain commits (no workspace) live, last HH:MM
 v1.2 commits fixed
 Your commits sit on main." "$(listing "$W")"
 echo live2 >>"$MNT/live/live.txt"; echo fz2 >>"$MNT/frozen/frozen.txt"
@@ -252,14 +252,15 @@ R branch api plain
 echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm own
 out=$("$BIN" -C "$W" layer add api --edit)
 eq "built on api: says what it moves" "moves 1 commit of me onto api" "$(head -1 <<<"$out")"
-eq "the listing: built on, your commits" "api commits live, last HH:MM built on: your 1 commit sits on it" \
+eq "the listing: built on, your commits" "api commits (no workspace) live, last HH:MM built on: your 1 commit sits on it" \
     "$(listing "$W" | grep '^api')"
 check "and not on main" fails grep -q "sit on main" <<<"$(listing "$W")"
 check "a see-only layer next to it" "$BIN" -C "$W" layer add live
 check "editable layers stored as such" grep -qP '^layer api\t.*\tedit$' "$COMMON/gitfold/me/layers"
 R switch -q api; echo two >"$REPO/api2.txt"; R add api2.txt; R commit -qm "api: two"; R switch -q main
-eq "api moved on: needs a move" "Note: needs update: its next turn, or \`gitfold layer add <LAYER> --edit\`" \
+eq "api moved on: needs a move, naming it" "Note: needs update: api has new commits; \`gitfold layer add api --edit\` moves me onto them (or its next turn)" \
     "$(listing "$W" | grep '^Note')"
+check "its row: updated at the next turn (me has an agent)" has "$(listing "$W" | grep '^api')" "live, last HH:MM; updates at your next turn"
 check "moved onto api's new commit with the layer shown" "$BIN" -C "$W" layer add api --edit
 eq "on api's tip, with its own commit" "$(R rev-parse api)|own.txt" "$(R rev-parse me^)|$(R diff --name-only api me)"
 eq "api's new file shows, the other layer still there" "two|api live" "$(cat "$W/api2.txt")|$(layer_names "$W")"
@@ -284,7 +285,7 @@ check "read-only" test ! -w "$W/n.txt"
 eq "the deny hook names both" "yes yes" \
     "$(edit_hook "$W" n.txt | grep -q "n.txt shows the merge of x and y's work" && echo yes) $(edit_hook "$W" n.txt | grep -q 'gitfold layer remove x' && echo yes)"
 out=$("$BIN" -C "$W" layer add z)
-eq "a third changing the same line: conflict markers, said, naming the two that conflict" "<<<<<<< base + x + y|>>>>>>> z|yes" \
+eq "a third changing the same line: conflict markers, said, naming the two that conflict" "<<<<<<< main + x + y|>>>>>>> z|yes" \
     "$(grep '^<<<<<<<' "$W/n.txt")|$(grep '^>>>>>>>' "$W/n.txt")|$(echo "$out" | grep -qF "note: Conflict: n.txt is changed by both y and z (it shows git's conflict markers)" && echo yes)"
 eq "listed, naming the two that conflict (x merges)" "Conflict: n.txt is changed by both y and z" "$("$BIN" -C "$W" layer | grep Conflict)"
 eq "the deny hook names them all" "yes yes" \
@@ -294,7 +295,7 @@ eq "git sees none of it" "" "$(git -C "$W" status --short)"
 rm "$MNT/x/d/b.txt"; echo yb >>"$MNT/y/d/b.txt"
 check "add both again, now up to date" sh -c "'$BIN' -C '$W' layer add x && '$BIN' -C '$W' layer add y"
 eq "a deletion against a change: the base's version" "b" "$(cat "$W/d/b.txt")"
-eq "listed as such" "Conflict: d/b.txt is changed by both x and y (the changes can't be merged: it shows your base's version)" \
+eq "listed as such" "Conflict: d/b.txt is changed by both x and y (the changes can't be merged: it shows main's version)" \
     "$("$BIN" -C "$W" layer | grep 'Conflict: d/')"
 check "remove one" "$BIN" -C "$W" layer remove z
 eq "the others merge again" "1 x 2 3 4 5 6 7 8 y" "$(tr '\n' ' ' <"$W/n.txt" | sed 's/ $//')"
@@ -310,7 +311,7 @@ ls "$W" >/dev/null; turn_starts "$W" >/dev/null   # an agent's: its layers move 
 eq "a layer of b's work" "b v1" "$(cat "$W/b.txt")"
 "$BIN" -C "$REPO" remove --force b >/dev/null
 (cd "$W" && "$BIN" layer --claude-hook user-prompt-submit >/dev/null)
-eq "b's workspace removed: the next turn shows its commits" "no|b commits live, last HH:MM" \
+eq "b's workspace removed: the next turn shows its commits" "no|b commits (no workspace) live, last HH:MM" \
     "$(test -e "$W/b.txt" && echo yes || echo no)|$(listing "$W" | grep '^b ')"
 ls "$MNT/b" >/dev/null
 (cd "$W" && "$BIN" layer --claude-hook user-prompt-submit >/dev/null)
@@ -325,11 +326,14 @@ eq "no snapshot of it yet (no turn ended there): one taken at this turn's start"
 for o in o1 o2 o3 o4; do echo "$o" >"$MNT/$o/$o.txt"; done
 pids=(); for o in o1 o2 o3 o4; do "$BIN" -C "$W" layer add "$o" >/dev/null & pids+=($!); done; wait "${pids[@]}"
 eq "layers added at once: none lost" "b o1 o2 o3 o4" "$(layer_names "$W" | tr ' ' '\n' | sort | paste -sd' ')"
-eq "the daemon's message: one path, singular" "me: layers shown (1 path changed)" \
+eq "the daemon's message: one file, singular" "1 file changed in me" \
     "$("$BIN" -C "$W" layer remove o1 | sed -n 2p)"
-out=$("$BIN" -C "$W" layer add main)
-eq "a live layer of the branch the base came from: said when there is nothing to show yet" "yes" \
-    "$(echo "$out" | head -1 | grep -q '(nothing to show yet: all of main is in your base already' && echo yes)"
+"$BIN" -C "$W" layer add main >/dev/null 2>&1; rc=$?
+eq "the main branch as a layer: refused (exit 2)" 2 "$rc"
+R branch -q at-main main
+out=$("$BIN" -C "$W" layer add at-main)
+eq "a live layer of a branch it has already: said when there is nothing to show yet" "yes" \
+    "$(echo "$out" | head -1 | grep -qF "(nothing to show yet: me already has at-main's work (it's in main or what me builds on)" && echo yes)"
 R update-ref refs/remotes/origin/main main; R config gitfold.trunk origin/main
 eq "the trunk a remote's branch: named as the branch" "Your commits sit on main." "$(listing "$W" | grep 'sit on')"
 R config --unset gitfold.trunk
@@ -588,8 +592,11 @@ c2	yes	yes	passed
 c3	no	yes	passed
 c4	unknown	yes	failed	exit 1: no fn get" "$rc|$(echo "$out" | sed -n '1,5p' | sed 's/ (.*//')"
 eq "the workspaces' own trees untouched" "A	use.txt|get(4)" "$("$BIN" -C "$REPO" changes c4)|$(cat "$MNT/c4/use.txt")"
-eq "proposals: the failed consent" "  consent: failed: 1 of 4 failing: c4" \
+eq "proposals: the failed consent, naming why" "  consent: failed: 1 of 4 failing: c4 (its test failed: exit 1: no fn get)" \
     "$("$BIN" -C "$REPO" proposals contracts | sed -n '/^contracts-prop\/c1/,/consent/p' | tail -1)"
+out=$("$BIN" -C "$MNT/contracts" accept contracts-prop/c1 2>&1); rc=$?
+eq "accept after it: refused, naming the workspace and why (exit 4)" "4 yes" \
+    "$rc $(grep -qF 'c4 (its test failed: exit 1: no fn get)' <<<"$out" && echo yes)"
 echo 'put(4)' >"$MNT/c4/use.txt"
 TEST2='test -f types.txt && { [ "$GITFOLD_WORKSPACE" != c2 ] || test -f lib.txt; } && echo x >"$GITFOLD_SCRATCH/out"'
 out=$("$BIN" -C "$REPO" consent contracts-prop/c1 --test "$TEST2" 2>&1); rc=$?
@@ -758,6 +765,8 @@ eq "web's line shows now (api's is in the base)" "3 web|w" "$(sed -n 3p "$A/p.tx
 base_was=$(cat "$COMMON/gitfold/api/base")
 sed -i 's/^2$/2 api/' "$A/q.txt"; G "$A" commit -qam "api q"
 eq "committed with the layers shown: the base waits" "$base_was" "$(cat "$COMMON/gitfold/api/base")"
+eq "list: its tip, and no changes, as git status" "0 $(R rev-parse --short=12 api)|" \
+    "$("$BIN" -C "$REPO" list | awk '$1 == "api" { print $2, $5 }')|$(git -C "$A" status --short)"
 c=$(snap api)
 eq "committed through the workspace: on the tip" "$(R rev-parse api)" "$(R rev-parse "$c^")"
 sed -i 's/^7$/7 more/' "$A/q.txt"
@@ -891,8 +900,10 @@ check "taken out: no warning" fails has "$(listing "$C")" WARNING
 eq "git sees the waiting edits as before" "" "$(git -C "$C" status --short)"
 
 G "$L" add -A; G "$L" commit -qm "lead: class, new"; turn_ends "$L" >/dev/null
-turn_starts "$C" >/dev/null
+out=$(turn_starts "$C")
 eq "the lead committed them: the child moves onto it" "$(R rev-parse lead)" "$(R rev-parse child^)"
+check "the turn says they are ordinary changes now" has "$out" \
+    "gitfold: your waiting edits in api.rs are ordinary uncommitted changes now: lead committed the lines they change"
 eq "its waiting edits are ordinary changes" " M api.rs| M new.rs" "$(git -C "$C" status --short | paste -sd'|')"
 eq "with what they changed" "-    fn a() {}|+    fn a() { mine }|+fn mine() {}" \
     "$(git -C "$C" diff | grep '^[-+][^-+]' | paste -sd'|')"

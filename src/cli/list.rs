@@ -41,7 +41,7 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     let s = status::status(&store, &state)?;
     let note = base_note(name, &s.base);
     if !note.is_empty() {
-        eprintln!("note: {name}: {note}; changes are against the stored base");
+        eprintln!("note: {name}: {note}; changes are against the commit it last had");
     }
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     let changes = s.changes(&store);
@@ -136,7 +136,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     };
     println!(
         "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {:<16} status",
-        "branch", "changed", "deleted", "ignored", "commit", "last", "base"
+        "branch", "changed", "deleted", "ignored", "commit", "last", "built on"
     );
     for (branch, depth) in rows {
         let shown = match depth {
@@ -171,7 +171,22 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             );
             continue;
         };
-        let s = match status::status(&store, &w.state) {
+        // Open in the mount, its changes are against its branch's tip, as
+        // git status says them: a base waiting behind it (a commit made
+        // while layers show) has copies of the committed files in upper.
+        let tip = (open.contains(&w.branch))
+            .then(|| git::branch_tip(&w.branch).ok())
+            .flatten();
+        let s = match tip {
+            Some(tip) => (w.state.read_base())
+                .and_then(|base| git::stack::is_ancestor(&common_dir, base.id, tip.id))
+                .and_then(|ahead| match ahead {
+                    true => status::status_at(&store, &w.state, tip),
+                    false => status::status(&store, &w.state),
+                }),
+            None => status::status(&store, &w.state),
+        };
+        let s = match s {
             Ok(s) => s,
             Err(e) => {
                 println!("{shown:<40} unreadable ({e:#}); id {}", w.state.id);

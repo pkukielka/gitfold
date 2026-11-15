@@ -76,10 +76,11 @@ enum Command {
     List(cli::list::ListArgs),
     /// List a workspace's uncommitted changes (A/M/D per path), without git status.
     ///
-    /// Against its base, untracked files included and ignored ones not, whatever
-    /// is staged (as `git add -A` and `git diff --cached --name-status`): one
-    /// path per line, `A` added, `M` modified, `D` deleted, quoted as git quotes
-    /// paths. Read from the workspace's stored state, mounted or not.
+    /// Against the commit it is on, untracked files included and ignored ones
+    /// not, whatever is staged (as `git add -A` and `git diff --cached
+    /// --name-status`): one path per line, `A` added, `M` modified, `D`
+    /// deleted, quoted as git quotes paths. Read from the workspace's stored
+    /// state, mounted or not.
     Changes(cli::list::ChangesArgs),
     /// List what a workspace read or changed that changed elsewhere since.
     ///
@@ -88,7 +89,7 @@ enum Command {
     /// file it read (recorded while tracked: `gitfold track-reads`) that the
     /// target changed, then the target and the path, quoted as git quotes
     /// paths. A target's changes are its commits since it diverged from the
-    /// workspace's base, plus, for a branch with a workspace, that workspace's
+    /// workspace's commit, plus, for a branch with a workspace, that workspace's
     /// uncommitted changes. Paths, not lines: a `W` path often merges cleanly
     /// (`git merge-tree` tells). Read from stored state, mounted or not. Exit
     /// codes: 0 no overlaps, 6 some, 3 no such branch (or no
@@ -121,7 +122,7 @@ enum Command {
     ///
     /// A branch with a workspace contributes its work: what the workspace
     /// shows, ignored files left out (as `gitfold changes` lists them), on its
-    /// base. Other branches (and all with --commits) and revisions contribute
+    /// branch's commit. Other branches (and all with --commits) and revisions contribute
     /// their commits. Several are merged in order onto the first (or --onto)
     /// as `git merge-tree` does. Prints the snapshot's path,
     /// <MOUNTPOINT>/@<SHA> (unmounted, the commit). No workspace, index or
@@ -132,44 +133,38 @@ enum Command {
     /// Show other branches' work in a workspace (layers): see-only, or
     /// editable (--edit: build on it).
     ///
-    /// A layer is another branch's work shown over the workspace's own
-    /// commits and under its own changes: a workspace's work (uncommitted
-    /// included), or with --commits or without a workspace, its commits. It
-    /// is kept up to date (at its agent's turns, and when added again)
-    /// unless --frozen; a tag or a commit never moves. A see-only layer's
-    /// files can't be written there, and git sees only the workspace's own
-    /// changes. An editable layer (`layer add BRANCH --edit`) is one the
-    /// branch builds on: its commits sit on BRANCH's commits (on a merge of
-    /// them with several), follow its new ones at its agent's turns (or,
-    /// without an agent, once the workspace is idle), and come off them
-    /// when it is removed or made see-only (`layer add BRANCH` again); what
-    /// BRANCH committed is the branch's to edit, and a file only editable
-    /// layers changed is writable, git seeing only the workspace's own lines
-    /// of it. Changes to their uncommitted lines are waiting edits: kept in
-    /// the file and out of git until the layer commits those lines. Every
-    /// branch otherwise sits on main. A layer brings only its
-    /// own changes: a file it changed shows the base's version with them
-    /// merged in (as merging its branch would), one layer after another,
-    /// with conflict markers where they conflict with the base's or another
-    /// layer's (listed). Files marked `merge=union` in .gitattributes are
-    /// union instead (the layers' lines and the workspace's own, which it
-    /// writes; each workspace's lines where it put them among the others'),
-    /// with a filter so git sees and commits only the workspace's own
-    /// lines, and a guard refusing commits that bring the layers' onto the
-    /// branch (and the daemon warning about one made without it). Where git
-    /// can't be kept right, it is turned off there, saying why. With no
-    /// subcommand, lists the layers
-    /// (what each shows, how it updates, whether your commits sit on it),
-    /// what your commits sit on, their conflicts, waiting edits, commits
-    /// with a layer's uncommitted lines, notes on landings and on
-    /// union files (lines placed by the base's lines, or lines added among
-    /// another branch's: maybe not a list). Stored with the workspace (a
-    /// branch without one: its editable layers); while mounted, shown at
-    /// once. Exit codes: 3 no such workspace, branch or layer, 4 refused or
-    /// not moved (git busy, commits already pushed without --yes, commits
-    /// or waiting edits that change a layer's lines, a conflict, uncommitted work in the
-    /// way, own lines that depend on a layer's), 1 other errors, 2 usage
-    /// errors (--edit on a tag, a commit or main).
+    /// A layer is another branch's work, shown over your commits and under
+    /// your own changes: a workspace's work (uncommitted included), or a
+    /// branch's commits (with --commits, or a branch without a workspace).
+    /// It updates at your agent's turns and when added again, unless
+    /// --frozen; a tag or a commit never moves.
+    ///
+    /// See-only (`layer add BRANCH`): its files are read-only here, and git
+    /// sees only your changes.
+    ///
+    /// Editable (`layer add BRANCH --edit`): your branch builds on BRANCH.
+    /// Your commits sit on its commits, follow its new ones, and come off
+    /// them when it is removed or made see-only. Files only editable layers
+    /// changed are yours to edit, and git sees only your lines. Your
+    /// changes to its uncommitted lines are waiting edits, kept out of git
+    /// until BRANCH commits those lines. Without editable layers, your
+    /// commits sit on main.
+    ///
+    /// A layer brings only its own changes, merged in one after another.
+    /// Where they change the same lines, the file shows git's conflict
+    /// markers, and the listing names them. Files marked `merge=union` in
+    /// .gitattributes keep every layer's lines and yours. How git is kept
+    /// right (a filter, a guard on commits) is in the README.
+    ///
+    /// With no subcommand, lists the layers (what each shows, how it
+    /// updates, whether your commits sit on it), then conflicts, waiting
+    /// edits and notes.
+    ///
+    /// Exit codes: 3 no such workspace, branch or layer; 4 refused or not
+    /// moved (git busy, commits already pushed without --yes, commits or
+    /// waiting edits that change a layer's lines, a conflict, uncommitted
+    /// work in the way); 1 other errors; 2 usage errors (--edit on a tag, a
+    /// commit or main).
     Layer(cli::layer::LayerArgs),
     /// Propose a change to a layer's files (a contract) from a workspace
     /// showing it.
@@ -192,9 +187,11 @@ enum Command {
     /// records say they didn't read a changed file): whether its own work
     /// merges with that, and --test run in its view with that in the
     /// layer's place (its other layers and own work included), a snapshot.
-    /// No workspace changes. Prints a table: workspace, read the files (yes,
-    /// no, unknown), merges cleanly, test. The result is recorded for
-    /// `accept`. Exit codes: 0 all passed, 4 any failed or none was checked
+    /// No workspace changes. Prints a table: workspace, read (whether it
+    /// read the proposed files: yes, no, or unknown when its reads aren't
+    /// recorded, `gitfold track-reads` records them; unknown counts as
+    /// read), merges cleanly, test. The result is recorded for `accept`,
+    /// with each failing workspace and why. Exit codes: 0 all passed, 4 any failed or none was checked
     /// (or the layer changed the proposed files since), 3 no such proposal,
     /// 1 other errors.
     Consent(cli::proposal::ConsentArgs),
@@ -222,9 +219,10 @@ enum Command {
     Reject(cli::proposal::RejectArgs),
     /// Delete a workspace, or a snapshot's registration.
     ///
-    /// A workspace: its registration, stored changes and base ref (its commits
-    /// stay on the branch). A snapshot (@<rev>): its registration. Works
-    /// mounted too, unless it is in use. Exit codes: 3 not found, 4 uncommitted
+    /// A workspace: its registration, stored changes and the ref keeping its
+    /// commit (its commits stay on the branch). A snapshot (@<rev>): its
+    /// registration. Works mounted too, unless it is in use. Exit codes: 3
+    /// not found, 4 uncommitted
     /// changes (or a git operation in progress), 5 in use, 1 other errors, 2
     /// usage errors.
     Remove(cli::remove::RemoveArgs),
@@ -290,7 +288,9 @@ fn main() -> std::process::ExitCode {
     let code = match run() {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("Error: {e:?}");
+            if !e.to_string().is_empty() {
+                eprintln!("error: {e:?}");
+            }
             refusal::Refusal::of(&e).map_or(1, |r| r.exit_code())
         }
     };

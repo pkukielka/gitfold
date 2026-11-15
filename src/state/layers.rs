@@ -391,17 +391,32 @@ pub struct Conflict {
     pub base: bool,
     /// It shows git's conflict markers; else the base's version.
     pub markers: bool,
+    /// What the base is, as users know it (`below`): `main`, `api`.
+    pub below: String,
+}
+
+/// What the base of a workspace with `layers` is, as users know it: what
+/// its branch builds on, its editable layers (`api`, `db`), else main.
+fn below(common_dir: &std::path::Path, layers: &Layers) -> Vec<String> {
+    match layers.editable_names() {
+        names if names.is_empty() => vec![crate::cli::layer::land::main_name(
+            common_dir,
+            &crate::settings::Local::read(common_dir),
+        )],
+        names => names,
+    }
 }
 
 impl Conflict {
     /// In words, with the names of `layers`' layers: `<path>: <layer>'s change
-    /// conflicts with your base` or `<path> is changed by both <a> and <b>`,
+    /// conflicts with main's` or `<path> is changed by both <a> and <b>`,
     /// and when it can't be merged, that it shows the base's version.
     pub fn describe(&self, layers: &Layers) -> String {
         let names = || self.layers.iter().map(|&i| layers.layers[i].branch.clone());
+        let below = &self.below;
         let mut out = match self.base {
             true => format!(
-                "{}: {}'s change conflicts with your base",
+                "{}: {}'s change conflicts with {below}'s",
                 self.path,
                 and_list(names())
             ),
@@ -413,7 +428,7 @@ impl Conflict {
             ),
         };
         if !self.markers {
-            out += " (the changes can't be merged: it shows your base's version)";
+            out += &format!(" (the changes can't be merged: it shows {below}'s version)");
         }
         out
     }
@@ -487,7 +502,12 @@ pub fn view(
             .map(|(path, _)| path)
             .collect())
     };
-    let view = git::with_repo(|repo| git::layers::build_view(repo, *base, &stack, &hunk_paths))?;
+    let below = below(common_dir, layers);
+    // Conflict markers name it as the layers are named: `main + lead`.
+    let label = below.join(" + ");
+    let below = and_list(below);
+    let view =
+        git::with_repo(|repo| git::layers::build_view(repo, *base, &label, &stack, &hunk_paths))?;
     let name = |ix: usize| layers.layers[ix].branch.clone();
     let mut conflicts = Vec::new();
     let mut notes = Vec::new();
@@ -499,7 +519,7 @@ pub fn view(
                 name(layer)
             ),
             git::layers::Note::PlacedByBase { layer, path } => {
-                let note = placed_by_base(&name(layer), &path);
+                let note = placed_by_base(&name(layer), &path, &below);
                 warnings.push(format!("Note: {note}"));
                 note
             }
@@ -527,6 +547,7 @@ pub fn view(
                     layers: involved,
                     base,
                     markers,
+                    below: below.clone(),
                 };
                 let note = format!(
                     "Conflict: {}{}",
@@ -632,10 +653,10 @@ pub fn own_among(
 
 /// The note for a layer `layer` whose lines in union file `path` are
 /// placed by the base's lines (`git::layers::Note::PlacedByBase`).
-fn placed_by_base(layer: &str, path: &BString) -> String {
+fn placed_by_base(layer: &str, path: &BString, below: &str) -> String {
     format!(
-        "{layer}'s lines in {path} are placed by your base's lines: the lines {layer} added them \
-         among aren't in the layers shown here"
+        "{layer}'s lines in {path} are placed by lines your branch has ({below}'s or your \
+         commits'): the lines {layer} added them among aren't in the layers shown here"
     )
 }
 
@@ -654,7 +675,7 @@ pub fn among(whose: &str, path: &BString, others: &str) -> String {
 pub fn merge_base(base: &ObjectId, layer: &Layer) -> Result<ObjectId> {
     git::merge_base_if_any(*base, layer.snapshot)?.ok_or_else(|| {
         anyhow::anyhow!(
-            "{} shares no history with the base {base}, so its changes can't be told apart",
+            "{} shares no history with commit {base}, so its changes can't be told apart",
             layer.branch
         )
     })

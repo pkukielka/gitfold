@@ -50,7 +50,7 @@ eq "in a workspace, it's that one's" "$EXPECT" "$(cd "$W1" && "$BIN" changes 2>&
 eq "from a subdirectory of it too" "$EXPECT" "$(cd "$W1/d" && "$BIN" changes 2>&1)"
 check "outside a workspace, the branch must be named" sh -c "cd '$REPO' && '$BIN' changes 2>&1 | grep -q 'not in a workspace: run it inside one'"
 for cmd in "layer" "layer add two" "layer add two --edit" "propose a.txt"; do
-    eq "outside a workspace: $cmd asks for -w" "Error: not in a workspace: run it inside one, or pass -w BRANCH" \
+    eq "outside a workspace: $cmd asks for -w" "error: not in a workspace: run it inside one, or pass -w BRANCH" \
         "$(cd "$REPO" && $BIN $cmd 2>&1)"
 done
 eq "list from the mount root: the repository's" "$("$BIN" -C "$REPO" list 2>&1 | awk '{ print $1 }')" \
@@ -121,17 +121,17 @@ check "an invalid name refused" fails "$BIN" -C "$REPO" changes ..
 unmount_fs
 R update-ref refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m moved)"
 out=$("$BIN" -C "$REPO" changes ch 2>&1 >/dev/null)
-eq "a branch moved since: a note on stderr" yes "$(grep -q 'base behind the branch tip' <<<"$out" && echo yes)"
+eq "a branch moved since: a note on stderr" yes "$(grep -q 'behind the branch tip (it catches up' <<<"$out" && echo yes)"
 find "$COMMON/gitfold/ch" -exec touch -h -d '3 days ago' {} +; touch -d '3 days ago' "$COMMON/logs/refs/heads/ch"
 eq "list: nothing changed for 3 days" 3d "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print $6 }')"
 R update-ref -m commit refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m again)"
 eq "a commit alone (the branch's reflog) counts" yes "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print ($6 ~ /^[0-9]+s$/ ? "yes" : $6) }')"
 mount_fs
-eq "mounted, but not open: a base behind is still said" "(base behind the branch tip (updated when opened in the mount))" \
-    "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch"' | grep -o '(base behind.*')"
+eq "mounted, but not open: a base behind is still said" "(behind the branch tip (it catches up when opened in the mount))" \
+    "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch"' | grep -o '(behind the branch.*')"
 ls "$MNT/ch" >/dev/null
 for _ in $(seq 30); do [ "$(cat "$COMMON/gitfold/ch/base")" = "$(R rev-parse ch)" ] && break; sleep 0.1; done
-eq "opened: caught up, nothing said" "" "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch"' | grep -o 'base behind')"
+eq "opened: caught up, nothing said" "" "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch"' | grep -o 'behind the branch')"
 }
 
 branch_with_changes_a_fork() {

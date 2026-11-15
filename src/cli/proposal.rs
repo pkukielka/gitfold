@@ -617,7 +617,7 @@ fn write_stored(
         }
         if file.is_some() {
             if lookup(path)?.is_some_and(|i| i.kind == EntryKind::Tree) {
-                return Err(mount(path, "a directory of its base"));
+                return Err(mount(path, "a directory of its branch"));
             }
             for a in state::ancestors(path) {
                 let upper = fs::symlink_metadata(state::upper_path(&state.upper(), a));
@@ -898,7 +898,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
                     read.word(),
                     conflicts.join(", ")
                 );
-                failing.push(branch.clone());
+                failing.push(format!("{branch} (conflicts on {})", conflicts.join(", ")));
                 continue;
             }
             Err(e) => return Err(e),
@@ -918,7 +918,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
                 let _ = writeln!(table, "{branch}\t{}\tyes\tpassed", read.word());
             }
             Ran::Failed(why) => {
-                failing.push(branch.clone());
+                failing.push(format!("{branch} (its test failed: {why})"));
                 let _ = writeln!(
                     table,
                     "{branch}\t{}\tyes\tfailed\t{why} ({})",

@@ -68,7 +68,7 @@ pub fn fork(
     // nothing to remove.
     ensure!(
         git::resolve(&to_pin).is_err(),
-        "the base pin {to_pin} of an earlier branch {to} is left; delete it with `git \
+        "the ref {to_pin} of an earlier branch {to} is left; delete it with `git \
          update-ref -d {to_pin}`"
     );
     worktree::refuse_if_busy(common_dir, &source.admin, from, AFTER_GIT)?;

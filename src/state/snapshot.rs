@@ -442,7 +442,8 @@ fn commit(
     record: Option<ObjectId>,
     branch: &str,
 ) -> Result<ObjectId> {
-    let message = format!("gitfold snapshot: {branch}\n\nIts uncommitted work, on its base.");
+    let message =
+        format!("gitfold snapshot: {branch}\n\nIts uncommitted work, on its branch's commit.");
     let (tree, base) = (tree.to_string(), base.to_string());
     let record = record.map(|r| r.to_string());
     let mut args = vec!["commit-tree", &tree, "-p", &base];

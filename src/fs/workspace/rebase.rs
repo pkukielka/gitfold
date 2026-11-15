@@ -145,6 +145,7 @@ impl Workspace {
         // nor the layers move. One that finishes moves the branch, which the
         // rebase below then follows.
         if moves::pending(&self.state) {
+            moves::release_left_index_lock(&self.state)?;
             if !self.git_idle() {
                 self.limit_touched();
                 return Ok(());

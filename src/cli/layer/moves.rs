@@ -238,8 +238,17 @@ pub struct Plan<'a> {
     pub off: Option<&'a str>,
     /// What it moves onto, as said (`onto api`, `off api, onto main`).
     pub said: String,
-    /// Said before what it moves (`api becomes see-only: `).
-    pub prefix: String,
+    /// Said before what it moves.
+    pub prefix: Prefix,
+}
+
+/// What a move asked for says before what it moves (`Plan::prefix`).
+#[derive(Default)]
+pub struct Prefix {
+    /// When it moves: `api becomes see-only: `.
+    pub moves: String,
+    /// When it doesn't (refused, blocked): `making api see-only `.
+    pub would: String,
 }
 
 /// The commit the parts merge to (none: main's tip), or the paths they
@@ -320,30 +329,53 @@ pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
             false => Outcome::BaseMoved,
         });
     }
-    if plan.asked {
-        let own_count = stack::count(common_dir, base, tip)?;
-        println!(
-            "{}moves {} of {name} {}",
-            plan.prefix,
-            plural(own_count, "commit", "commits"),
-            plan.said
-        );
-    }
+    // Asked for: what it moves said first, or what it would have moved.
+    let announce = |moves: bool| -> Result<()> {
+        if !plan.asked {
+            return Ok(());
+        }
+        let prefix = match moves {
+            true => &plan.prefix.moves,
+            false => &plan.prefix.would,
+        };
+        match (stack::count(common_dir, base, tip)?, moves) {
+            (0, true) => println!(
+                "{prefix}{name} now builds on {}",
+                onto_words(common_dir, &plan.parts)
+            ),
+            (0, false) => println!(
+                "{prefix}{name} would build on {}",
+                onto_words(common_dir, &plan.parts)
+            ),
+            (n, moves) => println!(
+                "{prefix}{} {} of {name} {}",
+                if moves { "moves" } else { "would move" },
+                plural(n, "commit", "commits"),
+                plan.said
+            ),
+        }
+        Ok(())
+    };
+    let refused = |why: String| -> Result<Outcome> {
+        announce(false)?;
+        Ok(Outcome::Refused(why))
+    };
     if let Some(off) = plan.off {
         let dependent = git::with_repo(|repo| stack::dependent(repo, base, onto, tip))?;
         if !dependent.is_empty() {
-            return Ok(Outcome::Refused(depends_on(common_dir, off, &dependent)?));
+            return refused(depends_on(common_dir, off, &dependent)?);
         }
     }
     let computed = git::with_repo(|repo| stack::compute_move(repo, base, onto, tip))?;
     let (new_tip, dropped) = match computed {
         stack::Move::Merge(commit) => {
-            return Ok(Outcome::Refused(format!(
+            return refused(format!(
                 "its commit {} is a merge, which isn't moved; rebase by hand",
                 short(commit)
-            )));
+            ));
         }
         stack::Move::Conflict { commit, paths } => {
+            announce(false)?;
             let told = blocked(&state).is_some_and(|b| b.starts_with(&format!("{onto} {commit}")));
             if plan.asked || !told {
                 record_blocked(&state, onto, commit, &paths);
@@ -352,7 +384,7 @@ pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
                 commit,
                 paths,
                 told,
-                onto: plan.said.trim_start_matches("onto ").to_string(),
+                onto: onto_words(common_dir, &plan.parts),
             });
         }
         stack::Move::Done { tip, dropped, .. } => (tip, dropped.len()),
@@ -361,14 +393,15 @@ pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
         && !plan.yes
         && let Some(why) = pushed(common_dir, name, base, tip)?
     {
-        return Ok(Outcome::Refused(why));
+        return refused(why);
     }
     if let Some(other) = git::worktree::checked_out_elsewhere(common_dir, name, &state.admin) {
-        return Ok(Outcome::Refused(format!(
+        return refused(format!(
             "it is checked out in {other}; move it there (`git rebase --onto {onto} {}`)",
             short(base)
-        )));
+        ));
     }
+    announce(true)?;
     if let Some(next) = &plan.next {
         layers::write_next(&state, onto, next)?;
     }
@@ -420,10 +453,13 @@ fn depends_on(
         };
         lines.push(format!("{} {subject} ({paths})", short(*commit)));
     }
+    let (changes, they, them) = match dependent.len() {
+        1 => ("1 commit changes".to_string(), "it", "it"),
+        n => (format!("{n} commits change"), "they", "them"),
+    };
     Ok(format!(
-        "{} change {off}'s lines, so they can't stand without {off}: {}. Keep {off} \
-         editable, or change them not to depend on its lines",
-        plural(dependent.len(), "commit", "commits"),
+        "{changes} {off}'s lines, so {they} can't stand without {off}: {}. Keep {off} \
+         editable, or change {them} not to depend on its lines",
         lines.join("; ")
     ))
 }
@@ -473,10 +509,10 @@ fn move_branch(state: &StateDir, intent: Intent) -> Result<Moved> {
 }
 
 /// Why a move of the own commits of `name` (`base..tip`) needs `--yes`:
-/// some are pushed already (reachable from its upstream, else
-/// `origin/<name>`).
+/// some are pushed already (reachable from its branch of the same name on
+/// its remote, `pushed_to`).
 fn pushed(common_dir: &Path, name: &str, base: ObjectId, tip: ObjectId) -> Result<Option<String>> {
-    let Some((remote, theirs, at)) = upstream(common_dir, name)? else {
+    let Some((remote, at)) = pushed_to(common_dir, name)? else {
         return Ok(None);
     };
     let Ok(meet) = git::merge_base(at, tip) else {
@@ -485,18 +521,18 @@ fn pushed(common_dir: &Path, name: &str, base: ObjectId, tip: ObjectId) -> Resul
     let pushed = stack::count(common_dir, base, meet)?;
     Ok((pushed > 0).then(|| {
         format!(
-            "{pushed} of them {} pushed already ({remote}/{theirs}): moving rewrites them, and \
+            "{pushed} of them {} pushed already ({remote}/{name}): moving rewrites them, and \
              the branch then needs a push with --force-with-lease; --yes moves them",
             if pushed == 1 { "is" } else { "are" }
         )
     }))
 }
 
-/// What to run to push `name` after a move, if it has a remote-tracking
-/// branch the move left behind: a push with a lease on that tip, so a
-/// push someone else made meanwhile is refused.
+/// What to run to push `name` after a move, if its branch of the same name
+/// on its remote has commits the move left behind: a push with a lease on
+/// that tip, so a push someone else made meanwhile is refused.
 pub fn force_push(common_dir: &Path, name: &str) -> Result<Option<String>> {
-    let Some((remote, theirs, at)) = upstream(common_dir, name)? else {
+    let Some((remote, at)) = pushed_to(common_dir, name)? else {
         return Ok(None);
     };
     let tip = tip_of(common_dir, name)?;
@@ -504,25 +540,25 @@ pub fn force_push(common_dir: &Path, name: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(format!(
-        "git push --force-with-lease={theirs}:{at} {remote} {name}:{theirs}"
+        "git push --force-with-lease={name}:{at} {remote} {name}:{name}"
     )))
 }
 
-/// The remote, branch and remote-tracking tip `name` pushes to: its
-/// upstream, else `origin`'s branch of the same name, if fetched.
-fn upstream(common_dir: &Path, name: &str) -> Result<Option<(String, String, ObjectId)>> {
-    let local = Local::read(common_dir);
-    if let Some(at) = stack::rev(common_dir, &format!("refs/heads/{name}@{{upstream}}"))?
-        && let Some((remote, theirs)) = local.upstream(name)
-    {
-        return Ok(Some((remote, theirs, at)));
-    }
-    let tracking = format!("refs/remotes/origin/{name}");
-    Ok(stack::rev(common_dir, &tracking)?.map(|at| ("origin".into(), name.into(), at)))
+/// The remote `name` pushes to (its upstream's, else `origin`) and the tip
+/// of its branch of the same name there, if fetched. Never the upstream
+/// branch itself: a branch started from `origin/main` tracks main, and a
+/// force-push onto main is never what to run.
+fn pushed_to(common_dir: &Path, name: &str) -> Result<Option<(String, ObjectId)>> {
+    let remote = match Local::read(common_dir).upstream(name) {
+        Some((remote, _)) if remote != "." => remote,
+        _ => "origin".to_string(),
+    };
+    let tracking = format!("refs/remotes/{remote}/{name}");
+    Ok(stack::rev(common_dir, &tracking)?.map(|at| (remote, at)))
 }
 
 /// Says `outcome` for `name` (`<name>: ...`) and, if it moved, the
-/// force-push to run; fails (exit 4) if it didn't move.
+/// force-push to run; fails (exit 4, nothing more said) if it didn't move.
 pub fn say(common_dir: &Path, name: &str, outcome: &Outcome) -> Result<()> {
     if !matches!(outcome, Outcome::UpToDate) {
         println!("{name}: {}", outcome.said());
@@ -533,16 +569,22 @@ pub fn say(common_dir: &Path, name: &str, outcome: &Outcome) -> Result<()> {
         println!("to push (rewritten since last push):\n  {push}");
     }
     if !outcome.done() {
-        return Err(Refusal::Changes.error(format!("{name} not moved (see above)")));
+        return Err(Refusal::Changes.said());
     }
     Ok(())
 }
 
 /// Says what parts a branch sits on: `api`, `api and db`, `main`.
 pub fn onto_words(common_dir: &Path, parts: &[Part]) -> String {
-    match parts.is_empty() {
+    let mut names: Vec<String> = Vec::new();
+    for (n, _) in parts {
+        if !names.contains(n) {
+            names.push(n.clone());
+        }
+    }
+    match names.is_empty() {
         true => land::main_name(common_dir, &Local::read(common_dir)),
-        false => layers::and_list(parts.iter().map(|(n, _)| n.clone())),
+        false => layers::and_list(names),
     }
 }
 
@@ -634,20 +676,44 @@ pub fn after_landing(
             None => next.layers.push(theirs),
         }
     }
-    let mut out: Vec<Part> = parts
-        .iter()
-        .filter(|(n, _)| *n != landing.layer && *n != landing.target_name)
-        .cloned()
-        .collect();
     let name = match trunk {
         true => land::main_name(common_dir, &local),
         false => landing.target_name.clone(),
     };
+    let target = |n: &str| n == name || n == landing.target_name;
+    let mut out: Vec<Part> = parts
+        .iter()
+        .filter(|(n, _)| *n != landing.layer && !target(n))
+        .cloned()
+        .collect();
+    // The newest of the target's commits: another landing followed before
+    // (or the target's own tip, an editable layer) may be newer than this
+    // one, and has this one's work then. Two that diverged both stay.
+    let mut at = vec![landing.landing.at];
+    for &(_, earlier) in parts
+        .iter()
+        .filter(|(n, _)| *n != landing.layer && target(n))
+    {
+        let mut placed = false;
+        for a in &mut at {
+            if *a == earlier || stack::is_ancestor(common_dir, earlier, *a)? {
+                placed = true;
+            } else if stack::is_ancestor(common_dir, *a, earlier)? {
+                (*a, placed) = (earlier, true);
+            }
+        }
+        if !placed {
+            at.push(earlier);
+        }
+    }
+    at.dedup();
     // With nothing else to build on, the landing commit alone.
     if trunk && next.editable().next().is_none() {
         out.clear();
     }
-    out.insert(0, (name, landing.landing.at));
+    for (i, at) in at.into_iter().enumerate() {
+        out.insert(i, (name.clone(), at));
+    }
     Ok((next, out))
 }
 
@@ -713,7 +779,7 @@ pub fn follow(common_dir: &Path, name: &str) -> Result<(Outcome, Vec<Landed>, Ve
         asked: false,
         yes: true,
         off: None,
-        prefix: String::new(),
+        prefix: Default::default(),
     };
     let outcome = move_onto(common_dir, &plan)?;
     Ok((outcome, seen, parts))
@@ -730,6 +796,16 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<(Option<String>, bo
     let state = StateDir::of(common_dir, name);
     let _lock = layers::lock(&state)?;
     let before = stack::rev(common_dir, &stack::own_ref(name))?;
+    // Its waiting edits now: those on lines the move brings become
+    // ordinary changes, which it says.
+    let waiting = || match state.opened() {
+        true => crate::state::waiting::of_workspace(&state).unwrap_or_else(|e| {
+            log::warn!("{name}: its waiting edits: {e:#}");
+            Vec::new()
+        }),
+        false => Vec::new(),
+    };
+    let waiting_before = waiting();
     let (outcome, landings, parts) = follow(common_dir, name)?;
     let told_file = state.dir.join(TOLD);
     let say_once = |text: String| -> Result<Option<String>> {
@@ -746,7 +822,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<(Option<String>, bo
     match &outcome {
         Outcome::UpToDate | Outcome::BaseMoved => {}
         Outcome::Blocked { told: true, .. } => {}
-        Outcome::Moved { files, .. } => {
+        Outcome::Moved { files, dropped } => {
             let _ = std::fs::remove_file(&told_file);
             let followed: Vec<&Landed> = landings.iter().filter(|l| l.gone).collect();
             let what = match followed.is_empty() {
@@ -766,23 +842,37 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<(Option<String>, bo
                     let said: Vec<String> = followed.iter().map(|l| l.said()).collect();
                     format!(
                         "{}; it was moved there with only its own commits, and now sits on \
-                         {onto}. Its pull request's base should be {}: suggest `gh pr edit \
-                         {name} --base {}` to the user after the push below rather than \
-                         running it yourself",
+                         {onto}. Its pull request should now target {}: suggest `gh pr edit \
+                         {name} --base {}` to the user rather than running it yourself",
                         said.join("; "),
                         followed[0].target,
                         followed[0].target
                     )
                 }
             };
-            let push = match force_push(common_dir, name)? {
-                Some(push) => format!(" Push it with: {push}"),
-                None => " Push it with --force-with-lease when you push.".into(),
+            // Its own commits copied onto the new ones (none: it only
+            // moved up with them, nothing rewritten).
+            let rewritten = *dropped > 0 || own_count(common_dir, name)?.is_some_and(|n| n > 0);
+            let push = match (rewritten, force_push(common_dir, name)?) {
+                (_, Some(push)) => {
+                    format!(" Its history was rewritten: push it with {push}")
+                }
+                (true, None) => " Its own commits were rewritten on top of them.".into(),
+                (false, None) => String::new(),
             };
             out.push(format!(
-                "gitfold: this branch, {name}, {what}; {}. Its history was rewritten.{push}",
+                "gitfold: this branch, {name}, {what}; {}.{push}",
                 under_you(files.clone())
             ));
+            let now: Vec<Vec<u8>> = waiting().into_iter().map(|w| w.path).collect();
+            for w in waiting_before.iter().filter(|w| !now.contains(&w.path)) {
+                out.push(format!(
+                    "gitfold: your waiting edits in {} are ordinary uncommitted changes now: {} \
+                     committed the lines they change, so git sees them; commit them as usual.",
+                    String::from_utf8_lossy(&w.path),
+                    layers::and_list(w.layers.iter().cloned())
+                ));
+            }
         }
         other => {
             if let Some(text) = say_once(format!(
@@ -831,8 +921,9 @@ pub fn notes(common_dir: &Path, name: &str) -> Vec<String> {
             _ => "looks merged",
         };
         notes.push(format!(
-            "{} {how} into {}: `gitfold layer remove {}` moves it there",
-            landing.layer, landing.target, landing.layer
+            "{} {how} into {}: `gitfold layer remove {}` moves {name} onto {} with only its own \
+             commits",
+            landing.layer, landing.target, landing.layer, landing.target
         ));
     }
     let state = StateDir::of(common_dir, name);
@@ -844,7 +935,36 @@ pub fn notes(common_dir: &Path, name: &str) -> Vec<String> {
         && !wanted.is_empty()
         && wanted != built.parts
     {
-        notes.push("needs update: its next turn, or `gitfold layer add <LAYER> --edit`".into());
+        let behind: Vec<String> = (wanted.iter())
+            .filter(|w| !built.parts.contains(w))
+            .map(|(n, _)| n.clone())
+            .collect();
+        notes.push(match onto_of(common_dir, &wanted) {
+            // Its editable layers' new work conflicts: nothing moves
+            // until one of them resolves it, or goes.
+            Ok(Err(paths)) => {
+                let all = layers::and_list(wanted.iter().map(|(n, _)| n.clone()));
+                let last = &wanted[wanted.len() - 1].0;
+                format!(
+                    "{all} conflict with each other on {}: ask one of them to resolve it, or \
+                     `gitfold layer remove {last}`",
+                    shown(&paths)
+                )
+            }
+            _ => {
+                let behind = match behind.is_empty() {
+                    true => vec![wanted[0].0.clone()],
+                    false => behind,
+                };
+                let has = if behind.len() == 1 { "has" } else { "have" };
+                format!(
+                    "needs update: {} {has} new commits; `gitfold layer add {} --edit` moves \
+                     {name} onto them (or its next turn)",
+                    layers::and_list(behind.iter().cloned()),
+                    behind[0]
+                )
+            }
+        });
     }
     if let Ok(Some(push)) = force_push(common_dir, name) {
         notes.push(format!("push with: {push}"));
@@ -880,8 +1000,12 @@ pub fn check_cycle(common_dir: &Path, name: &str, layer: &str) -> Result<()> {
         let theirs = Layers::read(&StateDir::of(common_dir, &at)).unwrap_or_default();
         for next in theirs.editable_names() {
             if next == name {
+                let through = match at == layer {
+                    true => String::new(),
+                    false => format!(" (through {at})"),
+                };
                 crate::cli::usage(format!(
-                    "{layer} builds on {name} (through {at}): that would be a cycle"
+                    "{name} can't build on {layer}: {layer} already builds on {name}{through}"
                 ));
             }
             todo.push(next);
@@ -910,12 +1034,14 @@ fn clear_blocked(state: &StateDir) {
     let _ = std::fs::remove_file(state.dir.join(BLOCKED));
 }
 
-/// The subjects of `from..to`, oldest first, at most three.
+/// The subjects of `from..to`, oldest first, at most three; not the merges
+/// gitfold makes for a branch built on several layers (`stack::merge_parts`).
 fn subjects(common_dir: &Path, from: ObjectId, to: ObjectId) -> Result<Vec<String>> {
     let range = format!("{from}..{to}");
     let out = git::cmd::output(common_dir, &["log", "--reverse", "--format=%s", &range])?;
     Ok(String::from_utf8_lossy(&out)
         .lines()
+        .filter(|s| !stack::is_merge_subject(s))
         .take(3)
         .map(str::to_string)
         .collect())

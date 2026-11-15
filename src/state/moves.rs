@@ -16,6 +16,10 @@
 //!    move changes dropped from upper (`stale_copies`);
 //! 3. the refs, in one transaction.
 //!
+//! git's own lock on the index (`IndexLock`) is held from step 1 through 3,
+//! so no `git commit` lands in between (it would commit the moved index on
+//! the old tip); the branch is checked again once it is taken.
+//!
 //! What a crash left is told by the branch tip, the index on the paths the
 //! move changes, and the base:
 //!
@@ -239,7 +243,19 @@ pub fn recover(state: &StateDir) -> Result<Recovery> {
 
 /// `recover` for the intent `text`, held.
 fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
-    let intent = Intent::parse(text)?;
+    drop_left_index_lock(state)?;
+    let intent = match Intent::parse(text) {
+        Ok(intent) => intent,
+        // Nothing tells what it moved: as one that can't be told apart.
+        Err(e) => {
+            return Ok(Recovery::Stuck(format!(
+                "an interrupted move of {} left an intent gitfold can't read ({e:#}); once its \
+                 workspace is as you want it, `gitfold layer remove --all -w {}` forgets the \
+                 interrupted move (and its layers)",
+                state.branch, state.branch
+            )));
+        }
+    };
     let common = &state.common_dir;
     let tip = stack::rev(common, &format!("refs/heads/{}", state.branch))?;
     let recovery = if tip == Some(intent.to) {
@@ -253,7 +269,7 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
                 Recovery::Finished
             }
             Some(true) => {
-                move_index(state, &intent, true)?;
+                move_index(state, &intent, true, None)?;
                 Recovery::Undone
             }
             Some(false) => Recovery::Undone,
@@ -430,10 +446,87 @@ pub fn index_matches(state: &StateDir, commit: ObjectId, paths: &[BString]) -> R
     }
 }
 
+/// What a move writes into git's index lock (`IndexLock`), so `recover`
+/// tells one a crash left from git's own.
+const INDEX_LOCK_MARK: &[u8] = b"gitfold: a move of this workspace holds its index\n";
+
+/// git's own lock on the index of a workspace (`index.lock`), held by its
+/// move from the index step through the refs (`fs::workspace::layers`): a
+/// `git commit` in between would commit the moved index onto the old tip,
+/// the layer's new commits squashed into one of the branch's own. It fails
+/// instead, as with any git command holding the lock. Removed when
+/// dropped; one a crash left, by `recover` (it is marked as a move's).
+pub struct IndexLock {
+    path: PathBuf,
+}
+
+impl IndexLock {
+    /// Takes it for the workspace in `state`; `None` if git holds it.
+    pub fn take(state: &StateDir) -> Result<Option<IndexLock>> {
+        let path = state.admin.join("index.lock");
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => return Ok(None),
+            Err(e) => return Err(e).with_context(|| format!("creating {}", path.display())),
+        };
+        let lock = IndexLock { path };
+        file.write_all(INDEX_LOCK_MARK)?;
+        Ok(Some(lock))
+    }
+}
+
+impl Drop for IndexLock {
+    fn drop(&mut self) {
+        if let Err(e) = remove(&self.path) {
+            log::warn!("removing {}: {e:#}", self.path.display());
+        }
+    }
+}
+
+/// Removes the index lock a move of the workspace in `state` left (a crash
+/// while it held it), unless a move runs: git counts as busy until then,
+/// which would keep the recovery away.
+pub fn release_left_index_lock(state: &StateDir) -> Result<()> {
+    let file = match fs::File::open(state.dir.join(INTENT)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    match crate::lock::flock(&file)? {
+        true => drop_left_index_lock(state),
+        false => Ok(()),
+    }
+}
+
+/// Removes the index lock of the workspace in `state` if a move left it
+/// (a crash while it held it): the move's intent held, no move runs.
+fn drop_left_index_lock(state: &StateDir) -> Result<()> {
+    let path = state.admin.join("index.lock");
+    if fs::read(&path).is_ok_and(|data| data == INDEX_LOCK_MARK) {
+        log::warn!(
+            "{}: removing the index lock an interrupted move left",
+            state.branch
+        );
+        remove(&path)?;
+    }
+    Ok(())
+}
+
 /// Moves the index of the workspace in `state` from C to C' (`back`: from
 /// C' to C) on the paths it changes, without its files: each entry C' has there
-/// (none: removed), as `git update-index --index-info` sets them.
-pub fn move_index(state: &StateDir, intent: &Intent, back: bool) -> Result<()> {
+/// (none: removed), as `git update-index --index-info` sets them. With
+/// `locked` (the move holds git's lock on it), written through a copy
+/// renamed over it, as git itself would.
+pub fn move_index(
+    state: &StateDir,
+    intent: &Intent,
+    back: bool,
+    locked: Option<&IndexLock>,
+) -> Result<()> {
     let to = match back {
         false => intent.to,
         true => intent.from,
@@ -460,7 +553,31 @@ pub fn move_index(state: &StateDir, intent: &Intent, back: bool) -> Result<()> {
     if input.is_empty() {
         return Ok(());
     }
-    cmd::output_with_input(&state.admin, &["update-index", "-z", "--index-info"], input).map(drop)
+    let args = ["update-index", "-z", "--index-info"];
+    if locked.is_none() {
+        return cmd::output_with_input(&state.admin, &args, input).map(drop);
+    }
+    let index = state.index();
+    let copy = state.admin.join("index.gitfold-move");
+    let written = (|| -> Result<()> {
+        match fs::copy(&index, &copy) {
+            Err(e) if e.kind() != ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("copying {}", index.display()));
+            }
+            _ => {}
+        }
+        let env = [(
+            "GIT_INDEX_FILE",
+            copy.to_str().context("a path that isn't UTF-8")?,
+        )];
+        cmd::output_with_env_input(&state.admin, &args, &env, input)?;
+        fs::File::open(&copy)?.sync_all()?;
+        fs::rename(&copy, &index).with_context(|| format!("renaming {}", copy.display()))
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&copy);
+    }
+    written
 }
 
 #[cfg(test)]
@@ -558,6 +675,58 @@ mod tests {
         });
         assert_eq!(forgot, Some(true));
         assert!(!pending(&state));
+    }
+
+    /// git's index lock is held through the move: a commit meanwhile fails
+    /// rather than commit the moved index onto the old tip; one a crash
+    /// left goes with the recovery.
+    #[test]
+    fn a_move_holds_the_index_against_commits() {
+        let (r, state, [c1, c2, c3]) = workspace("move-index-lock");
+        let wt = r.dir.join("gitfold-ws-p2");
+        // A change staged, as the index step leaves it.
+        fs::write(wt.join("f.txt"), "moved\n").unwrap();
+        r.git_in(&wt, &["add", "f.txt"]);
+        let lock = IndexLock::take(&state).unwrap().expect("not held");
+        assert!(IndexLock::take(&state).unwrap().is_none(), "one at a time");
+        let commit = r.run_in(&wt, &["commit", "-qm", "meanwhile"]);
+        assert!(!commit.status.success(), "a commit meanwhile fails");
+        assert!(
+            String::from_utf8_lossy(&commit.stderr).contains("index.lock"),
+            "on the lock"
+        );
+        assert_eq!(r.id("p2"), c3, "the branch didn't move");
+        drop(lock);
+        assert!(!state.admin.join("index.lock").exists(), "dropped: gone");
+        // Killed while holding it: the recovery removes it (here the
+        // branch moved on since, its index describing it).
+        r.git_in(&wt, &["reset", "-q", "--hard"]);
+        let intent = Intent {
+            from: c1,
+            to: c2,
+            own_to: c1,
+            own_from: None,
+        };
+        std::mem::forget(IndexLock::take(&state).unwrap());
+        intent.begin(&state).unwrap().keep();
+        assert_eq!(settled(&state), Recovery::Undone);
+        assert!(!state.admin.join("index.lock").exists(), "the lock goes");
+        // git's own lock stays.
+        fs::write(state.admin.join("index.lock"), "").unwrap();
+        intent.begin(&state).unwrap().keep();
+        settled(&state);
+        assert!(state.admin.join("index.lock").exists(), "git's stays");
+    }
+
+    #[test]
+    fn an_unreadable_intent_is_stuck() {
+        let (_r, state, _) = workspace("move-unreadable");
+        fs::write(state.dir.join(INTENT), "junk\n").unwrap();
+        let Recovery::Stuck(why) = settled(&state) else {
+            panic!("not stuck")
+        };
+        assert!(why.contains("can't read"), "{why}");
+        assert!(pending(&state), "left for `forget`");
     }
 
     #[test]
