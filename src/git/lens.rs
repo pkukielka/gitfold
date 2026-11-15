@@ -373,31 +373,20 @@ pub fn build_view(
         let changes = &whole[path];
         let ixs: Vec<usize> = changes.iter().map(|(ix, _)| *ix).collect();
         let in_base = lookup(repo, base_tree, path.as_ref())?;
-        let (entry, conflict) = match changes[..] {
-            [(ix, change)] => {
-                if change.item() != in_base
-                    && lookup(repo, layer_bases[ix], path.as_ref())? != in_base
-                {
-                    notes.push(Note::HidesBase {
-                        layer: ix,
-                        path: path.clone(),
-                    });
-                }
-                (change.item(), None)
+        // Merged against B's entry when several change it: a layer's version
+        // from before a change B made since reverts it, as with one layer.
+        for &(ix, change) in changes {
+            if change.item() != in_base && lookup(repo, layer_bases[ix], path.as_ref())? != in_base
+            {
+                notes.push(Note::HidesBase {
+                    layer: ix,
+                    path: path.clone(),
+                });
             }
+        }
+        let (entry, conflict) = match changes[..] {
+            [(_, change)] => (change.item(), None),
             _ => {
-                // Merged against B's entry: a layer's version from before a
-                // change B made since reverts it, as with one layer.
-                for &(ix, change) in changes {
-                    if change.item() != in_base
-                        && lookup(repo, layer_bases[ix], path.as_ref())? != in_base
-                    {
-                        notes.push(Note::HidesBase {
-                            layer: ix,
-                            path: path.clone(),
-                        });
-                    }
-                }
                 let sides: Vec<(Option<Item>, &str)> = (changes.iter())
                     .map(|(ix, c)| (c.item(), layers[*ix].name.as_str()))
                     .collect();
