@@ -32,7 +32,8 @@ pub struct LayerArgs {
     /// agent's workspace as it was when its last turn ended, one without an
     /// agent as it is now, or a branch's tip), move it onto its base's new
     /// commits if it is built on one (`gitfold layer base`), and say what
-    /// changed. As `PreToolUse` on
+    /// changed; from then on, only its turns move its layers. As
+    /// `PreToolUse` on
     /// Edit, Write, MultiEdit and NotebookEdit (`pre-tool-use`): deny
     /// writing a layer's file, saying why.
     #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit", "pre-tool-use"])]
@@ -48,7 +49,10 @@ pub enum LayerOp {
     ///
     /// A branch with a workspace shows its work, uncommitted included;
     /// one without, its commits. A tag or a commit shows as it is. Adding
-    /// it again replaces it (and brings it up to date).
+    /// it again replaces it (and brings it up to date). Kept up to date at
+    /// the start of each of your agent's turns (the `UserPromptSubmit`
+    /// hook), or, in a workspace without an agent, while mounted, once
+    /// nothing has written to it for 3 seconds.
     Add {
         /// A branch, or any revision.
         branch: String,

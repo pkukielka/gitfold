@@ -130,6 +130,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/restack.rs` | a closed workspace's base moved visibly for a restack of its branch, its changed files stamped |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
 | `src/fs/workspace/lens.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told (and own lines in blended files carried over), git told (skip-worktree, excludes, the blends in the index, HEAD at the lens commit, the push guard) or surrendered; extracting commits made on the lens commit onto the branch (`sync_lens`) |
+| `src/fs/workspace/follow.rs` | live layers of a workspace without an agent, moved by its sync thread once it is idle: writes counted (`Activity`), the check every 2 s, the move through `state::follow` and `switch` |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
@@ -143,7 +144,8 @@ Then, per request (`fs/workspace/`):
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/state/restack.rs` | a restack under way in a workspace: the `restack` intent file (locked while it runs), and finishing or undoing one a crash interrupted |
-| `src/state/seal.rs` | seals (snapshots, to users): a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`sealed`): whether an agent drives it |
+| `src/state/seal.rs` | seals (snapshots, to users): a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`sealed`): whether an agent drives it; its `UserPromptSubmit` hook's run recorded too (`turns`): whether it has an agent of its own |
+| `src/state/follow.rs` | moving a workspace's live layers to their latest work (what each follows, a fresh seal of a person's workspace, storing and showing them), shared by the `UserPromptSubmit` hook and the daemon |
 | `src/state/lens.rs` | a workspace's layers: the `lens` file (each layer's seal, what it shows and how it updates, the layer a proposal stands in for; version 1 files read too), its lock (`lens.lock`), the view (view and hunk trees, mixed and blended paths, conflicts, notes) and which files are blended (`merge=union`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
@@ -248,8 +250,9 @@ term; they never appear in messages, help or the README.
   its workspace's seals, or a branch's or a revision's commit, as the
   changes since a pinned merge base. **Live** layers follow their branch
   (an agent's workspace: the seal its `Stop` hook made at the end of its
-  last turn; a workspace without an agent: a seal taken at each of the
-  reader's turn starts; or the tip), **frozen** ones stay as taken,
+  last turn; a workspace without an agent: a seal taken whenever the layer
+  moves; or the tip), at the reader's turn starts if it has an agent, else
+  by the daemon once the reader is idle, **frozen** ones stay as taken,
   revisions are **fixed**.
 - **Lens** (*internal*; user-facing: the layers): the layers of a
   workspace, in the order added (also the name of the file storing them);
@@ -1325,7 +1328,9 @@ shows, ignored files left out, on its base, kept by
 `refs/gitfold-seal/<id>/<n>`), or with `--commits` or without a workspace
 the branch's tip, or a tag's or a commit's commit, with the merge base of
 the two, pinned when the layer is added or moved. A **live** layer moves
-at its agent's turn boundaries and when added again; a **frozen** one
+when added again, and at the reader's agent's turn boundaries, or in a
+workspace without an agent, by the daemon once the workspace is idle; a
+**frozen** one
 (`--frozen`) and a revision (**fixed**) don't. The layers' changes
 (`diff-tree <merge base> <seal>`, in the order added) applied to the
 base's tree make the **view tree** (`state::lens::view`,
@@ -1511,11 +1516,38 @@ a snapshot, with no change to any workspace.
   the other's half-done turn, and nothing the reader read changes
   mid-turn. The agent's own `gitfold layer add` switches at once: a
   boundary it chose. Frozen layers and revisions never move: a reader
-  that wants a fixed point says so, rather than turning a layer off.
+  that wants a fixed point says so, rather than turning a layer off. The
+  hook records that the reader has an agent (`turns` in its state
+  directory, from its first prompt on; its `Stop` hook's `sealed` record
+  counts too): the daemon then leaves its layers to its turns.
+- **Without an agent, by the daemon, once idle:** a reader with neither
+  record has no turns (a person works in it), so nothing would move its
+  live layers. Its sync thread (`fs::workspace::follow`) checks every
+  2 s (`CHECK_EVERY`) and moves them when (1) a layer has newer work (an
+  agent's newer end-of-turn seal, a tip that moved, or a person's
+  workspace written to since its last seal) and (2) nothing has written to
+  the reader for `IDLE` (3 s), so files don't change under someone
+  half-way through an edit. The check is cheap: a person's workspace is
+  sealed only when its write count (counted by every write through the
+  mount, `Activity`) or its base changed since its last seal for this
+  reader, and once it has been quiet for 1 s (a save isn't half-seen); a
+  closed one, once per mount and then when its base moves. The move is
+  the hook's own (`state::follow::follow_live`), so the rules can't
+  drift apart; it runs under the layers' `flock`, taken without waiting
+  (`try_lock`: a command holding it goes first, the check retries next
+  round), and shows the result through `Workspace::switch`, the path a
+  `gitfold layer` request takes. Lock order is the commands': the
+  `flock`, then the daemon's `lens_lock` inside `switch`; the sync thread
+  holds neither while waiting, so nothing deadlocks. It is said in one
+  daemon log line, and in the listing's `live, last HH:MM`. Rejected:
+  a note in the workspace's inbox (agents read it; a person sees the files
+  change, and notes would pile up unread); moving at once on every change
+  (files changing mid-edit); sealing every shown workspace every round
+  (a seal walks its changed files).
 - **A live layer follows an agent's turns, or a person's work as it is:**
   a live layer of an agent's workspace moves to its work as it was at the
   end of the agent's last turn; of a workspace without an agent, to its
-  work as it is at the reader's turn start. Which one a workspace is, its
+  work as it is when the layer moves. Which one a workspace is, its
   own `Stop` hook tells: each run records itself in the workspace's state
   directory (`sealed`: `<seal> stop`, or `- stop` when no layer showed it,
   so no seal was made). A workspace with that record has an agent, and its
@@ -1523,8 +1555,9 @@ a snapshot, with no change to any workspace.
   are), never one taken half-way through its turn; `layer add` takes that
   one too, or one now if there is none (`--frozen`: one now). Any other
   workspace (no record, or one an earlier build wrote for any seal) has no
-  turns: a seal is taken at each reader's turn start (and on `layer add`),
-  so it follows every time, not once. A proposal accepted into an agent's
+  turns: a seal is taken at each reader's turn start, when the daemon
+  moves a reader's layers (above), and on `layer add`, so it follows
+  every time, not once. A proposal accepted into an agent's
   workspace is recorded the same way (the owner's own boundary), so
   followers see it at their next turn. The record is in the workspace's
   state directory, not the highest-numbered ref: seal refs outlive the
@@ -1548,8 +1581,10 @@ a snapshot, with no change to any workspace.
   layer back all read the layers file, change it and write it whole;
   without a lock two at once lose one's change. Each holds an exclusive
   `flock` on `lens.lock` in the workspace's state directory across the
-  read, the change and the daemon's switch (the daemon only reads the
-  file and takes its own per-workspace lock, so this can't deadlock). The
+  read, the change and the daemon's switch (the daemon reads the file and
+  takes its own per-workspace lock; when it moves a workspace's layers
+  itself, it takes the `flock` without waiting, before that lock, so this
+  can't deadlock). The
   repository lock (`lock.rs`) can't serve: a mounted daemon holds it for
   its life.
 - **The layers file's format:** `version 2`, one line per layer: `layer
