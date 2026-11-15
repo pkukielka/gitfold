@@ -53,7 +53,7 @@ pub fn follow_live(
     let mut lens = Lens::read(state)?;
     let (mut moved, mut stored) = (Vec::new(), false);
     let local = Local::read(&state.common_dir);
-    let base = state.read_base()?.id;
+    let base = state.layers_point()?;
     for layer in &mut lens.layers {
         if layer.updates != Updates::Live {
             continue;

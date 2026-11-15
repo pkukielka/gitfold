@@ -96,6 +96,25 @@ pub fn ref_prefix(id: &str) -> String {
     format!("refs/gitfold-seal/{id}/")
 }
 
+/// The parent of a snapshot of the workspace in `state` on `base`: the
+/// branch's tip when the workspace committed and its base hasn't caught up
+/// yet (the tip has the base, no move onto another base is under way: the
+/// tip's tree is then part of what the workspace shows), else `base`. A
+/// snapshot on the stale base would count the just-committed lines as the
+/// workspace's own new work, which layers then merge as such.
+fn parent(state: &StateDir, base: ObjectId) -> ObjectId {
+    let Ok(tip) = git::branch_tip(&state.branch) else {
+        return base;
+    };
+    if tip.id == base || super::restack::pending(state) {
+        return base;
+    }
+    match git::merge_base_if_any(base, tip.id) {
+        Ok(Some(mb)) if mb == base => tip.id,
+        _ => base,
+    }
+}
+
 /// Seals the work of the workspace stored in `state` (see the module doc),
 /// made `by` its `Stop` hook, its owner or another command. Called by the
 /// commands themselves (`snapshot`, `layer`, the `Stop` hook), mounted or
@@ -109,7 +128,12 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
     let blends = blends(state, &base)?;
     let tree = tree_of(state, &base.tree, &s.changed, &s.deleted, &blends)
         .with_context(|| format!("taking a snapshot of {}", state.branch))?;
-    let commit = commit(&state.common_dir, &tree, &base.id, &state.branch)?;
+    let commit = commit(
+        &state.common_dir,
+        &tree,
+        &parent(state, base.id),
+        &state.branch,
+    )?;
     let _lock = crate::lock::wait(&state.dir.join(SEAL_LOCK))?;
     let seals = list(&state.common_dir, &state.id)?;
     let recorded = match by {

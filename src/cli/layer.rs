@@ -510,7 +510,7 @@ pub(super) fn layer_of(
     };
     // A layer shows its changes since it and the base diverged: without a
     // commit in common there is no telling them apart.
-    let Some(merge_base) = git::merge_base_if_any(state.read_base()?.id, seal)? else {
+    let Some(merge_base) = git::merge_base_if_any(state.layers_point()?, seal)? else {
         return Err(Refusal::Changes.error(format!(
             "{branch} shares no history with {}'s base, so its changes can't be told apart: \
              a layer must start from a commit your branch also has",

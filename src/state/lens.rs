@@ -607,7 +607,7 @@ pub fn put_back(state: &StateDir) -> Result<bool> {
     if !off(state) {
         return Ok(false);
     }
-    let tip = git::branch_tip(&state.branch)?.id;
+    let tip = state.layers_point()?;
     let mut lens = Lens::read(state)?;
     let before = lens.clone();
     let repin = |layer: &mut Layer| match git::merge_base(tip, layer.seal) {
