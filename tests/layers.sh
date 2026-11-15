@@ -173,7 +173,7 @@ R config core.sparseCheckout true
 check "sparse checkout: adding again still switches" "$BIN" -C "$W" layer add la --frozen
 eq "to the layer's work as now" "later" "$(tail -1 "$W/a.txt")"
 out=$(git -C "$W" status 2>&1); rc=$?
-eq "but git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LAYERS SHOWN (la): git is off here (sparse checkout is on). Run gitfold layer remove --all' && echo yes)"
+eq "but git is off, saying why (exit 128)" "128 yes" "$rc $(echo "$out" | grep -q 'LAYERS SHOWN (la): git is off here (sparse checkout is on). To use git, remove the see-only layers: gitfold layer remove BRANCH' && echo yes)"
 R config --unset core.sparseCheckout
 check "remove the layer" "$BIN" -C "$W" layer remove la
 eq "no layers: git back" "?? own.txt" "$(git -C "$W" status --short)"

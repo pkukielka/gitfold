@@ -147,7 +147,7 @@ struct GitPlan {
 fn off_gitfile(layers: &layers::Layers, why: &str) -> Vec<u8> {
     let shown: Vec<&str> = layers.layers.iter().map(|l| l.branch.as_str()).collect();
     format!(
-        "gitdir: /LAYERS SHOWN ({}): git is off here ({why}). Run gitfold layer remove --all to use git\n",
+        "gitdir: /LAYERS SHOWN ({}): git is off here ({why}). To use git, remove the see-only layers: gitfold layer remove BRANCH\n",
         shown.join("+")
     )
     .into_bytes()

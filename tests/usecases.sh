@@ -708,7 +708,7 @@ remote_tip=$(git -C "$T/remote.git" rev-parse ui)
 for args in "layer add other --edit" "layer add api" "layer remove api"; do
     out=$("$BIN" -C "$U" $args 2>&1); rc=$?
     eq "V16: $args: refused (exit 4)" "4" "$rc"
-    check "V16: $args: saying what it would move" has "$out" "moves 1 commit of ui"
+    check "V16: $args: saying what it would move" has "$out" "would move 1 commit of ui"
     check "V16: $args: and --yes" has "$out" "--yes"
     eq "V16: $args: nothing moved" "$pushed" "$(R rev-parse ui)"
 done
