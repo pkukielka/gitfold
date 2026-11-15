@@ -192,7 +192,7 @@ impl Lens {
         if lens.layers.iter().any(|l| l.moved == 0)
             && let Ok(at) = fs::metadata(&path).and_then(|m| m.modified())
         {
-            let secs = (at.duration_since(std::time::UNIX_EPOCH)).map_or(0, |d| d.as_secs() as i64);
+            let secs = crate::fsutil::epoch_secs(at);
             for l in lens.layers.iter_mut().filter(|l| l.moved == 0) {
                 l.moved = secs;
             }

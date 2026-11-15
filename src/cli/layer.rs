@@ -820,10 +820,8 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
     // When the stack ref last moved, while git keeps it loose.
     let stack_ref = common_dir.join(git::stack::stack_ref(branch));
     if let Ok(at) = std::fs::metadata(stack_ref).and_then(|m| m.modified()) {
-        let secs = at
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-        let _ = writeln!(out, "{:width$}last moved {}", "", clock(secs));
+        let at = crate::fsutil::epoch_secs(at);
+        let _ = writeln!(out, "{:width$}last moved {}", "", clock(at));
     }
     for note in super::stack::notes(common_dir, &local, branch) {
         let _ = writeln!(out, "{:width$}{note}", "");
@@ -833,9 +831,7 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
 
 /// Now, in seconds since the epoch.
 fn now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+    crate::fsutil::epoch_secs(std::time::SystemTime::now())
 }
 
 /// `secs` (since the epoch) as local time: `HH:MM` today, else with the

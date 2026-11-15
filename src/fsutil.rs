@@ -60,6 +60,12 @@ pub fn set_times(
     Ok(())
 }
 
+/// `t` in whole seconds since the epoch (0 before it).
+pub fn epoch_secs(t: SystemTime) -> i64 {
+    t.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 fn timespec(t: Option<SystemTime>) -> libc::timespec {
     match t.map(|t| t.duration_since(UNIX_EPOCH)) {
         Some(Ok(d)) => libc::timespec {
