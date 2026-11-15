@@ -99,11 +99,16 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
         !name.starts_with('@'),
         "branch names starting with @ can't be opened as workspaces (@<rev> is a snapshot)"
     );
+    let state = StateDir::of(common_dir, name);
+    if git::branch_exists(name) || !state.dir.exists() {
+        return Ok(());
+    }
     ensure!(
-        git::branch_exists(name) || !StateDir::of(common_dir, name).dir.exists(),
+        !state.holds_workspace(),
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
-    Ok(())
+    // Only what an earlier branch of that name built on: not this one's.
+    crate::state::retire::remove_dir(&state.dir)
 }
 
 /// Creates branch `name` at `from`, or at HEAD of the worktree of `repo` (its

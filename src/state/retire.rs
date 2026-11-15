@@ -131,7 +131,7 @@ pub fn check_workspace(
     // `..` would point it at the git directory itself.
     check_name(branch)?;
     let state = StateDir::of(common_dir, branch);
-    if !state.dir.exists() && !state.admin.exists() {
+    if !state.holds_workspace() && !state.admin.exists() {
         return Err(Refusal::NotFound.error(format!("no workspace for branch {branch}")));
     }
     let changes = |message: String| Refusal::Changes.error(message);
@@ -205,11 +205,18 @@ pub fn check_workspace(
 /// counted `ignored` files in it); returns what was done.
 pub fn delete_workspace(common_dir: &Path, branch: &str, ignored: usize) -> Result<String> {
     let state = StateDir::of(common_dir, branch);
+    // What the branch builds on outlives its workspace.
+    let mut kept = super::layers::Layers::read(&state).unwrap_or_default();
+    kept.layers.retain(|l| l.edit);
     // The registration first: without it, the state alone is resumed correctly
     // (the registration is recreated); the reverse is not.
     remove_dir(&state.admin)?;
     remove_dir(&state.dir)?;
     worktree::unpin(common_dir, &state.pin_ref())?;
+    if kept.is_on() && git::branch_exists(branch) {
+        fs::create_dir_all(&state.dir)?;
+        kept.write(&state)?;
+    }
     Ok(match ignored {
         0 => format!("removed workspace {branch}"),
         n => format!("removed workspace {branch} (and {n} ignored files in it)"),

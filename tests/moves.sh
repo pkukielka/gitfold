@@ -249,6 +249,13 @@ eq "a conflict: the hook says so" yes "$(grep -q "^gitfold: p2 builds on p1; blo
 eq "nothing moved, the layer's work as it showed" "$tip|own" "$(R rev-parse p2)|$(cat "$W/own.txt")"
 eq "said once" "" "$(prompt_hook "$W")"
 eq "list: blocked" "p1 (blocked: conflicts on own.txt)" "$(listed p2)"
+
+# Its workspace removed: the branch is still built on p1.
+"$BIN" -C "$REPO" remove --force p2 >/dev/null
+eq "removed: still built on p1, not a workspace" "p1|no" \
+    "$(editable p2)|$("$BIN" -C "$REPO" list | grep -q '^p2 .* [0-9]' && echo yes || echo no)"
+check "and opens again with it" grep -q own "$W/own.txt"
+eq "p1 shown as built on" "built on" "$("$BIN" -C "$W" layer | grep -o 'built on' | head -1)"
 }
 
 layers_or_an_unmounted_workspace() {

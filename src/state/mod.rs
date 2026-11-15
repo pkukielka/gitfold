@@ -103,6 +103,12 @@ impl StateDir {
         self.dir.join(BASE).exists()
     }
 
+    /// Whether a workspace is stored here (opened, or being made), not just
+    /// a branch's editable layers (`layers`).
+    pub fn holds_workspace(&self) -> bool {
+        self.opened() || self.upper().exists()
+    }
+
     /// Its base commit.
     pub fn read_base(&self) -> Result<git::Commit> {
         read_base(&self.dir)
@@ -241,7 +247,7 @@ pub fn list(common_dir: &Path) -> Result<Vec<Stored>> {
         let state = StateDir::of_id(common_dir, &id, &branch);
         // A branch without a workspace, its editable layers stored here
         // (`layers`): not a workspace.
-        if !state.opened() && !state.upper().exists() {
+        if !state.holds_workspace() {
             continue;
         }
         list.push(Stored { state, branch });
