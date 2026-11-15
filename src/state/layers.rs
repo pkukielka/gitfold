@@ -1,6 +1,6 @@
 //! A workspace's layers: other branches' work shown in it, read-only, over
 //! its base and under its own changes. Each layer is
-//! a branch's work as of one commit, its seal: a workspace's work as `seal`
+//! a branch's work as of one commit, its snapshot: a workspace's work as `snapshot`
 //! makes it, or a branch's or a revision's commits. It shows as the changes
 //! it makes since where it and the commit the view is built on diverged
 //! (their merge base). That is worked out each time a view is built
@@ -29,7 +29,7 @@
 //!
 //! Stored in `layers` in the state directory, rewritten whole: `version 3`,
 //! then one line per layer, in the order added: `layer <name> TAB <shows>
-//! TAB <updates> TAB <moved> TAB <seal>`, with `<shows>`
+//! TAB <updates> TAB <moved> TAB <snapshot>`, with `<shows>`
 //! `work`, `commits-only` or `commits` (`Shows`), `<updates>` `live`,
 //! `frozen` or `fixed` (`Updates`) and `<moved>` when it last moved, in
 //! seconds since the epoch (names hold no control characters). A layer line
@@ -41,7 +41,7 @@
 //! Earlier versions are read too, their stored merge bases ignored:
 //! version 2, the same with a sixth field, the merge base; version 1 (from
 //! builds before `layer add --frozen/--commits`), `layer <name> TAB <on|off>
-//! TAB <seal> TAB <merge base>`, a layer `on` live and showing all work, one
+//! TAB <snapshot> TAB <merge base>`, a layer `on` live and showing all work, one
 //! `off` (hidden) dropped.
 
 use std::collections::{HashMap, HashSet};
@@ -84,7 +84,7 @@ pub fn try_lock(state: &StateDir) -> Result<Option<LayersLock>> {
 /// What a layer shows of its branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Shows {
-    /// A workspace's work, uncommitted included (a seal).
+    /// A workspace's work, uncommitted included (a snapshot).
     Work,
     /// Only what the branch committed (`--commits`).
     CommitsOnly,
@@ -150,7 +150,7 @@ pub struct Layer {
     /// When it last moved (taken, or followed to newer work), in seconds
     /// since the epoch.
     pub moved: i64,
-    pub seal: ObjectId,
+    pub snapshot: ObjectId,
     /// For a proposal shown in its layer's place: that layer as it was, put
     /// back (its way of updating kept) when the proposal goes.
     pub instead: Option<Box<Layer>>,
@@ -165,7 +165,7 @@ impl Layer {
             self.shows.word(),
             self.updates.word(),
             self.moved,
-            self.seal,
+            self.snapshot,
         )
     }
 
@@ -173,8 +173,8 @@ impl Layer {
     /// file of `version` (2: a merge base after them, ignored).
     fn from_fields(line: &str, fields: &str, version: u8) -> Result<Layer> {
         let fields: Vec<&str> = fields.split('\t').collect();
-        let ([branch, shows, updates, moved, seal] | [branch, shows, updates, moved, seal, _]) =
-            fields[..]
+        let ([branch, shows, updates, moved, snapshot]
+        | [branch, shows, updates, moved, snapshot, _]) = fields[..]
         else {
             bail!("bad line {line:?}");
         };
@@ -184,7 +184,7 @@ impl Layer {
             shows: Shows::parse(shows)?,
             updates: Updates::parse(updates)?,
             moved: moved.parse()?,
-            seal: ObjectId::from_hex(seal.as_bytes())?,
+            snapshot: ObjectId::from_hex(snapshot.as_bytes())?,
             instead: None,
         })
     }
@@ -229,7 +229,7 @@ impl Layers {
                 let fields: Vec<&str> = (line.strip_prefix("layer ").unwrap_or(""))
                     .split('\t')
                     .collect();
-                let [branch, on, seal, _] = fields[..] else {
+                let [branch, on, snapshot, _] = fields[..] else {
                     bail!("bad line {line:?}");
                 };
                 // Hidden: there are no hidden layers now.
@@ -241,7 +241,7 @@ impl Layers {
                     shows: Shows::Work,
                     updates: Updates::Live,
                     moved: 0,
-                    seal: ObjectId::from_hex(seal.as_bytes())?,
+                    snapshot: ObjectId::from_hex(snapshot.as_bytes())?,
                     instead: None,
                 });
             }
@@ -321,13 +321,13 @@ pub fn shown_anywhere(common_dir: &std::path::Path, branch: &str) -> bool {
     every_layers(common_dir, false).any(|layers| layers.find(branch).is_some())
 }
 
-/// Every seal a workspace's layers name, stored or applied, and those of the
+/// Every snapshot a workspace's layers name, stored or applied, and those of the
 /// layers proposals stand in for (put back later): their refs are kept
-/// (`seal`).
-pub fn named_seals(common_dir: &std::path::Path) -> HashSet<ObjectId> {
+/// (`snapshot`).
+pub fn named_snapshots(common_dir: &std::path::Path) -> HashSet<ObjectId> {
     every_layers(common_dir, true)
         .flat_map(|layers| layers.layers.into_iter())
-        .flat_map(|l| std::iter::once(l.seal).chain(l.instead.map(|i| i.seal)))
+        .flat_map(|l| std::iter::once(l.snapshot).chain(l.instead.map(|i| i.snapshot)))
         .collect()
 }
 
@@ -384,8 +384,8 @@ pub struct View {
     /// The blended files (see `blend`), with the layers blended in: the
     /// workspace writes them, its own lines on top of theirs.
     pub blended: HashMap<Vec<u8>, Vec<usize>>,
-    /// The seals of the layers blended in (L's parents after the base).
-    pub hunk_seals: Vec<ObjectId>,
+    /// The snapshots of the layers blended in (L's parents after the base).
+    pub hunk_snapshots: Vec<ObjectId>,
     /// The paths where a layer's change conflicts with the base's or
     /// another layer's.
     pub conflicts: Vec<Conflict>,
@@ -398,7 +398,7 @@ pub struct View {
 }
 
 /// The view of `layers` over base commit `base`, or `None` if it has no
-/// layers. Each layer's changes are its seal's since it and `base` diverged
+/// layers. Each layer's changes are its snapshot's since it and `base` diverged
 /// (`merge_base`, see the module doc).
 ///
 /// A file is blended, rather than shown whole, if it is `merge=union` (in
@@ -418,7 +418,7 @@ pub fn view(
         .map(|l| {
             Ok(git::layers::Pin {
                 name: l.branch.clone(),
-                seal: l.seal,
+                snapshot: l.snapshot,
                 merge_base: merge_base(base, l)?,
             })
         })
@@ -495,8 +495,8 @@ pub fn view(
         blended: (view.blended.iter())
             .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
             .collect(),
-        hunk_seals: (hunk_layers.into_iter())
-            .map(|ix| layers.layers[ix].seal)
+        hunk_snapshots: (hunk_layers.into_iter())
+            .map(|ix| layers.layers[ix].snapshot)
             .collect(),
         conflicts,
         notes,
@@ -533,7 +533,7 @@ pub fn own_among(
         let mut whose = Vec::new();
         for &ix in &view.blended[path] {
             let layer = &layers.layers[ix];
-            let theirs = content(git::resolve(&layer.seal.to_string())?.tree, path)?;
+            let theirs = content(git::resolve(&layer.snapshot.to_string())?.tree, path)?;
             let mb = git::resolve(&merge_base(&base.id, layer)?.to_string())?;
             let added = git::layers::added_lines(&content(mb.tree, path)?, &theirs);
             let key = git::layers::key;
@@ -570,10 +570,10 @@ pub fn among(whose: &str, path: &BString, others: &str) -> String {
 }
 
 /// Where `layer` and base commit `base` diverged: its changes are its
-/// seal's against this. Without a commit in common they can't be told
+/// snapshot's against this. Without a commit in common they can't be told
 /// apart, and no view can be built.
 pub fn merge_base(base: &ObjectId, layer: &Layer) -> Result<ObjectId> {
-    git::merge_base_if_any(*base, layer.seal)?.ok_or_else(|| {
+    git::merge_base_if_any(*base, layer.snapshot)?.ok_or_else(|| {
         anyhow::anyhow!(
             "{} shares no history with the base {base}, so its changes can't be told apart",
             layer.branch
@@ -818,7 +818,12 @@ mod tests {
         assert_eq!(layers.layers.len(), 1);
         let l = &layers.layers[0];
         assert_eq!(
-            (l.branch.as_str(), l.shows, l.updates, l.seal.to_string()),
+            (
+                l.branch.as_str(),
+                l.shows,
+                l.updates,
+                l.snapshot.to_string()
+            ),
             ("on1", Shows::Work, Updates::Live, A.to_string())
         );
         assert!(l.instead.is_none());

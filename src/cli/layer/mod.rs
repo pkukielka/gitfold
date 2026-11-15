@@ -159,7 +159,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             refuse_if_moving(&common_dir, &state)?;
             let store = Store::default();
             let layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
-            let in_base = in_base(&state, layer.seal)?;
+            let in_base = in_base(&state, layer.snapshot)?;
             add(&local, &mut layers, &name, layer, in_base)
         }
         Some(LayerOp::Remove { branch: None, .. }) => {
@@ -195,7 +195,7 @@ fn add(local: &Local, layers: &mut Layers, name: &str, mut layer: Layer, in_base
     };
     let was = &layers.layers[i];
     // Not moved if it is where it was.
-    if was.seal == layer.seal {
+    if was.snapshot == layer.snapshot {
         layer.moved = was.moved;
     }
     let note = if was.branch == branch {
@@ -474,7 +474,7 @@ fn base_offer(
             let tree = git::layers::commit_tree(repo, commit)?;
             git::layers::lookup(repo, tree, path.into())
         };
-        Ok(at(layer.seal)? == at(tip)?)
+        Ok(at(layer.snapshot)? == at(tip)?)
     })?;
     let uncommitted = match committed {
         true => String::new(),
@@ -571,7 +571,7 @@ fn differs_from_base(layers: &Layers, base: ObjectId, path: &[u8]) -> Result<boo
         let at = |tree: ObjectId| git::layers::lookup(repo, tree, path.into());
         let in_base = at(base)?;
         for layer in &layers.layers {
-            if at(git::layers::commit_tree(repo, layer.seal)?)? != in_base {
+            if at(git::layers::commit_tree(repo, layer.snapshot)?)? != in_base {
                 return Ok(true);
             }
         }
@@ -579,15 +579,15 @@ fn differs_from_base(layers: &Layers, base: ObjectId, path: &[u8]) -> Result<boo
     })
 }
 
-/// Whether commit `seal` is in the base of the workspace in `state`: as a
+/// Whether commit `snapshot` is in the base of the workspace in `state`: as a
 /// layer it shows nothing (yet).
-fn in_base(state: &StateDir, seal: ObjectId) -> Result<bool> {
+fn in_base(state: &StateDir, snapshot: ObjectId) -> Result<bool> {
     let base = state.read_base()?.id;
-    Ok(git::merge_base_if_any(base, seal)? == Some(seal))
+    Ok(git::merge_base_if_any(base, snapshot)? == Some(snapshot))
 }
 
 /// The layer of `branch` (a branch, or any revision) as it is now, for the
-/// workspace in `state`: a workspace's work (its seal) unless `commits`,
+/// workspace in `state`: a workspace's work (its snapshot) unless `commits`,
 /// else a branch's tip or the revision; live unless `frozen` (a revision is
 /// fixed). Refused if it shares no history with the workspace's base, or,
 /// never moving, is in it already.
@@ -603,14 +603,14 @@ pub(super) fn layer_of(
         true => Updates::Frozen,
         false => Updates::Live,
     };
-    let (seal, shows, updates) = if git::branch_exists(branch) {
+    let (snapshot, shows, updates) = if git::branch_exists(branch) {
         check_name(branch)?;
         let theirs = StateDir::of(common_dir, branch);
         if theirs.opened() && !commits {
             // Live: as it follows it (`follow::latest_work`), else as it is now.
             let work = match (frozen, snapshot::driven(&theirs)) {
                 (false, snapshot::Driven::Agent(Some(last_turn))) => last_turn,
-                _ => snapshot::seal(store, &theirs, snapshot::By::Other)?.commit,
+                _ => snapshot::snapshot(store, &theirs, snapshot::By::Other)?.commit,
             };
             (work, Shows::Work, updates)
         } else {
@@ -629,7 +629,7 @@ pub(super) fn layer_of(
     };
     // A layer shows its changes since it and the base diverged: without a
     // commit in common there is no telling them apart.
-    let Some(merge_base) = git::merge_base_if_any(state.read_base()?.id, seal)? else {
+    let Some(merge_base) = git::merge_base_if_any(state.read_base()?.id, snapshot)? else {
         return Err(Refusal::Changes.error(format!(
             "{branch} shares no history with {}'s base, so its changes can't be told apart: \
              a layer must start from a commit your branch also has",
@@ -638,7 +638,7 @@ pub(super) fn layer_of(
     };
     // A layer shows changes on top of the base: one that never moves and is
     // part of the base already would show nothing.
-    if updates != Updates::Live && merge_base == seal {
+    if updates != Updates::Live && merge_base == snapshot {
         return Err(Refusal::Changes.error(format!(
             "{branch} is part of {}'s base already, so as a layer it shows nothing (a layer \
              shows changes on top of the base). To look at {branch} as it was: `gitfold \
@@ -651,7 +651,7 @@ pub(super) fn layer_of(
         shows,
         updates,
         moved: now(),
-        seal,
+        snapshot,
         instead: None,
     })
 }

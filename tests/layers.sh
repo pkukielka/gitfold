@@ -26,14 +26,14 @@ eq "the parent is the base" "$(R rev-parse s1)" "$(R rev-parse "$c^")"
 eq "the tree is what git would commit with add -A" \
     "$(G "$MNT/s1" add -A && G "$MNT/s1" write-tree)" "$(R rev-parse "$c^{tree}")"
 eq "ignored files left out" "" "$(R ls-tree --name-only "$c" build.o)"
-eq "kept by a ref" "$c" "$(R rev-parse refs/gitfold-seal/s1/1)"
+eq "kept by a ref" "$c" "$(R rev-parse refs/gitfold-snapshot/s1/1)"
 out=$("$BIN" -C "$REPO" snapshot s1 2>&1 >/dev/null)
 eq "unchanged work: the same snapshot, no new ref, said so" "$p 1|unchanged since its last snapshot" \
-    "$("$BIN" -C "$REPO" snapshot s1 2>/dev/null) $(R for-each-ref refs/gitfold-seal/s1 | wc -l)|$out"
+    "$("$BIN" -C "$REPO" snapshot s1 2>/dev/null) $(R for-each-ref refs/gitfold-snapshot/s1 | wc -l)|$out"
 echo more >>"$MNT/s1/a.txt"
 p2=$("$BIN" -C "$REPO" snapshot s1)
 check "new work: a new snapshot" test "$p2" != "$p"
-eq "numbered on" "${p2##*@}" "$(R rev-parse refs/gitfold-seal/s1/2)"
+eq "numbered on" "${p2##*@}" "$(R rev-parse refs/gitfold-snapshot/s1/2)"
 eq "the workspace unchanged" "A	.gitignore
 M	a.txt
 D	d/b.txt
@@ -46,11 +46,11 @@ more" "$(cat "$p2/a.txt")"
 eq "--commits: only its commits" "$MNT/@$(R rev-parse s1)" "$("$BIN" -C "$REPO" snapshot --commits s1)"
 echo again >>"$MNT/s1/a.txt"
 eq "the stop hook: nothing printed, nothing new while no workspace shows it" "|2" \
-    "$(cd "$MNT/s1" && "$BIN" snapshot --claude-hook stop)|$(R for-each-ref refs/gitfold-seal/s1 | wc -l)"
+    "$(cd "$MNT/s1" && "$BIN" snapshot --claude-hook stop)|$(R for-each-ref refs/gitfold-snapshot/s1 | wc -l)"
 ls "$MNT/s2" >/dev/null; "$BIN" -C "$REPO" layer add s1 -w s2 >/dev/null
 echo last >>"$MNT/s1/a.txt"
 (cd "$MNT/s1" && "$BIN" snapshot --claude-hook stop)
-newest=$(R for-each-ref --sort=-refname --count=1 --format='%(refname)' refs/gitfold-seal/s1)
+newest=$(R for-each-ref --sort=-refname --count=1 --format='%(refname)' refs/gitfold-snapshot/s1)
 eq "the stop hook: a new one once a layer shows it" "last" "$(R show "$newest:a.txt" | tail -1)"
 check "the hook takes no branch" fails "$BIN" -C "$REPO" snapshot s1 --claude-hook stop
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
@@ -335,8 +335,8 @@ eq "the trunk a remote's branch: the base line says the branch" "Base: main" "$(
 R config --unset gitfold.trunk
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
 # As a build before --frozen and --commits stored them (version 1).
-seal=$(R rev-parse "$(R for-each-ref --sort=-refname --count=1 --format='%(refname)' refs/gitfold-seal/o2)")
-printf 'version 1\nlayer o2\ton\t%s\t%s\nlayer o3\toff\t%s\t%s\n' "$seal" "$(R rev-parse main)" "$seal" "$(R rev-parse main)" \
+snapshot=$(R rev-parse "$(R for-each-ref --sort=-refname --count=1 --format='%(refname)' refs/gitfold-snapshot/o2)")
+printf 'version 1\nlayer o2\ton\t%s\t%s\nlayer o3\toff\t%s\t%s\n' "$snapshot" "$(R rev-parse main)" "$snapshot" "$(R rev-parse main)" \
     >"$COMMON/gitfold/me/layers"
 mount_fs
 for _ in $(seq 50); do [ ! -e "$W/o4.txt" ] && break; sleep 0.1; done
@@ -366,14 +366,14 @@ for i in 2 3 4; do
     eq "a person's work: at every turn start, as it is then ($i)" "pe $i" "$(cat "$W/pe.txt")"
 done
 # A record an earlier build wrote (any snapshot's): not an agent's.
-echo "$(R rev-parse main)" >"$COMMON/gitfold/pe/sealed"
+echo "$(R rev-parse main)" >"$COMMON/gitfold/pe/snapshotted"
 echo "pe 5" >"$MNT/pe/pe.txt"; turn_starts "$W" >/dev/null
 eq "an earlier build's record: still followed as it is now" "pe 5" "$(cat "$W/pe.txt")"
 
 # An agent's workspace: as it was at the end of its last turn, never
 # half-way through one.
 echo "ag 1" >"$MNT/ag/ag.txt"
-eq "its turn ends, no layer shows it: no snapshot" "|" "$(turn_ends "$MNT/ag")|$(R for-each-ref refs/gitfold-seal/ag)"
+eq "its turn ends, no layer shows it: no snapshot" "|" "$(turn_ends "$MNT/ag")|$(R for-each-ref refs/gitfold-snapshot/ag)"
 "$BIN" -C "$W" layer add ag >/dev/null
 eq "added: as it is now (no turn of its ended while shown)" "ag 1" "$(cat "$W/ag.txt")"
 echo "ag 2" >"$MNT/ag/ag.txt"; turn_starts "$W" >/dev/null
@@ -390,7 +390,7 @@ eq "added frozen: as it is now" "ag 3, half-way" "$(cat "$W/ag.txt")"
 eq "live again: its last turn's end" "ag 2" "$(cat "$W/ag.txt")"
 
 # One layer that can't move doesn't keep the others from moving.
-echo "1111111111111111111111111111111111111111 stop" >"$COMMON/gitfold/ag/sealed"
+echo "1111111111111111111111111111111111111111 stop" >"$COMMON/gitfold/ag/snapshotted"
 echo "pe 6" >"$MNT/pe/pe.txt"; turn_starts "$W" >/dev/null
 eq "a layer that can't move: the others still do" "pe 6|ag 2" "$(cat "$W/pe.txt")|$(cat "$W/ag.txt")"
 turn_ends "$MNT/ag"; turn_starts "$W" >/dev/null
@@ -404,8 +404,8 @@ for i in 1 2 3 4 5 6 7 8; do
 done
 rcs=""; for p in "${pids[@]}"; do wait "$p"; rcs+=$?; done
 eq "snapshots at once: all made" "00000000" "$rcs"
-eq "numbered one after another" "$(R for-each-ref refs/gitfold-seal/pe | wc -l)" \
-    "$(R for-each-ref --format='%(refname)' refs/gitfold-seal/pe | sed 's|.*/||' | sort -n | tail -1)"
+eq "numbered one after another" "$(R for-each-ref refs/gitfold-snapshot/pe | wc -l)" \
+    "$(R for-each-ref --format='%(refname)' refs/gitfold-snapshot/pe | sed 's|.*/||' | sort -n | tail -1)"
 }
 
 # Waits up to 15 s for file $1 to hold $2 (its last line); prints the time
@@ -636,7 +636,7 @@ check "reject" "$BIN" -C "$MNT/contracts" reject contracts-prop/c2 --reason "kee
 eq "the layer shown again, the proposer told why, the proposal gone" "contracts|yes|" \
     "$(layer_names "$MNT/c2" | tr " " "\n" | grep contracts)|$("$BIN" -C "$REPO" inbox c2 | grep -q 'was rejected: keep fetch' && echo yes)|$(R branch --list 'contracts-prop/*')"
 eq "no snapshot or start refs of removed proposals left" "" \
-    "$(R for-each-ref --format='%(refname)' refs/gitfold-proposal/ 'refs/gitfold-seal/contracts-prop*')"
+    "$(R for-each-ref --format='%(refname)' refs/gitfold-proposal/ 'refs/gitfold-snapshot/contracts-prop*')"
 (cd "$MNT/c2" && "$BIN" propose lib.txt --layer lib >/dev/null)
 out=$("$BIN" -C "$REPO" consent lib-prop/c2 --only-readers 2>&1); rc=$?
 eq "nobody checked: not a pass (exit 4)" "4 lib-prop/c2: unchecked" "$rc $(echo "$out" | tail -1 | sed 's/ (.*//')"
@@ -760,8 +760,8 @@ eq "the tip moved without its files (a push into it): on the base" "$base|" \
     "$(R rev-parse "$c^")|$(R ls-tree --name-only "$c" pushed.txt)"
 }
 
-# The seal of layer $2 stored for workspace $1.
-stored_seal() { awk -F'\t' -v l="layer $2" '$1 == l {print $5}' "$COMMON/gitfold/$1/layers"; }
+# The snapshot of layer $2 stored for workspace $1.
+stored_snapshot() { awk -F'\t' -v l="layer $2" '$1 == l {print $5}' "$COMMON/gitfold/$1/layers"; }
 
 # A person's workspace with a blended file (HEAD at the layers commit): the
 # daemon moves its layers there too, sees a source's commits, and backs off
@@ -784,9 +784,9 @@ eq "a source's new work shows by itself" "s 2" "$(cat "$P/s.txt")"
 # written through the mount, its base the same; its tip moved.
 echo o >"$MNT/other/o.txt"; "$BIN" -C "$S" layer add other >/dev/null
 G "$S" add s.txt; G "$S" commit -qm "src s"
-for _ in $(seq 100); do [ "$(R rev-parse "$(stored_seal pe src)^")" = "$(R rev-parse src)" ] && break; sleep 0.1; done
+for _ in $(seq 100); do [ "$(R rev-parse "$(stored_snapshot pe src)^")" = "$(R rev-parse src)" ] && break; sleep 0.1; done
 eq "a source's commit is seen: its layer moves onto the snapshot on its tip" "$(R rev-parse src)" \
-    "$(R rev-parse "$(stored_seal pe src)^")"
+    "$(R rev-parse "$(stored_snapshot pe src)^")"
 # A snapshot of the source that fails (a file it can't read): tried again
 # later, though nothing is written to it meanwhile.
 echo "u 1" >"$S/u.txt"; chmod 000 "$COMMON/gitfold/src/upper/u.txt"

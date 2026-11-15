@@ -123,7 +123,7 @@ as in a normal checkout.
 gitfold writes into the repository: worktree registrations under
 `.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
-[Cleaning up](#cleaning-up)), and `refs/gitfold-seal/*` and
+[Cleaning up](#cleaning-up)), and `refs/gitfold-snapshot/*` and
 `refs/gitfold-layers/*` that keep snapshots of work and layers commits (see
 [Layers](#layers)).
 
@@ -303,7 +303,7 @@ Nothing in a workspace, its index or its branch changes. The commits are
 made with a fixed identity and date (`gitfold`, 2020-01-01), so the same
 work gives the same snapshot (`unchanged since its last snapshot`, on
 stderr, for one workspace); a workspace's work is kept by a ref,
-`refs/gitfold-seal/<id>/<n>`, numbered from 1, the newest 16 kept. It works
+`refs/gitfold-snapshot/<id>/<n>`, numbered from 1, the newest 16 kept. It works
 mounted or not: unmounted it prints the commit instead of the path (and
 says so on stderr). It exits 4 on conflicts, listing the paths (`conflicts
 merging <BRANCH>:`, then how to look at each alone), and 3 if a name is
@@ -489,7 +489,7 @@ stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
 and the layers files, if it has layers (see [Layers](#layers)). Snapshots of its work are kept by refs
-`refs/gitfold-seal/<id>/<n>`, a workspace's layers commit by
+`refs/gitfold-snapshot/<id>/<n>`, a workspace's layers commit by
 `refs/gitfold-layers/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 

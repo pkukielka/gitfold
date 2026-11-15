@@ -108,15 +108,15 @@ fn follow(
     let Some((newest, shows)) = newest(store, common_dir, local, layer, fresh)? else {
         return Ok(None);
     };
-    if newest == layer.seal {
+    if newest == layer.snapshot {
         return Ok(None);
     }
     let (from, to) = (
-        git::resolve(&layer.seal.to_string())?,
+        git::resolve(&layer.snapshot.to_string())?,
         git::resolve(&newest.to_string())?,
     );
     let files = git::with_repo(|repo| git::layers::delta(repo, from.tree, to.tree))?.len();
-    layer.seal = newest;
+    layer.snapshot = newest;
     layer.shows = shows;
     Ok(Some(files))
 }
@@ -148,7 +148,7 @@ fn newest(
 }
 
 /// The work of the workspace in `theirs` a live layer shows (see
-/// `seal`): an agent's (one whose `Stop` hook ran) as it was at the end of
+/// `snapshot`): an agent's (one whose `Stop` hook ran) as it was at the end of
 /// its last turn, never half-way through one; one without an agent (a
 /// person's, a proposal edited from another workspace) has no turns, so a
 /// fresh snapshot, as it is now. An agent's that wasn't shown when its last
@@ -157,7 +157,7 @@ pub fn latest_work(store: &Store, theirs: &StateDir) -> Result<Option<ObjectId>>
     Ok(match snapshot::driven(theirs) {
         snapshot::Driven::Agent(last_turn) => last_turn,
         snapshot::Driven::Person => {
-            Some(snapshot::seal(store, theirs, snapshot::By::Other)?.commit)
+            Some(snapshot::snapshot(store, theirs, snapshot::By::Other)?.commit)
         }
     })
 }

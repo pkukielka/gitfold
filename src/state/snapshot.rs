@@ -1,31 +1,31 @@
-//! A workspace's uncommitted work as a commit: a seal. Its tree is what the
+//! A workspace's uncommitted work as a commit: a snapshot. Its tree is what the
 //! workspace shows (its base's tree with the changed files and without the
 //! deleted ones, ignored files left out, as `gitfold changes` lists them), its
 //! parent the base (or the branch's tip, when the workspace committed and its
-//! base hasn't caught up yet: `parent`). A seal can be opened as a snapshot
-//! (`@<sha>`), merged with other workspaces' seals (`gitfold snapshot`), and
+//! base hasn't caught up yet: `parent`). A snapshot can be opened
+//! (`@<sha>`), merged with other workspaces' snapshots (`gitfold snapshot`), and
 //! is what a layer shows of another workspace (`layers`).
 //!
-//! A blended file (`merge=union`) is sealed with the workspace's own lines
+//! A blended file (`merge=union`) is snapshotted with the workspace's own lines
 //! only, against the base; where it added lines among other layers' lines,
-//! the seal also records what it saw there and made of it, as its second
+//! the snapshot also records what it saw there and made of it, as its second
 //! parent (`git::layers::Record`), so the workspaces showing it put those
 //! lines in the same place among the others'.
 //!
-//! Seals are made with a fixed identity and date, so the same work on the same
-//! base gives the same commit: sealing an unchanged workspace again makes
-//! nothing new. Each new seal is kept by a ref, `refs/gitfold-seal/<id>/<seq>`,
+//! Snapshots are made with a fixed identity and date, so the same work on the same
+//! base gives the same commit: snapshotting an unchanged workspace again makes
+//! nothing new. Each new snapshot is kept by a ref, `refs/gitfold-snapshot/<id>/<seq>`,
 //! numbered from 1 (git would prune it otherwise); the oldest beyond
 //! `KEPT` are deleted.
 //!
 //! A workspace's own Claude Code `Stop` hook, at the end of its agent's
-//! turn, records in its state directory (`SEALED`) that it has an agent,
-//! with a seal of its work then if another workspace shows it as a layer
+//! turn, records in its state directory (`SNAPSHOTTED`) that it has an agent,
+//! with a snapshot of its work then if another workspace shows it as a layer
 //! (`By::StopHook`). The record goes with the workspace. A live layer of a
-//! workspace with an agent follows that seal (`driven`): it shows its work
+//! workspace with an agent follows that snapshot (`driven`): it shows its work
 //! as it was at the end of the agent's last turn, never half-way through
 //! one. A workspace without (a person's) has no turns, so its layers take a
-//! fresh seal when they move (`state::follow`). Its `UserPromptSubmit` hook
+//! fresh snapshot when they move (`state::follow`). Its `UserPromptSubmit` hook
 //! records that it has an agent too (`TURNS`), from its first turn on: the
 //! daemon leaves such a workspace's own live layers to its turns
 //! (`has_agent`). The refs outlive the
@@ -34,7 +34,7 @@
 //! workspace's work: the record never does.
 //!
 //! Numbering, the ref and the record are written under a lock on the
-//! workspace's `SEAL_LOCK`, so two seals at once (its `Stop` hook and
+//! workspace's `SNAPSHOT_LOCK`, so two snapshots at once (its `Stop` hook and
 //! another workspace's turn start) don't take the same number.
 
 use std::collections::HashMap;
@@ -51,23 +51,23 @@ use super::{StateDir, status, upper_path};
 use crate::git;
 use crate::store::Store;
 
-/// How many seals of one workspace are kept (the newest).
+/// How many snapshots of one workspace are kept (the newest).
 const KEPT: usize = 16;
 
 /// The file in a workspace's state directory recording its own `Stop`
-/// hook's last run: `<sha> stop`, the seal it made, or `- stop`, none (no
-/// layer showed it). (Earlier builds wrote a bare `<sha>` for any seal: not
+/// hook's last run: `<sha> stop`, the snapshot it made, or `- stop`, none (no
+/// layer showed it). (Earlier builds wrote a bare `<sha>` for any snapshot: not
 /// one of its hook's.)
-const SEALED: &str = "sealed";
+const SNAPSHOTTED: &str = "snapshotted";
 
 /// The file in a workspace's state directory whose presence records that
 /// its own `UserPromptSubmit` hook ran (`turn_started`).
 const TURNS: &str = "turns";
 
-/// The file locked while a seal is numbered and recorded.
-const SEAL_LOCK: &str = "sealed.lock";
+/// The file locked while a snapshot is numbered and recorded.
+const SNAPSHOT_LOCK: &str = "snapshot.lock";
 
-/// Who makes a seal.
+/// Who makes a snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum By {
     /// The workspace's own Claude Code `Stop` hook, at the end of its
@@ -81,7 +81,7 @@ pub enum By {
     Other,
 }
 
-/// The identity and date seals (and snapshots' merges) are made with: the
+/// The identity and date snapshots (and snapshots' merges) are made with: the
 /// same trees and parents give the same commit.
 pub const IDENTITY: [(&str, &str); 6] = [
     ("GIT_AUTHOR_NAME", "gitfold"),
@@ -92,15 +92,15 @@ pub const IDENTITY: [(&str, &str); 6] = [
     ("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z"),
 ];
 
-pub struct Seal {
+pub struct Snapshot {
     pub commit: ObjectId,
-    /// Not made now: the newest seal already had this work.
+    /// Not made now: the newest snapshot already had this work.
     pub same: bool,
 }
 
-/// The ref prefix of workspace `id`'s seals.
+/// The ref prefix of workspace `id`'s snapshots.
 pub fn ref_prefix(id: &str) -> String {
-    format!("refs/gitfold-seal/{id}/")
+    format!("refs/gitfold-snapshot/{id}/")
 }
 
 /// The parent of a snapshot, of tree `tree`, of the workspace in `state` on
@@ -162,14 +162,14 @@ fn has_tip(state: &StateDir, base: ObjectId, tip: &git::Commit, tree: ObjectId) 
     })
 }
 
-/// Seals the work of the workspace stored in `state` (see the module doc),
+/// Snapshots the work of the workspace stored in `state` (see the module doc),
 /// made `by` its `Stop` hook, its owner or another command. Called by the
 /// commands themselves (`snapshot`, `layer`, the `Stop` hook), mounted or
 /// not, without the daemon: it reads the stored state (upper, markers,
 /// base) as it is, so a write in progress meanwhile may be half-seen. That
-/// is why the hooks seal at turn ends, when the workspace's agent isn't
+/// is why the hooks snapshot at turn ends, when the workspace's agent isn't
 /// writing.
-pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
+pub fn snapshot(store: &Store, state: &StateDir, by: By) -> Result<Snapshot> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;
     let blends = blends(state, &base)?;
@@ -186,8 +186,8 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
         saw,
         &state.branch,
     )?;
-    let _lock = crate::lock::wait(&state.dir.join(SEAL_LOCK))?;
-    let seals = list(&state.common_dir, &state.id)?;
+    let _lock = crate::lock::wait(&state.dir.join(SNAPSHOT_LOCK))?;
+    let snapshots = list(&state.common_dir, &state.id)?;
     let recorded = match by {
         By::StopHook => true,
         By::Owner => matches!(driven(state), Driven::Agent(_)),
@@ -197,13 +197,13 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
         true => record(state, Some(commit)),
         false => Ok(()),
     };
-    if let Some(&(_, newest)) = seals.last()
+    if let Some(&(_, newest)) = snapshots.last()
         && newest == commit
     {
         note()?;
-        return Ok(Seal { commit, same: true });
+        return Ok(Snapshot { commit, same: true });
     }
-    let seq = seals.last().map_or(1, |&(seq, _)| seq + 1);
+    let seq = snapshots.last().map_or(1, |&(seq, _)| seq + 1);
     let name = format!("{}{seq}", ref_prefix(&state.id));
     git::cmd::run(
         &state.common_dir,
@@ -212,16 +212,18 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
     note()?;
     // The oldest go, unless a workspace's layers name them, or a live layer
     // of this one would follow it.
-    let mut named = super::layers::named_seals(&state.common_dir);
+    let mut named = super::layers::named_snapshots(&state.common_dir);
     if let Driven::Agent(Some(followed)) = driven(state) {
         named.insert(followed);
     }
-    let old = seals.iter().take((seals.len() + 1).saturating_sub(KEPT));
+    let old = snapshots
+        .iter()
+        .take((snapshots.len() + 1).saturating_sub(KEPT));
     for (old, _) in old.filter(|(_, c)| !named.contains(c)) {
         let name = format!("{}{old}", ref_prefix(&state.id));
         git::cmd::run(&state.common_dir, &["update-ref", "-d", &name])?;
     }
-    Ok(Seal {
+    Ok(Snapshot {
         commit,
         same: false,
     })
@@ -233,7 +235,7 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
 pub enum Driven {
     /// No `Stop` hook of its own ran (a person's): no turns to wait for.
     Person,
-    /// An agent, whose `Stop` hook ran: the seal it made at the end of its
+    /// An agent, whose `Stop` hook ran: the snapshot it made at the end of its
     /// last turn (this workspace's, never an earlier one of its branch), if
     /// a layer showed it then.
     Agent(Option<ObjectId>),
@@ -241,7 +243,7 @@ pub enum Driven {
 
 /// Who drives the workspace in `state` (see `Driven`).
 pub fn driven(state: &StateDir) -> Driven {
-    let Ok(text) = fs::read_to_string(state.dir.join(SEALED)) else {
+    let Ok(text) = fs::read_to_string(state.dir.join(SNAPSHOTTED)) else {
         return Driven::Person;
     };
     match text.trim().split_once(' ') {
@@ -250,11 +252,11 @@ pub fn driven(state: &StateDir) -> Driven {
     }
 }
 
-/// The `Stop` hook of the workspace in `state` ran without sealing it (no
-/// layer shows it): it has an agent, and an earlier seal of its hook's is
+/// The `Stop` hook of the workspace in `state` ran without snapshotting it (no
+/// layer shows it): it has an agent, and an earlier snapshot of its hook's is
 /// stale now.
 pub fn stopped(state: &StateDir) -> Result<()> {
-    let _lock = crate::lock::wait(&state.dir.join(SEAL_LOCK))?;
+    let _lock = crate::lock::wait(&state.dir.join(SNAPSHOT_LOCK))?;
     if driven(state) == Driven::Agent(None) {
         return Ok(());
     }
@@ -282,14 +284,17 @@ pub fn has_agent(state: &StateDir) -> bool {
 }
 
 /// Records a run of the `Stop` hook of the workspace in `state`, with the
-/// seal it made.
-fn record(state: &StateDir, seal: Option<ObjectId>) -> Result<()> {
-    let seal = seal.map_or("-".to_string(), |s| s.to_string());
-    crate::fsutil::write_atomic(&state.dir.join(SEALED), format!("{seal} stop").as_bytes())
-        .with_context(|| format!("recording the snapshot of {}", state.branch))
+/// snapshot it made.
+fn record(state: &StateDir, snapshot: Option<ObjectId>) -> Result<()> {
+    let snapshot = snapshot.map_or("-".to_string(), |s| s.to_string());
+    crate::fsutil::write_atomic(
+        &state.dir.join(SNAPSHOTTED),
+        format!("{snapshot} stop").as_bytes(),
+    )
+    .with_context(|| format!("recording the snapshot of {}", state.branch))
 }
 
-/// Workspace `id`'s seals, oldest first: (number, commit).
+/// Workspace `id`'s snapshots, oldest first: (number, commit).
 pub fn list(common_dir: &std::path::Path, id: &str) -> Result<Vec<(u64, ObjectId)>> {
     let out = git::cmd::output(
         common_dir,
@@ -300,7 +305,7 @@ pub fn list(common_dir: &std::path::Path, id: &str) -> Result<Vec<(u64, ObjectId
         ],
     )?;
     let prefix = ref_prefix(id);
-    let mut seals: Vec<(u64, ObjectId)> = String::from_utf8_lossy(&out)
+    let mut snapshots: Vec<(u64, ObjectId)> = String::from_utf8_lossy(&out)
         .lines()
         .filter_map(|l| {
             let (name, oid) = l.split_once(' ')?;
@@ -308,8 +313,8 @@ pub fn list(common_dir: &std::path::Path, id: &str) -> Result<Vec<(u64, ObjectId
             Some((seq, ObjectId::from_hex(oid.as_bytes()).ok()?))
         })
         .collect();
-    seals.sort_unstable();
-    Ok(seals)
+    snapshots.sort_unstable();
+    Ok(snapshots)
 }
 
 /// A blended file the workspace added lines to among other layers' lines:
@@ -392,7 +397,7 @@ fn tree_of(
     })
 }
 
-/// The record (`git::layers::Record`) of a seal of `branch` on `base` with
+/// The record (`git::layers::Record`) of a snapshot of `branch` on `base` with
 /// tree `tree`, of the blended files `seen`: its commit.
 fn seen_record(branch: &str, base: ObjectId, tree: ObjectId, seen: &[Seen]) -> Result<ObjectId> {
     git::with_repo(|repo| {
@@ -447,7 +452,7 @@ fn commit(
 type Blends = HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
 
 /// For each file the workspace in `state` shows blended (`state::layers`),
-/// the blend and the base's version: a seal of it holds the upper copy with
+/// the blend and the base's version: a snapshot of it holds the upper copy with
 /// the change from the blend back to the base's version merged in (only its
 /// own lines), so a workspace showing it as a layer gets the other layers'
 /// work from them, not through it.

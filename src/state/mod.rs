@@ -6,7 +6,7 @@
 //! - `retire`: the rules for removing a workspace or a snapshot's
 //!   registration.
 //! - `fork`: a new branch with a copy of a workspace (`branch --with-changes`).
-//! - `seal`: a workspace's uncommitted work as a commit (`gitfold snapshot`).
+//! - `snapshot`: a workspace's uncommitted work as a commit (`gitfold snapshot`).
 //! - `layers`: other workspaces' work shown in one, and its storage.
 //! - `follow`: moving a workspace's live layers to their latest work.
 //! - `restack`: a stacked branch's restack under way in a workspace (its

@@ -3,7 +3,7 @@
 //! storage).
 //!
 //! The lower layer becomes the view tree; everything that reads the lower
-//! layer reads it. A switch (a layer shown, hidden, or moved to a newer seal)
+//! layer reads it. A switch (a layer shown, hidden, or moved to a newer snapshot)
 //! changes what the kernel has cached, so it is told: the attributes and pages
 //! of every file whose content changed, the entries added, removed or changed
 //! in type, and the listings of their directories. Changed files get a fresh
@@ -122,7 +122,7 @@ fn registered(state: &StateDir) -> Vec<u8> {
 }
 
 /// The ref keeping workspace `id`'s view commit (and through it L and the
-/// seals) from `git gc`.
+/// snapshots) from `git gc`.
 fn layers_ref(id: &str) -> String {
     format!("refs/gitfold-layers/{id}")
 }
@@ -174,7 +174,7 @@ pub(super) fn open_view(
     layers.applied = applied;
     let view = match layers::view(&state.common_dir, &layers.base, &shown) {
         Ok(view) => view,
-        // A layer's seal gone (pruned): open without the layers, git off;
+        // A layer's snapshot gone (pruned): open without the layers, git off;
         // the switch that follows reports it.
         Err(e) => {
             log::warn!("{}: its layers can't be shown: {e:#}", state.branch);
@@ -617,10 +617,10 @@ impl Workspace {
     ) -> Result<()> {
         let (admin, branch) = (&self.state.admin, &self.state.branch);
         let subject = stored.subject(branch);
-        let all_seals: Vec<ObjectId> = stored.layers.iter().map(|l| l.seal).collect();
+        let all_snapshots: Vec<ObjectId> = stored.layers.iter().map(|l| l.snapshot).collect();
         let (l, vc) = git::with_repo(|repo| -> Result<(ObjectId, ObjectId)> {
-            let l = git::layers::layers_commit(repo, hunk, tip, &view.hunk_seals, &subject)?;
-            let vc = git::layers::view_commit(repo, view.tree, l, &all_seals, &subject)?;
+            let l = git::layers::layers_commit(repo, hunk, tip, &view.hunk_snapshots, &subject)?;
+            let vc = git::layers::view_commit(repo, view.tree, l, &all_snapshots, &subject)?;
             Ok((l, vc))
         })?;
         let pin = layers_ref(&self.state.id);
@@ -835,7 +835,7 @@ impl Workspace {
                 None => return Ok(None),
             };
             let layers = git::layers::Extractor {
-                seals: &view.hunk_seals,
+                snapshots: &view.hunk_snapshots,
                 subject: &subject,
                 is_hunk: &is_hunk,
                 owners: &owners,

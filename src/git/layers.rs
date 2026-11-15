@@ -5,7 +5,7 @@
 //!
 //! Terms (the layers design, §1.1):
 //! - B: my base, the branch tip.
-//! - A layer: another workspace's work as of one seal S (a commit whose tree
+//! - A layer: another workspace's work as of one snapshot S (a commit whose tree
 //!   is that workspace's view), with the merge base MB it was pinned at. Its
 //!   delta is `diff(MB.tree, S.tree)`.
 //! - H, the hunk tree: B with every hunk path (a registry, a manifest, as the
@@ -21,14 +21,14 @@
 //!   while hunk paths are mixed in, so `git diff` shows only my lines of a
 //!   blended file.
 //! - V, the view commit: tree M, parents `[L or B, S...]`; one ref on it
-//!   keeps M, L and the seals from `git gc`.
+//!   keeps M, L and the snapshots from `git gc`.
 //!
 //! Blending a hunk path folds each layer's change into the file in turn,
 //! `merge3(base = MB[p], ours = acc[p], theirs = S[p])`. Two appends at the
 //! same place (two agents adding to a registry) conflict in every 3-way
 //! merge, so when both sides only add lines the conflict is resolved by
 //! keeping both, ours first (`merge=union`, but only there). Any other
-//! conflict drops that layer's change to p and is reported. A seal whose
+//! conflict drops that layer's change to p and is reported. A snapshot whose
 //! author added lines among other layers' lines in p records what it saw
 //! and made (`Record`): its change is then folded in from what it saw, so
 //! its lines keep their place among the others'; while those aren't there
@@ -222,12 +222,12 @@ pub fn commit_tree(repo: &gix::Repository, commit: ObjectId) -> Result<ObjectId>
     Ok(commit.tree_id()?.detach())
 }
 
-/// One layer of a stack: a seal and the merge base it is pinned to, and the
+/// One layer of a stack: a snapshot and the merge base it is pinned to, and the
 /// name conflict markers give it.
 #[derive(Clone, Debug)]
 pub struct Pin {
     pub name: String,
-    pub seal: ObjectId,
+    pub snapshot: ObjectId,
     pub merge_base: ObjectId,
 }
 
@@ -249,7 +249,7 @@ pub struct Built {
 }
 
 impl Built {
-    /// The layers whose changes are in H: the seals that are L's parents.
+    /// The layers whose changes are in H: the snapshots that are L's parents.
     pub fn hunk_layers(&self) -> Vec<usize> {
         let set: BTreeSet<usize> = self.blended.values().flatten().copied().collect();
         set.into_iter().collect()
@@ -317,7 +317,7 @@ pub fn build_view(
     let mut deltas = Vec::with_capacity(layers.len());
     for layer in layers {
         let mb = commit_tree(repo, layer.merge_base)?;
-        deltas.push(delta(repo, mb, commit_tree(repo, layer.seal)?)?);
+        deltas.push(delta(repo, mb, commit_tree(repo, layer.snapshot)?)?);
         layer_bases.push(mb);
     }
     let mut candidates = BTreeSet::new();
@@ -343,7 +343,7 @@ pub fn build_view(
     let records = match is_hunk.is_empty() {
         true => Vec::new(),
         false => (layers.iter())
-            .map(|l| record_of(repo, l.seal))
+            .map(|l| record_of(repo, l.snapshot))
             .collect::<Result<Vec<_>>>()?,
     };
     let mut notes = Vec::new();
@@ -528,7 +528,7 @@ pub fn build_view(
 }
 
 /// One layer's change to a whole-file path: its entry at the layer's merge
-/// base and at its seal.
+/// base and at its snapshot.
 #[derive(Clone, Copy)]
 struct Side<'a> {
     layer: usize,
@@ -746,22 +746,22 @@ fn blend(
 /// (`Record`); its value is the commit the author's view was built on.
 pub const SEEN_HEADER: &str = "gitfold-seen";
 
-/// What the author of a seal saw in its blended files and made of them:
+/// What the author of a snapshot saw in its blended files and made of them:
 /// for each blended file it added lines to, the blend it saw (the base's
 /// version with the other layers' lines) and its own copy (its lines among
-/// them). The seal's tree holds only its own lines, against its base, so
+/// them). The snapshot's tree holds only its own lines, against its base, so
 /// layers bring their own work, never another's through them; the record
 /// keeps where those lines sat among the others'.
 ///
-/// Kept as the seal's second parent: a commit `made` (tree: the files as
+/// Kept as the snapshot's second parent: a commit `made` (tree: the files as
 /// the author left them; header `gitfold-seen <base>`) whose only parent
 /// is a root commit `seen` (tree: the same files as the author saw them),
-/// so `git diff <seal>^2^ <seal>^2` is the author's change in context. Both
+/// so `git diff <snapshot>^2^ <snapshot>^2` is the author's change in context. Both
 /// are made with a fixed identity and date (the same record is the same
-/// commits, and an unchanged workspace's seal stays the same), and the
-/// root commit's message names the branch, base and seal tree, so two
-/// seals never share it. No branch's commit descends from them: they never
-/// become a merge base, and `merge-base(view base, seal)` is as without.
+/// commits, and an unchanged workspace's snapshot stays the same), and the
+/// root commit's message names the branch, base and snapshot tree, so two
+/// snapshots never share it. No branch's commit descends from them: they never
+/// become a merge base, and `merge-base(view base, snapshot)` is as without.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Record {
     /// The commit the author's view was built on (its base).
@@ -772,9 +772,9 @@ pub struct Record {
     pub made: ObjectId,
 }
 
-/// Writes the record of a seal of `branch` on `base` whose tree is
+/// Writes the record of a snapshot of `branch` on `base` whose tree is
 /// `tree`: trees `seen` and `made` (see `Record`). Returns the commit to
-/// make the seal's second parent.
+/// make the snapshot's second parent.
 pub fn write_record(
     repo: &gix::Repository,
     branch: &str,
@@ -786,7 +786,7 @@ pub fn write_record(
     let me = gix::actor::Signature {
         name: "gitfold".into(),
         email: "gitfold@localhost".into(),
-        // 2020-01-01T00:00:00Z, as seals (`state::snapshot::IDENTITY`).
+        // 2020-01-01T00:00:00Z, as snapshots (`state::snapshot::IDENTITY`).
         time: gix::date::Time {
             seconds: 1_577_836_800,
             offset: 0,
@@ -821,10 +821,10 @@ pub fn write_record(
     Ok(repo.write_object(&made)?.detach())
 }
 
-/// The record of seal `seal` (see `Record`), if it has one: older seals,
+/// The record of snapshot `snapshot` (see `Record`), if it has one: older snapshots,
 /// branches' commits and revisions have none.
-pub fn record_of(repo: &gix::Repository, seal: ObjectId) -> Result<Option<Record>> {
-    let commit = repo.find_commit(seal)?;
+pub fn record_of(repo: &gix::Repository, snapshot: ObjectId) -> Result<Option<Record>> {
+    let commit = repo.find_commit(snapshot)?;
     let parents: Vec<ObjectId> = commit.parent_ids().map(|p| p.detach()).collect();
     let [_, made] = parents[..] else {
         return Ok(None);
@@ -944,7 +944,7 @@ fn whose_lines(
         if j == ix {
             continue;
         }
-        let theirs = lookup(repo, commit_tree(repo, layer.seal)?, path)?;
+        let theirs = lookup(repo, commit_tree(repo, layer.snapshot)?, path)?;
         let ancestor = lookup(repo, bases[j], path)?;
         if theirs == ancestor {
             continue;
@@ -1026,7 +1026,7 @@ fn merge3(base: &[u8], ours: &[u8], theirs: &[u8], conflict: text::Conflict) -> 
 }
 
 // The line-set rule's helpers, shared by blending, extraction, carrying own
-// lines over a switch (`fs::workspace::layers`) and sealing them
+// lines over a switch (`fs::workspace::layers`) and snapshotting them
 // (`state::snapshot`). Lines are compared whole but for the `\n`: two registry
 // lines differing in a `\r` are two lines.
 
@@ -1114,29 +1114,29 @@ fn push_line(out: &mut Vec<u8>, line: &[u8]) {
     out.extend_from_slice(line);
 }
 
-/// Writes layers commit L: tree `hunk_tree`, parents `base` then `seals`, the
+/// Writes layers commit L: tree `hunk_tree`, parents `base` then `snapshots`, the
 /// `gitfold-layers` header and `subject` (see `layers_subject`).
 pub fn layers_commit(
     repo: &gix::Repository,
     hunk_tree: ObjectId,
     base: ObjectId,
-    seals: &[ObjectId],
+    snapshots: &[ObjectId],
     subject: &str,
 ) -> Result<ObjectId> {
     let header = (LAYERS_HEADER.into(), LAYERS_HEADER_VALUE.into());
-    write_commit(repo, hunk_tree, base, seals, subject, vec![header])
+    write_commit(repo, hunk_tree, base, snapshots, subject, vec![header])
 }
 
 /// Writes view commit V: tree `view_tree`, parents `first` (L, or B when no
-/// hunk path is blended) then `seals`.
+/// hunk path is blended) then `snapshots`.
 pub fn view_commit(
     repo: &gix::Repository,
     view_tree: ObjectId,
     first: ObjectId,
-    seals: &[ObjectId],
+    snapshots: &[ObjectId],
     subject: &str,
 ) -> Result<ObjectId> {
-    write_commit(repo, view_tree, first, seals, subject, Vec::new())
+    write_commit(repo, view_tree, first, snapshots, subject, Vec::new())
 }
 
 /// L's subject, as `git log -1` shows it in the workspace.
@@ -1214,7 +1214,7 @@ pub struct Extraction {
     /// The agent's commits extracted, each with its copy on the branch.
     pub extracted: Vec<(ObjectId, ObjectId)>,
     /// L': the tree of the agent's last commit, parents the new tip and the
-    /// seals. Only when every commit was extracted.
+    /// snapshots. Only when every commit was extracted.
     pub layers: Option<ObjectId>,
     /// The first commit that couldn't be: it and the later ones stay where
     /// they are, to retry from the last extracted one.
@@ -1242,7 +1242,7 @@ pub struct Conflict {
 /// What extraction needs to know about the layers it extracts from.
 pub struct Extractor<'a> {
     /// L's parents after the base, for L'.
-    pub seals: &'a [ObjectId],
+    pub snapshots: &'a [ObjectId],
     /// The subject of L' (see `layers_subject`).
     pub subject: &'a str,
     pub is_hunk: &'a dyn Fn(&BStr) -> bool,
@@ -1287,7 +1287,7 @@ pub fn extract(
             repo,
             tree,
             done.tip,
-            layers.seals,
+            layers.snapshots,
             layers.subject,
         )?);
     }
@@ -1509,7 +1509,7 @@ mod tests {
     }
 
     /// The scenario of 03-experiments §1: a base, and branches `contracts`,
-    /// `a` and `b` with one commit each on it (the seals). Returns the base.
+    /// `a` and `b` with one commit each on it (the snapshots). Returns the base.
     fn scenario(r: &Repo) -> ObjectId {
         r.write("README.md", "readme\n");
         r.write("src/core.c", &lines(5, "core"));
@@ -1563,7 +1563,7 @@ mod tests {
     fn stack(r: &Repo, base: ObjectId, names: &[&str]) -> Vec<Pin> {
         let layer = |name: &&str| Pin {
             name: name.to_string(),
-            seal: r.id(name),
+            snapshot: r.id(name),
             merge_base: base,
         };
         names.iter().map(layer).collect()
@@ -1686,17 +1686,17 @@ mod tests {
         assert!(ls.contains("100755 blob"), "{ls}");
 
         // L and V, as git sees them.
-        let seals: Vec<_> = names.iter().map(|n| r.id(n)).collect();
+        let snapshots: Vec<_> = names.iter().map(|n| r.id(n)).collect();
         let subject = layers_subject("main", &names);
-        let l = layers_commit(&repo, view.hunk_tree, base, &seals[1..2], &subject).unwrap();
-        let v = view_commit(&repo, view.view_tree, l, &seals, "gitfold view").unwrap();
+        let l = layers_commit(&repo, view.hunk_tree, base, &snapshots[1..2], &subject).unwrap();
+        let v = view_commit(&repo, view.view_tree, l, &snapshots, "gitfold view").unwrap();
         assert!(is_layers_commit(&repo, l).unwrap());
         assert!(!is_layers_commit(&repo, v).unwrap());
         assert!(!is_layers_commit(&repo, base).unwrap());
         let l_hex = l.to_string();
         assert_eq!(
             r.git(&["log", "-1", "--format=%P%n%s", &l_hex]),
-            format!("{base} {}\n{subject}", seals[1])
+            format!("{base} {}\n{subject}", snapshots[1])
         );
         assert!(
             r.git(&["cat-file", "-p", &l_hex])
@@ -2002,9 +2002,9 @@ mod tests {
         );
     }
 
-    /// A seal of `b` whose author saw `a`'s registry lines and put its own
+    /// A snapshot of `b` whose author saw `a`'s registry lines and put its own
     /// among them: its tree holds only its own line, its record what it saw
-    /// and made. Returns (base, a, b's seal).
+    /// and made. Returns (base, a, b's snapshot).
     fn recorded_scenario(r: &Repo, made: &str) -> (ObjectId, ObjectId, ObjectId) {
         r.write("registry.txt", "alpha\nzulu\n");
         let base = r.commit("base");
@@ -2036,7 +2036,7 @@ mod tests {
         );
         let record = write_record(&repo, "b", base, tree, seen, made_tree).unwrap();
         let (tree, base_hex, record_hex) = (tree.to_string(), base.to_string(), record.to_string());
-        let seal = r.git(&[
+        let snapshot = r.git(&[
             "commit-tree",
             &tree,
             "-p",
@@ -2044,23 +2044,23 @@ mod tests {
             "-p",
             &record_hex,
             "-m",
-            "seal",
+            "snapshot",
         ]);
         r.git(&["checkout", "-q", "main"]);
-        (base, a, ObjectId::from_hex(seal.as_bytes()).unwrap())
+        (base, a, ObjectId::from_hex(snapshot.as_bytes()).unwrap())
     }
 
     fn pins(base: ObjectId, layers: &[(&str, ObjectId)]) -> Vec<Pin> {
         (layers.iter())
-            .map(|(name, seal)| Pin {
+            .map(|(name, snapshot)| Pin {
                 name: name.to_string(),
-                seal: *seal,
+                snapshot: *snapshot,
                 merge_base: base,
             })
             .collect()
     }
 
-    /// A layer whose seal records what its author saw keeps its lines'
+    /// A layer whose snapshot records what its author saw keeps its lines'
     /// place among another layer's, in either order; without that layer
     /// they are placed by the base's lines, noted. Lines added between two
     /// of another branch's are warned about.
@@ -2276,9 +2276,9 @@ mod tests {
         let repo = r.open();
         let names = ["contracts", "a", "b"];
         let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
-        let seals: Vec<_> = names.iter().map(|n| r.id(n)).collect();
+        let snapshots: Vec<_> = names.iter().map(|n| r.id(n)).collect();
         let subject = layers_subject("mine", &names);
-        let l = layers_commit(&repo, view.hunk_tree, base, &seals, &subject).unwrap();
+        let l = layers_commit(&repo, view.hunk_tree, base, &snapshots, &subject).unwrap();
         let wt = worktree_showing_layers(&r, l, &view);
         assert_eq!(
             r.git_in(&wt, &["status", "--porcelain"]),
@@ -2303,10 +2303,10 @@ mod tests {
         let commits = chain(&repo, l, head, 10).unwrap().unwrap();
         assert_eq!(commits.len(), 2);
         assert_eq!(chain(&repo, base, l, 10).unwrap(), Some(vec![l]));
-        assert_eq!(chain(&repo, seals[0], head, 10).unwrap(), None);
+        assert_eq!(chain(&repo, snapshots[0], head, 10).unwrap(), None);
         let owners = |p: &BStr| owners_of(&view, p);
         let layers = Extractor {
-            seals: &seals,
+            snapshots: &snapshots,
             subject: &subject,
             is_hunk: &registry,
             owners: &owners,
@@ -2339,10 +2339,12 @@ mod tests {
         // The second commit, which touches no hunk path, as git merges it.
         assert_eq!(Some(tree_of(&r, c2x)), r.merge_tree(c1, c1x, c2));
 
-        // L': the agent's tree, on the new tip and the seals.
+        // L': the agent's tree, on the new tip and the snapshots.
         let l2 = out.layers.unwrap();
         assert_eq!(tree_of(&r, l2), tree_of(&r, head));
-        let parents: Vec<_> = std::iter::once(c2x).chain(seals.iter().copied()).collect();
+        let parents: Vec<_> = std::iter::once(c2x)
+            .chain(snapshots.iter().copied())
+            .collect();
         let parents: Vec<_> = parents.iter().map(ObjectId::to_string).collect();
         assert_eq!(
             r.git(&["log", "-1", "--format=%P", &l2.to_string()]),
@@ -2377,15 +2379,15 @@ mod tests {
         let repo = r.open();
         let names = ["contracts", "a"];
         let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
-        let seals: Vec<_> = names.iter().map(|n| r.id(n)).collect();
+        let snapshots: Vec<_> = names.iter().map(|n| r.id(n)).collect();
         // L with A's util.c promoted into it.
-        let util = lookup(&repo, tree_of(&r, seals[1]), "src/util.c".into());
+        let util = lookup(&repo, tree_of(&r, snapshots[1]), "src/util.c".into());
         let promoted = [(BStr::new("src/util.c"), Change::Set(util.unwrap().unwrap()))];
         let hunk_tree = edit_tree(&repo, view.hunk_tree, promoted).unwrap();
-        let l = layers_commit(&repo, hunk_tree, base, &seals, "layers").unwrap();
+        let l = layers_commit(&repo, hunk_tree, base, &snapshots, "layers").unwrap();
         let owners = |p: &BStr| owners_of(&view, p);
         let layers = Extractor {
-            seals: &seals,
+            snapshots: &snapshots,
             subject: "layers",
             is_hunk: &registry,
             owners: &owners,

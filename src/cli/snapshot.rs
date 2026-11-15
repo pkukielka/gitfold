@@ -39,7 +39,7 @@ pub struct SnapshotArgs {
     pub claude_hook: Option<String>,
 }
 
-/// `gitfold snapshot --claude-hook stop`: when a session stops, seals its
+/// `gitfold snapshot --claude-hook stop`: when a session stops, snapshots its
 /// workspace if another workspace shows it as a layer, so layers move to the
 /// end of a turn, not into the middle of one (`gitfold layer --claude-hook`);
 /// either way records that the workspace has an agent (`snapshot::Driven`).
@@ -56,7 +56,7 @@ pub fn snapshot_hook() -> Result<()> {
         if !crate::state::layers::shown_anywhere(&common_dir, &name) {
             return snapshot::stopped(&state);
         }
-        snapshot::seal(&Store::default(), &state, By::StopHook)?;
+        snapshot::snapshot(&Store::default(), &state, By::StopHook)?;
         Ok(())
     })() {
         log::debug!("gitfold snapshot --claude-hook: {e:#}");
@@ -64,7 +64,7 @@ pub fn snapshot_hook() -> Result<()> {
     Ok(())
 }
 
-/// `gitfold snapshot`: merges the work of each named workspace (sealed), or
+/// `gitfold snapshot`: merges the work of each named workspace (snapshotted), or
 /// each branch's or revision's commit, in order, onto the first (or
 /// `--onto`), with `git merge-tree`; prints the merge as a snapshot path
 /// (`<mountpoint>/@<sha>`; unmounted, the commit). One named is its work
@@ -111,9 +111,9 @@ pub fn snapshot(repo: &Path, args: SnapshotArgs) -> Result<()> {
     Ok(())
 }
 
-/// What `what` contributes to a snapshot: its workspace's seal if it is a
+/// What `what` contributes to a snapshot: its workspace's snapshot if it is a
 /// branch with one (and not `commits` only), else the revision; and whether
-/// that seal is unchanged since the last.
+/// that snapshot is unchanged since the last.
 fn work_of(
     store: &Store,
     common_dir: &Path,
@@ -123,7 +123,7 @@ fn work_of(
     if !commits && check_name(what).is_ok() && !what.starts_with('@') {
         let state = StateDir::of(common_dir, what);
         if state.opened() {
-            let s = snapshot::seal(store, &state, By::Other)?;
+            let s = snapshot::snapshot(store, &state, By::Other)?;
             return Ok((what.to_string(), s.commit, s.same));
         }
     }

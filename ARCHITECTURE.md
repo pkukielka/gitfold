@@ -62,7 +62,7 @@ Non-goals for now: macOS and Windows; applying checkout filters
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
            refs/gitfold/<id>                 keeps the workspace base from git gc
-           refs/gitfold-seal/<id>/<n>        keeps a workspace's seals (the newest 16)
+           refs/gitfold-snapshot/<id>/<n>        keeps a workspace's snapshots (the newest 16)
            refs/gitfold-layers/<id>            keeps the view commit of a workspace showing layers (and its layers commit)
            refs/gitfold-stack/<branch>       a stacked branch's parent base
 ```
@@ -144,9 +144,9 @@ Then, per request (`fs/workspace/`):
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/state/restack.rs` | a restack under way in a workspace: the `restack` intent file (locked while it runs), and finishing or undoing one a crash interrupted |
-| `src/state/seal.rs` | seals (snapshots, to users): a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`sealed`): whether an agent drives it; its `UserPromptSubmit` hook's run recorded too (`turns`): whether it has an agent of its own; a blended file sealed with its own lines only, and what it saw and made there recorded as the seal's second parent |
-| `src/state/follow.rs` | moving a workspace's live layers to their latest work (what each follows, a fresh seal of a person's workspace, storing and showing them), shared by the `UserPromptSubmit` hook and the daemon |
-| `src/state/layers.rs` | a workspace's layers: the `layers` file (each layer's seal, what it shows and how it updates, the layer a proposal stands in for; version 1 files read too), its lock (`layers.lock`), the view (view and hunk trees, mixed and blended paths, conflicts, notes, the listing's notes and warnings on blended files) and which files are blended (`merge=union`) |
+| `src/state/snapshot.rs` | snapshots of work: a workspace's uncommitted work as a commit, kept by `refs/gitfold-snapshot/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`snapshotted`): whether an agent drives it; its `UserPromptSubmit` hook's run recorded too (`turns`): whether it has an agent of its own; a blended file snapshotted with its own lines only, and what it saw and made there recorded as the snapshot's second parent |
+| `src/state/follow.rs` | moving a workspace's live layers to their latest work (what each follows, a fresh snapshot of a person's workspace, storing and showing them), shared by the `UserPromptSubmit` hook and the daemon |
+| `src/state/layers.rs` | a workspace's layers: the `layers` file (each layer's snapshot, what it shows and how it updates, the layer a proposal stands in for; version 1 files read too), its lock (`layers.lock`), the view (view and hunk trees, mixed and blended paths, conflicts, notes, the listing's notes and warnings on blended files) and which files are blended (`merge=union`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
@@ -163,7 +163,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/hooks/` | the push guard's `pre-push` and the shell library the worktree's hooks share (embedded) |
 | `src/git/stack.rs` | stacked branches' git side: the parent base (`refs/gitfold-stack/<branch>`, guessed by the fork point without it), restacking by plumbing, moving a branch and its stack ref in one transaction, whether a parent base landed on a target (merged, squashed, rebased) |
 | `src/git/test_repo.rs` | unit tests' scratch repository |
-| `src/git/layers.rs` | layers' git side: the view and hunk trees (blending, from a seal's record of what its author saw where it has one; each layer's changes merged in per path; lines added among another branch's noted), the layers and view commits, seals' records, extracting commits made on the layers commit and moving the branch and HEAD in one transaction |
+| `src/git/layers.rs` | layers' git side: the view and hunk trees (blending, from a snapshot's record of what its author saw where it has one; each layer's changes merged in per path; lines added among another branch's noted), the layers and view commits, snapshots' records, extracting commits made on the layers commit and moving the branch and HEAD in one transaction |
 | `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, fusermount |
@@ -176,7 +176,7 @@ Then, per request (`fs/workspace/`):
 | `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
 | `src/cli/list.rs` | `list` (the stacks as a tree) and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
-| `src/cli/snapshot.rs` | `snapshot`: workspaces' work (seals, in the code) merged into one snapshot (and the `Stop` hook that takes one) |
+| `src/cli/snapshot.rs` | `snapshot`: workspaces' work merged into one snapshot (and the `Stop` hook that takes one) |
 | `src/cli/layer.rs` | `layer`: `add`, `remove`, the listing (the base line, the layers, their conflicts), `base` (handed to `stack`); the hooks that move live layers, moving a branch onto its base first, and deny edits of their files, offering to build on the layer's branch, a proposal, asking, removing the layer (and, for an edit that only adds lines, `merge=union`) |
 | `src/cli/proposal.rs` | `propose`, `proposals`, `consent`, `accept` and `reject`: changes to a layer's files made in a fork of its workspace, checked against the workspaces that read them, written into the layer's workspace |
 | `src/cli/stack/mod.rs` | `layer base` and `branch --base`: building a branch on another (its base), moving it onto its base's new commits or, its base taken away, onto the trunk, refusing to move pushed commits without `--yes`; the move the `UserPromptSubmit` hook does, re-parenting the children of a base that landed, `list`'s notes |
@@ -215,7 +215,7 @@ Then, per request (`fs/workspace/`):
 ## Glossary
 
 User-facing text uses three concepts only: **layer**, **base** and
-**snapshot**. The code keeps some internal names (seal,
+**snapshot**. The code keeps some internal names (snapshot,
 restack, stack, surrender), marked *internal* below with the user-facing
 term; they never appear in messages, help or the README.
 
@@ -240,24 +240,24 @@ term; they never appear in messages, help or the README.
   view tree).
 - **Upper**: every file that differs from the base, as real files in
   `.git/gitfold/<id>/upper`.
-- **Seal** (*internal*; user-facing: a snapshot of a workspace's work): a
+- **Snapshot of work** (of a workspace): a
   commit of a workspace's uncommitted work: the tree it shows, ignored
   files left out, on its base (or its branch tip, when it committed and
   its base hasn't caught up, if it has the tip's changes), made with a
   fixed identity and date.
   `gitfold snapshot` and the `Stop` hook make one. Its refs outlive the
   workspace; the one the workspace's own `Stop` hook made last is recorded
-  in its state (`sealed`), so a live layer never follows an earlier
+  in its state (`snapshotted`), so a live layer never follows an earlier
   workspace's. A blended file in it holds only the workspace's own lines;
   where they sit among other layers' lines, its **record** (*internal*:
-  `git::layers::Record`, the seal's second parent) keeps what the workspace
+  `git::layers::Record`, the snapshot's second parent) keeps what the workspace
   saw there and made of it.
 - **Layer**: another branch's work shown in a workspace, read-only: one of
-  its workspace's seals, or a branch's or a revision's commit, as the
+  its workspace's snapshots, or a branch's or a revision's commit, as the
   changes since it and the commit the view is built on diverged (their
   merge base, worked out per view). **Live** layers follow their branch
-  (an agent's workspace: the seal its `Stop` hook made at the end of its
-  last turn; a workspace without an agent: a seal taken whenever the layer
+  (an agent's workspace: the snapshot its `Stop` hook made at the end of its
+  last turn; a workspace without an agent: a snapshot taken whenever the layer
   moves; or the tip), at the reader's turn starts if it has an agent, else
   by the daemon once the reader is idle, **frozen** ones stay as taken,
   revisions are **fixed**.
@@ -279,7 +279,7 @@ term; they never appear in messages, help or the README.
   upper has it. It belongs to every layer that changed it.
 - **Layers commit** (L): HEAD, detached,
   while files are blended: tree H over the branch tip, parents the tip
-  and the blended layers' seals, a `gitfold-layers` header. The **view commit** (V, tree M, first parent L)
+  and the blended layers' snapshots, a `gitfold-layers` header. The **view commit** (V, tree M, first parent L)
   is what `refs/gitfold-layers/<id>` points at, keeping both.
 - **Extraction**: copying the commits made on L onto the branch with only
   the workspace's changes (the line-set rule on blended paths), then
@@ -291,7 +291,7 @@ term; they never appear in messages, help or the README.
   workspace showing the layer edits the layer's files, shown in its place
   (the layer it stands in for kept with it, `instead` in the layers file,
   so the layer comes back as it was shown: live or frozen, all work or
-  commits only); its changes are its seal against what it started from.
+  commits only); its changes are its snapshot against what it started from.
   **Consent**: the
   layer's work as now with those changes, checked in the view of each
   workspace showing the layer (merged with its own work, and tested).
@@ -419,8 +419,8 @@ decision that creates them.
   `reads`, `layers` and `layers-shown` record formats, `layers-git-off`,
   the `restack` intent, `restack-told`, `upper/`), task folders
   in `.git/gitfold/.tasks/<id>/` and the message format of their inboxes
-  (README, "Messages"), the base-pinning ref `refs/gitfold/<id>`, the seal
-  refs `refs/gitfold-seal/<id>/<n>`, the layers ref `refs/gitfold-layers/<id>`
+  (README, "Messages"), the base-pinning ref `refs/gitfold/<id>`, the snapshot
+  refs `refs/gitfold-snapshot/<id>/<n>`, the layers ref `refs/gitfold-layers/<id>`
   and the layers commit's `gitfold-layers 1` header (the push guard and a
   remount look for it), the stack refs `refs/gitfold-stack/<branch>` and
   the `branch.<b>.gitfoldParent`, `gitfoldRestack`,
@@ -1330,16 +1330,16 @@ nudge` drives tmux): tied to tmux and to how each harness reads input;
 
 **What:** a workspace can show other branches' work, uncommitted
 included, read-only, over its base and under its own changes. Each layer is
-one **seal** of the other workspace (`state::seal`: a commit of the tree it
+one **snapshot** of the other workspace (`state::snapshot`: a commit of the tree it
 shows, ignored files left out, on its base, kept by
-`refs/gitfold-seal/<id>/<n>`), or with `--commits` or without a workspace
+`refs/gitfold-snapshot/<id>/<n>`), or with `--commits` or without a workspace
 the branch's tip, or a tag's or a commit's commit. A **live** layer moves
 when added again, and at the reader's agent's turn boundaries, or in a
 workspace without an agent, by the daemon once the workspace is idle; a
 **frozen** one
 (`--frozen`) and a revision (**fixed**) don't. The layers' changes
-(`diff-tree <merge base> <seal>`, in the order added, the merge base of
-the seal and the commit the view is built on, worked out for each view)
+(`diff-tree <merge base> <snapshot>`, in the order added, the merge base of
+the snapshot and the commit the view is built on, worked out for each view)
 applied to the base's tree make the **view tree** (`state::layers::view`,
 `git::layers::build_view`), loaded into the shared store and used as the
 workspace's lower layer: at each path a layer changed, its change merged
@@ -1353,7 +1353,7 @@ holding the blends, and commits made on it are **extracted** onto the
 branch with only the workspace's changes. The layers are stored in `layers`
 in the state directory; `gitfold layer add`/`remove` write it and ask the
 daemon to switch (a `layers` control request). `gitfold snapshot` is the
-read-only form: seals merged with `git merge-tree` into a commit opened as
+read-only form: snapshots merged with `git merge-tree` into a commit opened as
 a snapshot, with no change to any workspace.
 
 **Why:**
@@ -1373,14 +1373,14 @@ a snapshot, with no change to any workspace.
   stored tree, so lookups, listings, `getattr` and reads needed no new code
   (only `mixed` on lower files, for their write bits). Upper still wins over
   it, so the workspace's own files are never touched by a layer.
-- **Seals, not live files:** a seal is immutable, so the other agent's
+- **Snapshots, not live files:** a snapshot is immutable, so the other agent's
   writes change nothing a reader has cached, and need no invalidation. Made
   with a fixed identity and date, the same work gives the same commit, so
-  sealing an unchanged workspace makes nothing new and moves no layer.
+  snapshotting an unchanged workspace makes nothing new and moves no layer.
 - **The merge base of the view's own base:** a layer is what its
   workspace has that this one doesn't (its commits since they diverged,
   plus its uncommitted work), so its changes are taken against
-  `merge-base(B, seal)`, B the commit that very view is built on: the
+  `merge-base(B, snapshot)`, B the commit that very view is built on: the
   workspace's base for the view tree, the branch tip for the layers
   commit's blends and for extraction, the base for a proposal's check.
   It is worked out per view (remembered per process: commits don't
@@ -1397,7 +1397,7 @@ a snapshot, with no change to any workspace.
   per view, they can't. What a layer shows still changes only at a
   switch: views are built only then.
 - **A snapshot's parent: what its tree is that commit plus the
-  workspace's own work** (`seal::parent`). Its base, or, when the
+  workspace's own work** (`snapshot::parent`). Its base, or, when the
   workspace committed and its base hasn't caught up (it waits while
   layers show), its branch tip, so a layer of it brings only what came
   after the commit. The tip only if the workspace has the tip's changes:
@@ -1489,7 +1489,7 @@ a snapshot, with no change to any workspace.
   blended if `git check-attr --source=<base> merge` says `union`
   (the base's `.gitattributes`, or `info/attributes`), the base has it and
   no layer deletes it. Each layer's change is folded in as
-  `merge3(base = merge base, ours = the blend so far, theirs = seal)`; two
+  `merge3(base = merge base, ours = the blend so far, theirs = snapshot)`; two
   appends at one place conflict in every 3-way merge, so where both sides
   only add lines both are kept, ours first (what `union` does, but only there).
   Any other conflict leaves that layer's change out, as a note on the
@@ -1499,19 +1499,19 @@ a snapshot, with no change to any workspace.
   the **hunk tree** H; the view tree M is H with the whole files on top.
   Blended files have no `mixed` entry, so they are writable: a copy-up
   takes the blend, and the workspace's own lines go on top.
-- **A seal records what its author saw in a blended file**
-  (`git::layers::Record`, written by `state::seal`). A seal holds only the
+- **A snapshot records what its author saw in a blended file**
+  (`git::layers::Record`, written by `state::snapshot`). A snapshot holds only the
   workspace's own lines of a blended file, against its base (`own_lines`),
   so a layer of it never brings another layer's lines through it. But
   that loses where those lines sat among the others': a line added inside
   another layer's block was then placed by the base's lines alone (after
   the block, by `union`'s ours-first rule). So where the workspace added
-  lines among other layers' lines, the seal gets a second parent R: a
+  lines among other layers' lines, the snapshot gets a second parent R: a
   commit whose tree has those files as the workspace left them (its
   upper copies), with a `gitfold-seen <base>` header naming the commit
   its view was built on, and whose only parent is a root commit S0 whose
   tree has the same files as it saw them (the hunk tree's blends). `git
-  diff <seal>^2^ <seal>^2` is then the author's change in context. A view
+  diff <snapshot>^2^ <snapshot>^2` is then the author's change in context. A view
   folds the layer's change to such a path in two steps: its commits up to
   the author's base (`merge3(MB[p], the blend so far, base[p])`), then
   the author's change from what it saw (`merge3(S0[p], that, R[p])`, with
@@ -1519,26 +1519,26 @@ a snapshot, with no change to any workspace.
   other layers' lines as the author put them. When that conflicts (what
   they sat among isn't there), it waits while other layers of the path
   fold in (one may bring those lines, whatever the order added), and
-  then falls back to the seal's own lines against the merge base, as
+  then falls back to the snapshot's own lines against the merge base, as
   before records, with a note (`PlacedByBase`, listed as `Note:`). The
-  merge base itself is still `merge-base(view base, seal)`, computed per
+  merge base itself is still `merge-base(view base, snapshot)`, computed per
   view: R and S0 share no history with any branch, and S0's message
-  names the branch, base and seal tree, so two seals never share it and
+  names the branch, base and snapshot tree, so two snapshots never share it and
   it never becomes a merge base. Made with the fixed identity and date,
-  an unchanged workspace makes the same R and the same seal (deduped as
-  before); a seal with no lines among others' has no R, as before, and a
-  seal of an earlier build (no R) or a branch's commit is read as before.
+  an unchanged workspace makes the same R and the same snapshot (deduped as
+  before); a snapshot with no lines among others' has no R, as before, and a
+  snapshot of an earlier build (no R) or a branch's commit is read as before.
   The record also shows lines added between two lines of another
   branch's, next to none of the base's (a method inside its class): a
   `Note::Among`, a `Warning:` in the listing (`state::layers::own_among`
   checks the workspace's own upper copies the same way), since such a
   file may not be a list. Rejected: L as the second parent (it has the
-  view tree, but its parents are the other layers' seals, whose bases
-  would then become merge bases of this seal, and a layer's change would
+  view tree, but its parents are the other layers' snapshots, whose bases
+  would then become merge bases of this snapshot, and a layer's change would
   be taken against another branch's commit); the record's trees in a
   commit header or note (objects reachable only from a header are pruned
-  by `gc`, and notes need a ref of their own that no seal ref keeps);
-  the author's whole file in the seal's tree (layers would bring the
+  by `gc`, and notes need a ref of their own that no snapshot ref keeps);
+  the author's whole file in the snapshot's tree (layers would bring the
   other layers' lines through it, even where those aren't shown).
   Extraction is unchanged: the branch's commits hold only the
   workspace's own lines, placed by the base's lines (the layers' lines
@@ -1546,7 +1546,7 @@ a snapshot, with no change to any workspace.
 - **HEAD detached at a layers commit L** (`tell_git`): the index alone can't
   split a file into theirs and mine; only a HEAD whose tree has their lines
   can. L has tree H (over the branch tip, if commits moved it past the
-  base), parents the tip and the blended layers' seals, and a
+  base), parents the tip and the blended layers' snapshots, and a
   `gitfold-layers 1` header, so hooks and a remount recognise it without a
   list of ids; its subject says `commits go to <branch>; never push this
   commit`. The index has the blends' ids and sizes (zero times: git reads
@@ -1555,8 +1555,8 @@ a snapshot, with no change to any workspace.
   measured on git 2.49, `gc` from another worktree pruned commits held only
   by other worktrees' `refs/worktree/*` (and a HEAD symbolic to one), but
   not one held by a detached HEAD. `refs/gitfold-layers/<id>` (common) pins
-  the view commit V (tree M, parents L and every shown seal), keeping M, L
-  and the seals. Turning the last blend off writes HEAD back as a symbolic
+  the view commit V (tree M, parents L and every shown snapshot), keeping M, L
+  and the snapshots. Turning the last blend off writes HEAD back as a symbolic
   ref to the branch and drops the ref and the guard; the files keep the
   workspace's lines, now changes against the branch's version.
 - **Extraction on the sync thread** (`sync_layers`, `git::layers::extract`):
@@ -1618,7 +1618,7 @@ a snapshot, with no change to any workspace.
   refused and retried). A move onto its base (below, "Stacked branches")
   takes the layers off for the move instead of rebasing under them.
 - **Moves at turn boundaries, by hooks:** a workspace shown as a layer is
-  sealed when its Claude Code session stops (`snapshot --claude-hook stop`), and
+  snapshotted when its Claude Code session stops (`snapshot --claude-hook stop`), and
   a reader's live layers move to their latest work (below; for commits, the
   branch tips) when its next prompt is sent (`layer --claude-hook
   user-prompt-submit`), which tells the agent which changed, and records
@@ -1628,29 +1628,29 @@ a snapshot, with no change to any workspace.
   boundary it chose. Frozen layers and revisions never move: a reader
   that wants a fixed point says so, rather than turning a layer off. The
   hook records that the reader has an agent (`turns` in its state
-  directory, from its first prompt on; its `Stop` hook's `sealed` record
+  directory, from its first prompt on; its `Stop` hook's `snapshotted` record
   counts too): the daemon then leaves its layers to its turns.
 - **Without an agent, by the daemon, once idle:** a reader with neither
   record has no turns (a person works in it), so nothing would move its
   live layers. Its sync thread (`fs::workspace::follow`) checks every
   2 s (`CHECK_EVERY`) and moves them when (1) a layer has newer work (an
-  agent's newer end-of-turn seal, a tip that moved, or a person's
-  workspace written to since its last seal) and (2) nothing has written to
+  agent's newer end-of-turn snapshot, a tip that moved, or a person's
+  workspace written to since its last snapshot) and (2) nothing has written to
   the reader for `IDLE` (3 s), so files don't change under someone
   half-way through an edit, and git is idle in it as a switch wants it
   (HEAD on the branch, or detached at the layers commit while files are
-  blended). The check is cheap: a person's workspace is sealed only when
+  blended). The check is cheap: a person's workspace is snapshotted only when
   its write count (counted by every write through the mount, `Activity`),
   its base or its branch tip (`git commit` writes nothing through the
   mount, and the base of one showing layers waits) changed since its
-  layer last moved to a seal of it, and once it has been quiet for 1 s (a
+  layer last moved to a snapshot of it, and once it has been quiet for 1 s (a
   save isn't half-seen); a closed one, once per mount and then when its
   base or tip moves. A source counts as seen only once its layer moved;
   one whose layer couldn't (an error, only logged) is tried again after
   `BACK_OFF` (10 s). A move refused as a whole (the switch: git busy, a
   commit on the layers commit that can't go onto the branch, own lines
   that depend on the layers) is tried again after `BACK_OFF`, or once the
-  reader is written to: not resealed, stored and restored every round.
+  reader is written to: not snapshotted again, stored and restored every round.
   The move is
   the hook's own (`state::follow::follow_live`), so the rules can't
   drift apart; it runs under the layers' `flock`, taken without waiting
@@ -1662,39 +1662,39 @@ a snapshot, with no change to any workspace.
   daemon log line, and in the listing's `live, last HH:MM`. Rejected:
   a note in the workspace's inbox (agents read it; a person sees the files
   change, and notes would pile up unread); moving at once on every change
-  (files changing mid-edit); sealing every shown workspace every round
-  (a seal walks its changed files).
+  (files changing mid-edit); snapshotting every shown workspace every round
+  (a snapshot walks its changed files).
 - **A live layer follows an agent's turns, or a person's work as it is:**
   a live layer of an agent's workspace moves to its work as it was at the
   end of the agent's last turn; of a workspace without an agent, to its
   work as it is when the layer moves. Which one a workspace is, its
   own `Stop` hook tells: each run records itself in the workspace's state
-  directory (`sealed`: `<seal> stop`, or `- stop` when no layer showed it,
-  so no seal was made). A workspace with that record has an agent, and its
-  layers follow only the seal recorded there (none: they stay as they
+  directory (`snapshotted`: `<snapshot> stop`, or `- stop` when no layer showed it,
+  so no snapshot was made). A workspace with that record has an agent, and its
+  layers follow only the snapshot recorded there (none: they stay as they
   are), never one taken half-way through its turn; `layer add` takes that
   one too, or one now if there is none (`--frozen`: one now). Any other
-  workspace (no record, or one an earlier build wrote for any seal) has no
-  turns: a seal is taken at each reader's turn start, when the daemon
+  workspace (no record, or one an earlier build wrote for any snapshot) has no
+  turns: a snapshot is taken at each reader's turn start, when the daemon
   moves a reader's layers (above), and on `layer add`, so it follows
   every time, not once. A proposal accepted into an agent's
   workspace is recorded the same way (the owner's own boundary), so
   followers see it at their next turn. The record is in the workspace's
-  state directory, not the highest-numbered ref: seal refs outlive the
+  state directory, not the highest-numbered ref: snapshot refs outlive the
   workspace (layers name them, and the id comes from the branch name), so
   after `gitfold remove` and a new workspace of that branch the newest ref
   is an earlier workspace's work. The state directory goes with the
-  workspace, so its record can't be stale; the seal it names is kept from
-  pruning. Rejected: following the newest seal whoever made it (a reader's
-  turn start would then seal an agent's workspace half-way through its
-  turn); deleting a workspace's seal refs on `remove` (refs that layers
+  workspace, so its record can't be stale; the snapshot it names is kept from
+  pruning. Rejected: following the newest snapshot whoever made it (a reader's
+  turn start would then snapshot an agent's workspace half-way through its
+  turn); deleting a workspace's snapshot refs on `remove` (refs that layers
   name must stay, so the newest could still be old); numbering
   incarnations in the ref names (a new ref layout, for the same result).
-- **Seals of one workspace at once** (its `Stop` hook and readers' turn
+- **Snapshots of one workspace at once** (its `Stop` hook and readers' turn
   starts) are numbered, given their ref and recorded under an `flock` on
-  `sealed.lock` in its state directory, so none takes another's number
+  `snapshot.lock` in its state directory, so none takes another's number
   (`update-ref` creating the ref would fail). In a reader's turn start, a
-  layer that can't move (its workspace's seal failing) is left as it is,
+  layer that can't move (its workspace's snapshot failing) is left as it is,
   and the others still move.
 - **Read-modify-write of the layers under a lock:** `layer add`/`remove`,
   the hook moving live layers, `propose`, and `accept`/`reject` putting a
@@ -1751,16 +1751,16 @@ agent wrote, shown read-only in each child) proposes the change with
 `gitfold propose <path>`: the layer's workspace is forked (`branch
 --with-changes`, through the daemon when mounted) into `<layer>-prop/<ws>`,
 recorded in config (`gitfoldProposal`, `gitfoldProposedBy`) with what it
-started from (its first seal) kept by `refs/gitfold-proposal/<id>`, and put
+started from (its first snapshot) kept by `refs/gitfold-proposal/<id>`, and put
 in the layer's place in the proposer's stack. The proposer edits the files
 in the proposal's workspace, where they are its own. Its changes are its
-seal against that start. `gitfold consent` builds what accepting gives (the
+snapshot against that start. `gitfold consent` builds what accepting gives (the
 layer's work as now with those changes) and, for each workspace showing the
 layer or a proposal to change it, checks that its own work merges with it
 and runs a test in its view with it; `gitfold accept`, given a current
 passed consent, writes the changed files into the layer's workspace, puts
 the layer back in place of the proposal, tells the followers, and removes
-the proposal (workspace, branch, start ref, seals no stack names).
+the proposal (workspace, branch, start ref, snapshots no stack names).
 
 **Why:**
 
@@ -1781,14 +1781,14 @@ the proposal (workspace, branch, start ref, seals no stack names).
   version would undo that silently. Then `reject`, and propose again.
 - **Consent checks what accept writes:** the proposal forked the layer's
   work as it was; accept writes its changes onto the layer's work as it
-  is. So the checked commit is the latter (the layer's seal now, its tree
+  is. So the checked commit is the latter (the layer's snapshot now, its tree
   edited with the proposal's changes), and the record holds both the
-  proposal's and the layer's seal: a later edit to either makes it stale,
+  proposal's and the layer's snapshot: a later edit to either makes it stale,
   and accept refuses a stale or failed one (`--force` overrides). Accept
-  also writes exactly the consented seal: a proposal edited since (or
+  also writes exactly the consented snapshot: a proposal edited since (or
   half-way through an edit) differs from it and is refused, and one
   edited while it is being accepted is kept with only those later edits.
-- **Each follower's view, not its seal alone:** the test runs in a
+- **Each follower's view, not its snapshot alone:** the test runs in a
   snapshot of what the workspace would show: its view tree rebuilt with
   the accepted commit in place of the layer (and of any proposal to change
   it), its other layers as they are, its own work on top (blended files
@@ -1809,19 +1809,19 @@ the proposal (workspace, branch, start ref, seals no stack names).
   its own workspace can't accept for another by mistake.
 - **Retiring:** removal is forced (the proposal's changes are taken); a
   workspace still in use stays as a plain branch (no longer a proposal).
-  Seals a pending switch still names stay until a later retire sweeps the
+  Snapshots a pending switch still names stay until a later retire sweeps the
   refs of proposals that are gone.
 - **Accepting is writing, not merging:** the layer's workspace gets the
   files as uncommitted changes through the mount (as its agent would write
   them, so the kernel and git are told as for any write), or offline into
   upper and the markers under the repository lock; the root commits as
   usual. Workspaces showing the layer move at their next turn by the
-  existing hook (the layer is sealed at once, recorded as its agent's
+  existing hook (the layer is snapshotted at once, recorded as its agent's
   boundary if it has one); the proposer is switched back at once, its
   stack stored first, so a switch refused now happens when it can. The
   proposer's own proposal has no agent of its own (its edits are made
   from the proposer's session, whose `Stop` records only its own
-  workspace), so the proposer's `UserPromptSubmit` hook seals it each turn.
+  workspace), so the proposer's `UserPromptSubmit` hook snapshots it each turn.
 
 **Rejected:**
 
@@ -1830,7 +1830,7 @@ the proposal (workspace, branch, start ref, seals no stack names).
 - Checking only the workspaces whose read records hold a changed file:
   those records miss what builds read, so a proposal could pass having
   checked nobody (kept as `--only-readers`).
-- Mixing the follower's seal with the proposal's work: that tests the
+- Mixing the follower's snapshot with the proposal's work: that tests the
   layer as it was when proposed, not what accept writes, and leaves out
   the follower's other layers.
 - Merging the proposal into the layer's workspace on accept: the start
@@ -2009,7 +2009,7 @@ p2's old tip, so its next restack replays exactly its own commits.
   work (adding and removing entries), and the unsafe order: ref moved,
   read-tree refused, the workspace left `MM` (e7c).
 - The layers file for the edge: per workspace and only for open ones; an edge
-  has no seal or view and must work for closed branches.
+  has no snapshot or view and must work for closed branches.
 - Replaying `merge-base(a, b)..b` and dropping commits that become empty
   (jj-style): conflicts after a squash merge (e4d).
 
@@ -2291,7 +2291,7 @@ checkout" and "Running it"); this is the why and what it would take.
   only remove the layer, or ask its agent to update).
   Blending and extraction assume a blended file's lines are unique and
   their order doesn't matter where both sides append.
-  A seal's record places its lines among the lines of the layers a view
+  A snapshot's record places its lines among the lines of the layers a view
   shows, not among the reader's own: in A's workspace, B's lines added
   inside A's block are placed by the base's lines (A's lines are in its
   upper copy, not in the hunk tree), noted, and A's copy gets them where
@@ -2301,9 +2301,9 @@ checkout" and "Running it"); this is the why and what it would take.
   (`--amend`, if it is the last: a later commit can't undo it, and a
   rebase takes HEAD off L's line, turning git off); only the daemon log
   and the next switch (exit 4) say so, and nothing retries it against a
-  newer seal of the layer. The push guard is a client hook: `--no-verify`
-  skips it. A layer pins a seal that only the newest 16 seal refs keep: one
-  not moved while its workspace sealed 16 times more can be pruned by `git
+  newer snapshot of the layer. The push guard is a client hook: `--no-verify`
+  skips it. A layer pins a snapshot that only the newest 16 snapshot refs keep: one
+  not moved while its workspace snapshotted 16 times more can be pruned by `git
   gc`. Lost skip-worktree bits (`update-index --no-skip-worktree`, an index
   rebuilt by hand) aren't re-derived until the next switch, nor is the
   excludes file regenerated when the user's global ignore file changes
@@ -2348,7 +2348,7 @@ compact node table and write measurements. Next:
   the layer changed the files since (only safe once the proposal is
   rebased onto the layer's work); several proposals to one layer checked
   together (`consent` checks each alone); the `deps` log of reads of
-  layers' files (design §4.3), so `consent` knows reads per seal rather
+  layers' files (design §4.3), so `consent` knows reads per snapshot rather
   than per path.
 - **Stacks, next phases** (see
   [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout)).

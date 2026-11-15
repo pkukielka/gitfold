@@ -12,7 +12,7 @@
 //! A proposal is a branch with `branch.<name>.gitfoldProposal` (the layer)
 //! and `gitfoldProposedBy` (see `settings`); what it starts from (the
 //! layer's work when it was made) is kept by `refs/gitfold-proposal/<id>`.
-//! Its changes are its work (a seal) against that. What accepting it gives
+//! Its changes are its work (a snapshot) against that. What accepting it gives
 //! is the layer's work as now with those changes: what consent checks, and
 //! what accept writes.
 
@@ -232,11 +232,11 @@ fn commit(
     )?)
 }
 
-/// The work of `branch`: its workspace's seal, or its tip if it has none.
+/// The work of `branch`: its workspace's snapshot, or its tip if it has none.
 fn work(store: &Store, common_dir: &Path, branch: &str) -> Result<ObjectId> {
     let state = StateDir::of(common_dir, branch);
     Ok(match state.opened() {
-        true => snapshot::seal(store, &state, snapshot::By::Other)?.commit,
+        true => snapshot::snapshot(store, &state, snapshot::By::Other)?.commit,
         false => git::branch_tip(branch)?.id,
     })
 }
@@ -826,7 +826,7 @@ fn view_with(
             replaced = true;
             kept.push(Layer {
                 branch: p.layer.clone(),
-                seal: accepted,
+                snapshot: accepted,
                 ..l
             });
         }
@@ -836,7 +836,7 @@ fn view_with(
         Some(view) => view.tree,
         None => base.tree,
     };
-    let own = snapshot::seal(store, state, snapshot::By::Other)?.commit;
+    let own = snapshot::snapshot(store, state, snapshot::By::Other)?.commit;
     let own = git::resolve(&own.to_string())?;
     let tree = git::with_repo(|repo| {
         let changes = git::layers::delta(repo, base.tree, own.tree)?;
@@ -883,7 +883,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
             continue;
         }
         checked += 1;
-        let ours = snapshot::seal(&store, &state, snapshot::By::Other)?.commit;
+        let ours = snapshot::snapshot(&store, &state, snapshot::By::Other)?.commit;
         match super::snapshot::merge(&common_dir, &ours, &accepted, &p.name) {
             Ok(_) => {}
             Err(e) if Refusal::of(&e) == Some(Refusal::Changes) => {
@@ -1077,7 +1077,7 @@ pub fn accept(repo: &Path, args: AcceptArgs) -> Result<()> {
     if layer_state.opened() {
         // Followers move to it now and at their next turn, even those of a
         // workspace whose agent's turn is under way.
-        snapshot::seal(&store, &layer_state, snapshot::By::Owner)?;
+        snapshot::snapshot(&store, &layer_state, snapshot::By::Owner)?;
     }
     let mut out = String::new();
     let shown: Vec<&str> = paths.iter().map(|p| p.to_str().unwrap_or("?")).collect();
@@ -1282,8 +1282,8 @@ fn changed_lines(diff: &BStr) -> Vec<String> {
 }
 
 /// Removes proposal `name`: its workspace (its changes are accepted), its
-/// branch, its start and its seals no layer names; then sweeps what earlier
-/// removals had to leave (seals a pending switch still named, starts of
+/// branch, its start and its snapshots no layer names; then sweeps what earlier
+/// removals had to leave (snapshots a pending switch still named, starts of
 /// proposals gone). Says what was done; what failed is said, not an error:
 /// the proposal is accepted already. A workspace in use stays, as a branch
 /// that is no longer a proposal, to remove by hand.
@@ -1315,7 +1315,7 @@ fn retire(common_dir: &Path, name: &str) -> String {
     }
 }
 
-/// Deletes the seal refs of proposals that are gone (no branch, no
+/// Deletes the snapshot refs of proposals that are gone (no branch, no
 /// workspace) which no layers, stored or applied, name, and the starts of
 /// proposals whose branch is gone.
 fn sweep(common_dir: &Path) -> Result<()> {
@@ -1325,11 +1325,11 @@ fn sweep(common_dir: &Path) -> Result<()> {
         &[
             "for-each-ref",
             "--format=%(refname) %(objectname)",
-            "refs/gitfold-seal/",
+            "refs/gitfold-snapshot/",
             START_REFS,
         ],
     )?;
-    let named = crate::state::layers::named_seals(common_dir);
+    let named = crate::state::layers::named_snapshots(common_dir);
     let gone = |id: &str| {
         let branch = state::workspace_branch(id);
         !git::branch_exists(&branch)
@@ -1343,7 +1343,9 @@ fn sweep(common_dir: &Path) -> Result<()> {
         let stale = if let Some(id) = name.strip_prefix(START_REFS) {
             !git::branch_exists(&state::workspace_branch(id))
         } else {
-            let rest = name.strip_prefix("refs/gitfold-seal/").unwrap_or_default();
+            let rest = name
+                .strip_prefix("refs/gitfold-snapshot/")
+                .unwrap_or_default();
             let id = rest.rsplit_once('/').map_or("", |(id, _)| id);
             let oid = ObjectId::from_hex(oid.as_bytes()).ok();
             gone(id) && oid.is_some_and(|o| !named.contains(&o))

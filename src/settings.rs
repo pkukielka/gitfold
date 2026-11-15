@@ -48,7 +48,7 @@ const PROPOSAL: &str = "gitfoldProposal";
 /// `branch.<branch>.gitfoldProposedBy`: the workspace that proposed it.
 const PROPOSED_BY: &str = "gitfoldProposedBy";
 /// `branch.<branch>.gitfoldConsent`: `<passed|failed|unchecked> <the proposal's
-/// seal checked> <the layer's seal checked> <summary>`, the last `gitfold
+/// snapshot checked> <the layer's snapshot checked> <summary>`, the last `gitfold
 /// consent` on a proposal.
 const CONSENT: &str = "gitfoldConsent";
 /// `branch.<branch>.gitfoldLanding`: `<target> <commit> [frozen|live]`, set
