@@ -17,24 +17,26 @@
 //!   excludes file that keeps the user's global ignore file too
 //!   (`git::worktree_config`). They can't be written here.
 //! - Union files (`state::layers::view`): the workspace writes them, its own
-//!   lines on top of the layers'. HEAD is detached at a layers commit L whose
-//!   tree has the unions (`git::layers`), and the index has the unions too, so
-//!   `git diff` shows only the workspace's own lines. Commits made on L are
-//!   extracted onto the branch by the sync thread (`sync_layers`), with only
-//!   the workspace's changes; one that changes a layer's lines can't be, and
-//!   waits. A push guard refuses pushing L. A switch carries the workspace's
-//!   own lines in a union file over (a 3-way merge), or is refused if they
-//!   depend on lines that would go.
+//!   lines on top of the layers'. HEAD stays on the branch, and git sees only
+//!   the workspace's own lines through a clean/smudge filter this workspace
+//!   answers (`git::filter`, `filter`): the driver and an attributes line per
+//!   union path in the worktree's own config (`worktree_config::set_filter`).
+//!   A switch zeroes the size recorded in their index entries, so git
+//!   re-reads (cleans) them instead of taking the new size as a change
+//!   (git's size rule). The guard hooks (`git::guard`) refuse a ref update or
+//!   a push bringing the layers' uncommitted lines onto the branch, for what
+//!   doesn't run the filter. A switch carries the workspace's own lines in a
+//!   union file over (a 3-way merge), or is refused if they depend on lines
+//!   that would go.
 //!
 //! What was applied (the layers, what git was told) is recorded apart from
 //! the layers stored (`state::layers::ShownLayers`), step by step as git is told,
 //! the layers last: a workspace opens showing what was applied, so the view
 //! and git agree, then switches to the stored layers if they differ (changed
-//! while it was closed, or a switch that failed half-way). Before HEAD moves
-//! to a layers commit, the commit is recorded as `next`, and adopted if HEAD is
-//! found there. Switches and the sync thread take `layers_lock`, so they never
-//! interleave; git is told after the workspace's own lock is released, so
-//! git processes reading the workspace meanwhile don't wait on it.
+//! while it was closed, or a switch that failed half-way). Switches and the
+//! sync thread take `layers_lock`, so they never interleave; git is told
+//! after the workspace's own lock is released, so git processes reading the
+//! workspace meanwhile don't wait on it.
 //!
 //! Where git can't be kept right (a bare repository, sparse checkout, a split
 //! or sparse index, an index git keeps locked), git is turned off in the
@@ -63,8 +65,10 @@ use gix::objs::tree::EntryKind;
 
 use super::times::Stamp;
 use super::{GITFILE_LOCAL, Layers, Workspace};
+use sha1::Digest;
+
 use crate::git::index_edit::{self, Edit};
-use crate::git::{self, worktree, worktree_config};
+use crate::git::{self, filter, worktree, worktree_config};
 use crate::inode;
 use crate::refusal::Refusal;
 use crate::state::layers::{self, ShownLayers};
@@ -82,8 +86,8 @@ const INDEX_WAIT: Duration = Duration::from_secs(3);
 /// that was refused.
 const RETRY_AFTER: Duration = Duration::from_secs(10);
 
-/// How far back from HEAD commits made on a layers commit are looked for.
-const CHAIN_LIMIT: usize = 10_000;
+/// How many smudged contents a workspace remembers (see `filter`).
+const MEMO_MAX: usize = 1024;
 
 /// A move of the branch made with a switch (`moves`).
 pub(super) struct MoveStep {
@@ -136,40 +140,16 @@ fn registered(state: &StateDir) -> Vec<u8> {
     format!("gitdir: {}\n", state.admin.display()).into_bytes()
 }
 
-/// The ref keeping workspace `id`'s view commit (and through it L and the
+/// The ref keeping workspace `id`'s view commit (and through it the
 /// snapshots) from `git gc`.
 fn layers_ref(id: &str) -> String {
     format!("refs/gitfold-layers/{id}")
 }
 
-/// The ref keeping the commit HEAD was at when it had left the layers commit's
-/// line (amended, reset) from `git gc`, after the layers are removed.
-fn left_ref(id: &str) -> String {
-    format!("refs/gitfold-layers-left/{id}")
-}
-
-/// The commit a detached HEAD in the registration at `admin` is at.
-fn detached_head(admin: &std::path::Path) -> Option<ObjectId> {
-    let head = fs::read_to_string(admin.join("HEAD")).ok()?;
-    ObjectId::from_hex(head.trim().as_bytes()).ok()
-}
-
-/// Whether HEAD in the registration at `admin` is on `branch`.
-fn head_on(admin: &std::path::Path, branch: &str) -> bool {
-    fs::read_to_string(admin.join("HEAD"))
-        .is_ok_and(|h| h.trim() == format!("ref: refs/heads/{branch}"))
-}
-
-/// The layers commit HEAD is at as far as `applied` knows: its `next`, adopted
-/// if HEAD got there (a crash after moving it, before recording it).
-fn adopt_next(state: &StateDir, applied: &mut ShownLayers) -> Result<()> {
-    if let Some(next) = applied.next.take() {
-        if detached_head(&state.admin) == Some(next) {
-            applied.head = Some(next);
-        }
-        applied.write(state)?;
-    }
-    Ok(())
+/// The filter driver of workspace `id` (see `git::filter`): named after it,
+/// so other worktrees, which don't define it, ignore the attribute.
+fn driver(id: &str) -> String {
+    format!("gitfold-{id}")
 }
 
 /// Sets up what was last applied of the layers of the workspace in `state`
@@ -180,8 +160,7 @@ pub(super) fn open_view(
     state: &StateDir,
     layers: &mut Layers,
 ) -> Result<Option<Vec<u8>>> {
-    let mut applied = ShownLayers::read(state)?;
-    adopt_next(state, &mut applied)?;
+    let applied = ShownLayers::read(state)?;
     let shown = applied.layers()?;
     let off = fs::read_to_string(state.dir.join(GIT_OFF))
         .ok()
@@ -254,9 +233,8 @@ impl Workspace {
 
     /// Shows the layers stored for it (`state::layers`), as they are now, and
     /// says what it did. Refused while git is busy in it (the switch changes
-    /// what its index describes), while a commit made on L can't be extracted
-    /// yet, or if its own lines in a union file depend on lines that would
-    /// go; then nothing changed.
+    /// what its index describes), or if its own lines in a union file depend
+    /// on lines that would go; then nothing changed.
     pub fn switch(&self, store: &Store) -> Result<String> {
         match self.switch_with(store, None)? {
             Switched::Done(done) => Ok(done),
@@ -271,21 +249,7 @@ impl Workspace {
     pub(super) fn switch_with(&self, store: &Store, mv: Option<&MoveStep>) -> Result<Switched> {
         let _layers = self.layers_lock.lock();
         let branch = &self.state.branch;
-        if let Some(busy) = worktree::git_running(&self.state.common_dir, &self.state.admin, branch)
-        {
-            return Err(Refusal::Changes.error(format!(
-                "{branch}: git is busy ({busy}); switch its layers when it is done"
-            )));
-        }
-        if self.layers.read().applied.head.is_some() {
-            self.sync_layers_locked()?;
-            if let Some(blocked) = self.extraction_blocked() {
-                return Err(Refusal::Changes.error(format!(
-                    "{branch}: {blocked}; switch its layers once it can go onto {branch} \
-                     (or amend it so it doesn't change their lines)"
-                )));
-            }
-        } else if let Some(busy) = self.state.git_busy() {
+        if let Some(busy) = self.state.git_busy() {
             return Err(Refusal::Changes.error(format!(
                 "{branch}: git is busy ({busy}); switch its layers when it is done"
             )));
@@ -364,6 +328,8 @@ impl Workspace {
             layers.view = new_view;
             layers.hunk = new_hunk;
             layers.layers_on = stored.is_on();
+            // What was smudged with the old view isn't what clean must give.
+            self.filter_memo.lock().clear();
             let mut stale = self.stale(store, &mut layers, old_tree, new_tree, &changes);
             let mut failed: Option<anyhow::Error> = None;
             {
@@ -427,7 +393,7 @@ impl Workspace {
         // Recorded last (see `tell_git`): until then the switch is pending.
         applied.layers = stored_bytes;
         let off = why.is_some()
-            && (plan.layers_on || applied.head.is_some() || !applied.skipped.is_empty());
+            && (plan.layers_on || !applied.union.is_empty() || !applied.skipped.is_empty());
         {
             let mut layers = self.layers.write();
             if let Err(e) = applied.write(&self.state) {
@@ -466,10 +432,7 @@ impl Workspace {
     fn catch_up_before_layers(&self, store: &Store, stored: &layers::Layers) -> Result<()> {
         let (none_shown, base) = {
             let layers = self.layers.read();
-            (
-                !layers.layers_on && layers.applied.head.is_none(),
-                layers.base,
-            )
+            (!layers.layers_on, layers.base)
         };
         if !stored.is_on() || !none_shown {
             return Ok(());
@@ -530,8 +493,9 @@ impl Workspace {
 
     /// The new content of the upper files at union paths (union before or
     /// now) when the unions change from tree `old_hunk` to `new_hunk`: the
-    /// workspace's own lines merged onto the new union. Refused if any
-    /// conflicts.
+    /// workspace's own lines merged onto the new union (a 3-way merge, the
+    /// line-set rule, or as git's filter sees them). Refused if none keeps
+    /// them.
     fn carry_over(
         &self,
         layers: &Layers,
@@ -543,6 +507,7 @@ impl Workspace {
         if old_hunk == new_hunk {
             return Ok(out);
         }
+        let base_tree = git::with_repo(|repo| git::layers::commit_tree(repo, layers.base))?;
         let paths: HashSet<&Vec<u8>> = layers.union.keys().chain(union.keys()).collect();
         for path in paths {
             let upper = self.upper_path(path);
@@ -558,7 +523,28 @@ impl Workspace {
             }
             let ours = fs::read(&upper)?;
             let merged = git::merge_file(&self.tmp, &old, &ours, &new)?;
-            match merged.or_else(|| git::layers::line_set(&old, &ours, &new)) {
+            // Else as git's filter sees it: the workspace's own lines (clean
+            // with the old union), with the new union's (smudge), if that
+            // keeps them all.
+            let refiltered = || -> Result<Option<Vec<u8>>> {
+                let base = content_at(base_tree, path)?;
+                let before = filter::Versions {
+                    base: base.clone(),
+                    union: old.clone(),
+                };
+                let after = filter::Versions {
+                    base,
+                    union: new.clone(),
+                };
+                let own = before.clean(&ours);
+                let merged = after.smudge(&own);
+                Ok((after.clean(&merged) == own).then_some(merged))
+            };
+            let merged = match merged.or_else(|| git::layers::line_set(&old, &ours, &new)) {
+                Some(merged) => Some(merged),
+                None => refiltered()?,
+            };
+            match merged {
                 Some(merged) if merged != ours => out.push((path.clone(), merged)),
                 Some(_) => {}
                 None => {
@@ -616,16 +602,15 @@ impl Workspace {
     /// Has git see only the workspace's own changes with the layers in
     /// `view` shown (or none), as `plan` says, recording each step in
     /// `applied` (and on disk) as it is done: the layers' tracked whole files
-    /// skip-worktree, the files they add excluded, and with union files,
-    /// HEAD at a layers commit and the unions in the index. What was applied
-    /// before is given back where no longer shown. The errors' text is the
-    /// reason the `.git` gives with git off.
+    /// skip-worktree, the files they add excluded, and with union files, the
+    /// filter and the guard on them and their index entries' size zeroed.
+    /// What was applied before is given back where no longer shown. The
+    /// errors' text is the reason the `.git` gives with git off.
     ///
     /// The order is what a crash leaves right: the index edits are recorded
-    /// before HEAD moves (a next switch gives back what was skipped), the
-    /// layers commit is recorded as `next` before HEAD moves to it (adopted if
-    /// HEAD got there), and the caller records the layers file last, so a
-    /// switch cut short stays pending and is done again.
+    /// as done (a next switch gives back what was skipped), and the caller
+    /// records the layers file last, so a switch cut short stays pending and
+    /// is done again.
     fn tell_git(
         &self,
         plan: &GitPlan,
@@ -643,44 +628,27 @@ impl Workspace {
                 "sparse checkout is on"
             );
         }
-        // What the branch tip has: the base, or past it by commits made with
-        // layers shown (the base waits for the layers to go).
-        let tip = git::branch_tip(&self.state.branch)?;
-        // Union files: the index has the union over the tip (what L has),
-        // or the tip's version again.
-        let hunk = match (view, plan.union.is_empty()) {
-            (Some(v), false) if tip.id != plan.base => {
-                let at_tip = layers::view(&self.state.common_dir, &tip.id, stored)?;
-                at_tip.map_or(v.hunk_tree, |t| t.hunk_tree)
-            }
-            (Some(v), false) => v.hunk_tree,
-            _ => tip.tree,
-        };
-        self.index_to_plan(plan, applied, hunk, tip.tree)?;
+        match (view, plan.union.is_empty()) {
+            (Some(v), false) => self.filter_on(plan, stored, v)?,
+            _ => self.filter_off()?,
+        }
+        self.index_to_plan(plan, applied)?;
         match plan.layers_on {
             true => worktree_config::set_excludes(admin, &plan.added)?,
             false => worktree_config::remove_excludes(admin)?,
         }
-        // HEAD: at a layers commit while files are union-merged, else on the branch.
-        match (view, plan.union.is_empty()) {
-            (Some(v), false) => self.head_to_layers(applied, stored, v, hunk, tip.id)?,
-            _ => self.head_to_branch(applied)?,
-        }
+        self.pin_view(stored, view)?;
         applied.write(&self.state)?;
         Ok(())
     }
 
     /// `tell_git`'s index edits: skip-worktree on `plan`'s skipped paths (off
-    /// on those no longer skipped), and union paths' entries the union in
-    /// tree `hunk` (or `tip_tree`'s version, no longer union). Recorded in
-    /// `applied` once done.
-    fn index_to_plan(
-        &self,
-        plan: &GitPlan,
-        applied: &mut ShownLayers,
-        hunk: ObjectId,
-        tip_tree: ObjectId,
-    ) -> Result<()> {
+    /// on those no longer skipped), and on union paths, now or before, the
+    /// recorded size and times zeroed: their content changed, and git takes
+    /// a size other than the one recorded as a change without reading the
+    /// file (cleaning it); a zero size makes it read the file, once, and
+    /// record its stat data again. Recorded in `applied` once done.
+    fn index_to_plan(&self, plan: &GitPlan, applied: &mut ShownLayers) -> Result<()> {
         let mut edits: HashMap<Vec<u8>, Edit> = HashMap::new();
         for path in applied.skipped.iter().chain(&plan.skipped) {
             let edit = Edit {
@@ -690,26 +658,12 @@ impl Workspace {
             edits.insert(path.clone(), edit);
         }
         for path in applied.union.iter().chain(&plan.union) {
-            let tree = match plan.union.contains(path) {
-                true => hunk,
-                false => tip_tree,
+            let edit = Edit {
+                skip_worktree: Some(false),
+                stat: Some(index_edit::Stat::default()),
+                oid: None,
             };
-            let item = git::with_repo(|repo| git::layers::lookup(repo, tree, BStr::new(path)))?;
-            if let Some(item) = item {
-                // The size git compares first is the blob's; zero times make
-                // it read the file once to be sure (a recorded size that
-                // differs would be taken as a change unread).
-                let size = git::object_size(item.oid)?.unwrap_or_default() as u32;
-                let edit = Edit {
-                    skip_worktree: Some(false),
-                    stat: Some(index_edit::Stat {
-                        size,
-                        ..Default::default()
-                    }),
-                    oid: Some(item.oid),
-                };
-                edits.insert(path.clone(), edit);
-            }
+            edits.insert(path.clone(), edit);
         }
         self.edit_index(&edits)?;
         applied.skipped = plan.skipped.clone();
@@ -717,77 +671,91 @@ impl Workspace {
         applied.write(&self.state)
     }
 
-    /// `tell_git`'s HEAD with union files: detached at a new layers commit L
-    /// (tree `hunk`, over branch tip `tip`), with the view commit pinned and
-    /// the push guard installed. Moved only from where it was left
-    /// (compare-and-swap): the branch, or the layers commit `applied` has.
-    fn head_to_layers(
+    /// `tell_git` with union files: the filter driver and its attributes on
+    /// them (`worktree_config::set_filter`), answered by `gitfold
+    /// filter-process` relaying to this workspace (`filter`), and the guard:
+    /// the layers' uncommitted lines in them (`git::guard`) and the hooks.
+    fn filter_on(
         &self,
-        applied: &mut ShownLayers,
+        plan: &GitPlan,
         stored: &layers::Layers,
         view: &layers::View,
-        hunk: ObjectId,
-        tip: ObjectId,
     ) -> Result<()> {
-        let (admin, branch) = (&self.state.admin, &self.state.branch);
-        let subject = stored.subject(branch);
-        let all_snapshots: Vec<ObjectId> = stored.layers.iter().map(|l| l.snapshot).collect();
-        let (l, vc) = git::with_repo(|repo| -> Result<(ObjectId, ObjectId)> {
-            let l = git::layers::layers_commit(repo, hunk, tip, &view.hunk_snapshots, &subject)?;
-            let vc = git::layers::view_commit(repo, view.tree, l, &all_snapshots, &subject)?;
-            Ok((l, vc))
-        })?;
-        let pin = layers_ref(&self.state.id);
-        git::cmd::run(
-            &self.state.common_dir,
-            &["update-ref", &pin, &vc.to_string()],
-        )?;
-        let old = match (detached_head(admin), applied.head) {
-            (Some(h), Some(l)) if h == l => l.to_string(),
-            (None, _) if head_on(admin, branch) => tip.to_string(),
-            _ => anyhow::bail!("HEAD isn't where gitfold left it"),
-        };
-        // Recorded before HEAD moves: a crash in between leaves it adopted.
-        applied.next = Some(l);
-        applied.write(&self.state)?;
-        let (msg, new) = ("gitfold: layers", l.to_string());
-        git::cmd::run(
-            admin,
-            &["update-ref", "--no-deref", "-m", msg, "HEAD", &new, &old],
-        )?;
-        worktree_config::install_push_guard(admin)?;
-        (applied.head, applied.next) = (Some(l), None);
-        Ok(())
+        let admin = &self.state.admin;
+        let exe = std::env::current_exe().context("finding the gitfold binary")?;
+        let process = format!(
+            "{} filter-process {} {}",
+            worktree_config::shell_quote(exe.as_os_str().as_bytes()),
+            worktree_config::shell_quote(self.state.common_dir.as_os_str().as_bytes()),
+            worktree_config::shell_quote(self.state.id.as_bytes()),
+        );
+        let paths: Vec<&Vec<u8>> = plan.union.iter().collect();
+        worktree_config::set_filter(admin, &driver(&self.state.id), &process, &paths)?;
+        guard_of(&self.state.branch, plan.base, stored, view)?.write(admin)?;
+        worktree_config::install_guard(admin, &exe)
     }
 
-    /// `tell_git`'s HEAD without union files: back on the branch if it was
-    /// at a layers commit (a commit it had moved to off L's line kept by a
-    /// ref), the push guard and the view commit's pin gone.
-    fn head_to_branch(&self, applied: &mut ShownLayers) -> Result<()> {
-        let Some(l) = applied.head else {
-            return Ok(());
-        };
-        let (admin, branch) = (&self.state.admin, &self.state.branch);
+    /// `tell_git` without union files: no filter, no guard.
+    fn filter_off(&self) -> Result<()> {
+        let admin = &self.state.admin;
+        worktree_config::remove_filter(admin, &driver(&self.state.id))?;
+        worktree_config::remove_guard(admin)?;
+        git::guard::Guard::remove(admin)
+    }
+
+    /// Keeps the view's commits (the layers' snapshots) from `git gc` while
+    /// layers show: `refs/gitfold-layers/<id>` at a view commit (tree M,
+    /// parents the base and the snapshots); removed with the layers.
+    fn pin_view(&self, stored: &layers::Layers, view: Option<&layers::View>) -> Result<()> {
         let common_dir = &self.state.common_dir;
-        let head = detached_head(admin);
-        if let Some(h) = head.filter(|&h| h != l) {
-            // Left L's line (amended, reset): kept, and said so.
-            let left = left_ref(&self.state.id);
-            git::cmd::run(common_dir, &["update-ref", &left, &h.to_string()])?;
-            log::warn!("{branch}: HEAD had left the layers commit; {h} is kept at {left}");
+        let pin = layers_ref(&self.state.id);
+        let Some(view) = view else {
+            return git::cmd::run(common_dir, &["update-ref", "-d", &pin]);
+        };
+        let subject = stored.subject(&self.state.branch);
+        let snapshots: Vec<ObjectId> = stored.layers.iter().map(|l| l.snapshot).collect();
+        let base = self.layers.read().base;
+        let vc = git::with_repo(|repo| {
+            git::layers::view_commit(repo, view.tree, base, &snapshots, &subject)
+        })?;
+        git::cmd::run(common_dir, &["update-ref", &pin, &vc.to_string()])
+    }
+
+    /// Answers git's filter (`git::filter`) for `path`'s `content`, from the
+    /// view as it is now: a union file's own lines (clean) or all of them
+    /// (smudge); any other path's content as it is (its attribute is left
+    /// over from an earlier view). Clean gives back exactly what smudge was
+    /// given for content it smudged (remembered, `MEMO_MAX` of them, until
+    /// the view changes), so a checkout's files are clean in git's eyes.
+    pub fn filter(&self, op: filter::Op, path: &[u8], content: Vec<u8>) -> Result<Vec<u8>> {
+        let (base, hunk) = {
+            let layers = self.layers.read();
+            if !layers.union.contains_key(path) {
+                return Ok(content);
+            }
+            (layers.base, layers.hunk)
+        };
+        let base_tree = git::with_repo(|repo| git::layers::commit_tree(repo, base))?;
+        let versions = filter::Versions {
+            base: content_at(base_tree, path)?,
+            union: content_at(hunk, path)?,
+        };
+        let hash = |data: &[u8]| -> [u8; 20] { sha1::Sha1::digest(data).into() };
+        match op {
+            filter::Op::Smudge => {
+                let out = versions.smudge(&content);
+                let mut memo = self.filter_memo.lock();
+                if memo.len() >= MEMO_MAX {
+                    memo.clear();
+                }
+                memo.insert(hash(&out), content);
+                Ok(out)
+            }
+            filter::Op::Clean => match self.filter_memo.lock().get(&hash(&content)) {
+                Some(own) => Ok(own.clone()),
+                None => Ok(versions.clean(&content)),
+            },
         }
-        if head.is_some() {
-            let full = format!("refs/heads/{branch}");
-            let msg = "gitfold: layers removed";
-            git::cmd::run(admin, &["symbolic-ref", "-m", msg, "HEAD", &full])?;
-        }
-        worktree_config::remove_push_guard(admin)?;
-        git::cmd::run(
-            common_dir,
-            &["update-ref", "-d", &layers_ref(&self.state.id)],
-        )?;
-        applied.head = None;
-        Ok(())
     }
 
     /// Edits the worktree's index, waiting up to `INDEX_WAIT` for git to
@@ -807,31 +775,10 @@ impl Workspace {
         }
     }
 
-    /// Why a commit made on the layers commit can't go onto the branch yet, if
-    /// one can't: HEAD (detached) isn't L after `sync_layers`, and L is on its
-    /// first-parent line.
-    fn extraction_blocked(&self) -> Option<String> {
-        let l = self.layers.read().applied.head?;
-        let head = detached_head(&self.state.admin)?;
-        if head == l {
-            return None;
-        }
-        let on_line = git::with_repo(|repo| git::layers::chain(repo, l, head, CHAIN_LIMIT))
-            .ok()
-            .flatten()
-            .is_some();
-        on_line.then(|| {
-            format!(
-                "commit {} changes lines of a layer's, so it can't go onto the branch alone",
-                &head.to_string()[..12]
-            )
-        })
-    }
-
     /// The sync thread's part while layers show or are pending (`rebase`):
     /// applies stored layers that differ from those applied (a switch that
     /// failed half-way, a change made while closed), retrying a refused one
-    /// every `RETRY_AFTER`, then `sync_layers_locked`.
+    /// every `RETRY_AFTER`, then `rehide`.
     pub(super) fn sync_layers(&self, store: &Store) -> Result<()> {
         if self.layers_pending() {
             let stored = layers::shown_bytes(&self.state).unwrap_or_default();
@@ -858,8 +805,7 @@ impl Workspace {
             }
         }
         let _layers = self.layers_lock.lock();
-        self.rehide()?;
-        self.sync_layers_locked()
+        self.rehide()
     }
 
     /// Puts back the skip-worktree bits git dropped from the layers' files
@@ -909,95 +855,6 @@ impl Workspace {
         }
         Ok(())
     }
-
-    /// Commits made on the layers commit are extracted onto the branch
-    /// (`git::layers::extract`), and HEAD moves to the new layers commit (the tree
-    /// of the last one, so nothing git sees changes). Git must be idle (but
-    /// for HEAD being detached). An amend of L is extracted as a commit on L.
-    /// If HEAD left L's line (git switch, reset), git is turned off: the
-    /// index holds the unions, which mustn't be committed on the branch;
-    /// `gitfold layer remove --all` gives it back.
-    fn sync_layers_locked(&self) -> Result<()> {
-        let Some(l) = self.layers.read().applied.head else {
-            return Ok(());
-        };
-        let (admin, branch) = (&self.state.admin, &self.state.branch);
-        if worktree::git_running(&self.state.common_dir, admin, branch).is_some() {
-            return Ok(());
-        }
-        let Some(head) = detached_head(admin) else {
-            return self.git_off("HEAD left the layers commit");
-        };
-        if head == l || *self.layers_blocked.lock() == Some(head) {
-            return Ok(());
-        }
-        let stored = self.layers.read().applied.layers()?;
-        let tip = git::branch_tip(branch)?;
-        let Some(view) = layers::view(&self.state.common_dir, &tip.id, &stored)? else {
-            return Ok(());
-        };
-        let subject = stored.subject(branch);
-        let union = &view.union;
-        let owners =
-            |p: &BStr| -> Vec<usize> { union.get(p.as_bytes()).cloned().unwrap_or_default() };
-        let is_hunk = |p: &BStr| union.contains_key(p.as_bytes());
-        let done = git::with_repo(|repo| -> Result<Option<git::layers::Extraction>> {
-            let chain = match git::layers::chain(repo, l, head, CHAIN_LIMIT)? {
-                Some(chain) => chain,
-                // An amend of L: a commit on L's first parent instead.
-                None if first_parent(repo, head)? == first_parent(repo, l)? => vec![head],
-                None => return Ok(None),
-            };
-            let layers = git::layers::Extractor {
-                snapshots: &view.hunk_snapshots,
-                subject: &subject,
-                is_hunk: &is_hunk,
-                owners: &owners,
-            };
-            Ok(Some(git::layers::extract(
-                repo, &layers, l, tip.id, &chain,
-            )?))
-        })?;
-        let Some(done) = done else {
-            return self.git_off("HEAD left the layers commit's line");
-        };
-        if let Some(blocked) = &done.blocked {
-            let paths: Vec<String> = (blocked.conflicts.iter())
-                .map(|c| c.path.to_str_lossy().into_owned())
-                .collect();
-            log::warn!(
-                "{branch}: commit {} changes layers' lines ({}): it waits until amended",
-                blocked.commit,
-                paths.join(", ")
-            );
-            *self.layers_blocked.lock() = Some(head);
-        }
-        if let Some(new_l) = done.layers {
-            let mut applied = self.layers.read().applied.clone();
-            applied.next = Some(new_l);
-            applied.write(&self.state)?;
-            git::layers::advance(admin, branch, (tip.id, done.tip), (head, new_l))?;
-            (applied.head, applied.next) = (Some(new_l), None);
-            applied.write(&self.state)?;
-            self.layers.write().applied = applied;
-            *self.layers_blocked.lock() = None;
-            log::info!(
-                "{branch}: {} commit(s) made on the layers commit moved onto the branch",
-                done.extracted.len()
-            );
-        }
-        Ok(())
-    }
-
-    /// Turns git off in it, saying why, and tells the kernel.
-    fn git_off(&self, why: &str) -> Result<()> {
-        let stored = self.layers.read().applied.layers()?;
-        if self.gitfile.read().starts_with(&off_gitfile(&stored, why)) {
-            return Ok(());
-        }
-        self.set_gitfile(&stored, Some(why))
-    }
-
     /// What changed in the view between lower trees `old` and `new` (the
     /// file `changes` between them), as the kernel holds it; stamps the
     /// changed files and forgets nodes of entries gone or changed in type.
@@ -1123,13 +980,64 @@ fn switched<'a>(
     done
 }
 
-/// A commit's first parent, if any.
-fn first_parent(repo: &gix::Repository, commit: ObjectId) -> Result<Option<ObjectId>> {
-    Ok(repo
-        .find_commit(commit)?
-        .parent_ids()
-        .next()
-        .map(|p| p.detach()))
+/// What the guard keeps from `branch` (`git::guard`) with `view` of
+/// `stored` over `base`: per union file, the lines the layers add there
+/// that are a layer's uncommitted work: in its snapshot of a workspace's
+/// work and not in the commit that snapshot is on. A line no layer's
+/// snapshot accounts for is guarded too, as the first layer's.
+fn guard_of(
+    branch: &str,
+    base: ObjectId,
+    stored: &layers::Layers,
+    view: &layers::View,
+) -> Result<git::guard::Guard> {
+    let mut guard = git::guard::Guard {
+        branch: branch.to_string(),
+        ..Default::default()
+    };
+    let base_tree = git::with_repo(|repo| git::layers::commit_tree(repo, base))?;
+    for (path, owners) in &view.union {
+        let versions = filter::Versions {
+            base: content_at(base_tree, path)?,
+            union: content_at(view.hunk_tree, path)?,
+        };
+        // Per layer: its snapshot's lines, and those committed.
+        let mut sides = Vec::new();
+        for &ix in owners {
+            let layer = &stored.layers[ix];
+            let snapshot = git::with_repo(|repo| git::layers::commit_tree(repo, layer.snapshot))?;
+            let committed = match layer.shows {
+                layers::Shows::Work => git::with_repo(|repo| -> Result<Option<ObjectId>> {
+                    let parent = repo.find_commit(layer.snapshot)?.parent_ids().next();
+                    parent
+                        .map(|p| git::layers::commit_tree(repo, p.detach()))
+                        .transpose()
+                })?,
+                _ => Some(snapshot),
+            };
+            let committed = match committed {
+                Some(tree) => content_at(tree, path)?,
+                None => Vec::new(),
+            };
+            sides.push((&layer.branch, content_at(snapshot, path)?, committed));
+        }
+        let has = |data: &[u8], line: &[u8]| {
+            git::layers::lines(data).any(|l| git::layers::key(l) == line)
+        };
+        let mut lines = Vec::new();
+        for line in versions.layers_lines() {
+            let owner = sides.iter().find(|(_, snap, _)| has(snap, line));
+            let guarded = match owner {
+                Some((name, _, committed)) => (!has(committed, line)).then_some(*name),
+                None => sides.first().map(|(name, _, _)| *name),
+            };
+            if let Some(name) = guarded {
+                lines.push((name.clone(), line.to_vec()));
+            }
+        }
+        guard.paths.insert(path.clone(), lines);
+    }
+    Ok(guard)
 }
 
 /// (directory, name) of `path`.

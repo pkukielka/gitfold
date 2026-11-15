@@ -384,40 +384,29 @@ gitfold layer remove --all             # stop showing every layer
   class). Union merging is for lists; code that goes inside another branch's
   code belongs on that branch: build on it (`gitfold layer base <A>`), or
   ask its agent.
-- **With union files, git shows and commits only your lines.** HEAD is
-  then detached at a layers commit (`git log -1`: `gitfold layers: <you> +
-  <layers> (commits go to <you>; never push this commit)`), and `git
-  status`/`git diff` show only your lines in a union file. **Commit
-  normally**: within about a second gitfold puts each commit onto your
-  branch with only your changes and moves HEAD to a new layers commit, so
-  the commit id you saw changes (`git log <your-branch>` has the real one).
-  `git log -1` showing `gitfold layers:` again means it is on your branch.
-- **Never push HEAD while it is a layers commit** (`git push origin
-  HEAD:<branch>`, or `--no-verify`): it holds other agents' uncommitted
-  work, and a push guard refuses it. **`git push origin <your-branch>` is
-  fine.**
-- **A commit that waits: it depends on a layer's lines.** If `git log -1`
-  still shows your commit (not `gitfold layers:`) after a few seconds, or
-  `gitfold layer add`/`remove` exit 4 with `commit <id> can't go onto the
-  branch alone (it changes lines of a layer's)`, that commit removed or
-  changed another agent's lines in a union file. It can't go onto your
-  branch without their uncommitted work, so it and any later commit stay
-  off your branch. Put their lines back as the file showed them (`git diff
-  HEAD~1 -- <file>` shows what you changed), keep only your own additions,
-  and `git commit -a --amend` (if it is your last commit; if not, stop and
-  tell the user). To change their lines, ask their agent with `gitfold send`.
-- **Don't `git switch`, `checkout <branch>`, `reset --soft` or `rebase`
-  while layers show**, nor `--amend` once `git log -1` shows `gitfold
-  layers:` (that amends the layers commit): HEAD leaving the layers
-  commit's line turns git off (below). Run **`gitfold layer remove --all`**
-  first (HEAD goes back on your branch; your uncommitted lines stay as
-  changes).
+- **With union files, git shows and commits only your lines.** HEAD stays
+  on your branch: a filter gitfold answers strips the layers' lines when git
+  reads the file and puts them back when git writes it, so `git status`,
+  `git diff`, `add -p`, `commit -a`, `--amend`, `stash`, `reset`, `rebase`,
+  `switch` and `push` work as usual and hold only your lines. Commit and
+  push normally.
+- **`gitfold: refusing to update refs/heads/<you>: commit <id> adds <A>'s
+  uncommitted line ...`** means a commit would have put another agent's
+  unfinished lines on your branch: one made without the filter
+  (`--no-filters`, plumbing, a libgit2 tool), or after a formatter changed
+  their lines (then `git diff` shows their lines as yours). Nothing moved.
+  Restore their lines as the file showed them (`git checkout -- <file>`
+  and redo your own change, or undo the formatter's change to their lines),
+  then commit again. `--no-verify` doesn't skip this check; `git push` checks
+  the same.
+- **Don't change other agents' lines in a union file** (reorder, reformat or
+  delete them): git doesn't see such changes as yours to commit. To change
+  their lines, ask their agent with `gitfold send`.
 - **`fatal: not a git repository: /LAYERS SHOWN (<layers>): git is off here
   (<why>)`** means gitfold couldn't hide the layers from git here (sparse
-  checkout, a split or sparse index, HEAD taken off the layers commit), so
-  it turned git off rather than let you commit others' work. The files
-  still show. Run `gitfold layer remove --all` to use git again; `gitfold`
-  commands keep working meanwhile.
+  checkout, a split or sparse index), so it turned git off rather than let
+  you commit others' work. The files still show. Run `gitfold layer remove
+  --all` to use git again; `gitfold` commands keep working meanwhile.
 - **Layers move between turns, not during them.** With the gitfold plugin,
   your live layers move when your next prompt starts, and you are told
   which layers changed (files you read from them may have changed: read

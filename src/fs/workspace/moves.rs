@@ -126,10 +126,7 @@ impl Workspace {
         }
         let (shown, base) = {
             let layers = self.layers.read();
-            (
-                layers.layers_on || layers.applied.head.is_some(),
-                layers.base,
-            )
+            (layers.layers_on, layers.base)
         };
         if !shown && base != intent.from {
             let from = git::resolve(&intent.from.to_string())?;

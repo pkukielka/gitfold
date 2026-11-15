@@ -1,0 +1,11 @@
+#!/bin/sh
+# gitfold's guard: refuses a ref update that would bring another layer's
+# uncommitted lines onto the workspace's branch (when prepared; --no-verify
+# doesn't skip it), then runs the user's own reference-transaction.
+. "${0%/*}/gitfold-lib.sh"
+gitfold_updates=$(cat)
+if [ "$1" = prepared ]; then
+	printf '%s\n' "$gitfold_updates" | gitfold_guard ref-update || exit 1
+fi
+printf '%s' "$gitfold_updates${gitfold_updates:+
+}" | gitfold_user_hook reference-transaction "$@"

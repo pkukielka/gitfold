@@ -5,9 +5,13 @@
 //!
 //! - `attr`: attributes as git reads them for a commit.
 //! - `cmd`: running git itself.
+//! - `filter`: the clean/smudge filter that has git see only a workspace's
+//!   own lines of a union file, and git's filter protocol.
+//! - `guard`: the hooks' check that no commit brings a layer's lines onto the
+//!   branch.
 //! - `index`: the git index gitfold writes.
-//! - `index_edit`: editing an index git wrote (skip-worktree bits).
-//! - `layers`: layers' trees and commits, and extraction of commits made on them.
+//! - `index_edit`: editing an index git wrote (skip-worktree bits, stat data).
+//! - `layers`: layers' trees and commits.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
 //! - `stack`: moves of a branch's own commits onto its editable layers'
@@ -18,6 +22,8 @@
 
 pub mod attr;
 pub mod cmd;
+pub mod filter;
+pub mod guard;
 pub mod index;
 pub mod index_edit;
 pub mod layers;
@@ -380,20 +386,36 @@ pub fn exclude(common_dir: &Path, pattern: &[u8], why: &str) -> Result<()> {
 /// Anything else is an error, not a reason to fall back: a fallback could
 /// ignore more than git does.
 pub fn excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
-    excludes_file_scoped(git_dir, true)
+    global_file(git_dir, "core.excludesFile", "ignore", true)
 }
 
 /// `excludes_file` without the worktree's own config (`config.worktree`):
 /// the user's global ignore file, which gitfold's per-worktree one
 /// (`worktree_config::set_excludes`) replaces for git, so has to include.
 pub fn user_excludes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
-    excludes_file_scoped(git_dir, false)
+    global_file(git_dir, "core.excludesFile", "ignore", false)
 }
 
-fn excludes_file_scoped(git_dir: &Path, worktree_scope: bool) -> Result<Option<PathBuf>> {
+/// The user's global attributes file, as `user_excludes_file` (setting
+/// `core.attributesFile`, default `$XDG_CONFIG_HOME/git/attributes`): gitfold's
+/// per-worktree one (`worktree_config::set_filter`) replaces it for git, so
+/// has to include it.
+pub fn user_attributes_file(git_dir: &Path) -> Result<Option<PathBuf>> {
+    global_file(git_dir, "core.attributesFile", "attributes", false)
+}
+
+/// The global file setting `key` names (git's default:
+/// `$XDG_CONFIG_HOME/git/<default>`), with or without the worktree's own
+/// config.
+fn global_file(
+    git_dir: &Path,
+    key: &str,
+    default: &str,
+    worktree_scope: bool,
+) -> Result<Option<PathBuf>> {
     let out = cmd::command(git_dir)
         .args(["config", "-z", "--show-scope", "--type=path"])
-        .args(["--get-all", "core.excludesFile"])
+        .args(["--get-all", key])
         .output()?;
     let value = match out.status.code() {
         // `<scope>\0<value>\0` per value, in the order git reads them: the
@@ -410,7 +432,7 @@ fn excludes_file_scoped(git_dir: &Path, worktree_scope: bool) -> Result<Option<P
             .next_back(),
         Some(1) => None,
         _ => bail!(
-            "git config core.excludesFile in {}: {}",
+            "git config {key} in {}: {}",
             git_dir.display(),
             String::from_utf8_lossy(&out.stderr).trim()
         ),
@@ -422,7 +444,7 @@ fn excludes_file_scoped(git_dir: &Path, worktree_scope: bool) -> Result<Option<P
             // unmounted.
             anyhow::ensure!(
                 value.is_empty() || path.is_absolute(),
-                "core.excludesFile is a relative path ({}), which gitfold can't resolve",
+                "{key} is a relative path ({}), which gitfold can't resolve",
                 path.display()
             );
             Ok((!value.is_empty()).then_some(path))
@@ -430,7 +452,7 @@ fn excludes_file_scoped(git_dir: &Path, worktree_scope: bool) -> Result<Option<P
         // Unset. As for git, an empty environment variable counts as unset too.
         None => {
             let mut env = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
-            Ok(gix::path::env::xdg_config("ignore", &mut env))
+            Ok(gix::path::env::xdg_config(default, &mut env))
         }
     }
 }

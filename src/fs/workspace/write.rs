@@ -589,7 +589,15 @@ impl Workspace {
         if layer_owned(&src_obj, &src) {
             return Err(Errno::EACCES);
         }
+        // A union file may be replaced, as it may be written (an editor's or
+        // a formatter's save through a temporary file): the new file holds
+        // the layers' lines and the workspace's, as a write leaves it.
+        let union_file = |obj: &Obj| {
+            matches!(obj, Obj::LowerFile { mixed: false, .. })
+                || matches!(obj, Obj::Upper(m) if !m.is_dir())
+        };
         match self.resolve_in(store, &layers, &dst) {
+            Ok(dst_obj) if layers.union.contains_key(&dst) && union_file(&dst_obj) => {}
             Ok(dst_obj) if layer_owned(&dst_obj, &dst) => return Err(Errno::EACCES),
             Err(_) if Self::is_mixed(&layers, &dst) => return Err(Errno::EACCES),
             _ => {}

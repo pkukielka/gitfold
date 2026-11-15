@@ -464,7 +464,7 @@ eq "the frozen layer still as added" "fz 1" "$(cat "$P/f.txt")"
 eq "the agent's workspace: still as its last turn's start" "src 2" "$(cat "$A/s.txt")"
 }
 
-union_files_and_the_layers_commit() {
+union_files_and_the_filter() {
 echo 'reg.txt merge=union' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
 R add -A; R commit -qm union-merge
 R branch me; R branch la; R branch lb
@@ -474,39 +474,62 @@ echo fromA >>"$MNT/la/reg.txt"; echo la >>"$MNT/la/a.txt"
 echo fromB >>"$MNT/lb/reg.txt"
 cat "$W/reg.txt" >/dev/null
 check "add two layers" sh -c "'$BIN' -C '$W' layer add la && '$BIN' -C '$W' layer add lb"
-eq "the union file has both layers' lines" "one two fromA fromB" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+eq "the union file has both layers' lines" "one two fromA fromB" "$(paste -sd' ' "$W/reg.txt")"
 eq "not a conflict" "" "$("$BIN" -C "$W" layer | grep Conflict)"
 check "and is writable" test -w "$W/reg.txt"
 check "a whole file isn't" test ! -w "$W/a.txt"
-eq "HEAD at the layers commit" "gitfold layers: me + la + lb (commits go to me; never push this commit)" "$(G "$W" log -1 --format=%s)"
+eq "HEAD stays on the branch" "me" "$(G "$W" branch --show-current)"
 eq "git status clean" "" "$(git -C "$W" status --short)"
+eq "the filter is the workspace's own" "reg.txt: filter: gitfold-me|reg.txt: filter: unspecified" \
+    "$(G "$W" check-attr filter -- reg.txt)|$(R check-attr filter -- reg.txt)"
 echo fromMe >>"$W/reg.txt"
 eq "git diff: only own lines" "+fromMe" "$(git -C "$W" diff | grep '^+[^+]')"
 check "commit" G "$W" commit -qam mine
-for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = fromMe ] && break; sleep 0.1; done
-eq "the branch gets only own lines" "one two fromMe" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
+eq "the branch gets only own lines, at once" "one two fromMe" "$(R show me:reg.txt | paste -sd' ')"
+eq "the file keeps the layers' lines" "one two fromA fromB fromMe" "$(paste -sd' ' "$W/reg.txt")"
 eq "git status still clean" "" "$(git -C "$W" status --short)"
-eq "HEAD at a new layers commit" "1" "$(G "$W" cat-file -p HEAD | grep -c '^gitfold-layers 1')"
+eq "HEAD~1 is the commit before" "union-merge" "$(G "$W" log -1 --format=%s HEAD~1)"
+echo amended >>"$W/reg.txt"
+check "amend" G "$W" commit -q --amend -am mine2
+eq "the amend is on the branch" "one two fromMe amended|mine2" \
+    "$(R show me:reg.txt | paste -sd' ')|$(R log -1 --format=%s me)"
+eq "stash keeps only own lines" "one two fromMe amended stashed|one two fromA fromB fromMe amended" \
+    "$(echo stashed >>"$W/reg.txt"; G "$W" stash -q; R show 'refs/stash:reg.txt' | paste -sd' ')|$(paste -sd' ' "$W/reg.txt")"
+G "$W" stash pop -q
+eq "stash pop: own lines back among the layers'" "one two fromA fromB fromMe amended stashed| M reg.txt" \
+    "$(paste -sd' ' "$W/reg.txt")|$(git -C "$W" status --short)"
+G "$W" checkout -q reg.txt
+sed 's/^two$/TWO/' "$W/reg.txt" >"$W/.reg.tmp"
+check "an editor's save (a new file renamed over it)" mv "$W/.reg.tmp" "$W/reg.txt"
+eq "git sees only that change" "-two +TWO" "$(git -C "$W" diff | grep '^[-+][^-+]' | paste -sd' ')"
+G "$W" checkout -q reg.txt
+# The guard: commits made without the filter don't reach the branch.
+tip=$(R rev-parse me)
+blob=$(G "$W" hash-object -w --no-filters reg.txt)
+G "$W" update-index --cacheinfo "100644,$blob,reg.txt"
+out=$(G "$W" commit -q --no-verify -m leak 2>&1); rc=$?
+eq "a commit of the layers' lines, --no-verify: refused, saying why" "1 yes $tip" \
+    "$((rc != 0)) $(echo "$out" | grep -q "adds la's uncommitted line \"fromA\" to reg.txt" && echo yes) $(R rev-parse me)"
+leak=$(G "$W" commit-tree "$(G "$W" write-tree)" -p HEAD -m leak)
+G "$W" reset -q
+check "plumbing too: update-ref refused" fails G "$W" update-ref refs/heads/me "$leak"
+eq "the branch didn't move" "$tip" "$(R rev-parse me)"
 git init -q --bare "$T/remote.git"
-out=$(G "$W" push -q "$T/remote.git" HEAD:refs/heads/main 2>&1); rc=$?
-eq "pushing HEAD is refused, saying why" "1 yes" "$((rc != 0)) $(echo "$out" | grep -q 'it contains the layers commit' && echo yes)"
+out=$(G "$W" push -q "$T/remote.git" "$leak:refs/heads/main" 2>&1); rc=$?
+eq "pushing it is refused (pre-push)" "1 yes" "$((rc != 0)) $(echo "$out" | grep -q 'refusing to push refs/heads/main' && echo yes)"
 check "pushing the branch isn't" G "$W" push -q "$T/remote.git" me
 check "remove one layer" "$BIN" -C "$W" layer remove lb
-eq "its lines gone, own ones kept" "one two fromA fromMe" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
-eq "a snapshot of it: only its own lines" "one two fromMe" \
-    "$(R show "$(snap me):reg.txt" | tr '\n' ' ' | sed 's/ $//')"
-echo amended >>"$W/reg.txt"
-check "commit, then amend" sh -c "git -C '$W' -c user.name=t -c user.email=t@t commit -qam two &&
-    sleep 2 && echo amended2 >>'$W/reg.txt' && git -C '$W' -c user.name=t -c user.email=t@t commit -q --amend -am two"
-for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = amended2 ] && break; sleep 0.1; done
-eq "the amend reaches the branch" "one two fromMe amended amended2" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
-eq "without the layers commit's mark" "0" "$(R cat-file -p me | grep -c '^gitfold-layers')"
-eq "git status still clean" "" "$(git -C "$W" status --short)"
+eq "its lines gone, own ones kept" "one two fromA fromMe amended" "$(paste -sd' ' "$W/reg.txt")"
+eq "git status clean after the switch" "" "$(git -C "$W" status --short)"
+eq "a snapshot of it: only its own lines" "one two fromMe amended" \
+    "$(R show "$(snap me):reg.txt" | paste -sd' ')"
 echo moreMe >>"$W/reg.txt"
 check "remove --all" "$BIN" -C "$W" layer remove --all
-eq "the layer's lines gone, own ones kept" "one two fromMe amended amended2 moreMe" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
-eq "back on the branch, the uncommitted line its change" "me| M reg.txt" \
+eq "the layer's lines gone, own ones kept" "one two fromMe amended moreMe" "$(paste -sd' ' "$W/reg.txt")"
+eq "on the branch, the uncommitted line its change" "me| M reg.txt" \
     "$(G "$W" branch --show-current)|$(git -C "$W" status --short)"
+eq "no filter, no guard left" "unspecified|1|1" \
+    "$(G "$W" check-attr filter -- reg.txt | sed 's/.*: //')|$(G "$W" config filter.gitfold-me.process >/dev/null; echo $?)|$(G "$W" config core.hooksPath >/dev/null; echo $?)"
 }
 
 # Claude Code's read-tracking hook on its Read tool, for each path.
@@ -754,9 +777,9 @@ eq "the tip moved without its files (a push into it): on the base" "$base|" \
 # The snapshot of layer $2 stored for workspace $1.
 stored_snapshot() { awk -F'\t' -v l="layer $2" '$1 == l {print $5}' "$COMMON/gitfold/$1/layers"; }
 
-# A person's workspace with a union file (HEAD at the layers commit): the
-# daemon moves its layers there too, sees a source's commits, and backs off
-# from a switch it can't make.
+# A person's workspace with a union file (filtered for git): the daemon
+# moves its layers there too, sees a source's commits, and backs off from a
+# switch it can't make.
 layers_move_by_themselves_in_a_workspace_with_union_files() {
 echo 'reg.txt merge=union' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
 R add -A; R commit -qm union-merge
@@ -766,8 +789,8 @@ P=$MNT/pe S=$MNT/src
 ls "$P" "$S" "$MNT/other" >/dev/null
 echo fromSrc >>"$S/reg.txt"; echo "s 1" >"$S/s.txt"
 "$BIN" -C "$P" layer add src >/dev/null
-eq "union: HEAD at the layers commit" "one two fromSrc|yes" \
-    "$(paste -sd' ' "$P/reg.txt")|$(G "$P" log -1 --format=%s | grep -q '^gitfold layers' && echo yes)"
+eq "union: HEAD on the branch" "one two fromSrc|pe" \
+    "$(paste -sd' ' "$P/reg.txt")|$(G "$P" branch --show-current)"
 echo "s 2" >"$S/s.txt"
 wait_for_line "$P/s.txt" "s 2" >/dev/null
 eq "a source's new work shows by itself" "s 2" "$(cat "$P/s.txt")"
@@ -785,18 +808,22 @@ sleep 5
 chmod 644 "$COMMON/gitfold/src/upper/u.txt"
 wait_for_line "$P/u.txt" "u 1" >/dev/null
 eq "a layer that couldn't move is tried again" "u 1" "$(cat "$P/u.txt" 2>/dev/null)"
-# pe commits a change to a layer's line: it can't go onto pe alone, so no
-# switch can be made until it is amended; the daemon doesn't retry every
-# round.
-printf 'one\ntwo\n' >"$P/reg.txt"
-# (The daemon may hold the index a moment, telling git of the last move.)
-for _ in $(seq 30); do G "$P" commit -qam "pe: drops src's line" 2>/dev/null && break; sleep 0.2; done
+eq "git sees no change after the moves" "" "$(git -C "$P" status --short)"
+echo fromSrc2 >>"$S/reg.txt"
+wait_for_line "$P/reg.txt" "fromSrc2" >/dev/null
+# (git is told just after the file changes: a status meanwhile may see it.)
+for _ in $(seq 20); do [ -z "$(git -C "$P" status --short)" ] && break; sleep 0.1; done
+eq "a union line moves in by itself, git still sees no change" "one two fromSrc fromSrc2|" \
+    "$(paste -sd' ' "$P/reg.txt")|$(git -C "$P" status --short)"
+# pe's HEAD away from its branch (a bisect, say): its layers don't move
+# until it is back.
+G "$P" switch -q --detach
 echo "s 3" >"$S/s.txt"
-for _ in $(seq 100); do grep -q 'pe: its layers not moved' "$LOG" && break; sleep 0.1; done
-check "the move refused" grep -q 'pe: its layers not moved' "$LOG"
-before=$(stat -c %Y.%y "$COMMON/gitfold/pe/layers")
 sleep 7
-eq "not tried again every round" "$before" "$(stat -c %Y.%y "$COMMON/gitfold/pe/layers")"
+eq "HEAD away: no move" "s 2" "$(cat "$P/s.txt")"
+G "$P" switch -q pe
+wait_for_line "$P/s.txt" "s 3" >/dev/null
+eq "back on the branch: it moves" "s 3" "$(cat "$P/s.txt")"
 }
 
 section "layers: shown in a workspace" layers_shown_in_a_workspace
@@ -805,7 +832,7 @@ section "layers: several changing one file" layers_changing_one_file
 section "layers: following a workspace as it is now; at once" layers_follow_the_workspace_as_it_is_now
 section "layers: of an agent and of a person" layers_of_an_agent_and_of_a_person
 section "layers: moving by themselves without an agent" layers_move_by_themselves_without_an_agent
-section "layers: union files, the layers commit" union_files_and_the_layers_commit
+section "layers: union files, the filter and the guard" union_files_and_the_filter
 section "snapshot: one workspace's work" snapshot_of_one_workspace
 section "snapshot: several merged" snapshot_of_several_merged
 section "proposals: a contract changed by consent" proposals_to_change_a_contract

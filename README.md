@@ -124,7 +124,7 @@ gitfold writes into the repository: worktree registrations under
 `.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
 [Cleaning up](#cleaning-up)), and `refs/gitfold-snapshot/*` and
-`refs/gitfold-layers/*` that keep snapshots of work and layers commits (see
+`refs/gitfold-layers/*` that keep snapshots of work and the layers shown (see
 [Layers](#layers)).
 
 ## Requirements
@@ -489,7 +489,7 @@ stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
 and the layers files, if it has layers (see [Layers](#layers)). Snapshots of its work are kept by refs
-`refs/gitfold-snapshot/<id>/<n>`, a workspace's layers commit by
+`refs/gitfold-snapshot/<id>/<n>`, the layers a workspace shows (a view commit) by
 `refs/gitfold-layers/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
@@ -615,8 +615,7 @@ layer that changes the file. Exit codes: 3 no such workspace, branch,
 revision or layer; 4 refused, nothing changed (the layers shown and stored
 stay as they were; run it again once the cause is gone): a branch that
 shares no history with the base, git busy in the workspace (a commit in
-progress, a stopped rebase),
-a commit made on the layers commit that can't go onto the branch yet, the
+progress, a stopped rebase, HEAD away from the branch), the
 workspace's own lines in a union file that depend on lines that would go
 (see below); 2 usage errors (a workspace as its own layer); 1 other
 errors.
@@ -776,59 +775,65 @@ its new commits as they come; it says when there is nothing to show yet.
   merge=union)`) and for the author itself (`Warning: your lines in
   shapes.rs sit among agent/db's: ...`). Such code belongs on that
   branch: build on it (`gitfold layer base agent/db`).
-- **The layers commit.** While any file is union-merged, HEAD is detached at a
-  layers commit gitfold makes: the unions over the branch tip, its parents
-  the tip and the union layers' snapshot commits, a `gitfold-layers` header, and the
-  subject `gitfold layers: agent/client + agent/api (commits go to
-  agent/client; never push this commit)`. The index has the unions too, so
-  `git status` and `git diff` show only the workspace's own lines in a
-  union file. `git status` says `HEAD detached at <id>`.
-- **Commits made on the layers commit go onto the branch.** Commit normally:
-  within about a second (once git is idle), gitfold copies each commit
-  onto the branch with only the workspace's changes (same author, committer
-  and message; the layers' lines left out), and moves HEAD to a new layers
-  commit with the same tree, so nothing git shows changes. The commit's id
-  on the branch differs from the one `git commit` printed; `git log
-  <branch>` shows it. Once moved, `git commit --amend` would amend the layers
-  commit, taking HEAD off its line (below). A commit that removes or
-  changes a layer's line in a union file depends on that layer's
-  uncommitted work and can't go onto the branch alone: it waits on HEAD,
-  above the layers commit, with every later commit (the daemon log says
-  which paths), and nothing goes onto the branch meanwhile; layer switches
-  exit 4 (`commit <id> can't go onto the branch alone (it changes lines of
-  a layer's)`) until it is amended to leave the layer's lines as they are.
-- **The push guard.** A layers commit holds other workspaces' uncommitted
-  work, so the worktree gets its own `core.hooksPath` (per-worktree config)
-  while one is HEAD, whose `pre-push` refuses a push that would publish a
-  commit with a `gitfold-layers` header (`git push origin HEAD:main`), then
-  runs your own `pre-push`; every other hook runs yours. `git push origin
-  <branch>` pushes the copied commits and is fine. `--no-verify` skips the
-  guard. Turning the last union off puts HEAD back on the branch and
-  removes the guard; uncommitted own lines stay, as changes to the branch's
-  version.
+- **git sees only your lines of a union file: a filter.** HEAD stays on
+  your branch. Each union path gets a clean/smudge filter that gitfold
+  answers: when git reads the file (`status`, `diff`, `add`, `commit -a`,
+  `stash`) it gets only the workspace's own lines; when git writes it
+  (`checkout`, `switch`, `reset`, `stash pop`, `merge`, `rebase`) the
+  layers' lines go back in. The index, commits and stashes hold only your
+  lines; the file shows everyone's. So `git commit`, `--amend`, `HEAD~1`,
+  `reset`, `rebase -i`, `stash`, `cherry-pick`, `revert`, `bisect` and the
+  rest are plain git, and the ids `git commit` prints are the branch's.
+  The filter is defined only in the worktree's own config
+  (`filter.gitfold-<id>.process = gitfold filter-process ...`, `required`,
+  with `extensions.worktreeConfig`), on the paths its own attributes file
+  names (`core.attributesFile` in the worktree's config: your global
+  attributes file, then `"/<path>" filter=gitfold-<id>` per union path);
+  other worktrees and the main one aren't affected. git runs one filter
+  process per command, which asks the daemon (`.git/gitfold/.filter`): if
+  it isn't answering, git fails rather than see the layers' lines. A
+  switch also zeroes the size recorded in the union paths' index entries,
+  so git reads them again rather than take the new size for a change.
+  git can't tell your lines from a layer's line you changed (a formatter
+  respacing the whole file, say): those show in `git diff` as yours, and
+  the guard below refuses committing them.
+- **The guard.** For what doesn't run the filter (`git -c
+  filter.<driver>.clean=cat`, `hash-object --no-filters`, `update-index
+  --cacheinfo`, libgit2-based tools), the worktree gets its own
+  `core.hooksPath` (per-worktree config) while files are union. Its
+  `reference-transaction` refuses an update of your branch to commits that
+  add a layer's uncommitted line to a union file (`gitfold: refusing to
+  update refs/heads/<branch>: commit <id> adds <layer>'s uncommitted line
+  ... to <path> ...`; compared by words, so respacing doesn't hide one). It
+  runs for every ref update, plumbing too (`commit-tree` and `update-ref`),
+  and `--no-verify` doesn't skip it. `pre-push` checks what a push sends the
+  same way, then runs your own `pre-push`; every other hook runs yours. A
+  merge of the layer's branch once it committed those lines passes (a parent
+  has them). libgit2-based tools (GitKraken, gitui) run no hooks: a commit
+  they make can bring the layers' lines onto the branch, and only a `git
+  push` refuses it then. Turning the last union off removes the filter and
+  the guard; uncommitted own lines stay, as changes to the branch's version.
 - **Switches carry own lines over.** When a switch changes a union file
   the workspace has written, its own lines are merged onto the new union (a
   3-way merge; where that conflicts, the new union's lines less those the
-  workspace removed, then its own new lines). A conflicting file that isn't
-  text refuses the switch (exit 4: `<path>: your changes to it depend on
-  lines the layers would no longer show; commit them first, or keep the
-  layers as they are`). A switch first moves the commits made on the layers
-  commit to the branch, and is refused while one can't.
+  workspace removed, then its own new lines; else its lines as git sees
+  them, with the new union's). Where none keeps them all, the switch is
+  refused (exit 4: `<path>: your changes to it depend on lines the layers
+  would no longer show; commit them first, or keep the layers as they
+  are`).
 - **`LAYERS SHOWN`: where git can't be kept right, it is turned off.** If the
   index can't be edited (sparse checkout, a split or sparse index, the index
-  locked meanwhile), or HEAD left the layers commit's line while files are
-  union (`git switch`, `checkout <branch>`, `reset --soft`, `rebase`: the
-  index holds the layers' lines, which mustn't be committed on the branch),
-  the layers still show, but the workspace's `.git` names a directory that
-  doesn't exist, so every git command fails (exit 128) saying why:
-  `fatal: not a git repository: /LAYERS SHOWN (agent/api): git is off
-  here (sparse checkout is on). Run gitfold layer remove --all to use git`.
-  It is kept across remounts, until `gitfold layer remove --all` (or a
+  locked meanwhile), the layers still show, but the workspace's `.git` names
+  a directory that doesn't exist, so every git command fails (exit 128)
+  saying why: `fatal: not a git repository: /LAYERS SHOWN (agent/api): git
+  is off here (sparse checkout is on). Run gitfold layer remove --all to use
+  git`. It is kept across remounts, until `gitfold layer remove --all` (or a
   switch that can edit the index). gitfold commands still find the
-  workspace there.
+  workspace there. Moving HEAD (`git switch`, `bisect`) never turns git off;
+  the layers wait to move until HEAD is back on the branch.
 - **The base waits.** While a layer shows, the workspace's base doesn't
-  follow its branch: commits work and move the branch as usual (with union
-  files, as copied from the layers commit), and the base catches up once no
+  follow its branch: commits work and move the branch as usual, and the
+  base catches up once no
   layer shows (moving it meanwhile could copy the layers' files into the
   workspace's own), and before layers go on in a workspace showing none.
   A move of the branch onto its own base (see [Bases](#bases-stacked-branches))
@@ -854,7 +859,7 @@ its new commits as they come; it says when there is nothing to show yet.
   only then is a new snapshot of it taken), and moves the layers once
   nothing has written to the workspace for 3 seconds, so files don't
   change under you half-way through an edit. A move it can't make (git
-  busy, a commit made on the layers commit that can't go onto the branch)
+  busy, HEAD away from the branch, own lines that would be lost)
   is tried again 10 seconds later, or as soon as you write to the
   workspace. Frozen layers and revisions never move. Each
   move is one line in the daemon's log (`<branch>: its layers moved to
@@ -868,9 +873,9 @@ its new commits as they come; it says when there is nothing to show yet.
   as git was told and then catches up with the stored layers (their
   formats are in [ARCHITECTURE.md](ARCHITECTURE.md)). Layers files of
   earlier builds are read: their shown layers become live, all work; their
-  hidden ones are dropped. While files are union-merged, the worktree's HEAD is
-  the layers commit (found again on a remount), and `refs/gitfold-layers/<id>`
-  keeps it and the view from `git gc`. A fork (`branch -w`) starts without
+  hidden ones are dropped. While layers show, `refs/gitfold-layers/<id>`
+  keeps the view (a commit of it, with the layers' snapshots as parents)
+  from `git gc`. A fork (`branch -w`) starts without
   layers.
 - **Limitations.** A file both the workspace and a layer changed shows the
   workspace's version, unless it is marked for union merging. Union merging assumes a union
@@ -880,7 +885,7 @@ its new commits as they come; it says when there is nothing to show yet.
   there to place them by); only views keep them among the layers' lines,
   not among a workspace's own: where agent/db's lines sit inside your own
   block, your workspace places them by the base's lines (noted).
-  `--no-verify` skips the push guard. A layer not
+  libgit2-based tools ignore the filter (above). A layer not
   updated while its workspace made 16 newer snapshots holds one no ref
   keeps any more, which `git gc` may prune: add it again (`gitfold layer add`).
 
@@ -945,10 +950,9 @@ gitfold list                       # p1
   layer add api` builds your commits on api's and shows api's uncommitted
   work on top. A move takes the layers off, moves the branch as above,
   then puts the same layers back over the new commits (so a layer of api
-  then shows only what api hasn't committed). Union files and the
-  layers commit come back with them; git still sees only the workspace's
-  own changes, and its commits hold only those, commits made on the
-  layers commit moving along. A move that doesn't happen (a conflict, work
+  then shows only what api hasn't committed). Union files and their
+  filter come back with them; git still sees only the workspace's
+  own changes, and its commits hold only those. A move that doesn't happen (a conflict, work
   in the way) leaves the layers as they were, never taken off for it.
   Interrupted half-way (a crash, Ctrl-C), the layers file is untouched,
   and whoever comes next (the daemon at once, or when the workspace opens;
@@ -1335,7 +1339,7 @@ mount and real git (build with `--release` first):
   check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/layers.sh`: snapshots of workspaces' work, layers shown in a
-  workspace (live, frozen, merged, union: the layers commit) and
+  workspace (live, frozen, merged, union: the filter and the guard) and
   proposals (sections as above).
 - `tests/stacks.sh`: branches built on another (`layer base`) moved with
   no workspace, in an open workspace (by the hook and by `layer base`

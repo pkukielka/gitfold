@@ -23,42 +23,10 @@ gitfold_user_hook() {
 	exec "$gitfold_hook" "$@"
 }
 
-# Fails, saying why, if a push of the updates "<local ref> <local oid>
-# <remote ref> <remote oid>" (one per line in $1, as pre-push gets them)
-# would publish a layers commit: one with a gitfold-layers header (it holds other
-# workspaces' uncommitted work). Commits a remote already has don't count.
-gitfold_check_layers() {
-	printf '%s\n' "$1" | while read -r gitfold_lref gitfold_local gitfold_rref gitfold_remote; do
-		# Deletions push no commits.
-		case $gitfold_local in *[!0]*) ;; *) continue ;; esac
-		gitfold_known=
-		case $gitfold_remote in *[!0]*)
-			if git cat-file -e "$gitfold_remote^{commit}" 2>/dev/null; then
-				gitfold_known=^$gitfold_remote
-			fi
-		esac
-		# The first commit with the header, among those pushed; on a failed
-		# walk, a line the headers can't have (they don't hold spaces before
-		# their name), so refused.
-		gitfold_layers=$({
-			git rev-list --pretty=raw "$gitfold_local" $gitfold_known --not --remotes ||
-				echo ' failed'
-		} | awk '
-			/^ failed$/ { print "?"; exit }
-			/^commit / { commit = $2; header = 1; next }
-			/^$/ { header = 0; next }
-			header && /^gitfold-layers( |$)/ { print commit; exit }
-		')
-		case $gitfold_layers in
-		'') ;;
-		'?')
-			echo "gitfold: refusing to push $gitfold_rref: couldn't check it for layers commits" >&2
-			exit 1
-			;;
-		*)
-			echo "gitfold: refusing to push $gitfold_rref: it contains the layers commit $gitfold_layers (other branches' work, shown as layers). Push your branch instead (git push origin <branch>): your commits go onto it without the others' work." >&2
-			exit 1
-			;;
-		esac
-	done
+# The guard (gitfold's src/git/guard.rs): checks the updates on stdin, as
+# hook $1 gets them (ref-update, pre-push), for commits that would bring
+# another layer's uncommitted lines; fails, saying why. GITFOLD_BIN is set
+# on the line above this file's text when installed.
+gitfold_guard() {
+	"$GITFOLD_BIN" guard "$1" "${0%/*}/.."
 }

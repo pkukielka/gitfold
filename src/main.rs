@@ -151,9 +151,10 @@ enum Command {
     /// layer's (listed). Files marked `merge=union` in .gitattributes are
     /// union instead (the layers' lines and the workspace's own, which it
     /// writes; each workspace's lines where it put them among the others'),
-    /// with HEAD at a layers commit; commits made on it go onto the branch
-    /// with only the workspace's changes. Where git can't be kept right, it
-    /// is turned off there, saying why. With no subcommand, lists the layers
+    /// with a filter so git sees and commits only the workspace's own
+    /// lines, and a guard refusing commits that bring the layers' onto the
+    /// branch. Where git can't be kept right, it is turned off there,
+    /// saying why. With no subcommand, lists the layers
     /// (what each shows, how it updates, whether your commits sit on it),
     /// what your commits sit on, their conflicts, notes on landings and on
     /// union files (lines placed by the base's lines, or lines added among
@@ -249,6 +250,18 @@ enum Command {
         #[arg(long)]
         threads: usize,
     },
+    /// git's filter in a workspace with union files (its
+    /// `filter.<driver>.process`): relays to the daemon.
+    #[command(hide = true)]
+    FilterProcess { common_dir: PathBuf, id: String },
+    /// The guard, run by a workspace's hooks: checks the ref updates or
+    /// pushes on stdin for layers' uncommitted lines.
+    #[command(hide = true)]
+    Guard {
+        #[arg(value_enum)]
+        hook: git::guard::Hook,
+        admin: PathBuf,
+    },
     /// Evaluate checkout attributes for every file of a revision.
     #[command(hide = true)]
     BenchAttrs { repo: PathBuf, rev: String },
@@ -331,6 +344,13 @@ fn run() -> Result<i32> {
             mode,
             threads,
         } => prewarm::run(root, mode, threads)?,
+        Command::FilterProcess { common_dir, id } => daemon::filter::relay(&common_dir, &id)?,
+        Command::Guard { hook, admin } => {
+            if let Err(e) = git::guard::run_hook(hook, &admin, std::io::stdin().lock()) {
+                eprintln!("{e:#}");
+                return Ok(1);
+            }
+        }
         Command::BenchAttrs { repo, rev } => {
             git::init(&repo)?;
             bench::attrs::run(&rev)?;

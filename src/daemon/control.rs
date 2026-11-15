@@ -185,9 +185,19 @@ fn with_path<T>(
     common_dir: &Path,
     f: impl FnOnce(&Path) -> std::io::Result<T>,
 ) -> std::io::Result<T> {
+    with_socket(common_dir, ".control", f)
+}
+
+/// Runs `f` with a short path to socket `name` in the state root of the
+/// repository with git common directory `common_dir`.
+pub(super) fn with_socket<T>(
+    common_dir: &Path,
+    name: &str,
+    f: impl FnOnce(&Path) -> std::io::Result<T>,
+) -> std::io::Result<T> {
     let dir = File::open(crate::state::state_root(common_dir))?;
     f(&PathBuf::from(format!(
-        "/proc/self/fd/{}/.control",
+        "/proc/self/fd/{}/{name}",
         dir.as_raw_fd()
     )))
 }
@@ -296,7 +306,7 @@ pub fn serve(
 }
 
 /// The user id of the process at the other end of `stream`.
-fn peer_uid(stream: &UnixStream) -> Option<u32> {
+pub(super) fn peer_uid(stream: &UnixStream) -> Option<u32> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let r = unsafe {

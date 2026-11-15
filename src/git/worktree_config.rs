@@ -1,15 +1,18 @@
 //! A linked worktree's own git configuration, for layers: excludes for the
-//! files other workspaces' layers add, and the push guard against publishing
-//! a layers commit. Both are per-worktree config (`<admin>/config.worktree`,
-//! with `extensions.worktreeConfig`), so the main worktree and the others are
+//! files other workspaces' layers add, the filter that has git see only the
+//! workspace's own lines of a union file, and the guard hooks. All are
+//! per-worktree config (`<admin>/config.worktree`, with
+//! `extensions.worktreeConfig`), so the main worktree and the others are
 //! unaffected; the files they name live in the admin directory too.
 //!
 //! Each setting *replaces* the user's for that worktree (`core.excludesFile`
-//! the global ignore file, `core.hooksPath` the hooks), so what gitfold puts
-//! there includes or runs the user's.
+//! the global ignore file, `core.attributesFile` the global attributes file,
+//! `core.hooksPath` the hooks), so what gitfold puts there includes or runs
+//! the user's.
 
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -22,15 +25,18 @@ use crate::git::{self, cmd};
 const EXCLUDE_FILE: &str = "gitfold-exclude";
 /// Between the user's global ignore patterns and gitfold's in it.
 const MARKER: &[u8] = b"# gitfold layers\n";
+/// The worktree's attributes file, in its admin directory.
+const ATTRIBUTES_FILE: &str = "gitfold-attributes";
 /// The worktree's hooks directory, in its admin directory.
 const HOOKS_DIR: &str = "gitfold-hooks";
 /// What the hooks share; not a hook name, so git never runs it.
 const HOOKS_LIB: &str = "gitfold-lib.sh";
 
 /// Hooks that run the user's of the same name (`githooks(5)`), except
-/// `pre-push` (gitfold's own), `push-to-checkout` (whose mere presence
-/// changes what a push into this worktree does) and `fsmonitor-watchman`
-/// (run only when `core.fsmonitor` names it).
+/// `reference-transaction` and `pre-push` (gitfold's own guard, which then
+/// run the user's), `push-to-checkout` (whose mere presence changes what a
+/// push into this worktree does) and `fsmonitor-watchman` (run only when
+/// `core.fsmonitor` names it).
 const SHIMMED_HOOKS: &[&str] = &[
     "applypatch-msg",
     "pre-applypatch",
@@ -48,7 +54,6 @@ const SHIMMED_HOOKS: &[&str] = &[
     "proc-receive",
     "post-receive",
     "post-update",
-    "reference-transaction",
     "pre-auto-gc",
     "post-rewrite",
     "sendemail-validate",
@@ -72,7 +77,7 @@ pub fn set_excludes<P: AsRef<[u8]>>(admin: &Path, paths: &[P]) -> Result<()> {
     }
     // The file before the config naming it: git never looks for a missing one.
     write_excludes(admin, &ours)?;
-    set(admin, "core.excludesFile", &excludes_path(admin))
+    set(admin, "core.excludesFile", excludes_path(admin).as_os_str())
 }
 
 /// Undoes `set_excludes`: the worktree ignores what the others do again.
@@ -81,21 +86,68 @@ pub fn remove_excludes(admin: &Path) -> Result<()> {
     remove_file(&excludes_path(admin))
 }
 
-/// Installs the push guard in the worktree with admin directory `admin`: its
-/// `core.hooksPath` becomes `<admin>/gitfold-hooks`, where `pre-push`
-/// refuses to push a commit with a `gitfold-layers` header that the remotes
-/// don't have, then runs the user's own `pre-push`; every other hook runs
-/// the user's (as git would without this). The hooks find the user's when
-/// they run, so later changes to them apply.
-pub fn install_push_guard(admin: &Path) -> Result<()> {
+/// Has git in the worktree with admin directory `admin` run filter `driver`
+/// on `paths` (relative to its top): defines the driver in the worktree's
+/// own config, a long-running one (`filter.<driver>.process = process`, a
+/// shell command) that git must not skip (`required`), and points its
+/// `core.attributesFile` at `<admin>/gitfold-attributes`, written as the
+/// user's global attributes file followed by `<path> filter=<driver>` per
+/// path. Replaces the paths a previous call gave. Other worktrees don't
+/// read this file, nor know the driver.
+pub fn set_filter<P: AsRef<[u8]>>(
+    admin: &Path,
+    driver: &str,
+    process: &str,
+    paths: &[P],
+) -> Result<()> {
+    let mut text = user_file(git::user_attributes_file(admin)?)?;
+    text.extend_from_slice(MARKER);
+    for path in paths {
+        text.extend_from_slice(&attribute_pattern(path.as_ref())?);
+        text.extend_from_slice(format!(" filter={driver}\n").as_bytes());
+    }
+    let file = attributes_path(admin);
+    fsutil::write_atomic(&file, &text).with_context(|| format!("writing {}", file.display()))?;
+    set(admin, &format!("filter.{driver}.process"), process.as_ref())?;
+    set(admin, &format!("filter.{driver}.required"), "true".as_ref())?;
+    set(admin, "core.attributesFile", file.as_os_str())
+}
+
+/// Undoes `set_filter`.
+pub fn remove_filter(admin: &Path, driver: &str) -> Result<()> {
+    unset(admin, "core.attributesFile")?;
+    unset(admin, &format!("filter.{driver}.process"))?;
+    unset(admin, &format!("filter.{driver}.required"))?;
+    remove_file(&attributes_path(admin))
+}
+
+/// Installs the guard (`git::guard`) in the worktree with admin directory
+/// `admin`: its `core.hooksPath` becomes `<admin>/gitfold-hooks`, where
+/// `reference-transaction` (when prepared) and `pre-push` run `<gitfold>
+/// guard`, which checks the updates against `<admin>/gitfold-guard`, then
+/// run the user's own hook of the name; every other hook runs the user's
+/// (as git would without this). The hooks find the user's when they run, so
+/// later changes to them apply.
+pub fn install_guard(admin: &Path, gitfold: &Path) -> Result<()> {
     let dir = hooks_path(admin);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    install_file(&dir.join(HOOKS_LIB), include_bytes!("hooks/lib.sh"), 0o644)?;
-    install_file(
-        &dir.join("pre-push"),
-        include_bytes!("hooks/pre-push"),
-        0o755,
-    )?;
+    let lib = [
+        format!(
+            "GITFOLD_BIN={}\n",
+            shell_quote(gitfold.as_os_str().as_bytes())
+        )
+        .as_bytes(),
+        include_bytes!("hooks/lib.sh"),
+    ]
+    .concat();
+    install_file(&dir.join(HOOKS_LIB), &lib, 0o644)?;
+    for name in ["reference-transaction", "pre-push"] {
+        let body = match name {
+            "pre-push" => include_bytes!("hooks/pre-push").as_slice(),
+            _ => include_bytes!("hooks/reference-transaction"),
+        };
+        install_file(&dir.join(name), body, 0o755)?;
+    }
     for name in SHIMMED_HOOKS {
         let shim = format!(
             "#!/bin/sh\n\
@@ -105,11 +157,11 @@ pub fn install_push_guard(admin: &Path) -> Result<()> {
         );
         install_file(&dir.join(name), shim.as_bytes(), 0o755)?;
     }
-    set(admin, "core.hooksPath", &dir)
+    set(admin, "core.hooksPath", dir.as_os_str())
 }
 
-/// Undoes `install_push_guard`: the user's hooks run directly again.
-pub fn remove_push_guard(admin: &Path) -> Result<()> {
+/// Undoes `install_guard`: the user's hooks run directly again.
+pub fn remove_guard(admin: &Path) -> Result<()> {
     unset(admin, "core.hooksPath")?;
     let dir = hooks_path(admin);
     match fs::remove_dir_all(&dir) {
@@ -118,6 +170,45 @@ pub fn remove_push_guard(admin: &Path) -> Result<()> {
         }
         _ => Ok(()),
     }
+}
+
+/// `s` quoted for a POSIX shell.
+pub fn shell_quote(s: &[u8]) -> String {
+    format!("'{}'", String::from_utf8_lossy(s).replace('\'', r"'\''"))
+}
+
+fn attributes_path(admin: &Path) -> PathBuf {
+    admin.join(ATTRIBUTES_FILE)
+}
+
+/// The gitattributes pattern matching exactly `path` (relative to the top
+/// of the worktree): anchored, glob characters escaped, in double quotes
+/// with C escapes (git's quoted patterns), so spaces and quotes are kept.
+fn attribute_pattern(path: &[u8]) -> Result<Vec<u8>> {
+    ensure!(
+        !path.is_empty() && !path.contains(&b'\n'),
+        "can't filter {:?}: not expressible as a gitattributes pattern",
+        String::from_utf8_lossy(path)
+    );
+    let mut glob = vec![b'/'];
+    for &b in path {
+        if matches!(b, b'*' | b'?' | b'[' | b'\\') {
+            glob.push(b'\\');
+        }
+        glob.push(b);
+    }
+    let mut out = vec![b'"'];
+    for b in glob {
+        match b {
+            b'"' => out.extend(b"\\\""),
+            b'\\' => out.extend(b"\\\\"),
+            b'\t' => out.extend(b"\\t"),
+            b if b < 0x20 || b == 0x7f => out.extend(format!("\\{b:03o}").bytes()),
+            b => out.push(b),
+        }
+    }
+    out.push(b'"');
+    Ok(out)
 }
 
 fn excludes_path(admin: &Path) -> PathBuf {
@@ -131,17 +222,17 @@ fn hooks_path(admin: &Path) -> PathBuf {
 /// Writes the excludes file: the user's global ignore file, the marker, then
 /// `ours`.
 fn write_excludes(admin: &Path, ours: &[u8]) -> Result<()> {
-    let mut text = user_excludes(admin)?;
+    let mut text = user_file(git::user_excludes_file(admin)?)?;
     text.extend_from_slice(MARKER);
     text.extend_from_slice(ours);
     let path = excludes_path(admin);
     fsutil::write_atomic(&path, &text).with_context(|| format!("writing {}", path.display()))
 }
 
-/// The content of the user's global ignore file, ending in a newline unless
-/// empty (none, or missing, is empty, as for git).
-fn user_excludes(admin: &Path) -> Result<Vec<u8>> {
-    let Some(path) = git::user_excludes_file(admin)? else {
+/// The content of the user's global file at `path` (ignore, attributes),
+/// ending in a newline unless empty (none, or missing, is empty, as for git).
+fn user_file(path: Option<PathBuf>) -> Result<Vec<u8>> {
+    let Some(path) = path else {
         return Ok(Vec::new());
     };
     let mut text = match fs::read(&path) {
@@ -203,7 +294,7 @@ fn remove_file(path: &Path) -> Result<()> {
 
 /// Sets `key` to `value` in the worktree's own config, enabling per-worktree
 /// config first if needed.
-fn set(admin: &Path, key: &str, value: &Path) -> Result<()> {
+fn set(admin: &Path, key: &str, value: &std::ffi::OsStr) -> Result<()> {
     enable_worktree_config(admin)?;
     let out = cmd::command(admin)
         .args(["config", "--worktree", key])
@@ -427,23 +518,6 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Writes a commit on top of HEAD, with HEAD's tree and a
-    /// `gitfold-layers` header; returns its id.
-    fn layers_commit(w: &Path) -> String {
-        let tree = git(w, &["rev-parse", "HEAD^{tree}"]);
-        let parent = git(w, &["rev-parse", "HEAD"]);
-        let text = format!(
-            "tree {}\nparent {}\nauthor T <t@example.com> 0 +0000\n\
-             committer T <t@example.com> 0 +0000\ngitfold-layers 1\n\nlayers\n",
-            tree.trim(),
-            parent.trim()
-        );
-        let args = ["hash-object", "-t", "commit", "-w", "--stdin"];
-        let out = try_git(w, &args, text.as_bytes());
-        assert!(out.status.success());
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
-    }
-
     fn hook(dir: &Path, name: &str, body: &str) {
         fs::create_dir_all(dir).unwrap();
         let path = dir.join(name);
@@ -451,80 +525,109 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// The push guard refuses a layers commit (and what is on top of it), lets
-    /// other pushes through, and runs the user's own hooks; the main worktree
-    /// has none of it, and removing it restores the worktree.
+    /// The guard's hooks run `<gitfold> guard` (a stand-in here, refusing
+    /// updates to a commit whose message says "leak") on every ref update when
+    /// prepared, `--no-verify` and plumbing included, and on pushes, then the
+    /// user's own hooks; the main worktree has none of it, and removing it
+    /// restores the worktree.
     #[test]
-    fn push_guard() {
-        let (dir, admin) = fixture("push");
+    fn guard_hooks() {
+        let (dir, admin) = fixture("guard");
         let (r, w) = (dir.join("r"), dir.join("w"));
         let ran = dir.join("pre-commit-ran");
         let got = dir.join("pre-push-got");
+        let txn = dir.join("txn-got");
         let user_hooks = r.join(".git/hooks");
         let pre_commit = format!("echo x >> '{}'", ran.display());
         hook(&user_hooks, "pre-commit", &pre_commit);
         let pre_push = format!("cat > '{0}'; echo \"$1\" >> '{0}'", got.display());
         hook(&user_hooks, "pre-push", &pre_push);
+        let user_txn = format!("echo \"$1\" >> '{}'; cat >/dev/null", txn.display());
+        hook(&user_hooks, "reference-transaction", &user_txn);
+        // The stand-in: refuses if a new commit of an update is a "leak".
+        let fake = dir.join("fake gitfold");
+        let check = "while read -r a b c d; do \
+                     for o in $b $d; do \
+                     git cat-file commit $o 2>/dev/null | grep -q '^leak' && \
+                     { echo \"refused: $2\" >&2; exit 1; }; done; done; exit 0";
+        hook(&dir, "fake gitfold", check);
 
-        install_push_guard(&admin).unwrap();
-        install_push_guard(&admin).unwrap();
+        install_guard(&admin, &fake).unwrap();
+        install_guard(&admin, &fake).unwrap();
         let unset =
             |d: &Path| try_git(d, &["config", "core.hooksPath"], b"").status.code() == Some(1);
         assert!(unset(&r));
 
-        // The user's pre-commit runs through the shim.
+        // The user's pre-commit and reference-transaction run through it.
         git(&w, &["commit", "-q", "--allow-empty", "-m", "mine"]);
         assert_eq!(fs::read_to_string(&ran).unwrap(), "x\n");
-
-        let layers = layers_commit(&w);
-        git(&w, &["checkout", "-q", "--detach", &layers]);
-        git(&w, &["commit", "-q", "--allow-empty", "-m", "on layers"]);
-        let out = try_git(&w, &["push", "origin", "HEAD:refs/heads/main"], b"");
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(!out.status.success(), "{stderr}");
-        let refusal = format!(
-            "gitfold: refusing to push refs/heads/main: it contains the layers commit {layers}"
+        let states = fs::read_to_string(&txn).unwrap();
+        assert!(
+            states.contains("prepared\n") && states.contains("committed\n"),
+            "{states}"
         );
-        assert!(stderr.contains(&refusal), "{stderr}");
-        assert!(!got.exists(), "the user's pre-push ran after a refusal");
 
-        // A push without the layers commit passes, through the user's pre-push.
-        git(
+        let refused = |out: Output| {
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            assert!(!out.status.success(), "{stderr}");
+            assert!(stderr.contains("refused: ref-update"), "{stderr}");
+        };
+        let head = git(&w, &["rev-parse", "HEAD"]);
+        refused(try_git(
+            &w,
+            &["commit", "--no-verify", "--allow-empty", "-m", "leak"],
+            b"",
+        ));
+        let tree = git(&w, &["rev-parse", "HEAD^{tree}"]);
+        let leak = git(
+            &w,
+            &["commit-tree", tree.trim(), "-p", "HEAD", "-m", "leak"],
+        );
+        refused(try_git(
+            &w,
+            &["update-ref", "refs/heads/x", leak.trim()],
+            b"",
+        ));
+        assert_eq!(git(&w, &["rev-parse", "HEAD"]), head);
+
+        // Pushes are checked too, then the user's pre-push runs.
+        let out = try_git(
             &w,
             &[
                 "push",
-                "-q",
                 "origin",
-                &format!("{layers}~1:refs/heads/main"),
+                &format!("{}:refs/heads/main", leak.trim()),
             ],
+            b"",
         );
+        assert!(!out.status.success());
+        // (Refused by the ref-update check of the remote-tracking ref, or by pre-push.)
+        assert!(String::from_utf8_lossy(&out.stderr).contains("refused:"));
+        assert!(!got.exists(), "the user's pre-push ran after a refusal");
+        git(&w, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
         let pushed = fs::read_to_string(&got).unwrap();
         assert!(pushed.contains(" refs/heads/main 0000000"), "{pushed}");
         assert!(pushed.ends_with("\norigin\n"), "{pushed}");
-        // So does a deletion.
-        git(&w, &["push", "-q", "origin", ":refs/heads/main"]);
 
         // The main worktree runs the user's hooks itself, and has no guard.
+        git(&r, &["update-ref", "refs/heads/y", leak.trim()]);
         git(&r, &["commit", "-q", "--allow-empty", "-m", "main"]);
-        assert_eq!(fs::read_to_string(&ran).unwrap(), "x\nx\nx\n");
-        git(
-            &r,
-            &["push", "-q", "origin", &format!("{layers}:refs/heads/main")],
-        );
+        assert_eq!(fs::read_to_string(&ran).unwrap(), "x\nx\n");
 
-        remove_push_guard(&admin).unwrap();
-        remove_push_guard(&admin).unwrap();
+        remove_guard(&admin).unwrap();
+        remove_guard(&admin).unwrap();
         assert!(!admin.join(HOOKS_DIR).exists());
         assert!(unset(&w));
+        git(&w, &["update-ref", "refs/heads/x", leak.trim()]);
         git(&w, &["commit", "-q", "--allow-empty", "-m", "after"]);
-        assert_eq!(fs::read_to_string(&ran).unwrap(), "x\nx\nx\nx\n");
+        assert_eq!(fs::read_to_string(&ran).unwrap(), "x\nx\nx\n");
         fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The shims find the user's hooks through the user's core.hooksPath
     /// (any scope but the worktree's), which removal leaves as it was.
     #[test]
-    fn push_guard_user_hooks_path() {
+    fn guard_user_hooks_path() {
         let (dir, admin) = fixture("hookspath");
         let (r, w) = (dir.join("r"), dir.join("w"));
         let user_hooks = dir.join("my-hooks");
@@ -533,13 +636,68 @@ mod tests {
             &r,
             &["config", "core.hooksPath", user_hooks.to_str().unwrap()],
         );
-        install_push_guard(&admin).unwrap();
+        install_guard(&admin, Path::new("/bin/true")).unwrap();
         let out = try_git(&w, &["commit", "--allow-empty", "-m", "x"], b"");
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("no-commit"));
-        remove_push_guard(&admin).unwrap();
+        remove_guard(&admin).unwrap();
         let path = git(&w, &["config", "core.hooksPath"]);
         assert_eq!(path.trim(), user_hooks.to_str().unwrap());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The filter applies to exactly the paths given, whatever characters
+    /// they have, in this worktree only, on top of the user's global
+    /// attributes; it goes away without a trace.
+    #[test]
+    fn filter_per_worktree() {
+        let (dir, admin) = fixture("filter");
+        let (r, w) = (dir.join("r"), dir.join("w"));
+        let global = dir.join("global-attributes");
+        fs::write(&global, "*.g diff=mine").unwrap();
+        git(
+            &r,
+            &["config", "core.attributesFile", global.to_str().unwrap()],
+        );
+        let odd = [
+            "a b.txt",
+            "q\"t",
+            "s*[x]?",
+            "back\\slash",
+            "#h",
+            "!n",
+            " lead",
+        ];
+        let plain = ["ab.txt", "sx", "s*", "back"];
+        // The filter is a stand-in that upper-cases, so a filtered file shows
+        // as changed once written lower-case.
+        let process = "tr a-z A-Z";
+        let attr = |d: &Path, p: &str| {
+            let out = git(d, &["check-attr", "filter", "--", p]);
+            out.rsplit(": ").next().unwrap().trim().to_string()
+        };
+        set_filter(&admin, "gitfold-w", process, &odd).unwrap();
+        set_filter(&admin, "gitfold-w", process, &odd).unwrap();
+        for p in odd {
+            assert_eq!(attr(&w, p), "gitfold-w", "{p:?}");
+            assert_eq!(attr(&r, p), "unspecified", "{p:?}");
+        }
+        for p in plain {
+            assert_eq!(attr(&w, p), "unspecified", "{p:?}");
+        }
+        let diff = git(&w, &["check-attr", "diff", "--", "x.g"]);
+        assert!(diff.ends_with("diff: mine\n"), "{diff}");
+        let required = git(&w, &["config", "filter.gitfold-w.required"]);
+        assert_eq!(required, "true\n");
+        let shared = try_git(&r, &["config", "filter.gitfold-w.process"], b"");
+        assert_eq!(shared.status.code(), Some(1));
+
+        remove_filter(&admin, "gitfold-w").unwrap();
+        remove_filter(&admin, "gitfold-w").unwrap();
+        assert!(!admin.join(ATTRIBUTES_FILE).exists());
+        assert_eq!(attr(&w, odd[0]), "unspecified");
+        let gone = try_git(&w, &["config", "filter.gitfold-w.process"], b"");
+        assert_eq!(gone.status.code(), Some(1));
         fs::remove_dir_all(&dir).unwrap();
     }
 }
