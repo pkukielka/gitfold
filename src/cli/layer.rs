@@ -15,7 +15,7 @@ use crate::git;
 use crate::refusal::Refusal;
 use crate::settings::Local;
 use crate::state::StateDir;
-use crate::state::lens::{Layer, Lens, Shows, Updates, and_list};
+use crate::state::lens::{Layer, Lens, Shows, Updates, View, and_list};
 use crate::state::retire::check_name;
 use crate::state::seal;
 use crate::store::Store;
@@ -131,7 +131,6 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         git::require_branch(&name)?;
         return Err(Refusal::NotFound.error(format!("{name} has no workspace yet")));
     }
-    let store = Store::default();
     if args.op.is_none() {
         print!("{}", listing(&common_dir, &state, &Lens::read(&state)?)?);
         return Ok(());
@@ -150,46 +149,9 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             // A move in progress first: it is what to wait for.
             refuse_if_moving(&common_dir, &state)?;
             refuse_with_base(&common_dir, &local, &name)?;
-            let mut layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
-            let mut what = describe(&layer);
-            if layer.updates == Updates::Live && layer.merge_base == layer.seal {
-                let _ = write!(
-                    what,
-                    " (nothing to show yet: all of {branch} is in your base already; what it \
-                     does next shows here)"
-                );
-            }
-            match slot(&local, &lens, &name, &branch) {
-                Some(i) => {
-                    let was = &lens.layers[i];
-                    // Not moved if it is where it was.
-                    if was.seal == layer.seal {
-                        layer.moved = was.moved;
-                    }
-                    let mine = |b: &str| local.proposal(b).is_some_and(|(_, by)| by == name);
-                    let note = if was.branch == branch {
-                        // A proposal again: still in place of its layer.
-                        layer.instead = was.instead.clone();
-                        String::new()
-                    } else if mine(&branch) {
-                        // A proposal in place of its layer, put back later.
-                        layer.instead = Some(Box::new(was.clone()));
-                        format!(" (in place of {})", was.branch)
-                    } else {
-                        format!(
-                            " (in place of your proposal {0}, which stays: `gitfold layer add \
-                             {0}` shows it again, `gitfold reject {0}` drops it)",
-                            was.branch
-                        )
-                    };
-                    lens.layers[i] = layer;
-                    format!("layer {branch} updated: {what}{note}")
-                }
-                None => {
-                    lens.layers.push(layer);
-                    format!("layer {branch} added: {what}")
-                }
-            }
+            let store = Store::default();
+            let layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
+            add(&local, &mut lens, &name, layer)
         }
         Some(LayerOp::Remove { branch: None, .. }) => {
             lens.layers.clear();
@@ -198,42 +160,88 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         Some(LayerOp::Remove {
             branch: Some(branch),
             ..
-        }) => {
-            // Its layer, or this workspace's proposal shown in its place; a
-            // proposal only itself.
-            let mine = local.proposal(&branch).is_some_and(|(_, by)| by == name);
-            let i = slot(&local, &lens, &name, &branch)
-                .filter(|&i| !mine || lens.layers[i].branch == branch)
-                .ok_or_else(|| {
-                    Refusal::NotFound.error(format!("{branch} isn't a layer of {name}"))
-                })?;
-            let mut was = lens.layers.remove(i);
-            match was.branch == branch {
-                // Your proposal shown in its layer's place: that layer back.
-                true if mine => {
-                    let back = was.instead.take().map(|instead| {
-                        let note = format!("; {} shown again as it was", instead.branch);
-                        lens.layers.insert(i, *instead);
-                        note
-                    });
-                    format!(
-                        "layer {branch} removed{}; the proposal stays: `gitfold reject {branch}` \
-                         drops it",
-                        back.unwrap_or_default()
-                    )
-                }
-                true => format!("layer {branch} removed"),
-                false => format!(
-                    "layer {branch} removed (it showed your proposal {0}, which stays: `gitfold \
-                     reject {0}` drops it)",
-                    was.branch
-                ),
-            }
-        }
+        }) => remove(&local, &mut lens, &name, &branch)?,
     };
     let applied = store_and_apply(&common_dir, &state, &lens)?;
     println!("{done}\n{applied}");
     Ok(())
+}
+
+/// `gitfold layer add`: `layer` added to `lens` (the layers of workspace
+/// `name`), or put in place of the one standing for its branch (`slot`);
+/// says which.
+fn add(local: &Local, lens: &mut Lens, name: &str, mut layer: Layer) -> String {
+    let branch = layer.branch.clone();
+    let mut what = describe(&layer);
+    if layer.updates == Updates::Live && layer.merge_base == layer.seal {
+        let _ = write!(
+            what,
+            " (nothing to show yet: all of {branch} is in your base already; what it does \
+             next shows here)"
+        );
+    }
+    let Some(i) = slot(local, lens, name, &branch) else {
+        lens.layers.push(layer);
+        return format!("layer {branch} added: {what}");
+    };
+    let was = &lens.layers[i];
+    // Not moved if it is where it was.
+    if was.seal == layer.seal {
+        layer.moved = was.moved;
+    }
+    let note = if was.branch == branch {
+        // A proposal again: still in place of its layer.
+        layer.instead = was.instead.clone();
+        String::new()
+    } else if mine(local, &branch, name) {
+        // A proposal in place of its layer, put back later.
+        layer.instead = Some(Box::new(was.clone()));
+        format!(" (in place of {})", was.branch)
+    } else {
+        format!(
+            " (in place of your proposal {0}, which stays: `gitfold layer add {0}` shows it \
+             again, `gitfold reject {0}` drops it)",
+            was.branch
+        )
+    };
+    lens.layers[i] = layer;
+    format!("layer {branch} updated: {what}{note}")
+}
+
+/// `gitfold layer remove BRANCH`: its layer removed from `lens` (the layers
+/// of workspace `name`), or this workspace's proposal shown in its place; a
+/// proposal only itself. Says what it did.
+fn remove(local: &Local, lens: &mut Lens, name: &str, branch: &str) -> Result<String> {
+    let mine = mine(local, branch, name);
+    let i = slot(local, lens, name, branch)
+        .filter(|&i| !mine || lens.layers[i].branch == branch)
+        .ok_or_else(|| Refusal::NotFound.error(format!("{branch} isn't a layer of {name}")))?;
+    let mut was = lens.layers.remove(i);
+    Ok(match was.branch == branch {
+        // Your proposal shown in its layer's place: that layer back.
+        true if mine => {
+            let back = was.instead.take().map(|instead| {
+                let note = format!("; {} shown again as it was", instead.branch);
+                lens.layers.insert(i, *instead);
+                note
+            });
+            format!(
+                "layer {branch} removed{}; the proposal stays: `gitfold reject {branch}` drops it",
+                back.unwrap_or_default()
+            )
+        }
+        true => format!("layer {branch} removed"),
+        false => format!(
+            "layer {branch} removed (it showed your proposal {0}, which stays: `gitfold reject \
+             {0}` drops it)",
+            was.branch
+        ),
+    })
+}
+
+/// Whether `branch` is a proposal of workspace `name`'s.
+fn mine(local: &Local, branch: &str, name: &str) -> bool {
+    local.proposal(branch).is_some_and(|(_, by)| by == name)
 }
 
 /// The layer of `lens` (the layers of workspace `name`) that stands for
@@ -455,7 +463,9 @@ fn deny_hook() -> Result<()> {
         };
         // What is shown, which a pending switch may not have changed yet.
         let lens = crate::state::lens::Applied::read(&state)?.layers()?;
-        let owners = owners(&state, &lens, path.as_bytes())?;
+        let Some((owners, view)) = owners_in_view(&state, &lens, path.as_bytes())? else {
+            return Ok(None);
+        };
         let names: Vec<&str> = (owners.iter())
             .map(|&i| lens.layers[i].branch.as_str())
             .collect();
@@ -488,16 +498,13 @@ fn deny_hook() -> Result<()> {
             )));
         }
         let all = and_list(names.iter().map(|n| n.to_string()));
-        let base = state.read_base()?;
-        let view = crate::state::lens::view(&state.common_dir, &base.id, &lens)?;
-        let conflict =
-            match view.and_then(|v| v.conflicts.into_iter().find(|c| c.path == path.as_bytes())) {
-                Some(c) => {
-                    let names = c.layers.iter().map(|&i| lens.layers[i].branch.clone());
-                    format!(" The changes of {} conflict there.", and_list(names))
-                }
-                None => String::new(),
-            };
+        let conflict = match (view.conflicts.into_iter()).find(|c| c.path == path.as_bytes()) {
+            Some(c) => {
+                let names = c.layers.iter().map(|&i| lens.layers[i].branch.clone());
+                format!(" The changes of {} conflict there.", and_list(names))
+            }
+            None => String::new(),
+        };
         Ok(Some(format!(
             "{path} shows the merge of {all}'s work (layers, read-only here): it can't be \
              changed in this workspace.{conflict} To change it, run `gitfold propose {path} \
@@ -523,24 +530,32 @@ fn deny_hook() -> Result<()> {
 /// show at `path`, read-only there: one, or those whose changes are merged
 /// there. None if what shows is the workspace's own or its base's.
 pub(super) fn owners(state: &StateDir, lens: &Lens, path: &[u8]) -> Result<Vec<usize>> {
+    Ok(owners_in_view(state, lens, path)?.map_or_else(Vec::new, |(owners, _)| owners))
+}
+
+/// `owners`, with the view they were found in (`None` if none was built:
+/// no owners).
+fn owners_in_view(
+    state: &StateDir,
+    lens: &Lens,
+    path: &[u8],
+) -> Result<Option<(Vec<usize>, View)>> {
     if !lens.is_on() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     // Its own file at that path wins: writable.
     if std::fs::symlink_metadata(crate::state::upper_path(&state.upper(), path)).is_ok() {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     git::init(&state.common_dir)?;
     // Most edits are of files no layer changes: told apart without building
     // the view (the deny hook runs on every edit).
     if !changed_by_any(lens, path)? {
-        return Ok(Vec::new());
+        return Ok(None);
     }
     let base = state.read_base()?;
-    let Some(view) = crate::state::lens::view(&state.common_dir, &base.id, lens)? else {
-        return Ok(Vec::new());
-    };
-    Ok(view.mixed.get(path).cloned().unwrap_or_default())
+    let view = crate::state::lens::view(&state.common_dir, &base.id, lens)?;
+    Ok(view.map(|view| (view.mixed.get(path).cloned().unwrap_or_default(), view)))
 }
 
 /// Whether a layer of `lens` changes `path`: its entry there differs
