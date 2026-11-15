@@ -373,8 +373,20 @@ impl Workspace {
             if let (Some(mv), Some(new_base), Some(new_base_tree)) = (mv, &new_base, new_base_tree)
             {
                 let begun = mv.intent.begin(&self.state)?;
+                // git's lock on the index, from the index through the refs:
+                // a commit in between would squash the move into one of the
+                // branch's own. Taken, the branch is checked again: a commit
+                // may have ended since the move was planned.
+                let Some(index_lock) = crate::state::moves::IndexLock::take(&self.state)? else {
+                    return Ok(Switched::Waits(format!(
+                        "{branch}: git is busy (index.lock); retried next time"
+                    )));
+                };
+                if let Some(super::moves::Moved::Waits(why)) = self.moved_meanwhile(&mv.intent)? {
+                    return Ok(Switched::Waits(why));
+                }
                 // Nothing moved if it fails: the index is written whole.
-                crate::state::moves::move_index(&self.state, &mv.intent, false)?;
+                crate::state::moves::move_index(&self.state, &mv.intent, false, Some(&index_lock))?;
                 // Past here, a failure leaves the intent for `recover`.
                 if let Err(e) = self.state.write_base(&new_base.id) {
                     begun.keep();
@@ -389,7 +401,7 @@ impl Workspace {
                         return Err(e);
                     }
                 }
-                held = Some(begun);
+                held = Some((begun, index_lock));
             }
             // Past here the view changes: every failure is reported after the
             // kernel is told what changed.
@@ -447,7 +459,7 @@ impl Workspace {
         };
         self.invalidate(&stale);
         // The move's step 3: the refs.
-        if let (Some(mv), Some(held)) = (mv, held) {
+        if let (Some(mv), Some((held, index_lock))) = (mv, held) {
             let i = &mv.intent;
             let refs = git::stack::move_refs(
                 &self.state.common_dir,
@@ -456,6 +468,7 @@ impl Workspace {
                 (i.own_from, i.own_to),
                 "gitfold: move",
             );
+            drop(index_lock);
             if let Err(e) = refs {
                 held.keep();
                 return Err(e);

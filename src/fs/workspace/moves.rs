@@ -95,7 +95,7 @@ impl Workspace {
     /// Whether the branch and its own ref are still where `intent` starts
     /// from (`None`), else how it ended: a move computed before another one
     /// finished would otherwise move the files against the other's result.
-    fn moved_meanwhile(&self, intent: &Intent) -> Result<Option<Moved>> {
+    pub(super) fn moved_meanwhile(&self, intent: &Intent) -> Result<Option<Moved>> {
         let (common_dir, branch) = (&self.state.common_dir, &self.state.branch);
         let tip = git::stack::rev(common_dir, &format!("refs/heads/{branch}"))?;
         let own = git::stack::rev(common_dir, &git::stack::own_ref(branch))?;

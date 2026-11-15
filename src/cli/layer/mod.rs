@@ -433,8 +433,9 @@ fn remove_edit(
 
 /// `gitfold layer remove --all` on a branch with editable layers: its own
 /// commits come off them, onto main, and every layer goes. An interrupted
-/// move that can't be finished or undone is forgotten instead, moving
-/// nothing more.
+/// move that can't be finished or undone (`Recovery::Stuck`) is forgotten
+/// instead, moving nothing more; one that fails to recover otherwise
+/// stays, the error said.
 fn remove_all_edit(
     common_dir: &Path,
     state: &StateDir,
@@ -444,8 +445,8 @@ fn remove_all_edit(
     let name = &state.branch;
     if state.opened()
         && matches!(
-            crate::state::moves::recover(state),
-            Ok(crate::state::moves::Recovery::Stuck(_)) | Err(_)
+            crate::state::moves::recover(state)?,
+            crate::state::moves::Recovery::Stuck(_)
         )
         && crate::state::moves::forget(state)?
     {
