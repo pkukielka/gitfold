@@ -123,7 +123,18 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         return Ok(());
     }
     let store = Store::default();
-    let mounted = matches!(crate::mount_table::mount_of(&common_dir), Ok(Some(_)));
+    // Mounted, the workspaces the daemon has open: their bases catch up by
+    // themselves.
+    let open: std::collections::HashSet<String> = match crate::mount_table::mount_of(&common_dir) {
+        Ok(Some(_)) => {
+            let request = crate::daemon::control::Request::Open;
+            match crate::daemon::control::request(&common_dir, &request, None) {
+                Ok(Some(open)) => open.lines().map(str::to_string).collect(),
+                _ => Default::default(),
+            }
+        }
+        _ => Default::default(),
+    };
     let lines = match stat {
         true => format!(" {:>8} {:>8}", "+lines", "-lines"),
         false => String::new(),
@@ -179,10 +190,10 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         };
         let task = TaskDir::with(&local, &common_dir, &w.branch);
         let last = last_change(&w.state, &s, &task).map_or("-".into(), age);
-        // What the agent says it is doing, then what gitfold notes. Mounted,
-        // a base behind its branch catches up within seconds (a commit, a
-        // move onto its base): not worth a note.
-        let note = match mounted && git::branch_exists(&w.branch) {
+        // What the agent says it is doing, then what gitfold notes. Open in
+        // the mount, a base behind its branch catches up within seconds (a
+        // commit, a move onto its base): not worth a note.
+        let note = match open.contains(&w.branch) && git::branch_exists(&w.branch) {
             true => "",
             false => base_note(&w.branch, &s.base),
         };

@@ -254,6 +254,14 @@ impl Workspaces {
         local.track_reads(branch).unwrap_or(self.track_reads)
     }
 
+    /// The branches whose workspaces are open.
+    pub fn open_branches(&self) -> Vec<String> {
+        (self.list.read().iter())
+            .filter(|(_, entry)| matches!(entry, Registered::Workspace(_)))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     /// The open workspace of `branch`.
     pub fn get_open(&self, branch: &str) -> Option<Arc<Workspace>> {
         let slot = *self.by_path.lock().get(branch)?;

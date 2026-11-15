@@ -167,7 +167,7 @@ Then, per request (`fs/workspace/`):
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, fusermount |
 | `src/procs.rs` | processes using a mount (from `/proc`) |
 | `src/mount_table.rs` | the mount table: where a gitfold mount is (or a repository's), its source name (the repository) |
-| `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm`, `track-reads` and layer switches (`lens`) while mounted; stopping and resuming prewarm for `unmount`; its version) |
+| `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm`, `track-reads` and layer switches (`lens`) while mounted; stopping and resuming prewarm for `unmount`; its version; the open workspaces, for `list`) |
 | `src/daemon/serve.rs` | the daemon in the foreground: mounting with FUSE, the control requests it answers, until unmounted |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process; the prewarm modes |
 | `src/cli/mod.rs` | what commands share: the repository (`repo`), the workspace the current directory is in (`branch_or_current`; `workspace_at` from the mount, where `.git` turns git away), printing paths as git quotes them (`quote`, `write_path`), the repository lock or a daemon request (`local_or_daemon`) |

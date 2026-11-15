@@ -85,6 +85,8 @@ pub enum Request {
     /// Show the layers stored for the workspace of `branch` (just changed),
     /// if it is open.
     Lens { branch: String },
+    /// The branches whose workspaces are open, one per line.
+    Open,
 }
 
 impl Request {
@@ -108,6 +110,7 @@ impl Request {
             Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
             Request::Lens { branch } => format!("lens\n{branch}\n"),
             Request::Version => "version\n".to_string(),
+            Request::Open => "open\n".to_string(),
             // NUL-separated: a path may hold a newline.
             Request::RecordReads { paths } => format!("record-reads\n{}", paths.join("\0")),
         }
@@ -141,6 +144,7 @@ impl Request {
                 to: to.to_string(),
             }),
             ["version", ""] => Ok(Request::Version),
+            ["open", ""] => Ok(Request::Open),
             ["lens", branch, ""] => Ok(Request::Lens {
                 branch: branch.to_string(),
             }),
@@ -312,6 +316,7 @@ mod tests {
             Request::StopPrewarm,
             Request::ResumePrewarm,
             Request::Version,
+            Request::Open,
             Request::RecordReads { paths: vec![] },
         ];
         for n in names {

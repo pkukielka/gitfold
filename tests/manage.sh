@@ -126,6 +126,12 @@ find "$COMMON/gitfold/ch" -exec touch -h -d '3 days ago' {} +; touch -d '3 days 
 eq "list: nothing changed for 3 days" 3d "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print $6 }')"
 R update-ref -m commit refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m again)"
 eq "a commit alone (the branch's reflog) counts" yes "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print ($6 ~ /^[0-9]+s$/ ? "yes" : $6) }')"
+mount_fs
+eq "mounted, but not open: a base behind is still said" "(base behind the branch tip (updated when opened in the mount))" \
+    "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch"' | grep -o '(base behind.*')"
+ls "$MNT/ch" >/dev/null
+for _ in $(seq 30); do [ "$(cat "$COMMON/gitfold/ch/base")" = "$(R rev-parse ch)" ] && break; sleep 0.1; done
+eq "opened: caught up, nothing said" "" "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch"' | grep -o 'base behind')"
 }
 
 branch_with_changes_a_fork() {

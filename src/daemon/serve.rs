@@ -108,6 +108,7 @@ pub fn run(options: Options) -> Result<()> {
                     .inspect(|done| log::info!("{done}")),
             },
             Request::Version => Ok(crate::VERSION.to_string()),
+            Request::Open => Ok(workspaces.open_branches().join("\n")),
             Request::ResumePrewarm => {
                 prewarm::resume();
                 log::info!("prewarm resumed: the unmount didn't go ahead");

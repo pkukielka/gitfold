@@ -54,7 +54,7 @@ impl Tip {
     fn note(self) -> &'static str {
         match self {
             Tip::At => "",
-            Tip::Behind => "base behind the branch tip (mount to update)",
+            Tip::Behind => "base behind the branch tip (updated when opened in the mount)",
             Tip::Deleted => "branch deleted",
         }
     }
