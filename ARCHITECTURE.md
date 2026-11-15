@@ -147,6 +147,8 @@ Then, per request (`fs/workspace/`):
 | `src/state/moves.rs` | a move under way in a workspace: the `move` intent file (locked while it runs), its steps (the index on the paths it changes, the base, the refs), and finishing or undoing one a crash interrupted |
 | `src/state/snapshot.rs` | snapshots of work: a workspace's uncommitted work as a commit, kept by `refs/gitfold-snapshot/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`snapshotted`): whether an agent drives it; its `UserPromptSubmit` hook's run recorded too (`turns`): whether it has an agent of its own; a union file snapshotted with its own lines only, and what it saw and made there recorded as the snapshot's second parent |
 | `src/state/follow.rs` | moving a workspace's live layers to their latest work (what each follows, a fresh snapshot of a person's workspace, storing and showing them), shared by the `UserPromptSubmit` hook and the daemon |
+| `src/state/waiting.rs` | waiting edits: a workspace's changes to its editable layers' uncommitted lines, worked out from upper and the applied view, in words for the listing, the hook and the refusals |
+| `src/state/guard_check.rs` | the safety net: a workspace's new commits checked with the guard's rule whenever its branch moves (`guard-checked`), what is found kept and said (`guard-alarms`) |
 | `src/state/layers.rs` | a workspace's layers: the `layers` file (each layer's snapshot, what it shows and how it updates, see-only or editable, the layer a proposal stands in for; also a branch's editable layers without a workspace), `layers.next` (the layers a move that changes what the branch builds on will leave, settled once its own ref is there), which paths only editable layers changed (writable), its lock (`layers.lock`), the view (view and hunk trees, mixed and union paths, conflicts, notes, the listing's notes and warnings on union files) and which files are union-merged (`merge=union`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
@@ -162,8 +164,8 @@ Then, per request (`fs/workspace/`):
 | `src/git/index_edit.rs` | editing an index git wrote (v2, v3, v4): skip-worktree bits, stat data and ids of given paths, under git's `index.lock` protocol |
 | `src/git/worktree_config.rs` | a linked worktree's own config: the excludes file for layers' new files (keeping the user's global ignore file); the filter on union files (driver and attributes file); the guard hooks |
 | `src/git/hooks/` | the guard's `reference-transaction` and `pre-push`, and the shell library the worktree's hooks share (embedded) |
-| `src/git/filter.rs` | the clean/smudge filter for union files (clean and smudge from the base's version and the union), git's long-running filter protocol, the relay's frames to the daemon |
-| `src/git/guard.rs` | the guard: the layers' uncommitted lines per union path (`gitfold-guard`), checking ref updates and pushes for commits that bring them (`gitfold guard`) |
+| `src/git/filter.rs` | the clean/smudge filter for union files (clean and smudge from the base's version and the union) and for files only editable layers changed (`Edited`: each hunk the workspace's own or a waiting edit), git's long-running filter protocol, the relay's frames to the daemon |
+| `src/git/guard.rs` | the guard: the layers' uncommitted lines per filtered path (`gitfold-guard`), checking ref updates and pushes for commits that bring them (`gitfold guard`), and finding every such line in a range of commits (the safety net) |
 | `src/daemon/filter.rs` | the filter socket (`.git/gitfold/.filter`) and `gitfold filter-process`, relaying git's requests to it |
 | `src/git/stack.rs` | moves' git side (*internal* name): where a branch's own commits start (`refs/gitfold-own/<branch>`), the merge of several editable layers' tips (`merge_parts`, read back by `parts_of`), computing a move by plumbing, commits that change a layer's lines (`dependent`), moving a branch and its own ref in one transaction, whether an editable layer's commit landed on a target (merged, squashed, rebased, fast-forwarded) |
 | `src/git/test_repo.rs` | unit tests' scratch repository |
@@ -1448,8 +1450,8 @@ a snapshot, with no change to any workspace.
   PR is), with what it means (`your commits will sit on A's (a pull
   request for your branch then includes A's commits until A lands)`) and,
   when A's change to the file isn't committed yet, that edits to A's
-  lines wait until A commits them (the plan: waiting edits aren't built,
-  see Known limitations); not offered when one of them is a revision, a
+  lines wait until A commits them (see "Waiting edits"); not offered when
+  one of them is a revision, a
   proposal, a branch that no longer exists or the main branch. Then a
   proposal (see "Proposals"), asking the layer's agent (`gitfold
   send`), removing the layer. An Edit or MultiEdit whose `new_string` is
@@ -1499,8 +1501,8 @@ a snapshot, with no change to any workspace.
   replaces the user's global ignore file, so the generated file starts with
   its patterns. Removing the layers clears both. A file the base has that
   only editable layers changed isn't marked (`git_plan`): it is writable,
-  and what is written there must be committable; until the filter covers
-  it too, git sees it whole (see Known limitations).
+  and git sees it through the filter (below, "Waiting edits"). One only
+  they have stays excluded, even with an upper copy: edits to it wait.
 - **Union files, for files several agents append to** (a registry, a
   manifest): whole files would show either theirs or mine. A file is
   union-merged if `git check-attr --source=<base> merge` says `union`
@@ -1624,7 +1626,21 @@ a snapshot, with no change to any workspace.
 
   The hook sees every ref update, plumbing included (`commit-tree` and
   `update-ref`), and `--no-verify` doesn't skip it. libgit2 runs no hooks:
-  its commits land on the branch, and only a `git push` refuses them (E3).
+  its commits land on the branch, and a `git push` refuses them (E3). So
+  the **safety net** (`state::guard_check`, the sync thread's
+  `check_branch`, every second): whenever the branch tip differs from the
+  one last checked (`guard-checked` in the state directory, recorded when
+  the workspace opens, so commits made while it was closed are checked at
+  the next mount), the new commits (`tip ^last`, without the layers'
+  branches' own commits, onto which a move puts the branch) are checked
+  with the guard's rule, every line found. Each commit and file found is
+  kept in `guard-alarms` (`<commit> TAB <text>`) until the commit is no
+  longer on the branch, said in the daemon's log, as `WARNING:` in the
+  listing and in the turn hook's notes, naming the commit, the lines and
+  `git reset --soft <commit>^`. Rejected: rewriting such a commit (it is
+  the user's tool's, maybe pushed; a warning keeps git's history theirs).
+  The guard skips lines of punctuation alone (`}`): in code they are
+  everyone's, and a commit adding its own `}` isn't a leak.
   `refs/gitfold-layers/<id>` (common) pins the view commit V (tree M,
   parents the base and every shown snapshot), keeping M and the
   snapshots. Turning the last union off removes the filter, the
@@ -1642,6 +1658,68 @@ a snapshot, with no change to any workspace.
   the whole switch is refused before anything changes (`your changes to it
   depend on lines the layers would no longer show`). The rewritten files
   are invalidated with the rest of the switch.
+- **Waiting edits: files only editable layers changed, through the same
+  filter** (`git::filter::Edited`, `state::waiting`). Such a file (the
+  view's `edited`: the base has it, the view shows it, only editable
+  layers changed it) mixes the branch's lines with a layer's uncommitted
+  ones, which the branch doesn't have yet and mustn't commit, so it gets
+  the union files' driver attribute, guard lines and stat zeroing
+  (`ShownLayers`' `B` records cover both). The difference is in what
+  clean keeps. Each hunk of the diff from the file as shown (M) to the
+  file as it is (W) is either the workspace's own, applied to the base's
+  version after the base line before it, or a **waiting edit**: it changes
+  or deletes a layer's line, inserts lines with a layer's lines on both
+  sides (a method in the layer's new class), or spans base lines the
+  layer deleted (the spec's dependency rule, by diff matching, no line
+  ids). Clean gives the base's version with the own hunks; smudge merges
+  git's version into the file without its own hunks (M with the waiting
+  ones, from upper as it is: `merge(base = B, ours = M + waiting, theirs
+  = git's)`, git's union resolution where they touch if clean gives git's
+  version back), so `checkout`, `stash` and `reset --hard` keep the
+  waiting edits. A binary file's every change waits.
+  - **Stored where every edit is:** in upper, durably, and carried on each
+    switch like a union file's own lines: `merge-file(old M, upper, new
+    M)`, a conflict kept with git's markers (`your waiting edits` against
+    `<layer>'s newer work`) rather than refusing the switch, and listed.
+    A crash after carrying but before the switch is recorded leaves the
+    old view applied: the switch is made again, and carrying again changes
+    nothing. When the layer commits the lines and the branch moves onto
+    that commit, the file isn't the layer's any more (no longer
+    filtered), and upper holds the branch's version plus the edits:
+    ordinary changes. Its index entry, moved with the branch
+    (`move_index`), has its size zeroed as a filtered path no longer
+    filtered, so git reads it once. A copy no longer filtered that is what
+    the view shows (a see-only layer's file now, say) is dropped, so it
+    doesn't hide the layer's file and stay writable. A snapshot keeps
+    only the workspace's own lines of the file in its tree, and the file as
+    seen and as made in its record (`git::layers::Record`), so a layer of
+    it never brings another's uncommitted lines or the waiting edits.
+  - **A file only editable layers have** (`edited_new`, `ShownLayers`'
+    `N` records): excluded, even with an upper copy; every change to it
+    waits, and a snapshot leaves it out. A move doesn't count its upper
+    copy as work in the way (`moves::own_paths`): once the layer commits
+    it, the move brings it into the branch and the copy is an ordinary
+    change.
+  - **git's size rule, again:** a waiting edit changes the file's size,
+    and git takes a size other than the one it recorded as a change
+    without reading the file. So before a write burst to such a file the
+    workspace zeroes its index entry's size (`unstat_edited`, the index
+    editor, skipped while git holds the index: git is then writing the
+    file itself), once until the index changes again.
+  - **Listed and refused:** `state::waiting` works them out from upper and
+    the applied view: per file, how many hunks wait, on whose lines, and
+    whether they conflict (markers). The listing and the turn hook's notes
+    say `N waiting edits in <file>: they change <A>'s uncommitted lines;
+    they become yours to commit once <A> commits them`; `layer add A`
+    (see-only), `layer remove A` and `remove --all` refuse (exit 4), listing
+    them, while some change A's lines, as for commits that do.
+  - **Rejected:** a separate store of waiting edits (a patch per file
+    beside upper): upper is where editors write, so a second copy would
+    have to be kept in step with every write, and a crash between them
+    would lose one; recomputing them from upper and the view is cheap.
+    Union files' lines changed by the workspace as waiting edits (the
+    guard keeps those off the branch; a union file's lines among the
+    others' are the workspace's own by design).
 - **Git off as the fallback:** where the index can't be edited (sparse
   checkout, whose re-application rewrites skip-worktree bits; a split or
   sparse index; an unknown required extension; the index locked), the layers
@@ -1697,7 +1775,10 @@ a snapshot, with no change to any workspace.
   `BACK_OFF` (10 s). A move refused as a whole (the switch: git busy, own
   lines that depend on the layers) is tried again after `BACK_OFF`, or once the
   reader is written to: not snapshotted again, stored and restored every round.
-  The move is
+  Before its layers move, its branch follows its editable layers' new
+  commits, as the hook does (`cli::layer::follow_editable`, below,
+  "Editable layers"), looked at only when one of their tips or its own
+  moved since. The move is
   the hook's own (`state::follow::follow_live`), so the rules can't
   drift apart; it runs under the layers' `flock`, taken without waiting
   (`try_lock`: a command holding it goes first, the check retries next
@@ -1933,8 +2014,12 @@ lines) are listed and nothing moves. Then b moves where it lives:
 Asked moves (`layer add`/`remove`) say first what they move (`moves 3
 commits of ui onto api`) and move on demand; the `UserPromptSubmit` hook
 moves the session's workspace at its agent's turn start onto its live
-editable layers' new commits, never from the daemon's poll (which moves
-only layers' work). A move that changes what b builds on stores the
+editable layers' new commits; in a workspace without an agent, the
+daemon's idle follow (`fs::workspace::follow`) does the same first, once
+its editable layers' or its own tip moved since it last looked (the move
+asked of the daemon itself, on a request thread of its own, while the sync
+thread holds the layers' `flock`), so a person's waiting edits become
+ordinary changes too once the layer commits. A move that changes what b builds on stores the
 layers it will have in `layers.next` (`onto <A>`, then the layers) before
 anything moves; they become b's layers once its own ref is at A
 (`state::layers::settle`, by whoever reads them next), and are dropped
@@ -2324,10 +2409,12 @@ checkout" and "Running it"); this is the why and what it would take.
   git can't see a change to a layer's lines in a union file (a deletion,
   a formatter's rewrite): clean takes them out as the layer's whatever the
   workspace did to them, and one it no longer recognises shows as the
-  workspace's own, which the guard then refuses to commit (waiting edits
-  are the planned answer). libgit2-based tools ignore the filter and run no
-  hooks: they see the layers' lines as changes, and a commit they make
-  lands on the branch with them; only `git push` (pre-push) refuses it. A
+  workspace's own, which the guard then refuses to commit (in a union file;
+  in a file only editable layers changed it is a waiting edit). libgit2-based
+  tools ignore the filter and run no hooks: they see the layers' lines as
+  changes, and a commit they make lands on the branch with them; the daemon
+  warns once it sees the branch move (`state::guard_check`), and `git push`
+  (pre-push) refuses it. A
   layer pins a snapshot that only the newest 16 snapshot refs keep: one
   not moved while its workspace snapshotted 16 times more can be pruned by `git
   gc`. Lost skip-worktree bits (`update-index --no-skip-worktree`, an index
@@ -2336,18 +2423,25 @@ checkout" and "Running it"); this is the why and what it would take.
   (it copies that file). A fork copies only the editable layers (and the
   own ref), but the index and upper as they are (skip-worktree bits, and
   in union files the layers' lines, which become the fork's own).
-- **Editable layers' uncommitted lines can be committed, for now.** A
-  file the base has that only editable layers changed is writable and not
-  skip-worktree: git sees it whole, so `git diff` shows the layers'
-  uncommitted lines in it as the workspace's changes and `commit -a`
-  commits them on the branch, where they then stand without the layer.
-  Waiting edits (edits to an editable layer's uncommitted lines kept apart
-  until the layer commits them, with the filter showing git only the
-  workspace's own lines, as for union files) aren't built; the deny hook's
-  note that such edits wait describes them. Moves also give up rather than
-  carry work over: uncommitted work on a path a move changes makes it wait,
-  and a conflict blocks it until rebased by hand. `git branch -m` doesn't
-  rename a branch's editable layers or own ref (they are found by name).
+- **Waiting edits, as diff matching sees them.** Which of the workspace's
+  changes depend on an editable layer's uncommitted lines is decided per
+  hunk of a line diff from the file as shown (`git::filter::Edited`):
+  a hunk next to the layer's lines on one side only is the workspace's own,
+  placed in the base's version after the base's line before it, which may
+  read differently from where it sat (git's union resolution and the
+  memo keep git's view and the file consistent). A union file's changes to
+  the layers' lines aren't waiting edits (the guard refuses them). The
+  index's size of a file only editable layers changed is zeroed before
+  each write burst to it (`unstat_edited`), one index rewrite per burst: a
+  git command between the view changing and git being told can still see
+  a waiting edit as a change, once. In a snapshot's tree a workspace's
+  waiting edits are left out (only its record has them), so a layer of it
+  shows its own lines only; a file only editable layers have is left out
+  whole. Moves carry uncommitted work over only in files mixed with the
+  layers' lines: elsewhere, uncommitted work on a path a move changes makes
+  it wait, and a conflict blocks it until rebased by hand. `git branch -m`
+  doesn't rename a branch's editable layers or own ref (they are found by
+  name).
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
   resolution uses the kernel's own parent links, so this only affects tools that
@@ -2380,9 +2474,9 @@ compact node table and write measurements. Next:
   [Limitations](#known-limitations).
 - **Parallel creates.** Creating an entry takes the workspace lock
   exclusively; per-directory locking would let parallel writers proceed.
-- **Layers, next phases.** Waiting edits and the filter for files only
-  editable layers changed (see [Known limitations](#known-limitations)).
-  Proposals: a 3-way merge in `accept` instead of the refusal when
+- **Layers, next phases.** Waiting edits in union files (today the guard
+  refuses a change to a layer's line there). Line ids, if diff matching
+  turns out to misplace waiting edits (the design's Stage 2). Proposals: a 3-way merge in `accept` instead of the refusal when
   the layer changed the files since (only safe once the proposal is
   rebased onto the layer's work); several proposals to one layer checked
   together (`consent` checks each alone); the `deps` log of reads of
@@ -2394,9 +2488,8 @@ compact node table and write measurements. Next:
   checking, and blocked moves reaching the branch's inbox, once per
   layer tip. *Moves and layers together:* the hook switches twice at a
   boundary that moves both the commits and a live layer's work (once for
-  the move, once following); one switch would do. The daemon could check
-  the branch tip against the guard when it moves (a libgit2 tool's
-  commit) and warn. Uncommitted work that overlaps a move could be
+  the move, once following); one switch would do. Uncommitted work that
+  overlaps a move outside the files mixed with the layers' lines could be
   carried over with a 3-way merge, as `carry_over` does for unions,
   rather than waiting. A note at commit time when a commit made while a
   see-only layer showed may need its code (`layer add --edit`). *Also:* a

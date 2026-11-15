@@ -543,13 +543,29 @@ gitfold list                            # each branch under what it builds on, w
   so, ask the user, or propose the change instead. For a file several
   see-only layers changed, it names every `--edit` needed (one alone
   leaves the others' lines read-only).
-- **Be careful with its uncommitted lines.** The denial may add `A hasn't
-  committed its change to this file yet: your edits to A's lines wait
-  until A commits them`. Waiting edits aren't built yet: today such a file
-  is writable and git sees it whole, so `git diff` shows A's uncommitted
-  lines in it as yours and `git commit -a` would commit them on your
-  branch. Commit such a file only once A has committed its change, or
-  stage only your own hunks (`git add -p`).
+- **Its uncommitted lines: your edits to them wait.** A file it changed
+  but hasn't committed yet shows its lines, and you may edit them, but
+  your branch doesn't have them yet, so git sees only your own lines there
+  (`git status`, `git diff` and `git commit -a` leave its lines out). A
+  change to its lines (a changed line, or lines added inside its block, a
+  method in its new class) is a **waiting edit**: kept in the file, not
+  seen by git, and listed (`gitfold layer`, and the turn's notes): `1
+  waiting edit in api.rs: it changes A's uncommitted lines; it becomes
+  yours to commit once A commits them`. Once A commits those lines and your
+  branch moves onto them (your next turn), they are ordinary uncommitted
+  changes: commit them as usual. A file A added and hasn't committed is
+  hidden from git until then: all your edits to it wait. If A changes the
+  lines you edited meanwhile, the file shows git's conflict markers
+  (`Conflict: <file>: your waiting edits conflict with A's newer work`):
+  edit them out. `gitfold layer add A` (see-only) and `gitfold layer remove
+  A` refuse (exit 4) while you have waiting edits of A's lines: undo them,
+  or wait for A to commit.
+- **`WARNING: commit <id> ... has <A>'s uncommitted lines in <file>`** (in
+  `gitfold layer` and the turn's notes) means a commit on your branch was
+  made without gitfold's filter and hooks (a GUI built on libgit2) and
+  holds another branch's unfinished lines. Take it out before pushing with
+  the `git reset --soft <id>^` it gives, and commit again with git; `git
+  push` refuses it meanwhile.
 - **It says first what it moves** (`moves 3 commits of p2 onto p1`), then
   what it did. Commits already pushed are refused (exit 4) unless you add
   `--yes`: ask the user first, it rewrites published history.
@@ -558,7 +574,9 @@ gitfold list                            # each branch under what it builds on, w
   and you are told the files that changed under you (read them again).
   Pushed commits move too then: the message gives the push to run. Never
   mid-turn. A frozen layer isn't followed: `gitfold layer add p1 --edit
-  --frozen` again brings it up to date.
+  --frozen` again brings it up to date. In a workspace without an agent (a
+  person's), the daemon does the same once nothing has written to it for a
+  few seconds.
 - **gitfold never pushes.** After a move your branch's history is
   rewritten: push it with the printed `git push --force-with-lease=...`
   (`list` and `gitfold layer` note it too). Suggest it to the user unless

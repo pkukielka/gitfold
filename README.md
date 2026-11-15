@@ -753,11 +753,12 @@ its new commits as they come; it says when there is nothing to show yet.
   there, it starts with that file's patterns). `git status`, `diff`, `add -A`
   and `commit -a` show and commit only the workspace's own changes, as do
   `gitfold changes`, `list` and `remove`. Removing the layers gives the paths
-  back to git. The exception, for now: a file the base has that only
-  editable layers changed isn't skip-worktree, so git sees it whole, and
-  their uncommitted lines in it can be committed with yours (see [Editable
-  layers](#editable-layers-building-on-another-branch)). If git refuses to touch a file you didn't change (a merge or
-  rebase over a layer's path), run `gitfold layer remove --all` and retry.
+  back to git. A file the base has that only editable layers changed is
+  writable, and git sees only your lines of it through the filter below;
+  one only they have stays excluded while you edit it (see [Editable
+  layers](#editable-layers-building-on-another-branch)). If git refuses to
+  touch a file you didn't change (a merge or rebase over a layer's path),
+  run `gitfold layer remove --all` and retry.
 - **Union files: everyone's lines in one file.** A file several agents
   add to (a registry, a manifest, a list of modules) can be union-merged rather
   than shown whole: mark it `merge=union` in `.gitattributes`, e.g.
@@ -829,8 +830,15 @@ its new commits as they come; it says when there is nothing to show yet.
   merge of the layer's branch once it committed those lines passes (a parent
   has them). libgit2-based tools (GitKraken, gitui) run no hooks: a commit
   they make can bring the layers' lines onto the branch, and only a `git
-  push` refuses it then. Turning the last union off removes the filter and
+  push` refuses it then, so the daemon checks your branch's new commits
+  whenever it moves, with the same rule, and warns loudly about one that
+  has a layer's uncommitted lines: `WARNING: commit <id> (<subject>) on
+  <branch> has <layer>'s uncommitted lines in <path>: ...`, in `gitfold
+  layer`, the agent's turn notes and the daemon's log, with the `git reset
+  --soft <id>^` that takes it out (the warning goes once the commit is no
+  longer on the branch). Turning the last union off removes the filter and
   the guard; uncommitted own lines stay, as changes to the branch's version.
+  Files editable layers changed get the same filter and guard (below).
 - **Switches carry own lines over.** When a switch changes a union file
   the workspace has written, its own lines are merged onto the new union (a
   3-way merge; where that conflicts, the new union's lines less those the
@@ -960,13 +968,34 @@ for `layer remove` of an editable layer, and the listing).
   `gitfold layer add`), the main branch (every branch sits on it
   already), or a branch that builds on yours (exit 2). `gitfold branch p2
   --edit main` makes an ordinary branch.
-- **For now, git sees such files whole.** A file the base has that only
-  editable layers changed isn't hidden from git: `git status` and `git
-  diff` show p1's uncommitted lines in it as p2's changes, and `git commit
-  -a` commits them on p2. Commit such a file once p1 has committed its
-  change, or stage only your own lines (`git add -p`). Edits to p1's
-  uncommitted lines that wait until p1 commits them (what the denial's
-  note says) aren't built yet.
+- **git sees only p2's lines; edits to p1's uncommitted lines wait.** A
+  file the base has that only editable layers changed shows p1's
+  uncommitted lines, and p2 may edit all of it, but p2's branch doesn't
+  have those lines yet. git sees the file through the same filter as a
+  union file: `git status`, `diff`, `add -p`, `commit -a`, `stash` and
+  `reset` see only p2's own changes, HEAD on p2. A change that depends on
+  p1's uncommitted lines (it changes or deletes one, or adds lines with
+  p1's lines on both sides: a method inside p1's new class) is a **waiting
+  edit**: kept in the file, left out of git with p1's lines, and listed:
+  ```
+  $ gitfold layer
+  ...
+  2 waiting edits in src/x.rs: they change p1's uncommitted lines; they become yours to commit once p1 commits them
+  ```
+  (also in the agent's turn notes). Once p1 commits those lines and p2
+  moves onto that commit (its agent's next turn, or without an agent, the
+  daemon once nothing has written to the workspace for a few seconds), the
+  file is no longer p1's, and the waiting edits are ordinary uncommitted
+  changes, which `git diff` shows and you commit as usual. When p1 changes
+  the lines a waiting edit changed, the file shows git's conflict markers,
+  listed (`Conflict: src/x.rs: your waiting edits conflict with p1's newer
+  work`): edit them out. A file p1 added and hasn't committed is hidden
+  from git (excluded) until p1 commits it: every change to it waits.
+  Waiting edits live in the workspace's files like any edit, and in its
+  snapshots only in their record of what it saw and made: a snapshot's
+  tree, which other workspaces show as a layer, has only p2's own lines.
+  The guard (above) keeps p1's uncommitted lines off p2's branch, and the
+  daemon's check warns about a commit made without it.
 - **What moves your commits.** Only adding, removing or changing an
   editable layer, and following one at the agent's turns. Each asked move
   says first what it moves, then what it did:
@@ -979,16 +1008,20 @@ for `layer remove` of an editable layer, and the listing).
     main (p1 stays shown, read-only)`). `layer remove p1` does the same,
     and p1 goes. Both refuse (exit 4), listing them, when some of p2's
     commits change p1's lines: `2 commits change p1's lines, so they can't
-    stand without p1: <id> <subject> (<paths>); ...`. `layer remove --all`
-    takes them off every editable layer, onto main.
+    stand without p1: <id> <subject> (<paths>); ...`, and while p2 has
+    waiting edits of p1's lines (`p2 has waiting edits of p1's uncommitted
+    lines in src/x.rs (2 waiting edits): they can't stand without p1. ...`):
+    undo them, or keep p1 editable until it commits them. `layer remove
+    --all` takes them off every editable layer, onto main.
   - At the start of p2's agent's turn, the `UserPromptSubmit` hook
     (`gitfold layer --claude-hook user-prompt-submit`, in the plugin)
     moves p2 onto its live editable layers' new commits and tells the
     agent which files changed under it, then moves its live layers' work
-    as usual. Never mid-turn. Frozen ones aren't followed, and the
-    daemon's following in a workspace without an agent moves layers' work,
-    never commits: `list` and the listing note `needs update: its next
-    turn, or gitfold layer add <LAYER> --edit`.
+    as usual. Never mid-turn. In a workspace without an agent, the daemon
+    does the same once nothing has written to it for a few seconds (and
+    git is idle there). Frozen ones aren't followed: `list` and the
+    listing note `needs update: its next turn, or gitfold layer add
+    <LAYER> --edit`.
 - **Pushing.** gitfold never pushes. An asked move refuses (exit 4)
   commits already pushed (reachable from p2's upstream, or `origin/p2`)
   unless given `--yes` (`1 of them is pushed already (origin/p2): moving
@@ -1391,8 +1424,9 @@ mount and real git (build with `--release` first):
   check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/layers.sh`: snapshots of workspaces' work, layers shown in a
-  workspace (live, frozen, merged, union: the filter and the guard) and
-  proposals (sections as above).
+  workspace (live, frozen, merged, union: the filter and the guard),
+  waiting edits (with and without an agent) and the daemon's check of new
+  commits, and proposals (sections as above).
 - `tests/moves.sh`: a branch's own commits moved onto its editable
   layers' commits (`layer add --edit`, `branch --edit`) and off them
   (`layer add` without `--edit`, `layer remove`), with no workspace, in an
