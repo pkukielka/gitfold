@@ -285,7 +285,11 @@ lists), its parent the workspace's base (or its branch's tip, when the
 workspace committed and its base hasn't caught up yet: a layer then shows
 only what came after the commit; only if the workspace has the tip's
 changes, so not after the branch was moved without them, by a push into
-it say). A branch without a workspace, a
+it say). A file blended with layers' lines (see
+[Layers](#layers)) holds only the workspace's own lines; where it added
+lines among the layers', the commit has a second parent recording what it
+saw there and made of it (`git diff <sha>^2^ <sha>^2`), for the
+workspaces that show it. A branch without a workspace, a
 tag or a commit gives its commit; `--commits` takes only a branch's
 commits even if it has a workspace. Several are merged, in order onto the
 first (or onto `--onto <REV>`), as `git merge-tree` does, to check work
@@ -598,8 +602,9 @@ follows it and how many commits of its own sit on it: see
 added: the name, what it shows (`all work`, `commits only`, or `commits`
 for a branch without a workspace, a tag or a commit) and how it updates
 (`live, last HH:MM`, when it last moved, the date too if not today;
-`frozen at HH:MM`; `fixed`), then the conflicts; `No layers.` if there are
-none. `add` and `remove` print a line saying what they did, then what the
+`frozen at HH:MM`; `fixed`), then the conflicts, then notes and warnings
+on blended files (`Note: ...`, `Warning: ...`, below); `No layers.` if
+there are none. `add` and `remove` print a line saying what they did, then what the
 daemon did: while mounted, it shows the change at once, printing notes
 about the new view after its summary (`note: Conflict: <path> is changed
 by both <A> and <B> (it shows git's conflict markers)`, or `note: <path>:
@@ -629,13 +634,27 @@ its new commits as they come; it says when there is nothing to show yet.
   truncating, removing, renaming them (or a directory holding one) and
   `chmod` fail with `EACCES`, as does creating a path a layer deleted. They
   are another agent's work in progress: a change made here would become this
-  workspace's own file, hiding theirs and committed with this branch. To
-  change one, propose a change (below), ask its agent (`gitfold send
-  <BRANCH> <TEXT>`), or remove the layer (`gitfold layer remove <BRANCH>`)
-  and edit your own version. A file a layer changed is that layer's, the
-  base's lines in it too; one several layers change is all of theirs.
-  In Claude Code, the plugin denies its edit tools such a file, saying this
-  and naming every layer whose changes it shows.
+  workspace's own file, hiding theirs and committed with this branch. Code
+  that depends on another branch's code is built on that branch, as a
+  stacked pull request is: `gitfold layer base <BRANCH>` puts your commits
+  on its commits, and what it committed becomes yours to edit (what it
+  hasn't committed yet stays its layer's, read-only, until it does; see
+  [Bases](#bases-stacked-branches)). Otherwise, to change one, propose a
+  change (below), ask its agent (`gitfold send <BRANCH> <TEXT>`), or
+  remove the layer (`gitfold layer remove <BRANCH>`) and edit your own
+  version. A file a layer changed is that layer's, the base's lines in it
+  too; one several layers change is all of theirs. Files marked for
+  blending are the exception (below): every workspace adds its lines to
+  them. In Claude Code, the plugin denies its edit tools such a file,
+  saying this and naming every layer whose changes it shows. For one
+  layer's file it offers, in this order: building on that branch
+  (`gitfold layer base <BRANCH>`; not for a tag or a commit, nor the
+  branch it is built on already, and saying when it would replace
+  another base, or when the branch hasn't committed its change to the
+  file yet), a proposal, asking its agent, removing the layer. An edit
+  that only adds whole lines (a list, a changelog) also gets a hint: if
+  the order of the file's lines doesn't matter, mark it `merge=union` in
+  `.gitattributes`, and every workspace can add lines to it.
 - **Proposals: changing a layer's file (a contract).** A typical tree: a
   root agent writes the interfaces in a workspace (`contracts`), each child
   shows it as a layer and builds against it. When a child needs an
@@ -734,6 +753,29 @@ its new commits as they come; it says when there is nothing to show yet.
   kept both (git's own meaning of `merge=union`); a layer's change that conflicts with what is below it isn't
   blended in (a note says so). The file stays writable: the workspace's own
   lines go on top of the layers'.
+- **Blended lines keep their place.** A workspace's snapshot holds only its
+  own lines of a blended file (so a layer of it never brings another
+  layer's lines), but also records what it saw there: the blend, the other
+  layers' lines included. A workspace showing it applies its change from
+  that (a 3-way merge of what the author saw, the blend so far and the
+  author's file), so a line added between another layer's lines sits
+  between them wherever that layer shows too. Where those lines aren't
+  shown (that layer isn't a layer there), its lines are placed by the
+  base's lines, and a note says so (`note: agent/api's lines in
+  registry.txt are placed by your base's lines: the lines agent/api added
+  them among aren't in the layers shown here`; `gitfold layer` lists it
+  as `Note: ...`). Snapshots taken by earlier builds have no record, and
+  are placed by the base's lines as before. Your branch's commits still
+  hold only your own lines.
+- **A warning for lines that may not belong in a list.** Lines added
+  between two of another branch's lines, next to none of the base's (a
+  method added inside another layer's class), suggest the file isn't a
+  list after all: `gitfold layer` and the switch's notes say so, for the
+  workspaces showing it (`Warning: agent/api's lines in shapes.rs sit
+  among agent/db's: this file may not be a list (it's marked
+  merge=union)`) and for the author itself (`Warning: your lines in
+  shapes.rs sit among agent/db's: ...`). Such code belongs on that
+  branch: build on it (`gitfold layer base agent/db`).
 - **The layers commit.** While any file is blended, HEAD is detached at a
   layers commit gitfold makes: the blends over the branch tip, its parents
   the tip and the blended layers' snapshot commits, a `gitfold-lens` header, and the
@@ -803,7 +845,7 @@ its new commits as they come; it says when there is nothing to show yet.
   or the reader's. The daemon leaves such a workspace's layers to its
   turns. A third hook, `gitfold layer --claude-hook pre-tool-use` on Edit,
   Write, MultiEdit and NotebookEdit, denies writing a layer's file with the
-  reason above.
+  reason and the ways out above.
 - **Without an agent.** In a workspace where no Claude Code hook has run
   (a person works in it, in an editor or a shell), the mounted daemon
   moves the live layers itself: every 2 seconds it looks for newer work (an
@@ -833,7 +875,12 @@ its new commits as they come; it says when there is nothing to show yet.
 - **Limitations.** A file both the workspace and a layer changed shows the
   workspace's version, unless it is marked for blending. Blending assumes a blended
   file's lines are unique and their order doesn't matter where two sides
-  append at the same place. `--no-verify` skips the push guard. A layer not
+  append at the same place. Your branch's commits hold only your lines of
+  a blended file, placed by the base's lines (the layers' lines aren't
+  there to place them by); only views keep them among the layers' lines,
+  not among a workspace's own: where agent/db's lines sit inside your own
+  block, your workspace places them by the base's lines (noted).
+  `--no-verify` skips the push guard. A layer not
   updated while its workspace made 16 newer snapshots holds one no ref
   keeps any more, which `git gc` may prune: add it again (`gitfold layer add`).
 

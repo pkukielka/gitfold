@@ -307,10 +307,9 @@ gitfold layer remove --all             # stop showing every layer
 - **Adding a layer again replaces it** with the flags you give, and brings
   it up to date (a frozen one too). A branch is never shown twice (nor
   with your proposal to change it: adding one replaces the other).
-- **Not on a branch with a base** (built on another branch than main, see
-  "Bases"): `layer add` refuses (exit 4). Look at the base's work with
-  `gitfold snapshot <base>`, or take the branch off its base
-  first (`gitfold layer base main`).
+- **On a branch with a base too** (built on another branch than main, see
+  "Bases"): the layers show over the base's commits, and stay shown when
+  the branch moves onto the base's new commits.
 - **The listing** (`gitfold layer`) shows `Base: <branch>` first, then one
   line per layer: what it shows (`all work`, `commits only`, `commits`) and
   how it updates (`live, last 14:07`, `frozen at 14:02`, `fixed`), then
@@ -319,7 +318,13 @@ gitfold layer remove --all             # stop showing every layer
   progress; a change made here would become your own copy of the file,
   hiding theirs from you and landing in your commits. Writing one fails
   with `EACCES` (Claude Code's edit tools are denied, saying whose it is).
-  Three ways out:
+  Ways out, in this order:
+  - **build on its branch** if your code depends on its code (as a stacked
+    pull request would): `gitfold layer base <BRANCH>` puts your commits
+    on its commits, and what it has committed becomes yours to edit (see
+    "Bases"). What it hasn't committed yet stays its layer's, read-only,
+    until it commits it (the denial says when that is so). It replaces
+    your current base, if you have one (one base per branch);
   - **propose the change**: `gitfold propose <file>` (see "Contracts"
     below): you edit a copy of the layer's workspace, shown here in its
     place, and its agent accepts it;
@@ -328,6 +333,11 @@ gitfold layer remove --all             # stop showing every layer
   - or **`gitfold layer remove <BRANCH>`**, then edit your own version (a
     file of yours at a layer's path always wins over the layer, and stays
     yours).
+
+  If you only wanted to add lines to a list (a changelog, a registry, a
+  module list), the denial says so: if the order of its lines doesn't
+  matter, it can be marked `merge=union` (below), and then every workspace
+  adds its lines to it.
 - **Whole files:** a file both you and a layer changed shows your version,
   unless it is blended (below).
 - **A layer brings only its own changes.** A file it changed shows your
@@ -362,8 +372,18 @@ gitfold layer remove --all             # stop showing every layer
   layer add <BRANCH>`). Only files your base has are blended. A blended
   file shows the base's version with every layer's lines and stays
   writable: add your lines anywhere (lines both sides add at one place are
-  all kept). A `note:` after `gitfold layer add` says if a layer's change
-  to it couldn't be blended in.
+  all kept). Your lines keep their place among the layers' lines in the
+  workspaces that show your work along with those layers (your snapshot
+  records what you saw); where those layers aren't shown, your lines are
+  placed by the base's lines. A `note:` after `gitfold layer add` says if a
+  layer's change to it couldn't be blended in, or was placed by the base's
+  lines.
+- **`Warning: ... lines in <file> sit among <A>'s: this file may not be a
+  list`** (in `gitfold layer`, and after a switch) means lines were added
+  between two of another branch's lines, inside its block (a method in its
+  class). Blending is for lists; code that goes inside another branch's
+  code belongs on that branch: build on it (`gitfold layer base <A>`), or
+  ask its agent.
 - **With blended files, git shows and commits only your lines.** HEAD is
   then detached at a layers commit (`git log -1`: `gitfold layers: <you> +
   <layers> (commits go to <you>; never push this commit)`), and `git
