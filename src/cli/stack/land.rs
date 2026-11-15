@@ -68,6 +68,12 @@ pub fn trunk_name(common_dir: &Path, local: &Local) -> Option<String> {
     Some(local_of(common_dir, &trunk).unwrap_or(trunk))
 }
 
+/// The main branch as commands given to users name it: `trunk_name`, else
+/// `main`.
+pub fn main_name(common_dir: &Path, local: &Local) -> String {
+    trunk_name(common_dir, local).unwrap_or_else(|| "main".into())
+}
+
 /// The commit to move onto for the trunk named `name` (`main`, or as
 /// configured, `origin/main`): the newer of the local branch and the
 /// configured trunk, the configured one if they diverged, whichever exists

@@ -798,7 +798,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
         );
     }
     let (Some((_, parent_tip)), Some(base)) = (resolved, base) else {
-        let trunk = land::trunk_name(common_dir, &local).unwrap_or_else(|| "main".into());
+        let trunk = land::main_name(common_dir, &local);
         return Ok(Outcome::Refused(format!(
             "its base {parent} is missing: `gitfold layer base <BRANCH>` builds it on another, \
              `gitfold layer base {trunk}` on {trunk} with no other base"

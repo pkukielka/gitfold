@@ -294,8 +294,7 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
         Recovery::Undone
     } else {
         let main =
-            crate::cli::stack::land::trunk_name(common, &crate::settings::Local::read(common))
-                .unwrap_or_else(|| "main".into());
+            crate::cli::stack::land::main_name(common, &crate::settings::Local::read(common));
         Recovery::Stuck(format!(
             "an interrupted move of {} onto its base, from {}: the branch and its index moved \
              since; once its workspace is as you want it, `gitfold layer base {main} -w {}` \

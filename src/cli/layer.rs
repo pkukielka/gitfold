@@ -259,7 +259,7 @@ fn refuse_with_base(common_dir: &Path, local: &Local, name: &str) -> Result<()> 
     if super::stack::land::is_trunk(common_dir, local, &parent) {
         return Ok(());
     }
-    let trunk = super::stack::land::trunk_name(common_dir, local).unwrap_or_else(|| "main".into());
+    let trunk = super::stack::land::main_name(common_dir, local);
     Err(Refusal::Changes.error(format!(
         "{name} is built on {parent}; layers on a branch with a base aren't supported yet: \
          show {parent}'s work with a snapshot (`gitfold snapshot {parent}`), or take {name} \
