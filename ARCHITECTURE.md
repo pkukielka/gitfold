@@ -143,8 +143,8 @@ Then, per request (`fs/workspace/`):
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/state/restack.rs` | a restack under way in a workspace: the `restack` intent file (locked while it runs), and finishing or undoing one a crash interrupted |
-| `src/state/seal.rs` | seals: a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>` |
-| `src/state/lens.rs` | a workspace's layers: the `lens` file (each layer's seal, what it shows and how it updates), the view (view and hunk trees, mixed and blended paths, conflicts, notes) and which files are blended (`merge=union`) |
+| `src/state/seal.rs` | seals (snapshots, to users): a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>`; the workspace's newest one recorded in its state (`sealed`) |
+| `src/state/lens.rs` | a workspace's layers: the `lens` file (each layer's seal, what it shows and how it updates, the layer a proposal stands in for; version 1 files read too), its lock (`lens.lock`), the view (view and hunk trees, mixed and blended paths, conflicts, notes) and which files are blended (`merge=union`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
@@ -174,7 +174,7 @@ Then, per request (`fs/workspace/`):
 | `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
 | `src/cli/list.rs` | `list` (the stacks as a tree) and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
-| `src/cli/snapshot.rs` | `snapshot`: seals merged into a snapshot (and the `Stop` hook that seals) |
+| `src/cli/snapshot.rs` | `snapshot`: workspaces' work (seals, in the code) merged into one snapshot (and the `Stop` hook that takes one) |
 | `src/cli/layer.rs` | `layer`: `add`, `remove`, the listing (the base line, the layers, their conflicts), `base` (handed to `stack`); the hooks that move live layers, moving a branch onto its base first, and deny edits of their files, offering a proposal |
 | `src/cli/proposal.rs` | `propose`, `proposals`, `consent`, `accept` and `reject`: changes to a layer's files made in a fork of its workspace, checked against the workspaces that read them, written into the layer's workspace |
 | `src/cli/stack/mod.rs` | `layer base` and `branch --base`: building a branch on another (its base), moving it onto its base's new commits or off the stack onto the trunk, refusing to move pushed commits without `--yes`; the move the `UserPromptSubmit` hook does, re-parenting the children of a base that landed, `list`'s notes |
@@ -211,6 +211,11 @@ Then, per request (`fs/workspace/`):
 
 ## Glossary
 
+User-facing text uses three concepts only: **layer**, **base** and
+**snapshot**. The code keeps some internal names (seal, lens, lensed,
+restack, stack, surrender), marked *internal* below with the user-facing
+term; they never appear in messages, help or the README.
+
 - **Snapshot**: `@<rev>`, showing the tree of a commit, read-only.
 - **Workspace**: `<branch>`, a writable view of a branch, made of a lower and an
   upper layer.
@@ -232,17 +237,22 @@ Then, per request (`fs/workspace/`):
   view tree).
 - **Upper**: every file that differs from the base, as real files in
   `.git/gitfold/<id>/upper`.
-- **Seal**: a commit of a workspace's uncommitted work: the tree it shows,
-  ignored files left out, on its base, made with a fixed identity and date.
-  An internal name: `gitfold snapshot` makes one, and user-facing text
-  calls it a snapshot.
+- **Seal** (*internal*; user-facing: a snapshot of a workspace's work): a
+  commit of a workspace's uncommitted work: the tree it shows, ignored
+  files left out, on its base, made with a fixed identity and date.
+  `gitfold snapshot` and the `Stop` hook make one. Its refs outlive the
+  workspace; the workspace's own newest is recorded in its state
+  (`sealed`), so a live layer never follows an earlier workspace's.
 - **Layer**: another branch's work shown in a workspace, read-only: one of
   its workspace's seals, or a branch's or a revision's commit, as the
   changes since a pinned merge base. **Live** layers follow their branch
-  (the newest seal, or the tip), **frozen** ones stay as taken, revisions
-  are **fixed**. The layers of a workspace, in the order added, are its
-  **lens** in the code (also the name of the file storing them); "lensed"
-  means it has at least one. User-facing text says "layers" only.
+  (the newest seal of its workspace as it is now, one taken at the
+  reader's turn start if it has none yet; or the tip), **frozen** ones
+  stay as taken, revisions are **fixed**.
+- **Lens** (*internal*; user-facing: the layers): the layers of a
+  workspace, in the order added (also the name of the file storing them);
+  **lensed** (*internal*; user-facing: "layers shown") means it has at
+  least one.
 - **View tree** (M): the hunk tree with the layers' other changes on top,
   whole files; where several layers change one, their 3-way merge against
   the base's version, conflict markers kept (the base's version if they
@@ -255,7 +265,7 @@ Then, per request (`fs/workspace/`):
 - **Mixed path**: a path a layer changed (or deleted) that isn't blended:
   the layer's whole file (or the merge of several layers'), read-only,
   unless upper has it. It belongs to every layer whose change it shows.
-- **Layers commit** (L; the lens commit in the code): HEAD, detached,
+- **Layers commit** (L; *internal*: the lens commit): HEAD, detached,
   while files are blended: tree H over the branch tip, parents the tip
   and the blended layers' seals, a `gitfold-lens` header. The **view commit** (V, tree M, first parent L)
   is what `refs/gitfold-lens/<id>` points at, keeping both.
@@ -266,21 +276,25 @@ Then, per request (`fs/workspace/`):
 - **Push guard**: the per-worktree `pre-push` hook that refuses to publish
   a layers commit while HEAD is one.
 - **Proposal**: a fork of a layer's workspace (`<layer>-prop/<ws>`) where a
-  workspace showing the layer edits the layer's files, shown in its place;
-  its changes are its seal against what it started from. **Consent**: the
+  workspace showing the layer edits the layer's files, shown in its place
+  (the layer it stands in for kept with it, `instead` in the layers file,
+  so the layer comes back as it was shown: live or frozen, all work or
+  commits only); its changes are its seal against what it started from.
+  **Consent**: the
   layer's work as now with those changes, checked in the view of each
   workspace showing the layer (merged with its own work, and tested).
-- **Stacked branch**: a branch built on another, its **base** (`gitfold
-  layer base`; the **parent** in the code, `gitfoldParent`); its **parent
-  base** is the commit of the parent its own commits sit on
-  (`refs/gitfold-stack/<branch>`).
-- **Restack**: copying a stacked branch's own commits onto its parent's
-  tip, and moving the branch (and its workspace's files) there ("moved
-  onto its base", "updated" in messages).
+- **Stacked branch** (*internal*: stack; user-facing: a branch with a
+  base): a branch built on another, its **base** (`gitfold layer base`;
+  the **parent** in the code, `gitfoldParent`); its **parent base** is the
+  commit of the parent its own commits sit on (`refs/gitfold-stack/<branch>`).
+- **Restack** (*internal*; user-facing: "moved onto its base",
+  "updated"): copying a stacked branch's own commits onto its parent's
+  tip, and moving the branch (and its workspace's files) there.
 - **Switch**: changing what the layers show (a layer added, replaced,
   removed or moved to newer work), telling the kernel and git, and
   carrying the workspace's own lines in blended files over.
-- **Surrender**: turning git off in a lensed workspace whose index can't be
+- **Surrender** (*internal*; user-facing: "git is off here"): turning git
+  off in a workspace with layers whose index can't be
   edited, or whose HEAD left the lens commit's line: its `.git` names a
   nonexistent `/LAYERS SHOWN (...)` directory saying why.
 - **Whiteout**: a recorded deleted lower path, so it stays hidden.
@@ -1496,6 +1510,36 @@ a snapshot, with no change to any workspace.
   mid-turn. The agent's own `gitfold layer add` switches at once: a
   boundary it chose. Frozen layers and revisions never move: a reader
   that wants a fixed point says so, rather than turning a layer off.
+- **A live layer follows its workspace as it is now:** the newest seal is
+  the one recorded in the workspace's own state directory (`sealed`, written
+  by every seal), not the highest-numbered ref: seal refs outlive the
+  workspace (layers name them, and the id comes from the branch name), so
+  after `gitfold remove` and a new workspace of that branch the newest ref
+  is an earlier workspace's work. The state directory goes with the
+  workspace, so its record can't be stale. A workspace with no seal yet
+  (opened since, or whose sessions never stopped: a person's) is sealed at
+  the reader's turn start, rather than the layer staying on old work.
+  Rejected: deleting a workspace's seal refs on `remove` (refs that layers
+  name must stay, so the newest could still be old); numbering
+  incarnations in the ref names (a new ref layout, for the same result).
+- **Read-modify-write of the layers under a lock:** `layer add`/`remove`,
+  the hook moving live layers, `propose`, and `accept`/`reject` putting a
+  layer back all read the layers file, change it and write it whole;
+  without a lock two at once lose one's change. Each holds an exclusive
+  `flock` on `lens.lock` in the workspace's state directory across the
+  read, the change and the daemon's switch (the daemon only reads the
+  file and takes its own per-workspace lock, so this can't deadlock). The
+  repository lock (`lock.rs`) can't serve: a mounted daemon holds it for
+  its life.
+- **The layers file's format:** `version 2`, one line per layer: `layer
+  <name> TAB <work|commits-only|commits> TAB <live|frozen|fixed> TAB <when
+  it last moved, seconds since the epoch> TAB <commit> TAB <merge base>`,
+  a proposal's line followed by `instead` and the same fields for the layer
+  it stands in for. Version 1 files (`layer <name> TAB <on|off> TAB
+  <commit> TAB <merge base>`, from builds before `--frozen`/`--commits`)
+  are read, also inside `lens-applied`: `on` is live, all work, its time
+  the file's; `off` (a hidden layer, which no longer exists) is dropped.
+  The README names these "the layers files" and leaves the formats here.
 
 **Rejected:**
 

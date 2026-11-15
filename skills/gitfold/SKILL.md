@@ -305,7 +305,12 @@ gitfold layer remove --all             # stop showing every layer
 ```
 
 - **Adding a layer again replaces it** with the flags you give, and brings
-  it up to date (a frozen one too). A branch is never shown twice.
+  it up to date (a frozen one too). A branch is never shown twice (nor
+  with your proposal to change it: adding one replaces the other).
+- **Not on a branch with a base** (built on another branch than main, see
+  "Stacked branches"): `layer add` refuses (exit 4). Look at the base's
+  work with `gitfold snapshot <base>`, or take the branch off its base
+  first (`gitfold layer base main`).
 - **The listing** (`gitfold layer`) shows `Base: <branch>` first, then one
   line per layer: what it shows (`all work`, `commits only`, `commits`) and
   how it updates (`live, last 14:07`, `frozen at 14:02`, `fixed`), then
@@ -421,15 +426,16 @@ when done).
 **As a child**, when a contract (a layer's file) must change for your task:
 
 1. `gitfold propose <file>...` (from your workspace). It prints the new
-   branch (`<layer>-prop/<you>`, a copy of the contracts' workspace with
-   their uncommitted work) and where to edit:
+   branch (`<layer>-prop/<you>`, a copy of the contracts' work, uncommitted
+   included) and where to edit:
    `<mount>/<layer>-prop/<you>/<file>`. Your workspace now shows the
    proposal in the layer's place. `--from <DIR>` copies `<DIR>/<file>` in
    instead.
 2. Edit the files **there** (the path printed; not in your workspace,
    where they stay read-only). Keep the change minimal: others build on
-   these files. Run `gitfold layer add <branch>` to see the edits in your
-   workspace, then build and test your own work against them.
+   these files. Your next turn shows the edits in your workspace (or now:
+   `gitfold layer add <branch>`); then build and test your own work
+   against them.
 3. Tell the layer's agent: `gitfold send <layer> -s "proposal" "<branch>:
    <what changed and why>"`. Wait for its answer in your inbox: `contract
    changed` (accepted; your workspace shows the layer again, with it) or
@@ -466,8 +472,10 @@ when done).
    a reason the proposer can act on.
 
 **A child told `contract changed`** reads the message (the changed lines),
-re-reads the files it uses (run `gitfold layer add <layer>` first if the message
-came mid-turn: the layer moves at your next prompt), and adapts its work.
+re-reads the files it uses (the message says when your layer shows the
+change: a live one at your next prompt, or now with `gitfold layer add
+<layer>`; a frozen one when you add it again with `--frozen`), and adapts
+its work.
 
 ## Stacked branches
 

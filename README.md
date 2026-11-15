@@ -298,7 +298,8 @@ stderr, for one workspace); a workspace's work is kept by a ref,
 `refs/gitfold-seal/<id>/<n>`, numbered from 1, the newest 16 kept. It works
 mounted or not: unmounted it prints the commit instead of the path (and
 says so on stderr). It exits 4 on conflicts, listing the paths (`conflicts
-merging <BRANCH>:`), and 3 if a name is neither a branch nor a revision. An
+merging <BRANCH>:`, then how to look at each alone), and 3 if a name is
+neither a branch nor a revision (`no branch or revision <NAME>`). An
 untracked nested repository is left out (logged).
 
 ### Workspaces
@@ -479,7 +480,7 @@ last tip, see above), as real files; `markers` records deleted files so they
 stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
-`lens` its layers, if any (see [Layers](#layers)). Snapshots of its work are kept by refs
+and the layers files, if it has layers (see [Layers](#layers)). Snapshots of its work are kept by refs
 `refs/gitfold-seal/<id>/<n>`, a workspace's layers commit by
 `refs/gitfold-lens/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
@@ -549,7 +550,9 @@ changes it makes since it and the workspace's base diverged; that merge base
 is pinned with the layer, so it shows the same files whatever happens to
 either branch until it moves. A live layer moves at the agent's turns (see
 *Between turns* below) and whenever `layer add` names it again: a
-workspace's to its newest snapshot, a branch's to its tip. `--frozen` takes
+workspace's to its newest snapshot (only one of its workspace as it is now,
+never one left by an earlier workspace of that branch; if it has none yet,
+one is taken then), a branch's to its tip. `--frozen` takes
 it as it is now and leaves it there (`--frozen --commits`: the branch's
 commits as they are now); a revision never moves. Adding a layer again
 replaces it in place, with the flags given, and brings it up to date: the
@@ -579,14 +582,27 @@ daemon did: while mounted, it shows the change at once, printing notes
 about the new view after its summary (`note: <path>: <A> and <B> change it
 and conflict: it shows git's conflict markers`, `note: <path>: <layer>'s
 change conflicts with what is below it, so it isn't blended in`, or
-`...'s version hides a change on your base since it diverged`); unmounted,
-it is stored and shown when the workspace opens. Exit codes: 3 no such
-workspace, branch, revision or layer, 4 the change is stored but not shown
-yet (the workspace shows it once the cause is gone): git busy in the
-workspace (a commit in progress, a stopped rebase), a commit made on the
-layers commit that can't go onto the branch yet, or the workspace's own
-lines in a blended file that depend on lines that would go (see below); 2
-usage errors, 1 other errors (a workspace as its own layer).
+`<path>: <layer>'s version is older than your base's (it hides a change
+made since); ask <layer> to update`); unmounted, it is stored and shown
+when the workspace opens. A conflict names the layers whose changes
+conflict, not every layer that changes the file. Exit codes: 3 no such
+workspace, branch, revision or layer; 4 refused, nothing changed (the
+layers shown and stored stay as they were; run it again once the cause is
+gone): git busy in the workspace (a commit in progress, a stopped rebase),
+a commit made on the layers commit that can't go onto the branch yet, the
+workspace's own lines in a blended file that depend on lines that would go
+(see below), or a branch built on a base (`layer add` on it: layers on a
+branch with a base aren't supported yet; `gitfold snapshot <BASE>` shows
+the base's work instead, or `gitfold layer base main` takes the branch off
+its base first); 2 usage errors (a workspace as its own layer); 1 other
+errors.
+
+`layer add <BRANCH>` while your proposal to change BRANCH shows in its
+place replaces the proposal (which stays, as a branch: `gitfold layer add
+<PROPOSAL>` shows it again in the same place, `gitfold reject <PROPOSAL>`
+drops it); `layer remove <BRANCH>` then removes the proposal's place.
+Adding the branch the workspace's base came from (`layer add main`) shows
+its new commits as they come; it says when there is nothing to show yet.
 
 - **A layer's files are read-only.** They have no write bits; writing,
   truncating, removing, renaming them (or a directory holding one) and
@@ -606,9 +622,9 @@ usage errors, 1 other errors (a workspace as its own layer).
   ```
   cd ~/mnt/repo/child-3
   gitfold propose api/billing.rs     # branch contracts-prop/child-3: a copy of
-                                     # contracts' workspace, shown here in its place
+                                     # contracts' work, shown here in its place
   $EDITOR ~/mnt/repo/contracts-prop/child-3/api/billing.rs
-  gitfold layer add contracts-prop/child-3   # the edits show here (the next turn does too)
+  # the next turn shows the edits here (or now: gitfold layer add contracts-prop/child-3)
   # in contracts' workspace (the root):
   gitfold proposals                  # who proposed what (diff stat), consent so far
   gitfold consent contracts-prop/child-3 \
@@ -617,8 +633,9 @@ usage errors, 1 other errors (a workspace as its own layer).
   ```
 
   `propose <PATH>... [--layer <L>] [--from <DIR>] [-w <WS>]` forks the
-  layer's workspace (`branch --with-changes`, with its uncommitted work)
-  into `<L>-prop/<WS>` (the layer defaults to the one whose file the first
+  layer's workspace (`branch --with-changes`, with its uncommitted work;
+  for a layer without a workspace, its commits) into `<L>-prop/<WS>`,
+  shown as all work, live (the layer defaults to the one whose file the first
   path shows, named with `--layer` where several layers merge it; paths
   are relative to the current directory in the
   workspace), copies `<DIR>/<PATH>` there with `--from`, and puts the
@@ -652,15 +669,20 @@ usage errors, 1 other errors (a workspace as its own layer).
   its stored state unmounted). Refused (exit 4) if the layer changed any of
   them since the proposal was made, or without a passed consent check of
   the proposal and the layer as they are now (`--force` accepts anyway).
-  Workspaces showing the proposal show the layer again, at once; those
-  showing the layer get the change at their next turn (or now: `gitfold
-  layer add <L>`); each one but those whose read records say they didn't read the
-  files gets a message (`subject: contract changed`, the lines as proposed).
+  Workspaces showing the proposal show the layer again, at once, as they
+  showed it before (live or frozen, all work or commits only: a frozen one
+  is taken again, with the change); those showing the layer live get the
+  change at their next turn (or now: `gitfold layer add <L>`), frozen ones
+  when they add it again (`gitfold layer add <L> --frozen`), commits-only
+  ones once the layer commits it. Each one but those whose read records
+  say they didn't read the files gets a message saying which (`subject:
+  contract changed`, the lines as proposed).
   The proposal's workspace and branch are removed; edits made to it while
   it was accepted stay in it as a proposal of their own, and a workspace in
   use stays as a plain branch to remove later. `reject <PROPOSAL> [--reason
   <TEXT>]`, in the layer's or the proposer's workspace, removes it untaken,
-  shows the layer again and tells the proposer. Both act as the workspace
+  shows the layer again as it showed before the proposal (a live one up to
+  date, a frozen one as it was) and tells the proposer. Both act as the workspace
   you are in: `-w` names one only when run outside every workspace.
 - **A switch** (any of the commands above, or the hook below) tells the
   kernel exactly what changed: the files whose content changed, the entries
@@ -757,17 +779,15 @@ usage errors, 1 other errors (a workspace as its own layer).
   to date. A third hook, `gitfold layer --claude-hook pre-tool-use` on Edit,
   Write, MultiEdit and NotebookEdit, denies writing a layer's file with the
   reason above.
-- **Stored** in the workspace's state directory: `lens`, rewritten whole,
-  `version 2` and then one line per layer, in the order added: `layer
-  <name> TAB <work|commits-only|commits> TAB <live|frozen|fixed> TAB <when
-  it last moved, seconds since the epoch> TAB <commit> TAB <merge base>`;
-  `lens-applied`, what the daemon last applied (the layers file then, the
-  paths git was told to skip, the blended paths, the layers commit), so a
-  workspace opens as git was told and then catches up with the stored
-  layers; `lens-git-off`, while git is turned off, holds why. While files
-  are blended, the worktree's HEAD is the layers commit (found again on a
-  remount), and `refs/gitfold-lens/<id>` keeps it and the view from `git
-  gc`. A fork (`branch -w`) starts without layers.
+- **Stored** in the workspace's state directory, in the layers files: the
+  layers as added, and what the daemon last applied, so a workspace opens
+  as git was told and then catches up with the stored layers (their
+  formats are in [ARCHITECTURE.md](ARCHITECTURE.md)). Layers files of
+  earlier builds are read: their shown layers become live, all work; their
+  hidden ones are dropped. While files are blended, the worktree's HEAD is
+  the layers commit (found again on a remount), and `refs/gitfold-lens/<id>`
+  keeps it and the view from `git gc`. A fork (`branch -w`) starts without
+  layers.
 - **Limitations.** A file both the workspace and a layer changed shows the
   workspace's version, unless it is marked for blending. Blending assumes a blended
   file's lines are unique and their order doesn't matter where two sides
