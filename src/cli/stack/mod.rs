@@ -1084,42 +1084,44 @@ fn copy_onto(
         parent_tip: onto,
         stack_old: base.stored,
     };
-    let moved = if state.opened() {
-        match crate::mount_table::mount_of(common_dir)? {
-            Some(mount) => apply_open(&state, &mount.join(name), &intent)?,
-            None => match crate::lock::lock(common_dir)? {
-                Some(_lock) => apply_closed(
-                    &state,
-                    &Intent {
-                        mode: Mode::Closed,
-                        ..intent
-                    },
-                )?,
-                None => Moved::Waits("the repository is being mounted or unmounted; retry".into()),
-            },
-        }
-    } else {
-        match stack::move_refs(
-            common_dir,
-            name,
-            (tip, new_tip),
-            (base.stored, onto),
-            "gitfold: move onto base",
-        ) {
-            Ok(()) => Moved::Done(None),
-            Err(_) if stack::rev(common_dir, &format!("refs/heads/{name}"))? == Some(new_tip) => {
-                Moved::Already
-            }
-            Err(e) => return Err(e),
-        }
-    };
-    let files = match moved {
+    let files = match move_branch(&state, intent)? {
         Moved::Done(files) => files,
         Moved::Already => return Ok(Copied::Stop(Outcome::UpToDate)),
         Moved::Waits(why) => return Ok(Copied::Stop(Outcome::Waits(why))),
     };
     settings::set_restack_blocked(common_dir, name, None)?;
     Ok(Copied::Moved { files, dropped })
+}
+
+/// Moves the branch of `state` as `intent` says, where it lives: its
+/// workspace mounted (`apply_open`), unmounted (`apply_closed`), or only its
+/// refs if it has none.
+fn move_branch(state: &StateDir, intent: Intent) -> Result<Moved> {
+    let (common_dir, name) = (&state.common_dir, &state.branch);
+    if !state.opened() {
+        return match move_refs(state, &intent) {
+            Ok(()) => Ok(Moved::Done(None)),
+            Err(_) if stack::rev(common_dir, &format!("refs/heads/{name}"))? == Some(intent.to) => {
+                Ok(Moved::Already)
+            }
+            Err(e) => Err(e),
+        };
+    }
+    match crate::mount_table::mount_of(common_dir)? {
+        Some(mount) => apply_open(state, &mount.join(name), &intent),
+        None => match crate::lock::lock(common_dir)? {
+            Some(_lock) => apply_closed(
+                state,
+                &Intent {
+                    mode: Mode::Closed,
+                    ..intent
+                },
+            ),
+            None => Ok(Moved::Waits(
+                "the repository is being mounted or unmounted; retry".into(),
+            )),
+        },
+    }
 }
 
 /// Whether a branch at `tip` with parent base `base` needs no restack onto
