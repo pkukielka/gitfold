@@ -375,16 +375,16 @@ impl Conflict {
 pub struct View {
     /// M: the base's tree with the layers' changes.
     pub tree: ObjectId,
-    /// H: the base's tree with only the blended files blended (see `blend`).
+    /// H: the base's tree with only the union files union-merged (see `union`).
     pub hunk_tree: ObjectId,
     /// The paths the layers' whole files replace, delete or merge, with the
     /// layers (their indexes in `Layers::layers`) whose changes show there:
     /// read-only.
     pub mixed: HashMap<Vec<u8>, Vec<usize>>,
-    /// The blended files (see `blend`), with the layers blended in: the
+    /// The union files (see `union`), with the layers union-merged in: the
     /// workspace writes them, its own lines on top of theirs.
-    pub blended: HashMap<Vec<u8>, Vec<usize>>,
-    /// The snapshots of the layers blended in (L's parents after the base).
+    pub union: HashMap<Vec<u8>, Vec<usize>>,
+    /// The snapshots of the layers union-merged in (L's parents after the base).
     pub hunk_snapshots: Vec<ObjectId>,
     /// The paths where a layer's change conflicts with the base's or
     /// another layer's.
@@ -392,7 +392,7 @@ pub struct View {
     /// What the agent should hear about it.
     pub notes: Vec<String>,
     /// The notes the listing shows too, each with its `Note:` or
-    /// `Warning:`: blended lines placed by the base's lines, or sitting
+    /// `Warning:`: union lines placed by the base's lines, or sitting
     /// among another branch's.
     pub warnings: Vec<String>,
 }
@@ -401,7 +401,7 @@ pub struct View {
 /// layers. Each layer's changes are its snapshot's since it and `base` diverged
 /// (`merge_base`, see the module doc).
 ///
-/// A file is blended, rather than shown whole, if it is `merge=union` (in
+/// A file is union-merged, rather than shown whole, if it is `merge=union` (in
 /// the base's `.gitattributes` or `info/attributes`), the base has it and no
 /// layer deletes it: every layer's change to it is merged into the base's
 /// version, lines both sides add kept both (registries, manifests: files
@@ -439,8 +439,8 @@ pub fn view(
     let hunk_layers = view.hunk_layers();
     for note in view.notes {
         notes.push(match note {
-            git::layers::Note::NotBlended { layer, path } => format!(
-                "{path}: {}'s change conflicts with what is below it, so it isn't blended in",
+            git::layers::Note::NotInUnion { layer, path } => format!(
+                "{path}: {}'s change conflicts with what is below it, so it isn't union-merged in",
                 name(layer)
             ),
             git::layers::Note::PlacedByBase { layer, path } => {
@@ -492,7 +492,7 @@ pub fn view(
         mixed: (view.mixed.iter())
             .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
             .collect(),
-        blended: (view.blended.iter())
+        union: (view.union.iter())
             .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
             .collect(),
         hunk_snapshots: (hunk_layers.into_iter())
@@ -505,7 +505,7 @@ pub fn view(
 }
 
 /// The warnings (`View::warnings`) for the own lines of the workspace in
-/// `state` (on base commit `base`, showing `layers` as `view`) in its blended
+/// `state` (on base commit `base`, showing `layers` as `view`) in its union
 /// files: those added between two lines of its layers', next to none of the
 /// base's.
 pub fn own_among(
@@ -519,7 +519,7 @@ pub fn own_among(
         item.map_or(Ok(Vec::new()), |i| git::read_blob(i.oid))
     };
     let mut out = Vec::new();
-    let mut paths: Vec<&Vec<u8>> = view.blended.keys().collect();
+    let mut paths: Vec<&Vec<u8>> = view.union.keys().collect();
     paths.sort();
     for path in paths {
         let Ok(made) = fs::read(super::upper_path(&state.upper(), path)) else {
@@ -531,7 +531,7 @@ pub fn own_among(
             continue;
         }
         let mut whose = Vec::new();
-        for &ix in &view.blended[path] {
+        for &ix in &view.union[path] {
             let layer = &layers.layers[ix];
             let theirs = content(git::resolve(&layer.snapshot.to_string())?.tree, path)?;
             let mb = git::resolve(&merge_base(&base.id, layer)?.to_string())?;
@@ -551,7 +551,7 @@ pub fn own_among(
     Ok(out)
 }
 
-/// The note for a layer `layer` whose lines in blended file `path` are
+/// The note for a layer `layer` whose lines in union file `path` are
 /// placed by the base's lines (`git::layers::Note::PlacedByBase`).
 fn placed_by_base(layer: &str, path: &BString) -> String {
     format!(
@@ -560,7 +560,7 @@ fn placed_by_base(layer: &str, path: &BString) -> String {
     )
 }
 
-/// The warning for lines of `whose` (`B's`, `your`) in blended file `path`
+/// The warning for lines of `whose` (`B's`, `your`) in union file `path`
 /// that sit among lines of `others` (`A's`): `path` may not be a list.
 pub fn among(whose: &str, path: &BString, others: &str) -> String {
     format!(
@@ -603,8 +603,8 @@ pub const SHOWN_LAYERS: &str = "layers-shown";
 /// `version 1`, `head <oid or ->`, `next <oid or ->` (the layers commit HEAD is
 /// being moved to, adopted if it got there), a line `layers <bytes>` giving the length of
 /// the layers file that follows, then NUL-terminated records: `S<path>` a
-/// path git was told to skip (skip-worktree), `B<path>` a blended path whose
-/// index entry git was given the blend for.
+/// path git was told to skip (skip-worktree), `B<path>` a union path whose
+/// index entry git was given the union for.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShownLayers {
     /// The layers file's content when applied (empty: none).
@@ -615,7 +615,7 @@ pub struct ShownLayers {
     /// writes it first): if HEAD is there, it got there.
     pub next: Option<ObjectId>,
     pub skipped: std::collections::BTreeSet<Vec<u8>>,
-    pub blended: std::collections::BTreeSet<Vec<u8>>,
+    pub union: std::collections::BTreeSet<Vec<u8>>,
 }
 
 impl ShownLayers {
@@ -659,7 +659,7 @@ impl ShownLayers {
         for record in rest[len..].split(|&b| b == 0).filter(|r| !r.is_empty()) {
             match record.split_first() {
                 Some((b'S', path)) => applied.skipped.insert(path.to_vec()),
-                Some((b'B', path)) => applied.blended.insert(path.to_vec()),
+                Some((b'B', path)) => applied.union.insert(path.to_vec()),
                 _ => return Err(bad()),
             };
         }
@@ -675,7 +675,7 @@ impl ShownLayers {
         )
         .into_bytes();
         data.extend_from_slice(&self.layers);
-        for (tag, set) in [(b'S', &self.skipped), (b'B', &self.blended)] {
+        for (tag, set) in [(b'S', &self.skipped), (b'B', &self.union)] {
             for path in set {
                 data.push(tag);
                 data.extend_from_slice(path);

@@ -805,7 +805,7 @@ fn of_layer(local: &Local, p: &Proposal, branch: &str) -> bool {
 
 /// What the workspace in `state` (showing `layers`) would show with `accepted`
 /// (`p` accepted) in place of `p`'s layer and its proposals: its view tree
-/// with its own work on top, as a commit on its base. Blended files show the
+/// with its own work on top, as a commit on its base. Union files show the
 /// workspace's own version, if it has one.
 fn view_with(
     store: &Store,

@@ -6,7 +6,7 @@
 //! (`@<sha>`), merged with other workspaces' snapshots (`gitfold snapshot`), and
 //! is what a layer shows of another workspace (`layers`).
 //!
-//! A blended file (`merge=union`) is snapshotted with the workspace's own lines
+//! A union file (`merge=union`) is snapshotted with the workspace's own lines
 //! only, against the base; where it added lines among other layers' lines,
 //! the snapshot also records what it saw there and made of it, as its second
 //! parent (`git::layers::Record`), so the workspaces showing it put those
@@ -172,8 +172,8 @@ fn has_tip(state: &StateDir, base: ObjectId, tip: &git::Commit, tree: ObjectId) 
 pub fn snapshot(store: &Store, state: &StateDir, by: By) -> Result<Snapshot> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;
-    let blends = blends(state, &base)?;
-    let (tree, seen) = tree_of(state, &base.tree, &s.changed, &s.deleted, &blends)
+    let unions = unions(state, &base)?;
+    let (tree, seen) = tree_of(state, &base.tree, &s.changed, &s.deleted, &unions)
         .with_context(|| format!("taking a snapshot of {}", state.branch))?;
     let saw = match seen.is_empty() {
         true => None,
@@ -317,8 +317,8 @@ pub fn list(common_dir: &std::path::Path, id: &str) -> Result<Vec<(u64, ObjectId
     Ok(snapshots)
 }
 
-/// A blended file the workspace added lines to among other layers' lines:
-/// the blend it saw and its own copy (`git::layers::Record`).
+/// A union file the workspace added lines to among other layers' lines:
+/// the union it saw and its own copy (`git::layers::Record`).
 struct Seen {
     path: Vec<u8>,
     kind: EntryKind,
@@ -328,13 +328,13 @@ struct Seen {
 
 /// The tree `base` becomes with upper's `changed` paths and without `deleted`
 /// ones: blobs written for the changed files, trees only along changed paths.
-/// With the blended files to record (`Seen`).
+/// With the union files to record (`Seen`).
 fn tree_of(
     state: &StateDir,
     base: &ObjectId,
     changed: &[Vec<u8>],
     deleted: &[Vec<u8>],
-    blends: &Blends,
+    unions: &Unions,
 ) -> Result<(ObjectId, Vec<Seen>)> {
     let upper = state.upper();
     let mut seen = Vec::new();
@@ -368,17 +368,17 @@ fn tree_of(
                     0 => EntryKind::Blob,
                     _ => EntryKind::BlobExecutable,
                 };
-                match blends.get(path) {
-                    // A blended file: its own lines only, and, if they sit
+                match unions.get(path) {
+                    // A union file: its own lines only, and, if they sit
                     // among other layers' lines, where (`Seen`).
-                    Some((blend, before)) => {
+                    Some((union, before)) => {
                         let made = fs::read(&file)?;
-                        let own = own_lines(&std::env::temp_dir(), &made, blend, before)?;
-                        if blend != before && own != *before {
+                        let own = own_lines(&std::env::temp_dir(), &made, union, before)?;
+                        if union != before && own != *before {
                             seen.push(Seen {
                                 path: path.clone(),
                                 kind,
-                                seen: repo.write_blob(blend)?.detach(),
+                                seen: repo.write_blob(union)?.detach(),
                                 made: repo.write_blob(&made)?.detach(),
                             });
                         }
@@ -398,7 +398,7 @@ fn tree_of(
 }
 
 /// The record (`git::layers::Record`) of a snapshot of `branch` on `base` with
-/// tree `tree`, of the blended files `seen`: its commit.
+/// tree `tree`, of the union files `seen`: its commit.
 fn seen_record(branch: &str, base: ObjectId, tree: ObjectId, seen: &[Seen]) -> Result<ObjectId> {
     git::with_repo(|repo| {
         let empty = repo.write_object(gix::objs::Tree::empty())?.detach();
@@ -448,17 +448,17 @@ fn commit(
     )?)
 }
 
-/// Per blended path, the blend and the base's version (`blends`).
-type Blends = HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
+/// Per union path, the union and the base's version (`unions`).
+type Unions = HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
 
-/// For each file the workspace in `state` shows blended (`state::layers`),
-/// the blend and the base's version: a snapshot of it holds the upper copy with
-/// the change from the blend back to the base's version merged in (only its
+/// For each file the workspace in `state` shows union-merged (`state::layers`),
+/// the union and the base's version: a snapshot of it holds the upper copy with
+/// the change from the union back to the base's version merged in (only its
 /// own lines), so a workspace showing it as a layer gets the other layers'
 /// work from them, not through it.
-fn blends(state: &StateDir, base: &git::Commit) -> Result<Blends> {
+fn unions(state: &StateDir, base: &git::Commit) -> Result<Unions> {
     let applied = super::layers::ShownLayers::read(state)?;
-    if applied.blended.is_empty() {
+    if applied.union.is_empty() {
         return Ok(HashMap::new());
     }
     let Some(view) = super::layers::view(&state.common_dir, &base.id, &applied.layers()?)? else {
@@ -469,7 +469,7 @@ fn blends(state: &StateDir, base: &git::Commit) -> Result<Blends> {
         item.map_or(Ok(Vec::new()), |i| git::read_blob(i.oid))
     };
     let mut out = HashMap::new();
-    for path in &applied.blended {
+    for path in &applied.union {
         out.insert(
             path.clone(),
             (content(view.hunk_tree, path)?, content(base.tree, path)?),
@@ -478,13 +478,13 @@ fn blends(state: &StateDir, base: &git::Commit) -> Result<Blends> {
     Ok(out)
 }
 
-/// `upper`'s own lines: the change from `blend` to `before` merged into it,
+/// `upper`'s own lines: the change from `union` to `before` merged into it,
 /// or if that conflicts (its lines interleave with the layers'), the layers'
 /// added lines taken out, once each.
-fn own_lines(tmp: &std::path::Path, upper: &[u8], blend: &[u8], before: &[u8]) -> Result<Vec<u8>> {
-    if let Some(own) = git::merge_file(tmp, blend, upper, before)? {
+fn own_lines(tmp: &std::path::Path, upper: &[u8], union: &[u8], before: &[u8]) -> Result<Vec<u8>> {
+    if let Some(own) = git::merge_file(tmp, union, upper, before)? {
         return Ok(own);
     }
-    let theirs = git::layers::added_lines(before, blend);
+    let theirs = git::layers::added_lines(before, union);
     Ok(git::layers::without_lines(upper, &theirs))
 }

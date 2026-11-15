@@ -339,7 +339,7 @@ gitfold layer remove --all             # stop showing every layer
   matter, it can be marked `merge=union` (below), and then every workspace
   adds its lines to it.
 - **Whole files:** a file both you and a layer changed shows your version,
-  unless it is blended (below).
+  unless it is union-merged (below).
 - **A layer brings only its own changes.** A file it changed shows your
   base's version with the layer's changes merged in (as merging its branch
   would), so a fix your base got after the layer started stays, and a
@@ -359,35 +359,35 @@ gitfold layer remove --all             # stop showing every layer
 - **`git status` shows only your work.** The layers' files are hidden from
   git (skip-worktree, and excluded if new): `status`, `diff`, `add -A`,
   `commit -a` see and commit only your changes, as do `gitfold changes` and
-  `list`. Commit and push normally (with blended files, see below). If git
+  `list`. Commit and push normally (with union files, see below). If git
   refuses to touch a file you didn't change (a merge or rebase over a
   layer's file), run `gitfold layer remove --all` and retry.
-- **Blended files: a file several agents add to.** For a registry, a
+- **Union files: a file several agents add to.** For a registry, a
   manifest or a module list that you and a layer both append to, mark it in
   the base's attributes so it shows everyone's lines instead of one whole
   file: add `<path> merge=union` (e.g. `registry.txt merge=union`) to
   `.gitattributes` and commit it before adding the layers (your base
   doesn't move while layers show), or, uncommitted, to `$(git rev-parse
   --git-common-dir)/info/attributes`, then add the layers again (`gitfold
-  layer add <BRANCH>`). Only files your base has are blended. A blended
+  layer add <BRANCH>`). Only files your base has are union-merged. A union
   file shows the base's version with every layer's lines and stays
   writable: add your lines anywhere (lines both sides add at one place are
   all kept). Your lines keep their place among the layers' lines in the
   workspaces that show your work along with those layers (your snapshot
   records what you saw); where those layers aren't shown, your lines are
   placed by the base's lines. A `note:` after `gitfold layer add` says if a
-  layer's change to it couldn't be blended in, or was placed by the base's
+  layer's change to it couldn't be union-merged in, or was placed by the base's
   lines.
 - **`Warning: ... lines in <file> sit among <A>'s: this file may not be a
   list`** (in `gitfold layer`, and after a switch) means lines were added
   between two of another branch's lines, inside its block (a method in its
-  class). Blending is for lists; code that goes inside another branch's
+  class). Union merging is for lists; code that goes inside another branch's
   code belongs on that branch: build on it (`gitfold layer base <A>`), or
   ask its agent.
-- **With blended files, git shows and commits only your lines.** HEAD is
+- **With union files, git shows and commits only your lines.** HEAD is
   then detached at a layers commit (`git log -1`: `gitfold layers: <you> +
   <layers> (commits go to <you>; never push this commit)`), and `git
-  status`/`git diff` show only your lines in a blended file. **Commit
+  status`/`git diff` show only your lines in a union file. **Commit
   normally**: within about a second gitfold puts each commit onto your
   branch with only your changes and moves HEAD to a new layers commit, so
   the commit id you saw changes (`git log <your-branch>` has the real one).
@@ -400,7 +400,7 @@ gitfold layer remove --all             # stop showing every layer
   still shows your commit (not `gitfold layers:`) after a few seconds, or
   `gitfold layer add`/`remove` exit 4 with `commit <id> can't go onto the
   branch alone (it changes lines of a layer's)`, that commit removed or
-  changed another agent's lines in a blended file. It can't go onto your
+  changed another agent's lines in a union file. It can't go onto your
   branch without their uncommitted work, so it and any later commit stay
   off your branch. Put their lines back as the file showed them (`git diff
   HEAD~1 -- <file>` shows what you changed), keep only your own additions,
@@ -552,7 +552,7 @@ gitfold list                      # each branch under its base, with what it nee
   also see its uncommitted work: `gitfold layer base p1` and `gitfold layer
   add p1`. A move takes your layers off, moves the branch and shows them
   again on the new commits (a layer of p1 then shows only what p1 hasn't
-  committed); blended files and your commits' contents stay right. A
+  committed); union files and your commits' contents stay right. A
   `layer base` that is refused or can't move the branch leaves its base
   and your layers as they were (never taken off for it). Interrupted, the
   move is finished first; until it can be, your layers stay off.

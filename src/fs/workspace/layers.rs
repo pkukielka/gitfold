@@ -16,14 +16,14 @@
 //!   base's version), and excludes those layers add, in a per-worktree
 //!   excludes file that keeps the user's global ignore file too
 //!   (`git::worktree_config`). They can't be written here.
-//! - Blended files (`state::layers::view`): the workspace writes them, its own
+//! - Union files (`state::layers::view`): the workspace writes them, its own
 //!   lines on top of the layers'. HEAD is detached at a layers commit L whose
-//!   tree has the blends (`git::layers`), and the index has the blends too, so
+//!   tree has the unions (`git::layers`), and the index has the unions too, so
 //!   `git diff` shows only the workspace's own lines. Commits made on L are
 //!   extracted onto the branch by the sync thread (`sync_layers`), with only
 //!   the workspace's changes; one that changes a layer's lines can't be, and
 //!   waits. A push guard refuses pushing L. A switch carries the workspace's
-//!   own lines in a blended file over (a 3-way merge), or is refused if they
+//!   own lines in a union file over (a 3-way merge), or is refused if they
 //!   depend on lines that would go.
 //!
 //! What was applied (the layers, what git was told) is recorded apart from
@@ -103,7 +103,7 @@ struct GitPlan {
     skipped: BTreeSet<Vec<u8>>,
     /// Files layers add that the workspace's own changes don't hide.
     added: Vec<Vec<u8>>,
-    blended: BTreeSet<Vec<u8>>,
+    union: BTreeSet<Vec<u8>>,
 }
 
 /// The `.git` content while git is off: git prints the path it names.
@@ -188,7 +188,7 @@ pub(super) fn open_view(
     layers.view = view.tree;
     layers.hunk = view.hunk_tree;
     layers.mixed = view.mixed;
-    layers.blended = view.blended;
+    layers.union = view.union;
     layers.layers_on = true;
     Ok(off)
 }
@@ -239,7 +239,7 @@ impl Workspace {
     /// Shows the layers stored for it (`state::layers`), as they are now, and
     /// says what it did. Refused while git is busy in it (the switch changes
     /// what its index describes), while a commit made on L can't be extracted
-    /// yet, or if its own lines in a blended file depend on lines that would
+    /// yet, or if its own lines in a union file depend on lines that would
     /// go; then nothing changed.
     pub fn switch(&self, store: &Store) -> Result<String> {
         let _layers = self.layers_lock.lock();
@@ -268,23 +268,23 @@ impl Workspace {
         let base = self.layers.read().base;
         let base_tree = git::resolve(&base.to_string())?.tree;
         let view = layers::view(&self.state.common_dir, &base, &stored)?;
-        let (new_view, new_hunk, mixed, blended) = match &view {
-            Some(v) => (v.tree, v.hunk_tree, v.mixed.clone(), v.blended.clone()),
+        let (new_view, new_hunk, mixed, union) = match &view {
+            Some(v) => (v.tree, v.hunk_tree, v.mixed.clone(), v.union.clone()),
             None => (base_tree, base_tree, Default::default(), Default::default()),
         };
         let new_tree = store.load_tree(new_view)?;
         let (stale, mut failed, plan, applied, changed) = {
             let mut layers = self.layers.write();
-            // Under the write lock: no write to a blended file can land
+            // Under the write lock: no write to a union file can land
             // between reading it and replacing it.
-            let carried = self.carry_over(&layers, layers.hunk, new_hunk, &blended)?;
+            let carried = self.carry_over(&layers, layers.hunk, new_hunk, &union)?;
             let changes = git::with_repo(|repo| git::layers::delta(repo, layers.view, new_view))
                 .context("comparing the views")?;
             // Past here the view changes: every failure is reported after the
             // kernel is told what changed.
             let old_tree = layers.view_tree;
             layers.mixed = mixed;
-            layers.blended = blended;
+            layers.union = union;
             layers.view_tree = new_tree;
             layers.view = new_view;
             layers.hunk = new_hunk;
@@ -417,22 +417,22 @@ impl Workspace {
         Ok(())
     }
 
-    /// The new content of the upper files at blended paths (blended before or
-    /// now) when the blends change from tree `old_hunk` to `new_hunk`: the
-    /// workspace's own lines merged onto the new blend. Refused if any
+    /// The new content of the upper files at union paths (union before or
+    /// now) when the unions change from tree `old_hunk` to `new_hunk`: the
+    /// workspace's own lines merged onto the new union. Refused if any
     /// conflicts.
     fn carry_over(
         &self,
         layers: &Layers,
         old_hunk: ObjectId,
         new_hunk: ObjectId,
-        blended: &HashMap<Vec<u8>, Vec<usize>>,
+        union: &HashMap<Vec<u8>, Vec<usize>>,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut out = Vec::new();
         if old_hunk == new_hunk {
             return Ok(out);
         }
-        let paths: HashSet<&Vec<u8>> = layers.blended.keys().chain(blended.keys()).collect();
+        let paths: HashSet<&Vec<u8>> = layers.union.keys().chain(union.keys()).collect();
         for path in paths {
             let upper = self.upper_path(path);
             let Ok(meta) = fs::symlink_metadata(&upper) else {
@@ -482,7 +482,7 @@ impl Workspace {
             base: layers.base,
             skipped: BTreeSet::new(),
             added: Vec::new(),
-            blended: layers.blended.keys().cloned().collect(),
+            union: layers.union.keys().cloned().collect(),
         };
         for path in layers.mixed.keys() {
             if self.shadowed(layers, path) {
@@ -502,8 +502,8 @@ impl Workspace {
     /// Has git see only the workspace's own changes with the layers in
     /// `view` shown (or none), as `plan` says, recording each step in
     /// `applied` (and on disk) as it is done: the layers' tracked whole files
-    /// skip-worktree, the files they add excluded, and with blended files,
-    /// HEAD at a layers commit and the blends in the index. What was applied
+    /// skip-worktree, the files they add excluded, and with union files,
+    /// HEAD at a layers commit and the unions in the index. What was applied
     /// before is given back where no longer shown. The errors' text is the
     /// reason the `.git` gives with git off.
     ///
@@ -532,9 +532,9 @@ impl Workspace {
         // What the branch tip has: the base, or past it by commits made with
         // layers shown (the base waits for the layers to go).
         let tip = git::branch_tip(&self.state.branch)?;
-        // Blended files: the index has the blend over the tip (what L has),
+        // Union files: the index has the union over the tip (what L has),
         // or the tip's version again.
-        let hunk = match (view, plan.blended.is_empty()) {
+        let hunk = match (view, plan.union.is_empty()) {
             (Some(v), false) if tip.id != plan.base => {
                 let at_tip = layers::view(&self.state.common_dir, &tip.id, stored)?;
                 at_tip.map_or(v.hunk_tree, |t| t.hunk_tree)
@@ -547,8 +547,8 @@ impl Workspace {
             true => worktree_config::set_excludes(admin, &plan.added)?,
             false => worktree_config::remove_excludes(admin)?,
         }
-        // HEAD: at a layers commit while files are blended, else on the branch.
-        match (view, plan.blended.is_empty()) {
+        // HEAD: at a layers commit while files are union-merged, else on the branch.
+        match (view, plan.union.is_empty()) {
             (Some(v), false) => self.head_to_layers(applied, stored, v, hunk, tip.id)?,
             _ => self.head_to_branch(applied)?,
         }
@@ -557,8 +557,8 @@ impl Workspace {
     }
 
     /// `tell_git`'s index edits: skip-worktree on `plan`'s skipped paths (off
-    /// on those no longer skipped), and blended paths' entries the blend in
-    /// tree `hunk` (or `tip_tree`'s version, no longer blended). Recorded in
+    /// on those no longer skipped), and union paths' entries the union in
+    /// tree `hunk` (or `tip_tree`'s version, no longer union). Recorded in
     /// `applied` once done.
     fn index_to_plan(
         &self,
@@ -575,8 +575,8 @@ impl Workspace {
             };
             edits.insert(path.clone(), edit);
         }
-        for path in applied.blended.iter().chain(&plan.blended) {
-            let tree = match plan.blended.contains(path) {
+        for path in applied.union.iter().chain(&plan.union) {
+            let tree = match plan.union.contains(path) {
                 true => hunk,
                 false => tip_tree,
             };
@@ -599,11 +599,11 @@ impl Workspace {
         }
         self.edit_index(&edits)?;
         applied.skipped = plan.skipped.clone();
-        applied.blended = plan.blended.clone();
+        applied.union = plan.union.clone();
         applied.write(&self.state)
     }
 
-    /// `tell_git`'s HEAD with blended files: detached at a new layers commit L
+    /// `tell_git`'s HEAD with union files: detached at a new layers commit L
     /// (tree `hunk`, over branch tip `tip`), with the view commit pinned and
     /// the push guard installed. Moved only from where it was left
     /// (compare-and-swap): the branch, or the layers commit `applied` has.
@@ -646,7 +646,7 @@ impl Workspace {
         Ok(())
     }
 
-    /// `tell_git`'s HEAD without blended files: back on the branch if it was
+    /// `tell_git`'s HEAD without union files: back on the branch if it was
     /// at a layers commit (a commit it had moved to off L's line kept by a
     /// ref), the push guard and the view commit's pin gone.
     fn head_to_branch(&self, applied: &mut ShownLayers) -> Result<()> {
@@ -801,7 +801,7 @@ impl Workspace {
     /// of the last one, so nothing git sees changes). Git must be idle (but
     /// for HEAD being detached). An amend of L is extracted as a commit on L.
     /// If HEAD left L's line (git switch, reset), git is turned off: the
-    /// index holds the blends, which mustn't be committed on the branch;
+    /// index holds the unions, which mustn't be committed on the branch;
     /// `gitfold layer remove --all` gives it back.
     fn sync_layers_locked(&self) -> Result<()> {
         let Some(l) = self.layers.read().applied.head else {
@@ -823,10 +823,10 @@ impl Workspace {
             return Ok(());
         };
         let subject = stored.subject(branch);
-        let blended = &view.blended;
+        let union = &view.union;
         let owners =
-            |p: &BStr| -> Vec<usize> { blended.get(p.as_bytes()).cloned().unwrap_or_default() };
-        let is_hunk = |p: &BStr| blended.contains_key(p.as_bytes());
+            |p: &BStr| -> Vec<usize> { union.get(p.as_bytes()).cloned().unwrap_or_default() };
+        let is_hunk = |p: &BStr| union.contains_key(p.as_bytes());
         let done = git::with_repo(|repo| -> Result<Option<git::layers::Extraction>> {
             let chain = match git::layers::chain(repo, l, head, CHAIN_LIMIT)? {
                 Some(chain) => chain,
@@ -971,15 +971,15 @@ impl Workspace {
     }
 
     /// Whether any path below directory `path` is a layer's: a whole file or
-    /// deletion, or a blended file (whose upper copy holds the layers' lines:
+    /// deletion, or a union file (whose upper copy holds the layers' lines:
     /// not to be moved).
     pub(super) fn has_mixed_below(layers: &Layers, path: &[u8]) -> bool {
-        if layers.mixed.is_empty() && layers.blended.is_empty() {
+        if layers.mixed.is_empty() && layers.union.is_empty() {
             return false;
         }
         let prefix = [path, b"/"].concat();
         path.is_empty()
-            || (layers.mixed.keys().chain(layers.blended.keys())).any(|p| p.starts_with(&prefix))
+            || (layers.mixed.keys().chain(layers.union.keys())).any(|p| p.starts_with(&prefix))
     }
 }
 

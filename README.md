@@ -285,7 +285,7 @@ lists), its parent the workspace's base (or its branch's tip, when the
 workspace committed and its base hasn't caught up yet: a layer then shows
 only what came after the commit; only if the workspace has the tip's
 changes, so not after the branch was moved without them, by a push into
-it say). A file blended with layers' lines (see
+it say). A file union-merged with layers' lines (see
 [Layers](#layers)) holds only the workspace's own lines; where it added
 lines among the layers', the commit has a second parent recording what it
 saw there and made of it (`git diff <sha>^2^ <sha>^2`), for the
@@ -588,7 +588,7 @@ change, a file turned into a symlink), it shows the base's version. Either
 is listed: `Conflict: <path>: <layer>'s change conflicts with your base`,
 or `Conflict: <path> is changed by both <A> and <B>`, the first five, then
 `and N more`. A file of the workspace's own at that path wins over all of
-them and stays writable. Files marked for blending are the exception
+them and stays writable. Files marked for union merging are the exception
 (below): they show every layer's lines and the workspace's own.
 
 A branch with no commit in common with the workspace's base can't be a
@@ -603,12 +603,12 @@ added: the name, what it shows (`all work`, `commits only`, or `commits`
 for a branch without a workspace, a tag or a commit) and how it updates
 (`live, last HH:MM`, when it last moved, the date too if not today;
 `frozen at HH:MM`; `fixed`), then the conflicts, then notes and warnings
-on blended files (`Note: ...`, `Warning: ...`, below); `No layers.` if
+on union files (`Note: ...`, `Warning: ...`, below); `No layers.` if
 there are none. `add` and `remove` print a line saying what they did, then what the
 daemon did: while mounted, it shows the change at once, printing notes
 about the new view after its summary (`note: Conflict: <path> is changed
 by both <A> and <B> (it shows git's conflict markers)`, or `note: <path>:
-<layer>'s change conflicts with what is below it, so it isn't blended
+<layer>'s change conflicts with what is below it, so it isn't union-merged
 in`); unmounted, it is stored and shown when the workspace opens. A
 conflict names the base or the layers whose changes conflict, not every
 layer that changes the file. Exit codes: 3 no such workspace, branch,
@@ -617,7 +617,7 @@ stay as they were; run it again once the cause is gone): a branch that
 shares no history with the base, git busy in the workspace (a commit in
 progress, a stopped rebase),
 a commit made on the layers commit that can't go onto the branch yet, the
-workspace's own lines in a blended file that depend on lines that would go
+workspace's own lines in a union file that depend on lines that would go
 (see below); 2 usage errors (a workspace as its own layer); 1 other
 errors.
 
@@ -644,7 +644,7 @@ its new commits as they come; it says when there is nothing to show yet.
   remove the layer (`gitfold layer remove <BRANCH>`) and edit your own
   version. A file a layer changed is that layer's, the base's lines in it
   too; one several layers change is all of theirs. Files marked for
-  blending are the exception (below): every workspace adds its lines to
+  union merging are the exception (below): every workspace adds its lines to
   them. In Claude Code, the plugin denies its edit tools such a file,
   saying this and naming every layer whose changes it shows. For one
   layer's file it offers, in this order: building on that branch
@@ -741,8 +741,8 @@ its new commits as they come; it says when there is nothing to show yet.
   `gitfold changes`, `list` and `remove`. Removing the layers gives the paths
   back to git. If git refuses to touch a file you didn't change (a merge or
   rebase over a layer's path), run `gitfold layer remove --all` and retry.
-- **Blended files: everyone's lines in one file.** A file several agents
-  add to (a registry, a manifest, a list of modules) can be blended rather
+- **Union files: everyone's lines in one file.** A file several agents
+  add to (a registry, a manifest, a list of modules) can be union-merged rather
   than shown whole: mark it `merge=union` in `.gitattributes`, e.g.
   `registry.txt merge=union` or `**/Cargo.toml merge=union`.
   The attributes are read from the workspace's base (which waits while
@@ -751,13 +751,13 @@ its new commits as they come; it says when there is nothing to show yet.
   layer add`). A marked file the base has and no layer deletes shows the
   base's version with every layer's change merged in, lines both sides add
   kept both (git's own meaning of `merge=union`); a layer's change that conflicts with what is below it isn't
-  blended in (a note says so). The file stays writable: the workspace's own
+  union-merged in (a note says so). The file stays writable: the workspace's own
   lines go on top of the layers'.
-- **Blended lines keep their place.** A workspace's snapshot holds only its
-  own lines of a blended file (so a layer of it never brings another
-  layer's lines), but also records what it saw there: the blend, the other
+- **Union lines keep their place.** A workspace's snapshot holds only its
+  own lines of a union file (so a layer of it never brings another
+  layer's lines), but also records what it saw there: the union, the other
   layers' lines included. A workspace showing it applies its change from
-  that (a 3-way merge of what the author saw, the blend so far and the
+  that (a 3-way merge of what the author saw, the union so far and the
   author's file), so a line added between another layer's lines sits
   between them wherever that layer shows too. Where those lines aren't
   shown (that layer isn't a layer there), its lines are placed by the
@@ -776,13 +776,13 @@ its new commits as they come; it says when there is nothing to show yet.
   merge=union)`) and for the author itself (`Warning: your lines in
   shapes.rs sit among agent/db's: ...`). Such code belongs on that
   branch: build on it (`gitfold layer base agent/db`).
-- **The layers commit.** While any file is blended, HEAD is detached at a
-  layers commit gitfold makes: the blends over the branch tip, its parents
-  the tip and the blended layers' snapshot commits, a `gitfold-layers` header, and the
+- **The layers commit.** While any file is union-merged, HEAD is detached at a
+  layers commit gitfold makes: the unions over the branch tip, its parents
+  the tip and the union layers' snapshot commits, a `gitfold-layers` header, and the
   subject `gitfold layers: agent/client + agent/api (commits go to
-  agent/client; never push this commit)`. The index has the blends too, so
+  agent/client; never push this commit)`. The index has the unions too, so
   `git status` and `git diff` show only the workspace's own lines in a
-  blended file. `git status` says `HEAD detached at <id>`.
+  union file. `git status` says `HEAD detached at <id>`.
 - **Commits made on the layers commit go onto the branch.** Commit normally:
   within about a second (once git is idle), gitfold copies each commit
   onto the branch with only the workspace's changes (same author, committer
@@ -791,7 +791,7 @@ its new commits as they come; it says when there is nothing to show yet.
   on the branch differs from the one `git commit` printed; `git log
   <branch>` shows it. Once moved, `git commit --amend` would amend the layers
   commit, taking HEAD off its line (below). A commit that removes or
-  changes a layer's line in a blended file depends on that layer's
+  changes a layer's line in a union file depends on that layer's
   uncommitted work and can't go onto the branch alone: it waits on HEAD,
   above the layers commit, with every later commit (the daemon log says
   which paths), and nothing goes onto the branch meanwhile; layer switches
@@ -803,12 +803,12 @@ its new commits as they come; it says when there is nothing to show yet.
   commit with a `gitfold-layers` header (`git push origin HEAD:main`), then
   runs your own `pre-push`; every other hook runs yours. `git push origin
   <branch>` pushes the copied commits and is fine. `--no-verify` skips the
-  guard. Turning the last blend off puts HEAD back on the branch and
+  guard. Turning the last union off puts HEAD back on the branch and
   removes the guard; uncommitted own lines stay, as changes to the branch's
   version.
-- **Switches carry own lines over.** When a switch changes a blended file
-  the workspace has written, its own lines are merged onto the new blend (a
-  3-way merge; where that conflicts, the new blend's lines less those the
+- **Switches carry own lines over.** When a switch changes a union file
+  the workspace has written, its own lines are merged onto the new union (a
+  3-way merge; where that conflicts, the new union's lines less those the
   workspace removed, then its own new lines). A conflicting file that isn't
   text refuses the switch (exit 4: `<path>: your changes to it depend on
   lines the layers would no longer show; commit them first, or keep the
@@ -817,7 +817,7 @@ its new commits as they come; it says when there is nothing to show yet.
 - **`LAYERS SHOWN`: where git can't be kept right, it is turned off.** If the
   index can't be edited (sparse checkout, a split or sparse index, the index
   locked meanwhile), or HEAD left the layers commit's line while files are
-  blended (`git switch`, `checkout <branch>`, `reset --soft`, `rebase`: the
+  union (`git switch`, `checkout <branch>`, `reset --soft`, `rebase`: the
   index holds the layers' lines, which mustn't be committed on the branch),
   the layers still show, but the workspace's `.git` names a directory that
   doesn't exist, so every git command fails (exit 128) saying why:
@@ -827,7 +827,7 @@ its new commits as they come; it says when there is nothing to show yet.
   switch that can edit the index). gitfold commands still find the
   workspace there.
 - **The base waits.** While a layer shows, the workspace's base doesn't
-  follow its branch: commits work and move the branch as usual (with blended
+  follow its branch: commits work and move the branch as usual (with union
   files, as copied from the layers commit), and the base catches up once no
   layer shows (moving it meanwhile could copy the layers' files into the
   workspace's own), and before layers go on in a workspace showing none.
@@ -868,15 +868,15 @@ its new commits as they come; it says when there is nothing to show yet.
   as git was told and then catches up with the stored layers (their
   formats are in [ARCHITECTURE.md](ARCHITECTURE.md)). Layers files of
   earlier builds are read: their shown layers become live, all work; their
-  hidden ones are dropped. While files are blended, the worktree's HEAD is
+  hidden ones are dropped. While files are union-merged, the worktree's HEAD is
   the layers commit (found again on a remount), and `refs/gitfold-layers/<id>`
   keeps it and the view from `git gc`. A fork (`branch -w`) starts without
   layers.
 - **Limitations.** A file both the workspace and a layer changed shows the
-  workspace's version, unless it is marked for blending. Blending assumes a blended
+  workspace's version, unless it is marked for union merging. Union merging assumes a union
   file's lines are unique and their order doesn't matter where two sides
   append at the same place. Your branch's commits hold only your lines of
-  a blended file, placed by the base's lines (the layers' lines aren't
+  a union file, placed by the base's lines (the layers' lines aren't
   there to place them by); only views keep them among the layers' lines,
   not among a workspace's own: where agent/db's lines sit inside your own
   block, your workspace places them by the base's lines (noted).
@@ -945,7 +945,7 @@ gitfold list                       # p1
   layer add api` builds your commits on api's and shows api's uncommitted
   work on top. A move takes the layers off, moves the branch as above,
   then puts the same layers back over the new commits (so a layer of api
-  then shows only what api hasn't committed). Blended files and the
+  then shows only what api hasn't committed). Union files and the
   layers commit come back with them; git still sees only the workspace's
   own changes, and its commits hold only those, commits made on the
   layers commit moving along. A move that doesn't happen (a conflict, work
@@ -1335,7 +1335,7 @@ mount and real git (build with `--release` first):
   check fails, rerun that suite alone.
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/layers.sh`: snapshots of workspaces' work, layers shown in a
-  workspace (live, frozen, merged, blended: the layers commit) and
+  workspace (live, frozen, merged, union: the layers commit) and
   proposals (sections as above).
 - `tests/stacks.sh`: branches built on another (`layer base`) moved with
   no workspace, in an open workspace (by the hook and by `layer base`

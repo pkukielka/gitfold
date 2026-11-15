@@ -5,12 +5,12 @@
 # layers, a release tag, two layers on one file, a base that moved on since
 # the layers started, a shared append-only file, a denied edit, a stack of
 # PRs, a frozen base, pushed commits, a base that landed, a base shown as a
-# layer too, a child on the lead's branch, a layer and a blended file on a
+# layer too, a child on the lead's branch, a layer and a union file on a
 # branch with a base, snapshots of several agents' work, a proposal, a
 # person working without an agent, a child denied editing the lead's
 # class and offered to build on it, a list file not marked merge=union,
 # a registry entry among another layer's, a method inside another layer's
-# class in a blended file.
+# class in a union file.
 # usage: tests/usecases.sh (or with the others: tests/run.sh); sections as
 # in tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -351,8 +351,8 @@ G "$C" checkout -q -- api/shared.rs
 check "UC27: the listing: base and layer" sh -c "'$BIN' -C '$C' layer | grep -q '^Base: lead, live' && '$BIN' -C '$C' layer | grep -q '^lead '"
 }
 
-# UC28: a layer of another branch while built on api, with a blended file:
-# api's new commits move the branch, the layer stays, blends and the
+# UC28: a layer of another branch while built on api, with a union file:
+# api's new commits move the branch, the layer stays, unions and the
 # layers commit come back.
 an_unrelated_layer_on_a_base() {
 printf 'CHANGELOG.md merge=union\n' >"$REPO/.gitattributes"; printf '# log\n' >"$REPO/CHANGELOG.md"
@@ -371,7 +371,7 @@ out=$(turn_starts "$U")
 check "UC28: moved onto api at the turn" has "$out" "was moved onto its base api"
 eq "UC28: on api's tip" "$(R rev-parse api)" "$(R rev-parse ui~1)"
 eq "UC28: api's file, c's layer" "api|c" "$(cat "$U/api.txt")|$(cat "$U/c.txt")"
-eq "UC28: the blend: c's line and ui's" "# log|- c: thing|- ui: screen" "$(LC_ALL=C sort "$U/CHANGELOG.md" | paste -sd'|')"
+eq "UC28: the union: c's line and ui's" "# log|- c: thing|- ui: screen" "$(LC_ALL=C sort "$U/CHANGELOG.md" | paste -sd'|')"
 check "UC28: HEAD at a layers commit again" has "$(git -C "$U" log -1 --format=%s)" "gitfold layers"
 eq "UC28: git sees nothing of c" "" "$(git -C "$U" status --short)"
 eq "UC28: ui's commits hold only its own changes" "CHANGELOG.md" "$(R diff --name-only api ui)"
@@ -555,7 +555,7 @@ eq "UC32: b's commit holds only its own line (placed as extraction does)" "alpha
 }
 
 # UC33: a method added inside another layer's class, in a file marked
-# merge=union: blended, with a warning that the file may not be a list.
+# merge=union: union-merged, with a warning that the file may not be a list.
 a_method_inside_anothers_class() {
 printf 'shapes.rs merge=union\n' >"$REPO/.gitattributes"; printf '// shapes\n' >"$REPO/shapes.rs"
 R add -A; R commit -qm shapes

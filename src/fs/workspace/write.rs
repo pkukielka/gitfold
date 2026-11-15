@@ -582,8 +582,8 @@ impl Workspace {
         // renaming would copy the layer's content into the workspace's own.
         let layer_owned = |obj: &Obj, path: &[u8]| match obj {
             Obj::LowerFile { mixed: true, .. } => true,
-            Obj::LowerFile { .. } => layers.blended.contains_key(path),
-            Obj::Upper(m) if !m.is_dir() => layers.blended.contains_key(path),
+            Obj::LowerFile { .. } => layers.union.contains_key(path),
+            Obj::Upper(m) if !m.is_dir() => layers.union.contains_key(path),
             _ => Self::has_mixed_below(&layers, path),
         };
         if layer_owned(&src_obj, &src) {

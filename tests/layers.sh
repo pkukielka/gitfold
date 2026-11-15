@@ -473,9 +473,9 @@ eq "the frozen layer still as added" "fz 1" "$(cat "$P/f.txt")"
 eq "the agent's workspace: still as its last turn's start" "src 2" "$(cat "$A/s.txt")"
 }
 
-blended_files_and_the_layers_commit() {
+union_files_and_the_layers_commit() {
 echo 'reg.txt merge=union' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
-R add -A; R commit -qm blendable
+R add -A; R commit -qm union-merge
 R branch me; R branch la; R branch lb
 mount_fs
 W=$MNT/me
@@ -483,7 +483,7 @@ echo fromA >>"$MNT/la/reg.txt"; echo la >>"$MNT/la/a.txt"
 echo fromB >>"$MNT/lb/reg.txt"
 cat "$W/reg.txt" >/dev/null
 check "add two layers" sh -c "'$BIN' -C '$W' layer add la && '$BIN' -C '$W' layer add lb"
-eq "the blended file has both layers' lines" "one two fromA fromB" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
+eq "the union file has both layers' lines" "one two fromA fromB" "$(tr '\n' ' ' <"$W/reg.txt" | sed 's/ $//')"
 eq "not a conflict" "" "$("$BIN" -C "$W" layer | grep Conflict)"
 check "and is writable" test -w "$W/reg.txt"
 check "a whole file isn't" test ! -w "$W/a.txt"
@@ -763,19 +763,19 @@ eq "the tip moved without its files (a push into it): on the base" "$base|" \
 # The snapshot of layer $2 stored for workspace $1.
 stored_snapshot() { awk -F'\t' -v l="layer $2" '$1 == l {print $5}' "$COMMON/gitfold/$1/layers"; }
 
-# A person's workspace with a blended file (HEAD at the layers commit): the
+# A person's workspace with a union file (HEAD at the layers commit): the
 # daemon moves its layers there too, sees a source's commits, and backs off
 # from a switch it can't make.
-layers_move_by_themselves_in_a_blended_workspace() {
+layers_move_by_themselves_in_a_workspace_with_union_files() {
 echo 'reg.txt merge=union' >"$REPO/.gitattributes"; printf 'one\ntwo\n' >"$REPO/reg.txt"
-R add -A; R commit -qm blendable
+R add -A; R commit -qm union-merge
 R branch pe; R branch src; R branch other
 mount_fs
 P=$MNT/pe S=$MNT/src
 ls "$P" "$S" "$MNT/other" >/dev/null
 echo fromSrc >>"$S/reg.txt"; echo "s 1" >"$S/s.txt"
 "$BIN" -C "$P" layer add src >/dev/null
-eq "blended: HEAD at the layers commit" "one two fromSrc|yes" \
+eq "union: HEAD at the layers commit" "one two fromSrc|yes" \
     "$(paste -sd' ' "$P/reg.txt")|$(G "$P" log -1 --format=%s | grep -q '^gitfold layers' && echo yes)"
 echo "s 2" >"$S/s.txt"
 wait_for_line "$P/s.txt" "s 2" >/dev/null
@@ -814,11 +814,11 @@ section "layers: several changing one file" layers_changing_one_file
 section "layers: following a workspace as it is now; v1 files; at once" layers_follow_the_workspace_as_it_is_now
 section "layers: of an agent and of a person" layers_of_an_agent_and_of_a_person
 section "layers: moving by themselves without an agent" layers_move_by_themselves_without_an_agent
-section "layers: blended files, the layers commit" blended_files_and_the_layers_commit
+section "layers: union files, the layers commit" union_files_and_the_layers_commit
 section "snapshot: one workspace's work" snapshot_of_one_workspace
 section "snapshot: several merged" snapshot_of_several_merged
 section "proposals: a contract changed by consent" proposals_to_change_a_contract
 section "proposals: the layer kept as it was" proposals_keep_the_layer_as_it_was
 section "layers: on the workspace's own commits" layers_on_the_workspaces_own_commits
-section "layers: moving by themselves in a blended workspace" layers_move_by_themselves_in_a_blended_workspace
+section "layers: moving by themselves in a workspace with union files" layers_move_by_themselves_in_a_workspace_with_union_files
 finish

@@ -9,7 +9,7 @@
 //!   is that workspace's view), with the merge base MB it was pinned at. Its
 //!   delta is `diff(MB.tree, S.tree)`.
 //! - H, the hunk tree: B with every hunk path (a registry, a manifest, as the
-//!   caller says: those marked `merge=union`) blended across the layers.
+//!   caller says: those marked `merge=union`) union across the layers.
 //! - M, the view tree: H with each layer's change to every other path
 //!   ("whole-file" paths) applied in turn, as a 3-way merge `merge(base =
 //!   MB[p], ours = what p is so far, starting from B[p], theirs = S[p])`, so
@@ -19,11 +19,11 @@
 //! - L, the layers commit (the layers commit in the code): tree H, parents
 //!   `[B, S...]`, an extra header `gitfold-layers 1`. The worktree's HEAD
 //!   while hunk paths are mixed in, so `git diff` shows only my lines of a
-//!   blended file.
+//!   union file.
 //! - V, the view commit: tree M, parents `[L or B, S...]`; one ref on it
 //!   keeps M, L and the snapshots from `git gc`.
 //!
-//! Blending a hunk path folds each layer's change into the file in turn,
+//! Union merging a hunk path folds each layer's change into the file in turn,
 //! `merge3(base = MB[p], ours = acc[p], theirs = S[p])`. Two appends at the
 //! same place (two agents adding to a registry) conflict in every 3-way
 //! merge, so when both sides only add lines the conflict is resolved by
@@ -234,7 +234,7 @@ pub struct Pin {
 /// What `build_view` made.
 #[derive(Debug)]
 pub struct Built {
-    /// H: B's tree with the hunk paths blended (B's tree if none is).
+    /// H: B's tree with the hunk paths union-merged (B's tree if none is).
     pub hunk_tree: ObjectId,
     /// M: H with the whole-file paths of the layers.
     pub view_tree: ObjectId,
@@ -242,8 +242,8 @@ pub struct Built {
     /// merge), with the layers (indexes into the stack) that change them.
     pub mixed: BTreeMap<BString, Vec<usize>>,
     /// Hunk paths where H differs from B, with the layers whose changes are
-    /// blended in.
-    pub blended: BTreeMap<BString, Vec<usize>>,
+    /// union-merged in.
+    pub union: BTreeMap<BString, Vec<usize>>,
     /// What the switch should tell the agent.
     pub notes: Vec<Note>,
 }
@@ -251,7 +251,7 @@ pub struct Built {
 impl Built {
     /// The layers whose changes are in H: the snapshots that are L's parents.
     pub fn hunk_layers(&self) -> Vec<usize> {
-        let set: BTreeSet<usize> = self.blended.values().flatten().copied().collect();
+        let set: BTreeSet<usize> = self.union.values().flatten().copied().collect();
         set.into_iter().collect()
     }
 }
@@ -260,8 +260,8 @@ impl Built {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Note {
     /// The layer's change to this hunk path conflicts with what is below it
-    /// (B or the layers under it), so it is not blended in.
-    NotBlended { layer: usize, path: BString },
+    /// (B or the layers under it), so it is not union-merged in.
+    NotInUnion { layer: usize, path: BString },
     /// The layer's snapshot records where its lines in this hunk path sat
     /// among the lines its author saw (`Record`), but those lines aren't
     /// here (that layer isn't shown, or changed them since): its change is
@@ -299,11 +299,11 @@ enum Merged {
 }
 
 /// Builds the view of base commit `base` with `layers` (in the order
-/// added), blending hunk paths and, for the others, applying the change of
+/// added), union merging hunk paths and, for the others, applying the change of
 /// each layer that changes them in turn, starting from B's entry: the 3-way
 /// merge of the layer's merge base's entry, what is there so far and the
 /// layer's, so it brings only its own changes; conflicts reported. The
-/// paths a layer sets that B has and no layer deletes (a blend needs B's
+/// paths a layer sets that B has and no layer deletes (a union needs B's
 /// version, and a deletion is whole) are given to `hunk_paths`, once, which
 /// returns those that are hunk paths.
 pub fn build_view(
@@ -339,7 +339,7 @@ pub fn build_view(
         true => HashSet::new(),
         false => hunk_paths(&candidates.into_iter().collect::<Vec<_>>())?,
     };
-    // What each layer's author saw in its blended files, if recorded.
+    // What each layer's author saw in its union files, if recorded.
     let records = match is_hunk.is_empty() {
         true => Vec::new(),
         false => (layers.iter())
@@ -348,7 +348,7 @@ pub fn build_view(
     };
     let mut notes = Vec::new();
     let mut hunks: BTreeMap<BString, Option<Item>> = BTreeMap::new();
-    let mut blended: BTreeMap<BString, Vec<usize>> = BTreeMap::new();
+    let mut union: BTreeMap<BString, Vec<usize>> = BTreeMap::new();
     // Whole-file changes by path, in layer order; the paths in the order
     // first changed (a file's deletion before the files of the directory
     // replacing it).
@@ -385,7 +385,7 @@ pub fn build_view(
                 let record = records.get(ix).and_then(Option::as_ref);
                 let in_context = match record {
                     Some(record) if !by_base => {
-                        blend_recorded(repo, record, ancestor, ours, path.as_ref())?
+                        union_recorded(repo, record, ancestor, ours, path.as_ref())?
                     }
                     _ => None,
                 };
@@ -398,7 +398,7 @@ pub fn build_view(
                     // No record of this path (an older snapshot), or what
                     // its lines sat among isn't here.
                     None => {
-                        let merged = blend(repo, ancestor, ours, change.item())?;
+                        let merged = union_merge(repo, ancestor, ours, change.item())?;
                         if by_base && merged.is_some() {
                             let path = path.clone();
                             notes.push(Note::PlacedByBase { layer: ix, path });
@@ -413,7 +413,7 @@ pub fn build_view(
                     }
                     None => {
                         let path = path.clone();
-                        notes.push(Note::NotBlended { layer: ix, path });
+                        notes.push(Note::NotInUnion { layer: ix, path });
                     }
                 }
             }
@@ -436,7 +436,7 @@ pub fn build_view(
         if !folded.is_empty() {
             folded.sort_unstable();
             hunks.insert(path.clone(), ours);
-            blended.insert(path, folded);
+            union.insert(path, folded);
         }
     }
     let hunk_tree = edit_tree(
@@ -446,7 +446,7 @@ pub fn build_view(
             .iter()
             .map(|(p, item)| (p.as_ref(), Change::from_item(*item))),
     )?;
-    // A blend can come back to B's file (a layer reverting another's line).
+    // A union can come back to B's file (a layer reverting another's line).
     let mut unchanged = Vec::new();
     for (path, item) in &hunks {
         if lookup(repo, base_tree, path.as_ref())? == *item {
@@ -454,7 +454,7 @@ pub fn build_view(
         }
     }
     for path in unchanged {
-        blended.remove(&path);
+        union.remove(&path);
     }
     let mut edits = Vec::with_capacity(order.len());
     let mut mixed = BTreeMap::new();
@@ -522,7 +522,7 @@ pub fn build_view(
         hunk_tree,
         view_tree,
         mixed,
-        blended,
+        union,
         notes,
     })
 }
@@ -699,7 +699,7 @@ pub fn has_change(
 
 /// Folds `theirs` (a layer's entry, changed from `ancestor`) into `ours`:
 /// the merged entry (`None`: deleted), or `None` on a conflict.
-fn blend(
+fn union_merge(
     repo: &gix::Repository,
     ancestor: Option<Item>,
     ours: Option<Item>,
@@ -742,12 +742,12 @@ fn blend(
     Ok(Some(Some(Item { kind, oid })))
 }
 
-/// The extra header that marks a snapshot's record of its blended files
+/// The extra header that marks a snapshot's record of its union files
 /// (`Record`); its value is the commit the author's view was built on.
 pub const SEEN_HEADER: &str = "gitfold-seen";
 
-/// What the author of a snapshot saw in its blended files and made of them:
-/// for each blended file it added lines to, the blend it saw (the base's
+/// What the author of a snapshot saw in its union files and made of them:
+/// for each union file it added lines to, the union it saw (the base's
 /// version with the other layers' lines) and its own copy (its lines among
 /// them). The snapshot's tree holds only its own lines, against its base, so
 /// layers bring their own work, never another's through them; the record
@@ -805,7 +805,7 @@ pub fn write_record(
         seen,
         Default::default(),
         format!(
-            "gitfold snapshot: the blended files {branch} saw\n\nOn {base}, for its snapshot \
+            "gitfold snapshot: the union files {branch} saw\n\nOn {base}, for its snapshot \
              of tree {tree}.\n"
         ),
         Vec::new(),
@@ -853,7 +853,7 @@ pub fn record_of(repo: &gix::Repository, snapshot: ObjectId) -> Result<Option<Re
 /// made, so its lines keep their place among other layers' lines.
 /// `None` if the record doesn't have the path; `Some(None)` if it doesn't
 /// merge (what its lines sat among isn't in `ours`).
-fn blend_recorded(
+fn union_recorded(
     repo: &gix::Repository,
     record: &Record,
     ancestor: Option<Item>,
@@ -867,10 +867,10 @@ fn blend_recorded(
         return Ok(None);
     };
     let at_base = lookup(repo, commit_tree(repo, record.base)?, path)?;
-    let Some(on_base) = blend(repo, ancestor, ours, at_base)? else {
+    let Some(on_base) = union_merge(repo, ancestor, ours, at_base)? else {
         return Ok(Some(None));
     };
-    Ok(Some(blend(repo, Some(seen), on_base, Some(made))?))
+    Ok(Some(union_merge(repo, Some(seen), on_base, Some(made))?))
 }
 
 /// The lines the author's added lines in hunk path `path` sit between, if
@@ -1025,7 +1025,7 @@ fn merge3(base: &[u8], ours: &[u8], theirs: &[u8], conflict: text::Conflict) -> 
     }
 }
 
-// The line-set rule's helpers, shared by blending, extraction, carrying own
+// The line-set rule's helpers, shared by union merging, extraction, carrying own
 // lines over a switch (`fs::workspace::layers`) and snapshotting them
 // (`state::snapshot`). Lines are compared whole but for the `\n`: two registry
 // lines differing in a `\r` are two lines.
@@ -1086,7 +1086,7 @@ pub(crate) fn without_lines(data: &[u8], remove: &[&[u8]]) -> Vec<u8> {
     out
 }
 
-/// The line-set rule for carrying `ours`' lines from blend `old` onto blend
+/// The line-set rule for carrying `ours`' lines from union `old` onto union
 /// `new` where their merge conflicts, if `ours` only added lines (next to a
 /// layer's, which are then their context): `new`'s lines, then the lines
 /// `ours` added, in its order, each ending in a newline. `None` if it
@@ -1128,7 +1128,7 @@ pub fn layers_commit(
 }
 
 /// Writes view commit V: tree `view_tree`, parents `first` (L, or B when no
-/// hunk path is blended) then `snapshots`.
+/// hunk path is union-merged) then `snapshots`.
 pub fn view_commit(
     repo: &gix::Repository,
     view_tree: ObjectId,
@@ -1320,7 +1320,7 @@ fn extract_one(
     for path in &paths {
         let at = |tree| lookup(repo, tree, path.as_ref());
         let (t, p, c) = (at(tip_tree)?, at(prev_tree)?, at(commit_tree_id)?);
-        match extract_blend(repo, t, p, c)? {
+        match extract_union(repo, t, p, c)? {
             Ok(item) => {
                 base_edits.push((path.as_ref(), Change::from_item(t)));
                 ours_edits.push((path.as_ref(), Change::from_item(item)));
@@ -1380,7 +1380,7 @@ pub fn copy_commit(
 /// entry the commit's change makes of the tip's `t`, given the commit's `c`
 /// and its parent's `p` (which has the layers' lines), or the layers' lines
 /// the commit removed or changed.
-fn extract_blend(
+fn extract_union(
     repo: &gix::Repository,
     t: Option<Item>,
     p: Option<Item>,
@@ -1577,7 +1577,7 @@ mod tests {
     fn owners_of(view: &Built, path: &BStr) -> Vec<usize> {
         match view.mixed.get(path) {
             Some(layers) => layers.clone(),
-            None => view.blended.get(path).cloned().unwrap_or_default(),
+            None => view.union.get(path).cloned().unwrap_or_default(),
         }
     }
 
@@ -1661,8 +1661,8 @@ mod tests {
             r.show(view.hunk_tree, "registry.txt"),
             "entry_base1\nentry_base2\nentry_base3\nentry_a"
         );
-        assert_eq!(view.blended.get(BStr::new("registry.txt")), Some(&vec![1]));
-        assert_eq!(view.blended.len(), 1);
+        assert_eq!(view.union.get(BStr::new("registry.txt")), Some(&vec![1]));
+        assert_eq!(view.union.len(), 1);
         assert_eq!(view.hunk_layers(), [1]);
         let mixed: Vec<_> = (view.mixed.iter())
             .map(|(p, l)| format!("{p}:{}", l[0]))
@@ -1707,7 +1707,7 @@ mod tests {
     }
 
     /// The base moved on since the layers' merge base: a whole-file path
-    /// shows the base's newer change and the layer's own, as does a blended
+    /// shows the base's newer change and the layer's own, as does a union
     /// path.
     #[test]
     fn view_on_a_newer_base() {
@@ -1945,11 +1945,11 @@ mod tests {
     }
 
     /// Two layers append to the registry: a plain 3-way merge conflicts
-    /// (git's too), the blend keeps both. Two layers changing the same line
+    /// (git's too), the union keeps both. Two layers changing the same line
     /// differently: the upper one's change is dropped and reported.
     #[test]
-    fn registry_blends() {
-        let r = Repo::new("blend");
+    fn registry_unions() {
+        let r = Repo::new("union");
         let base = scenario(&r);
         for (name, line) in [("x", "entry_x"), ("y", "entry_y")] {
             r.git(&["checkout", "-q", "-b", name, "main"]);
@@ -1978,16 +1978,13 @@ mod tests {
             r.show(view.view_tree, "registry.txt"),
             "entry_base1\nentry_base2\nentry_base3\nentry_x\nentry_y"
         );
-        assert_eq!(
-            view.blended.get(BStr::new("registry.txt")),
-            Some(&vec![0, 1])
-        );
+        assert_eq!(view.union.get(BStr::new("registry.txt")), Some(&vec![0, 1]));
 
         let view =
             build_view(&repo, base, &stack(&r, base, &["p", "x", "q"]), &registries).unwrap();
         assert_eq!(
             view.notes,
-            [Note::NotBlended {
+            [Note::NotInUnion {
                 layer: 2,
                 path: "registry.txt".into()
             }]
@@ -1996,10 +1993,7 @@ mod tests {
             r.show(view.view_tree, "registry.txt"),
             "entry_base1\nentry_base2 P\nentry_base3\nentry_x"
         );
-        assert_eq!(
-            view.blended.get(BStr::new("registry.txt")),
-            Some(&vec![0, 1])
-        );
+        assert_eq!(view.union.get(BStr::new("registry.txt")), Some(&vec![0, 1]));
     }
 
     /// A snapshot of `b` whose author saw `a`'s registry lines and put its own
@@ -2065,7 +2059,7 @@ mod tests {
     /// they are placed by the base's lines, noted. Lines added between two
     /// of another branch's are warned about.
     #[test]
-    fn recorded_blends_keep_their_place() {
+    fn recorded_unions_keep_their_place() {
         let r = Repo::new("recorded");
         let made = "alpha\nbravo\ncharlie\ndelta\nzulu\n";
         let (base, a, b) = recorded_scenario(&r, made);
@@ -2093,10 +2087,7 @@ mod tests {
         for order in [[("a", a), ("b", b)], [("b", b), ("a", a)]] {
             let view = build_view(&repo, base, &pins(base, &order), &registries).unwrap();
             assert_eq!(r.show(view.view_tree, "registry.txt"), made.trim_end());
-            assert_eq!(
-                view.blended.get(BStr::new("registry.txt")),
-                Some(&vec![0, 1])
-            );
+            assert_eq!(view.union.get(BStr::new("registry.txt")), Some(&vec![0, 1]));
             let b_ix = order.iter().position(|(n, _)| *n == "b").unwrap();
             assert_eq!(view.notes, [among(b_ix, vec![1 - b_ix])]);
         }

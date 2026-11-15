@@ -169,10 +169,10 @@ struct Layers {
     mixed: std::collections::HashMap<Vec<u8>, Vec<usize>>,
     /// Whether any layer is shown.
     layers_on: bool,
-    /// H: the base's tree with the blended files blended (the base's tree
-    /// when none is), and the blended files (see `layers`).
+    /// H: the base's tree with the union files union-merged (the base's tree
+    /// when none is), and the union files (see `layers`).
     hunk: ObjectId,
-    blended: std::collections::HashMap<Vec<u8>, Vec<usize>>,
+    union: std::collections::HashMap<Vec<u8>, Vec<usize>>,
     /// What was last applied of the layers (see `layers`).
     applied: crate::state::layers::ShownLayers,
     /// Whiteouts and opaque markers.
@@ -290,7 +290,7 @@ impl Workspace {
             mixed: Default::default(),
             layers_on: false,
             hunk: base.tree,
-            blended: Default::default(),
+            union: Default::default(),
             applied: Default::default(),
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,

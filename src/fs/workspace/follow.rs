@@ -167,7 +167,7 @@ impl Workspace {
     }
 
     /// Whether git is idle in it as a switch wants it (`switch`): nothing
-    /// running, HEAD on its branch, or with files blended, detached at the
+    /// running, HEAD on its branch, or with union files, detached at the
     /// layers commit.
     fn git_quiet(&self) -> bool {
         let state = &self.state;

@@ -129,7 +129,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/restack.rs` | a closed workspace's base moved visibly for a restack of its branch, its changed files stamped |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/workspace/layers.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told (and own lines in blended files carried over), git told (skip-worktree, excludes, the blends in the index, HEAD at the layers commit, the push guard) or turned off; extracting commits made on the layers commit onto the branch (`sync_layers`) |
+| `src/fs/workspace/layers.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told (and own lines in union files carried over), git told (skip-worktree, excludes, the unions in the index, HEAD at the layers commit, the push guard) or turned off; extracting commits made on the layers commit onto the branch (`sync_layers`) |
 | `src/fs/workspace/follow.rs` | live layers of a workspace without an agent, moved by its sync thread once it is idle: writes counted (`Activity`), the check every 2 s, the move through `state::follow` and `switch` |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
@@ -144,9 +144,9 @@ Then, per request (`fs/workspace/`):
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
 | `src/state/restack.rs` | a restack under way in a workspace: the `restack` intent file (locked while it runs), and finishing or undoing one a crash interrupted |
-| `src/state/snapshot.rs` | snapshots of work: a workspace's uncommitted work as a commit, kept by `refs/gitfold-snapshot/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`snapshotted`): whether an agent drives it; its `UserPromptSubmit` hook's run recorded too (`turns`): whether it has an agent of its own; a blended file snapshotted with its own lines only, and what it saw and made there recorded as the snapshot's second parent |
+| `src/state/snapshot.rs` | snapshots of work: a workspace's uncommitted work as a commit, kept by `refs/gitfold-snapshot/<id>/<n>`, numbered under a lock; the one its own `Stop` hook made last recorded in its state (`snapshotted`): whether an agent drives it; its `UserPromptSubmit` hook's run recorded too (`turns`): whether it has an agent of its own; a union file snapshotted with its own lines only, and what it saw and made there recorded as the snapshot's second parent |
 | `src/state/follow.rs` | moving a workspace's live layers to their latest work (what each follows, a fresh snapshot of a person's workspace, storing and showing them), shared by the `UserPromptSubmit` hook and the daemon |
-| `src/state/layers.rs` | a workspace's layers: the `layers` file (each layer's snapshot, what it shows and how it updates, the layer a proposal stands in for; version 1 files read too), its lock (`layers.lock`), the view (view and hunk trees, mixed and blended paths, conflicts, notes, the listing's notes and warnings on blended files) and which files are blended (`merge=union`) |
+| `src/state/layers.rs` | a workspace's layers: the `layers` file (each layer's snapshot, what it shows and how it updates, the layer a proposal stands in for; version 1 files read too), its lock (`layers.lock`), the view (view and hunk trees, mixed and union paths, conflicts, notes, the listing's notes and warnings on union files) and which files are union-merged (`merge=union`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
 | `src/fsutil.rs` | file helpers: atomic writes, times without following symlinks, copying a tree |
 | `src/inode.rs` | inode encoding, path hash, constant timestamp |
@@ -163,7 +163,7 @@ Then, per request (`fs/workspace/`):
 | `src/git/hooks/` | the push guard's `pre-push` and the shell library the worktree's hooks share (embedded) |
 | `src/git/stack.rs` | stacked branches' git side: the parent base (`refs/gitfold-stack/<branch>`, guessed by the fork point without it), restacking by plumbing, moving a branch and its stack ref in one transaction, whether a parent base landed on a target (merged, squashed, rebased) |
 | `src/git/test_repo.rs` | unit tests' scratch repository |
-| `src/git/layers.rs` | layers' git side: the view and hunk trees (blending, from a snapshot's record of what its author saw where it has one; each layer's changes merged in per path; lines added among another branch's noted), the layers and view commits, snapshots' records, extracting commits made on the layers commit and moving the branch and HEAD in one transaction |
+| `src/git/layers.rs` | layers' git side: the view and hunk trees (union merging, from a snapshot's record of what its author saw where it has one; each layer's changes merged in per path; lines added among another branch's noted), the layers and view commits, snapshots' records, extracting commits made on the layers commit and moving the branch and HEAD in one transaction |
 | `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
 | `src/daemon/mod.rs` | mount point checks, unmount on SIGINT/SIGTERM/SIGHUP, fusermount |
@@ -203,7 +203,7 @@ Then, per request (`fs/workspace/`):
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
-| `tests/layers.sh` | end-to-end test of snapshots of work and layers in a workspace (refusals, git status and commits, git off, remounts; live, frozen, commits-only and revision layers, re-adding, the listing; several layers on one file, merged or conflicting; blended files, the layers commit, extraction, the push guard; proposals, consent, accept and reject) |
+| `tests/layers.sh` | end-to-end test of snapshots of work and layers in a workspace (refusals, git status and commits, git off, remounts; live, frozen, commits-only and revision layers, re-adding, the listing; several layers on one file, merged or conflicting; union files, the layers commit, extraction, the push guard; proposals, consent, accept and reject) |
 | `tests/stacks.sh` | end-to-end test of bases (stacked branches): moves with no workspace, in an open workspace (hook and `layer base`) and an unmounted one, conflicts, uncommitted work in the way, pushed commits and `--yes`, `--frozen`, refusals that change nothing, the base taken away (also with `origin/main` as the trunk), `list`'s tree and notes; parents that landed (squash, rebase and merge commits, a tweaked squash, a stacked parent's parent, a merge of later parent commits, none when unmerged, an interrupted re-parent, a branch on the trunk's local branch) |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
@@ -233,7 +233,7 @@ term; they never appear in messages, help or the README.
 - **Idle** (git in a workspace): HEAD on the branch, no operation stopped
   half-way (merge conflict, rebase, cherry-pick, revert, sequencer, bisect) in
   the worktree's admin directory, and no lock on the index, HEAD, the branch
-  ref or `packed-refs` (`worktree::git_busy`). With files blended, HEAD is
+  ref or `packed-refs` (`worktree::git_busy`). With union files, HEAD is
   detached at the layers commit instead, and the rest is checked
   (`worktree::git_running`).
 - **Lower**: the base tree, from the shared store (with layers shown, the
@@ -248,7 +248,7 @@ term; they never appear in messages, help or the README.
   `gitfold snapshot` and the `Stop` hook make one. Its refs outlive the
   workspace; the one the workspace's own `Stop` hook made last is recorded
   in its state (`snapshotted`), so a live layer never follows an earlier
-  workspace's. A blended file in it holds only the workspace's own lines;
+  workspace's. A union file in it holds only the workspace's own lines;
   where they sit among other layers' lines, its **record** (*internal*:
   `git::layers::Record`, the snapshot's second parent) keeps what the workspace
   saw there and made of it.
@@ -269,20 +269,20 @@ term; they never appear in messages, help or the README.
   base's version, the path so far starting from the base's, its own),
   conflict markers kept (the base's version where a change can't merge at
   all); the lower layer while showing layers.
-- **Blended path** (hunk path): a file `merge=union` marks in the base's
+- **Union path** (hunk path): a file `merge=union` marks in the base's
   attributes, which the base has, a layer changed and none deletes: every
   layer's change merged into the base's version. Writable; upper holds it
   with the workspace's own lines on top.
-- **Hunk tree** (H): the base's tree with only the blended paths blended.
-- **Mixed path**: a path a layer changed (or deleted) that isn't blended:
+- **Hunk tree** (H): the base's tree with only the union paths union-merged.
+- **Mixed path**: a path a layer changed (or deleted) that isn't union-merged:
   the base's version with the layers' changes merged in, read-only, unless
   upper has it. It belongs to every layer that changed it.
 - **Layers commit** (L): HEAD, detached,
-  while files are blended: tree H over the branch tip, parents the tip
-  and the blended layers' snapshots, a `gitfold-layers` header. The **view commit** (V, tree M, first parent L)
+  while files are union-merged: tree H over the branch tip, parents the tip
+  and the union layers' snapshots, a `gitfold-layers` header. The **view commit** (V, tree M, first parent L)
   is what `refs/gitfold-layers/<id>` points at, keeping both.
 - **Extraction**: copying the commits made on L onto the branch with only
-  the workspace's changes (the line-set rule on blended paths), then
+  the workspace's changes (the line-set rule on union paths), then
   moving HEAD to a new L with the last one's tree. A commit that changes a
   layer's lines **waits**.
 - **Push guard**: the per-worktree `pre-push` hook that refuses to publish
@@ -304,7 +304,7 @@ term; they never appear in messages, help or the README.
   tip, and moving the branch (and its workspace's files) there.
 - **Switch**: changing what the layers show (a layer added, replaced,
   removed or moved to newer work), telling the kernel and git, and
-  carrying the workspace's own lines in blended files over.
+  carrying the workspace's own lines in union files over.
 - **Git off** ("git is off here"): turning git
   off in a workspace with layers whose index can't be
   edited, or whose HEAD left the layers commit's line: its `.git` names a
@@ -368,8 +368,8 @@ decision that creates them.
   rebases keep what git recorded true (stamps). Layers' paths are
   skip-worktree, which git doesn't compare; those a switch gives back carry
   the switch's stamp, which the index doesn't record yet, so git re-reads
-  them once (a layer's changed files, not the tree). Blended paths' entries
-  get the blend's id and size with zero times, so git reads each once
+  them once (a layer's changed files, not the tree). Union paths' entries
+  get the union's id and size with zero times, so git reads each once
   rather than taking a size change as a change unread.
   ([rebases](#workspaces-follow-their-branch-invisible-rebases),
   [index](#a-synthesized-git-index-whose-stat-data-matches-the-filesystem))
@@ -1346,10 +1346,10 @@ workspace's lower layer: at each path a layer changed, its change merged
 into what is there (the base's version, or with the layers before it) as
 `git merge-file` does, against its own merge base (conflict markers kept,
 and listed), except files marked `merge=union`, which are
-**blended** (every layer's change merged into the base's version, lines
-both sides add kept both) and stay writable. While any file is blended,
+**union-merged** (every layer's change merged into the base's version, lines
+both sides add kept both) and stay writable. While any file is union-merged,
 HEAD is detached at a **layers commit** (the layers commit, in the code)
-holding the blends, and commits made on it are **extracted** onto the
+holding the unions, and commits made on it are **extracted** onto the
 branch with only the workspace's changes. The layers are stored in `layers`
 in the state directory; `gitfold layer add`/`remove` write it and ask the
 daemon to switch (a `layers` control request). `gitfold snapshot` is the
@@ -1360,7 +1360,7 @@ a snapshot, with no change to any workspace.
 
 - **What was applied, apart from what is stored:** `layers` is what the user
   (or a hook) asked for; `layers-shown` is what the daemon last applied: the
-  layers file then, the paths git was told to skip, the blended paths, the
+  layers file then, the paths git was told to skip, the union paths, the
   layers commit. A workspace opens showing what was applied, so the view and
   the index, excludes and HEAD always describe the same layers, and the sync
   thread then switches to the stored layers if they differ (changed while
@@ -1382,7 +1382,7 @@ a snapshot, with no change to any workspace.
   plus its uncommitted work), so its changes are taken against
   `merge-base(B, snapshot)`, B the commit that very view is built on: the
   workspace's base for the view tree, the branch tip for the layers
-  commit's blends and for extraction, the base for a proposal's check.
+  commit's unions and for extraction, the base for a proposal's check.
   It is worked out per view (remembered per process: commits don't
   change), never stored. Rejected: pinning it when the layer is added or
   moved. Against the base, it went stale when the base caught up; against
@@ -1441,7 +1441,7 @@ a snapshot, with no change to any workspace.
   send`), removing the layer. An Edit or MultiEdit whose `new_string` is
   its `old_string` with whole lines inserted, or a Write whose content is
   the file's with lines inserted, adds the `merge=union` hint: a list
-  file is better blended than owned. Rejected: in-place editing of a
+  file is better union-merged than owned. Rejected: in-place editing of a
   layer's file (the edit would be neither the layer's nor cleanly the
   workspace's: whose commit holds it, and how the next layer move merges
   it, have no good answer).
@@ -1484,24 +1484,24 @@ a snapshot, with no change to any workspace.
   `info/exclude` is shared by every worktree, and the per-worktree setting
   replaces the user's global ignore file, so the generated file starts with
   its patterns. Removing the layers clears both.
-- **Blended files, for files several agents append to** (a registry, a
+- **Union files, for files several agents append to** (a registry, a
   manifest): whole files would show either theirs or mine. A file is
-  blended if `git check-attr --source=<base> merge` says `union`
+  union-merged if `git check-attr --source=<base> merge` says `union`
   (the base's `.gitattributes`, or `info/attributes`), the base has it and
   no layer deletes it. Each layer's change is folded in as
-  `merge3(base = merge base, ours = the blend so far, theirs = snapshot)`; two
+  `merge3(base = merge base, ours = the union so far, theirs = snapshot)`; two
   appends at one place conflict in every 3-way merge, so where both sides
   only add lines both are kept, ours first (what `union` does, but only there).
   Any other conflict leaves that layer's change out, as a note on the
-  switch's reply. Blending and the other paths' merges are the same 3-way
-  merge per layer; only blending resolves append conflicts, and a path is
-  one or the other, never both. The base's tree with only the blends is
+  switch's reply. Union merging and the other paths' merges are the same 3-way
+  merge per layer; only union merging resolves append conflicts, and a path is
+  one or the other, never both. The base's tree with only the unions is
   the **hunk tree** H; the view tree M is H with the whole files on top.
-  Blended files have no `mixed` entry, so they are writable: a copy-up
-  takes the blend, and the workspace's own lines go on top.
-- **A snapshot records what its author saw in a blended file**
+  Union files have no `mixed` entry, so they are writable: a copy-up
+  takes the union, and the workspace's own lines go on top.
+- **A snapshot records what its author saw in a union file**
   (`git::layers::Record`, written by `state::snapshot`). A snapshot holds only the
-  workspace's own lines of a blended file, against its base (`own_lines`),
+  workspace's own lines of a union file, against its base (`own_lines`),
   so a layer of it never brings another layer's lines through it. But
   that loses where those lines sat among the others': a line added inside
   another layer's block was then placed by the base's lines alone (after
@@ -1510,10 +1510,10 @@ a snapshot, with no change to any workspace.
   commit whose tree has those files as the workspace left them (its
   upper copies), with a `gitfold-seen <base>` header naming the commit
   its view was built on, and whose only parent is a root commit S0 whose
-  tree has the same files as it saw them (the hunk tree's blends). `git
+  tree has the same files as it saw them (the hunk tree's unions). `git
   diff <snapshot>^2^ <snapshot>^2` is then the author's change in context. A view
   folds the layer's change to such a path in two steps: its commits up to
-  the author's base (`merge3(MB[p], the blend so far, base[p])`), then
+  the author's base (`merge3(MB[p], the union so far, base[p])`), then
   the author's change from what it saw (`merge3(S0[p], that, R[p])`, with
   `union`'s rule for appends at one place), so its lines land among the
   other layers' lines as the author put them. When that conflicts (what
@@ -1546,24 +1546,24 @@ a snapshot, with no change to any workspace.
 - **HEAD detached at a layers commit L** (`tell_git`): the index alone can't
   split a file into theirs and mine; only a HEAD whose tree has their lines
   can. L has tree H (over the branch tip, if commits moved it past the
-  base), parents the tip and the blended layers' snapshots, and a
+  base), parents the tip and the union layers' snapshots, and a
   `gitfold-layers 1` header, so hooks and a remount recognise it without a
   list of ids; its subject says `commits go to <branch>; never push this
-  commit`. The index has the blends' ids and sizes (zero times: git reads
+  commit`. The index has the unions' ids and sizes (zero times: git reads
   each file once), not skip-worktree, so `git diff` shows only the
   workspace's lines. Detached rather than symbolic to a per-worktree ref:
   measured on git 2.49, `gc` from another worktree pruned commits held only
   by other worktrees' `refs/worktree/*` (and a HEAD symbolic to one), but
   not one held by a detached HEAD. `refs/gitfold-layers/<id>` (common) pins
   the view commit V (tree M, parents L and every shown snapshot), keeping M, L
-  and the snapshots. Turning the last blend off writes HEAD back as a symbolic
+  and the snapshots. Turning the last union off writes HEAD back as a symbolic
   ref to the branch and drops the ref and the guard; the files keep the
   workspace's lines, now changes against the branch's version.
 - **Extraction on the sync thread** (`sync_layers`, `git::layers::extract`):
   when HEAD has moved from L by a first-parent chain of commits and git is
   otherwise idle (`git_running`), each commit C is copied onto the branch
   tip T as `merge(base = its parent P, ours = T, theirs = C)` with C's
-  author, committer and message, except on blended paths, where P has the
+  author, committer and message, except on union paths, where P has the
   layers' lines and T doesn't: there the line-set rule decides. C may not
   remove or change a layer's line (one in P but not in T): it depends on
   that layer, and it and every later commit wait (logged), with nothing
@@ -1587,10 +1587,10 @@ a snapshot, with no change to any workspace.
   user's `pre-push`; every other hook name is a shim running the user's (the
   path found from config without the worktree scope, at run time).
   `--no-verify` bypasses it.
-- **Own lines carried over on a switch** (`carry_over`): when the blend
+- **Own lines carried over on a switch** (`carry_over`): when the union
   under a file the workspace has written changes, upper becomes
-  `merge-file(base = old blend, ours = upper, theirs = new blend)`, or, if
-  that conflicts, the line-set rule (new blend less the lines upper
+  `merge-file(base = old union, ours = upper, theirs = new union)`, or, if
+  that conflicts, the line-set rule (new union less the lines upper
   removed, then upper's new lines). A conflicting file the rule can't take
   (not text) refuses the whole switch before anything changes (`your
   changes to it depend on lines the layers would no longer show`). The
@@ -1598,7 +1598,7 @@ a snapshot, with no change to any workspace.
 - **Git off as the fallback:** where the index can't be edited (sparse
   checkout, whose re-application rewrites skip-worktree bits; a split or
   sparse index; an unknown required extension; the index locked), or HEAD
-  left L's line while files are blended (`git switch`, `reset`, `rebase`,
+  left L's line while files are union-merged (`git switch`, `reset`, `rebase`,
   an amend of L itself: the index and files hold the layers' lines, which
   would be committed on the branch), the layers
   still show, but the virtual `.git` (now swappable) names a directory that
@@ -1639,7 +1639,7 @@ a snapshot, with no change to any workspace.
   the reader for `IDLE` (3 s), so files don't change under someone
   half-way through an edit, and git is idle in it as a switch wants it
   (HEAD on the branch, or detached at the layers commit while files are
-  blended). The check is cheap: a person's workspace is snapshotted only when
+  union). The check is cheap: a person's workspace is snapshotted only when
   its write count (counted by every write through the mount, `Activity`),
   its base or its branch tip (`git commit` writes nothing through the
   mount, and the base of one showing layers waits) changed since its
@@ -1791,7 +1791,7 @@ the proposal (workspace, branch, start ref, snapshots no stack names).
 - **Each follower's view, not its snapshot alone:** the test runs in a
   snapshot of what the workspace would show: its view tree rebuilt with
   the accepted commit in place of the layer (and of any proposal to change
-  it), its other layers as they are, its own work on top (blended files
+  it), its other layers as they are, its own work on top (union files
   then show its own version). `merges` is `git merge-tree` of its own work
   with the accepted commit: what committing both would meet. Snapshot
   registrations are removed after each test; the test gets a writable
@@ -1951,11 +1951,11 @@ p2's old tip, so its next restack replays exactly its own commits.
   (`state::layers::to_show`), and the daemon (unmounted: this process, under
   the repository lock) switches to that: commits on the layers commit
   extracted, HEAD back on the branch, skip-worktree and excludes cleared,
-  own lines in blends carried over, the view the base again. Then the
+  own lines in unions carried over, the view the base again. Then the
   ordinary move (intent, `read-tree -m -u` after an index refresh, since
   the switch restamped files, the ref transaction), worked out again from
   the new tip if the switch-off moved the branch (commits made on the
-  layers commit extracted onto it: otherwise every first try in a blended
+  layers commit extracted onto it: otherwise every first try in a union
   workspace ended "moved meanwhile"). Then `put_back`: the marker removed,
   and the switch to them asked for, whose `catch_up_before_layers` rebases
   the base onto the moved tip first so the files the read-tree wrote are
@@ -2284,12 +2284,12 @@ checkout" and "Running it"); this is the why and what it would take.
   to be detached (it lists the processes using it, from `/proc`, first),
   except when it or a process it runs under (its shell, `make`, ...) is
   inside the mount: it would wait for itself.
-- **A workspace's own file wins whole, except blended ones.** A file both
+- **A workspace's own file wins whole, except union ones.** A file both
   workspaces changed shows this workspace's version only, unless marked
   `merge=union`; a layer's change conflicting with the base's or another
   layer's shows conflict markers the reader can't resolve here (it can
   only remove the layer, or ask its agent to update).
-  Blending and extraction assume a blended file's lines are unique and
+  Union merging and extraction assume a union file's lines are unique and
   their order doesn't matter where both sides append.
   A snapshot's record places its lines among the lines of the layers a view
   shows, not among the reader's own: in A's workspace, B's lines added
@@ -2309,7 +2309,7 @@ checkout" and "Running it"); this is the why and what it would take.
   excludes file regenerated when the user's global ignore file changes
   (it copies that file). A fork doesn't copy the
   layers, but copies the index and upper as they are (skip-worktree bits,
-  and in blended files the layers' lines, which become the fork's own).
+  and in union files the layers' lines, which become the fork's own).
 - **`..` in directory listings reports the mount root's inode.** A listing
   doesn't know its parent's inode without storing a parent per directory. Path
   resolution uses the kernel's own parent links, so this only affects tools that
@@ -2360,7 +2360,7 @@ compact node table and write measurements. Next:
   would do. An extraction that "depends on" a layer whose lines the parent has
   since committed could offer `layer base` that parent instead. Uncommitted
   work that overlaps a restack could be carried over with a 3-way merge,
-  as `carry_over` does for blends, rather than waiting. *Also:* `layer
+  as `carry_over` does for unions, rather than waiting. *Also:* `layer
   base --rebase` (a real `git rebase --onto A B` in the workspace for a
   blocked restack), merges in a stacked branch (flattened, as extraction
   does), re-signing copies when `commit.gpgSign` is set, an undo

@@ -127,18 +127,18 @@ fn waits(state: &StateDir, intent: &Intent) -> Result<Option<String>> {
     if applied.head.is_some_and(|l| head != Some(l)) {
         return Ok(None);
     }
-    let in_the_way = uncommitted_on(state, intent, &applied.blended)?;
+    let in_the_way = uncommitted_on(state, intent, &applied.union)?;
     Ok((!in_the_way.is_empty()).then(|| super::in_the_way(&in_the_way)))
 }
 
 /// The paths the move `intent` changes where the workspace in `state` has
 /// work of its own its branch hasn't (its files differ from the branch
-/// tip's), but for `blended` ones (their upper copies hold the layers'
+/// tip's), but for `union` ones (their upper copies hold the layers'
 /// lines until the layers come off).
 fn uncommitted_on(
     state: &StateDir,
     intent: &Intent,
-    blended: &std::collections::BTreeSet<Vec<u8>>,
+    union: &std::collections::BTreeSet<Vec<u8>>,
 ) -> Result<Vec<String>> {
     let moved: std::collections::HashSet<BString> =
         moves::changed_paths(intent)?.into_iter().collect();
@@ -146,7 +146,7 @@ fn uncommitted_on(
     let tip = git::resolve(&intent.from.to_string())?.tree;
     let mut out = Vec::new();
     let paths = s.changed.iter().chain(&s.deleted);
-    for path in paths.filter(|p| moved.contains(p.as_slice()) && !blended.contains(*p)) {
+    for path in paths.filter(|p| moved.contains(p.as_slice()) && !union.contains(*p)) {
         let at_tip = git::with_repo(|repo| git::layers::lookup(repo, tip, path.as_slice().into()))?;
         let file = upper_path(&state.upper(), path);
         let differs = match (at_tip, std::fs::symlink_metadata(&file)) {
