@@ -43,8 +43,9 @@ const RESTACK_BLOCKED: &str = "gitfoldRestackBlocked";
 const PROPOSAL: &str = "gitfoldProposal";
 /// `branch.<branch>.gitfoldProposedBy`: the workspace that proposed it.
 const PROPOSED_BY: &str = "gitfoldProposedBy";
-/// `branch.<branch>.gitfoldConsent`: `<passed|failed> <the proposal's seal
-/// checked> <summary>`, the last `gitfold consent` on a proposal.
+/// `branch.<branch>.gitfoldConsent`: `<passed|failed|unchecked> <the proposal's
+/// seal checked> <the layer's seal checked> <summary>`, the last `gitfold
+/// consent` on a proposal.
 const CONSENT: &str = "gitfoldConsent";
 /// `branch.<branch>.gitfoldLanding`: `<target> <landing commit>`, set while
 /// the branch moves onto where its parent landed, until the target is its
@@ -308,6 +309,14 @@ pub fn set_restack_blocked(git_dir: &Path, branch: &str, blocked: Option<&str>) 
 pub fn set_proposal(git_dir: &Path, branch: &str, layer: &str, by: &str) -> Result<()> {
     set_branch(git_dir, branch, PROPOSAL, layer)?;
     set_branch(git_dir, branch, PROPOSED_BY, by)
+}
+
+/// Forgets that `branch` is a proposal (accepted, its branch kept for now).
+pub fn clear_proposal(git_dir: &Path, branch: &str) -> Result<()> {
+    for key in [PROPOSAL, PROPOSED_BY, CONSENT] {
+        unset_branch(git_dir, branch, key)?;
+    }
+    Ok(())
 }
 
 /// Records the last consent check of proposal `branch` (see `CONSENT`).

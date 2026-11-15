@@ -163,30 +163,39 @@ enum Command {
     Proposals(cli::proposal::ProposalsArgs),
     /// Check a proposal against every workspace it affects.
     ///
-    /// For each workspace showing its layer (or it) that read a file it
-    /// changes (from the read records; every one whose reads aren't
-    /// recorded): that workspace's work mixed with the proposal (`gitfold
-    /// mix`), and --test run in the mix's snapshot. No workspace changes.
-    /// Prints a table: workspace, read the files (yes, no, unknown), merges
-    /// cleanly, test. Exit codes: 0 all passed, 4 any failed, 3 no such
-    /// proposal, 1 other errors.
+    /// What accepting it gives is the layer's work as now with the
+    /// proposal's changes. For each workspace showing the layer (or a
+    /// proposal to change it; with --only-readers, not those whose read
+    /// records say they didn't read a changed file): whether its own work
+    /// merges with that, and --test run in its view with that in the
+    /// layer's place (its other layers and own work included), a snapshot.
+    /// No workspace changes. Prints a table: workspace, read the files (yes,
+    /// no, unknown), merges cleanly, test. The result is recorded for
+    /// `accept`. Exit codes: 0 all passed, 4 any failed or none was checked
+    /// (or the layer changed the proposed files since), 3 no such proposal,
+    /// 1 other errors.
     Consent(cli::proposal::ConsentArgs),
     /// Take a proposal into its layer's workspace.
     ///
-    /// Writes the files it changed into the layer's workspace (uncommitted
-    /// work there, as any edit), shows the layer again where the proposal
-    /// showed, sends a message (`gitfold send`) to every workspace that read
-    /// the files, and removes the proposal's workspace and branch. Workspaces
-    /// showing the layer see the change at their next turn. Exit codes: 4
-    /// the layer changed those files since the proposal was made, 3 no such
+    /// Run in the layer's workspace (-w only from outside every workspace).
+    /// Needs a passed `gitfold consent` of the proposal and the layer as
+    /// they are now (or --force). Writes the files it changed into the
+    /// layer's workspace (uncommitted work there, as any edit), shows the
+    /// layer again where the proposal showed, sends a message (`gitfold
+    /// send`) to every workspace showing the layer but those whose read
+    /// records say they didn't read the files, and removes the proposal's
+    /// workspace and branch. Workspaces showing the layer see the change at
+    /// their next turn. Exit codes: 4 the layer changed those files since
+    /// the proposal was made, or no current passed consent, 3 no such
     /// proposal (or not this layer's), 1 other errors.
     Accept(cli::proposal::AcceptArgs),
     /// Remove a proposal without taking it (or withdraw your own).
     ///
-    /// Run in its layer's workspace or its proposer's: the layer shows again
-    /// where the proposal showed, the proposer is told (with --reason), and
-    /// the proposal's workspace and branch are removed. Exit codes: 3 no such
-    /// proposal (or not one of these workspaces'), 1 other errors.
+    /// Run in its layer's workspace or its proposer's (-w only from outside
+    /// every workspace): the layer shows again where the proposal showed,
+    /// the proposer is told (with --reason), and the proposal's workspace
+    /// and branch are removed. Exit codes: 3 no such proposal (or not one of
+    /// these workspaces'), 1 other errors.
     Reject(cli::proposal::RejectArgs),
     /// Stacked branches: a branch built on a parent branch, its own commits
     /// following the parent's new ones.
