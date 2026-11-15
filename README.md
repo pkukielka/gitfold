@@ -102,7 +102,9 @@ The skill's "Claude Code" section has the details
 
 The rest of this page is reference: [How it works](#how-it-works) ·
 [Requirements](#requirements) · [Usage](#usage) · [Snapshots](#snapshots) ·
-[Workspaces](#workspaces) · [Layers](#layers) · [Running it](#running-it) ·
+[Workspaces](#workspaces) · [Layers](#layers) ·
+[Editable layers](#editable-layers-building-on-another-branch) ·
+[Running it](#running-it) ·
 [Cleaning up](#cleaning-up) ·
 [Differences from a checkout](#differences-from-a-checkout) ·
 [Performance](#performance) · [Development](#development)
@@ -125,7 +127,9 @@ gitfold writes into the repository: worktree registrations under
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
 [Cleaning up](#cleaning-up)), and `refs/gitfold-snapshot/*` and
 `refs/gitfold-layers/*` that keep snapshots of work and the layers shown (see
-[Layers](#layers)).
+[Layers](#layers)), and `refs/gitfold-own/*`, where a branch's own commits
+start when it builds on another (see [Editable
+layers](#editable-layers-building-on-another-branch)).
 
 ## Requirements
 
@@ -149,10 +153,10 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <BRANCH> [-w] [--from <REV> | --base <BASE>] [--prewarm <MODE>] [--track-reads on|off]
+gitfold branch <BRANCH> [-w] [--from <REV> | --edit <LAYER>] [--prewarm <MODE>] [--track-reads on|off]
                                               # create a branch for a workspace
                                               # (-w: with a workspace's changes;
-                                              # --base: built on BASE)
+                                              # --edit: built on LAYER's commits)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
@@ -171,10 +175,11 @@ gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
 gitfold track-reads <BRANCH> on|off           # record a workspace's reads
 gitfold snapshot [<BRANCH|REV>...] [--commits] [--onto <REV>]
                                               # workspaces' work (merged), as a snapshot
-gitfold layer [-w <BRANCH>]                   # a workspace's base and layers
-gitfold layer add <BRANCH|REV> [--frozen] [--commits] [-w <BRANCH>]
+gitfold layer [-w <BRANCH>]                   # a workspace's layers, what its commits sit on
+gitfold layer add <BRANCH|REV> [--edit] [--frozen] [--commits] [--yes] [-w <BRANCH>]
                                               # another branch's work shown in it, read-only
-gitfold layer remove <BRANCH>|--all [-w <BRANCH>]
+                                              # (--edit: build on it, its commits under yours)
+gitfold layer remove <BRANCH>|--all [--yes] [-w <BRANCH>]
 gitfold propose <PATH>... [--layer <L>] [--from <DIR>] [-w <BRANCH>]
                                               # change a layer's files, in a fork of it
 gitfold proposals [<L>]                       # the open proposals
@@ -182,10 +187,6 @@ gitfold consent <PROPOSAL> [--test <CMD>] [--timeout <SECS>] [--only-readers]
                                               # check it with every workspace showing the layer
 gitfold accept <PROPOSAL> [--force] [-w <L>]  # take it into the layer's workspace
 gitfold reject <PROPOSAL> [--reason <TEXT>] [-w <BRANCH>]
-gitfold layer [-w <BRANCH>] base <BASE> [--frozen] [--yes]
-                                              # build a branch on another's commits
-                                              # (main: no base any more)
-gitfold layer base --all [--yes]              # every branch following its base, onto it
 gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
 gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
 ```
@@ -206,10 +207,11 @@ name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
 Six commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
 `snapshot` (4 conflicts), `consent` (4 a workspace fails, or none checked),
-`layer base` (4 a branch not moved: commits already pushed, a conflict,
-uncommitted work in the way, git busy) and `inbox
+`layer add` and `layer remove` (4 a branch not moved: commits already
+pushed, commits that can't stand without a layer, a conflict, uncommitted
+work in the way, git busy) and `inbox
 --claude-hook rewake` (2, to wake the session).
-`gitfold branch` starts the branch at HEAD unless `--from` (or `--base`) says
+`gitfold branch` starts the branch at HEAD unless `--from` (or `--edit`) says
 otherwise.
 
 Names below the mount point:
@@ -463,10 +465,11 @@ files (build output) it holds, how long ago it last changed (`last`: a file
 written, created or deleted, or a commit; a stalled agent stands out), with a
 note if its branch was deleted or, unmounted, its base is behind the branch tip
 (mount once to update it). It works from the mount point too. A branch built on
-another (see [Bases](#bases-stacked-branches)) is listed under its base, indented
-with `└─` (with `-` for the counts if it has no workspace, as for its base),
-the base in the `base` column, noting whether it is frozen, needs an update,
-is blocked, or needs a force-push; `--stat` adds the lines added and removed
+another (see [Editable layers](#editable-layers-building-on-another-branch))
+is listed under it (under the first, if it builds on several), indented
+with `└─` (with `-` for the counts if it has no workspace), its editable
+layers joined with `+` in the `base` column (`-` for none), noting a
+landing, a blocked move, a needed update, or a force-push to run; `--stat` adds the lines added and removed
 in total, reading every changed file. `gitfold changes
 [<BRANCH>]` lists one workspace's uncommitted changes against its base,
 untracked files included and whatever is staged, as `git add -A` and `git diff
@@ -490,7 +493,8 @@ or restored unchanged); `reads` the files read, if tracked; `base` is that commi
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
 and the layers files, if it has layers (see [Layers](#layers)). Snapshots of its work are kept by refs
 `refs/gitfold-snapshot/<id>/<n>`, the layers a workspace shows (a view commit) by
-`refs/gitfold-layers/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
+`refs/gitfold-layers/<id>`, where its own commits start, if it builds on
+another branch, by `refs/gitfold-own/<branch>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
 **Limitations.**
@@ -526,7 +530,10 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
 Agents working on parts of one change often need each other's work before
 it is committed: an API one of them is writing, which another calls. Layers
-show it, uncommitted included, without merging anything.
+show it, uncommitted included, without merging anything. A layer is
+see-only (its files read-only, never part of your history), or, with
+`--edit`, editable: your branch builds on it (see [Editable
+layers](#editable-layers-building-on-another-branch)).
 
 **Layers in a workspace.** `gitfold layer add <BRANCH>` shows another
 branch's work in the workspace you are in (`-w <BRANCH>` names another
@@ -541,12 +548,11 @@ gitfold layer add v1.2                  # a tag or a commit: fixed by nature
 gitfold layer remove agent/db           # stop showing it
 gitfold layer remove --all              # stop showing every layer
 gitfold layer                           # what's in my view:
-Base: main
-
-LAYER       SHOWS          UPDATES
+LAYER       SHOWS          UPDATES            YOUR COMMITS
 agent/api   all work       live, last 14:07
 agent/ui    commits only   live, last 13:50
 v1.2        commits        fixed
+Your commits sit on main.
 
 Conflict: src/api.rs is changed by both agent/api and agent/ui
 ```
@@ -595,16 +601,17 @@ A branch with no commit in common with the workspace's base can't be a
 layer (`layer add` refuses it, exit 4): there would be no telling its
 changes apart.
 
-The listing (`gitfold layer` alone) shows first what the branch is built
-on (`Base: main`, or for a branch with a base, that base, whether it
-follows it and how many commits of its own sit on it: see
-[Bases](#bases-stacked-branches)), then one line per layer, in the order
-added: the name, what it shows (`all work`, `commits only`, or `commits`
-for a branch without a workspace, a tag or a commit) and how it updates
-(`live, last HH:MM`, when it last moved, the date too if not today;
-`frozen at HH:MM`; `fixed`), then the conflicts, then notes and warnings
-on union files (`Note: ...`, `Warning: ...`, below); `No layers.` if
-there are none. `add` and `remove` print a line saying what they did, then what the
+The listing (`gitfold layer` alone) shows one line per layer, in the
+order added: the name, what it shows (`all work`, `commits only`, or
+`commits` for a branch without a workspace, a tag or a commit), how it
+updates (`live, last HH:MM`, when it last moved, the date too if not
+today; `frozen at HH:MM`; `fixed`) and, for an editable layer, `built
+on` (the first one says how many of your commits sit on it, or on a
+merge of them); `No layers.` if there are none. Without editable layers
+a line says `Your commits sit on main.` Then notes on editable layers
+(`Note: ...`: a landing, a blocked move, a needed update, the push to
+run), the conflicts, then notes and warnings on union files (`Note:
+...`, `Warning: ...`, below). `add` and `remove` print a line saying what they did, then what the
 daemon did: while mounted, it shows the change at once, printing notes
 about the new view after its summary (`note: Conflict: <path> is changed
 by both <A> and <B> (it shows git's conflict markers)`, or `note: <path>:
@@ -617,8 +624,10 @@ stay as they were; run it again once the cause is gone): a branch that
 shares no history with the base, git busy in the workspace (a commit in
 progress, a stopped rebase, HEAD away from the branch), the
 workspace's own lines in a union file that depend on lines that would go
-(see below); 2 usage errors (a workspace as its own layer); 1 other
-errors.
+(see below), a move of your commits that doesn't happen (see [Editable
+layers](#editable-layers-building-on-another-branch)); 2 usage errors (a
+workspace as its own layer; `--edit` on a tag, a commit or the main
+branch, or on a branch that builds on yours); 1 other errors.
 
 `layer add <BRANCH>` while your proposal to change BRANCH shows in its
 place replaces the proposal (which stays, as a branch: `gitfold layer add
@@ -629,31 +638,37 @@ before the proposal (frozen, say); the proposal stays until rejected.
 Adding the branch the workspace's base came from (`layer add main`) shows
 its new commits as they come; it says when there is nothing to show yet.
 
-- **A layer's files are read-only.** They have no write bits; writing,
-  truncating, removing, renaming them (or a directory holding one) and
-  `chmod` fail with `EACCES`, as does creating a path a layer deleted. They
-  are another agent's work in progress: a change made here would become this
-  workspace's own file, hiding theirs and committed with this branch. Code
-  that depends on another branch's code is built on that branch, as a
-  stacked pull request is: `gitfold layer base <BRANCH>` puts your commits
-  on its commits, and what it committed becomes yours to edit (what it
-  hasn't committed yet stays its layer's, read-only, until it does; see
-  [Bases](#bases-stacked-branches)). Otherwise, to change one, propose a
-  change (below), ask its agent (`gitfold send <BRANCH> <TEXT>`), or
-  remove the layer (`gitfold layer remove <BRANCH>`) and edit your own
-  version. A file a layer changed is that layer's, the base's lines in it
-  too; one several layers change is all of theirs. Files marked for
-  union merging are the exception (below): every workspace adds its lines to
-  them. In Claude Code, the plugin denies its edit tools such a file,
-  saying this and naming every layer whose changes it shows. For one
-  layer's file it offers, in this order: building on that branch
-  (`gitfold layer base <BRANCH>`; not for a tag or a commit, nor the
-  branch it is built on already, and saying when it would replace
-  another base, or when the branch hasn't committed its change to the
-  file yet), a proposal, asking its agent, removing the layer. An edit
-  that only adds whole lines (a list, a changelog) also gets a hint: if
-  the order of the file's lines doesn't matter, mark it `merge=union` in
-  `.gitattributes`, and every workspace can add lines to it.
+- **A see-only layer's files are read-only.** They have no write bits;
+  writing, truncating, removing, renaming them (or a directory holding
+  one) and `chmod` fail with `EACCES`, as does creating a path a layer
+  deleted. They are another agent's work in progress: a change made here
+  would become this workspace's own file, hiding theirs and committed with
+  this branch. Code that depends on another branch's code is built on that
+  branch, as a stacked pull request is: `gitfold layer add <BRANCH>
+  --edit` puts your commits on its commits, and its files become yours to
+  edit (see [Editable layers](#editable-layers-building-on-another-branch)).
+  Otherwise, to change one, propose a change (below), ask its agent
+  (`gitfold send <BRANCH> <TEXT>`), or remove the layer (`gitfold layer
+  remove <BRANCH>`) and edit your own version. A file a see-only layer
+  changed is that layer's, the base's lines in it too; one several layers
+  change is all of theirs, and stays read-only while any of them is
+  see-only. A file only editable layers changed is writable. Files marked
+  for union merging are writable whoever changed them (below): every
+  workspace adds its lines to them. In Claude Code, the plugin denies its
+  edit tools a read-only file, saying this and naming every layer whose
+  changes it shows. It offers, in this order: building on the see-only
+  layers' branches (`gitfold layer add <BRANCH> --edit`: `your commits will
+  sit on <BRANCH>'s (a pull request for your branch then includes
+  <BRANCH>'s commits until <BRANCH> lands)`; for a file several see-only
+  layers changed, every `--edit` needed, since one alone leaves the
+  others' lines read-only; adding `<BRANCH> hasn't committed its change to
+  this file yet: your edits to <BRANCH>'s lines wait until <BRANCH>
+  commits them` where that is so; not offered when one of them is a tag, a
+  commit, a proposal or the main branch), a proposal, asking its agent,
+  removing the layer. An edit that only adds whole lines (a list, a
+  changelog) also gets a hint: if the order of the file's lines doesn't
+  matter, mark it `merge=union` in `.gitattributes`, and every workspace
+  can add lines to it.
 - **Proposals: changing a layer's file (a contract).** A typical tree: a
   root agent writes the interfaces in a workspace (`contracts`), each child
   shows it as a layer and builds against it. When a child needs an
@@ -738,7 +753,10 @@ its new commits as they come; it says when there is nothing to show yet.
   there, it starts with that file's patterns). `git status`, `diff`, `add -A`
   and `commit -a` show and commit only the workspace's own changes, as do
   `gitfold changes`, `list` and `remove`. Removing the layers gives the paths
-  back to git. If git refuses to touch a file you didn't change (a merge or
+  back to git. The exception, for now: a file the base has that only
+  editable layers changed isn't skip-worktree, so git sees it whole, and
+  their uncommitted lines in it can be committed with yours (see [Editable
+  layers](#editable-layers-building-on-another-branch)). If git refuses to touch a file you didn't change (a merge or
   rebase over a layer's path), run `gitfold layer remove --all` and retry.
 - **Union files: everyone's lines in one file.** A file several agents
   add to (a registry, a manifest, a list of modules) can be union-merged rather
@@ -763,8 +781,8 @@ its new commits as they come; it says when there is nothing to show yet.
   base's lines, and a note says so (`note: agent/api's lines in
   registry.txt are placed by your base's lines: the lines agent/api added
   them among aren't in the layers shown here`; `gitfold layer` lists it
-  as `Note: ...`). Snapshots taken by earlier builds have no record, and
-  are placed by the base's lines as before. Your branch's commits still
+  as `Note: ...`). A layer without such a record (a branch's commits) has
+  its lines placed by the base's lines too. Your branch's commits still
   hold only your own lines.
 - **A warning for lines that may not belong in a list.** Lines added
   between two of another branch's lines, next to none of the base's (a
@@ -774,7 +792,7 @@ its new commits as they come; it says when there is nothing to show yet.
   among agent/db's: this file may not be a list (it's marked
   merge=union)`) and for the author itself (`Warning: your lines in
   shapes.rs sit among agent/db's: ...`). Such code belongs on that
-  branch: build on it (`gitfold layer base agent/db`).
+  branch: build on it (`gitfold layer add agent/db --edit`).
 - **git sees only your lines of a union file: a filter.** HEAD stays on
   your branch. Each union path gets a clean/smudge filter that gitfold
   answers: when git reads the file (`status`, `diff`, `add`, `commit -a`,
@@ -836,8 +854,9 @@ its new commits as they come; it says when there is nothing to show yet.
   base catches up once no
   layer shows (moving it meanwhile could copy the layers' files into the
   workspace's own), and before layers go on in a workspace showing none.
-  A move of the branch onto its own base (see [Bases](#bases-stacked-branches))
-  takes the layers off for the move and puts them back after.
+  A move of your commits (see [Editable
+  layers](#editable-layers-building-on-another-branch)) moves the base
+  with them, the view built again over the new tip, layers shown or not.
 - **Between turns, in Claude Code.** The plugin's hooks snapshot a session's
   workspace when the session stops (`gitfold snapshot --claude-hook stop`,
   only if some workspace has it as a layer), and when a prompt is sent,
@@ -845,12 +864,14 @@ its new commits as they come; it says when there is nothing to show yet.
   agent's workspace as it was when its last turn ended, a workspace
   without an agent as it is now, a branch's tip), telling the agent which
   layers changed and how many files, and any conflicts among them
-  (`gitfold layer --claude-hook user-prompt-submit`). What a layer shows
-  thus changes only between turns, never half-way through one, its agent's
-  or the reader's. The daemon leaves such a workspace's layers to its
-  turns. A third hook, `gitfold layer --claude-hook pre-tool-use` on Edit,
-  Write, MultiEdit and NotebookEdit, denies writing a layer's file with the
-  reason and the ways out above.
+  (`gitfold layer --claude-hook user-prompt-submit`); before that, it
+  moves the workspace's commits onto its editable layers' new commits (see
+  [Editable layers](#editable-layers-building-on-another-branch)). What a
+  layer shows thus changes only between turns, never half-way through one,
+  its agent's or the reader's. The daemon leaves such a workspace's layers
+  to its turns. A third hook, `gitfold layer --claude-hook pre-tool-use` on
+  Edit, Write, MultiEdit and NotebookEdit, denies writing a read-only file
+  with the reason and the ways out above.
 - **Without an agent.** In a workspace where no Claude Code hook has run
   (a person works in it, in an editor or a shell), the mounted daemon
   moves the live layers itself: every 2 seconds it looks for newer work (an
@@ -861,7 +882,9 @@ its new commits as they come; it says when there is nothing to show yet.
   change under you half-way through an edit. A move it can't make (git
   busy, HEAD away from the branch, own lines that would be lost)
   is tried again 10 seconds later, or as soon as you write to the
-  workspace. Frozen layers and revisions never move. Each
+  workspace. Frozen layers and revisions never move. It moves only
+  layers' work, never your commits: those move onto an editable layer's
+  new commits at your agent's turns, or when you add it again. Each
   move is one line in the daemon's log (`<branch>: its layers moved to
   their latest work ...: agent/api (2 files changed)`), and `gitfold
   layer` shows when each layer last moved (`live, last HH:MM`).
@@ -871,12 +894,10 @@ its new commits as they come; it says when there is nothing to show yet.
 - **Stored** in the workspace's state directory, in the layers files: the
   layers as added, and what the daemon last applied, so a workspace opens
   as git was told and then catches up with the stored layers (their
-  formats are in [ARCHITECTURE.md](ARCHITECTURE.md)). Layers files of
-  earlier builds are read: their shown layers become live, all work; their
-  hidden ones are dropped. While layers show, `refs/gitfold-layers/<id>`
-  keeps the view (a commit of it, with the layers' snapshots as parents)
-  from `git gc`. A fork (`branch -w`) starts without
-  layers.
+  formats are in [ARCHITECTURE.md](ARCHITECTURE.md)). While layers show,
+  `refs/gitfold-layers/<id>` keeps the view (a commit of it, with the
+  layers' snapshots as parents) from `git gc`. A fork (`branch -w`)
+  starts with only its source's editable layers.
 - **Limitations.** A file both the workspace and a layer changed shows the
   workspace's version, unless it is marked for union merging. Union merging assumes a union
   file's lines are unique and their order doesn't matter where two sides
@@ -889,153 +910,184 @@ its new commits as they come; it says when there is nothing to show yet.
   updated while its workspace made 16 newer snapshots holds one no ref
   keeps any more, which `git gc` may prune: add it again (`gitfold layer add`).
 
-### Bases (stacked branches)
+### Editable layers: building on another branch
 
-Stacked pull requests, `main <- p1 <- p2`: p2 is built on p1's commits,
-p1 is its **base**. When p1 gets review fixes (or is rebased), p2's own
-commits have to move onto them. git can't do it where every branch is
-checked out in a worktree (`git rebase --update-refs` leaves the other
-worktrees' branches behind), and plain `update-ref` moves a branch without
-its files. gitfold does both:
+Stacked pull requests, `main <- p1 <- p2`: p2 needs p1's code before p1
+is merged. A see-only layer of p1 shows p1's work in p2's workspace, but
+its files are read-only there and none of it is p2's. An **editable**
+layer (`--edit`) builds p2 on p1: p2's own commits sit on p1's commits,
+what p1 committed is p2's to edit, and p1's uncommitted work shows on
+top, as any layer's does. Every branch otherwise sits on main. When p1
+gets new commits (review fixes, a rebase), p2's own commits have to move
+onto them. git can't do that where every branch is checked out in a
+worktree (`git rebase --update-refs` leaves the other worktrees' branches
+behind), and plain `update-ref` moves a branch without its files. gitfold
+does both:
 
 ```
-gitfold branch p2 --base p1        # p2 at p1's tip, built on it
-gitfold layer base p1 -w p2        # or: an existing branch, its own commits moved onto p1
-gitfold layer base p1              # again, in p2's workspace: onto p1's new commits now
-gitfold layer base p1 --frozen     # built on p1 as it is, not following it by itself
-gitfold layer base main            # no base any more: its own commits onto main
-gitfold layer base --all           # every branch following its base, bases first
-gitfold list                       # p1
-                                   # └─ p2   ... p1  (needs update: gitfold layer base p1)
+gitfold branch p2 --edit p1             # p2 at p1's tip, built on it
+gitfold layer add p1 --edit -w p2       # or: an existing branch, its own commits moved onto p1
+gitfold layer add p1 --edit             # again, in p2's workspace: onto p1's new commits now
+gitfold layer add p1 --edit --frozen    # built on p1 as it is now, not following it
+gitfold layer add p1 --edit --commits   # built on p1, without its uncommitted work shown
+gitfold layer add p1                    # p1 see-only again: p2's commits off p1, onto main
+gitfold layer remove p1                 # the same, and p1 no longer shown
+gitfold layer                           # in p2's workspace:
+LAYER   SHOWS      UPDATES            YOUR COMMITS
+p1      all work   live, last 14:07   built on: your 3 commits sit on it
+gitfold list                            # p1
+                                        # └─ p2   ... p1  (needs update: ...)
 ```
 
-- **What a move is.** p2's own commits are those after the commit of p1
-  they sit on (kept by `refs/gitfold-own/p2`; the base's name is
-  `branch.p2.gitfoldParent` in git config). Each is copied onto p1's tip
-  with the same author, committer and message, as `git rebase --onto p1
-  <start> p2` would (signatures are dropped); one that becomes empty (p1
-  made the same change) is dropped. Because where they start is stored, an
-  amended or force-pushed p1 doesn't drag its old commits along. Merge
-  commits in p2's own commits aren't moved (rebase by hand). A branch not
-  built on another yet has as its own commits those since it and p1 met.
-- **When.** `gitfold layer base p1` says what it moves (`moves 3 commits of
-  p2 onto p1`), then moves it; run again, it moves p2 onto p1's new
-  commits. Without it, at the start of p2's agent's turn: the
-  `UserPromptSubmit` hook (`gitfold layer --claude-hook
-  user-prompt-submit`, in the plugin) moves the session's workspace and
-  tells the agent which files changed under it. Never in the middle of a
-  turn. `--frozen` (`branch.p2.gitfoldRestack manual`) leaves it to `layer
-  base p1 --frozen`, run again (the notes say so); `layer base p1` without
-  it follows p1 again. `--all` leaves frozen branches as they are, and
-  takes neither `--frozen` nor `-w` (exit 2, as building a branch on
-  itself).
-- **Nothing changes unless it moves.** A `layer base` that is refused
-  (commits already pushed) or can't move the branch (a
-  conflict, uncommitted work in the way) leaves its base as it was: p2 is
-  built on a new base only once moved there.
-- **No base any more.** `gitfold layer base main` (the main branch:
-  `main`, `master`, or `gitfold.trunk`) forgets p2's base and moves its
-  own commits onto main's tip; on a branch with no base it says so and
-  does nothing. With the main branch `origin/main`, `main` names it too:
-  the newer of the local `main` and `origin/main` is used (`origin/main`
-  if they diverged), so a stale or missing local `main` doesn't matter.
-- **Where p2 lives.** With no workspace, its ref moves (refused if a git
-  worktree has it checked out). In a mounted workspace, its files move as in
-  a checkout (`git read-tree -m -u`): unstaged, staged and untracked work
-  is kept, and the new files get new times, so builds see them. In an
-  unmounted one, only without uncommitted changes; otherwise it waits for
-  the mount.
-- **With layers shown.** A workspace on a base can show layers too, the
-  base's own branch among them: `gitfold layer base api` with `gitfold
-  layer add api` builds your commits on api's and shows api's uncommitted
-  work on top. A move takes the layers off, moves the branch as above,
-  then puts the same layers back over the new commits (so a layer of api
-  then shows only what api hasn't committed). Union files and their
-  filter come back with them; git still sees only the workspace's
-  own changes, and its commits hold only those. A move that doesn't happen (a conflict, work
-  in the way) leaves the layers as they were, never taken off for it.
-  Interrupted half-way (a crash, Ctrl-C), the layers file is untouched,
-  and whoever comes next (the daemon at once, or when the workspace opens;
-  the next turn; `layer base`; `layer add`) finishes or undoes the move
-  first, then shows the layers again; while it can't, they stay off.
-  Unmounted, the layers are taken off there and shown again when the
-  workspace opens.
-- **When it can't.** A commit that conflicts with p1's new ones leaves p2
-  where it was: `layer base` says which commit and paths (exit 4), the hook
-  tells the agent once, and `list` shows `blocked: conflicts on <paths>`
-  until p2 is rebased by hand (`git rebase --onto p1 <start>` in its
-  workspace; the next `layer base p1` records where its commits now start).
-  Uncommitted work on a path the move changes waits (`waits: uncommitted
-  changes to f.txt overlap the move`; the hook says it once while it stays
-  so), retried at the next turn.
-- **Pushing.** gitfold never pushes. `layer base` refuses (exit 4) to move
+`-w` names any branch with `--edit`, also one without a workspace (as
+for `layer remove` of an editable layer, and the listing).
+
+- **Your own commits.** p2's own commits are those after the commit of
+  p1 they sit on, kept by `refs/gitfold-own/p2`. A move copies them,
+  oldest first, onto p1's commit with the same author, committer and
+  message, as `git rebase --onto p1 <start> p2` would (signatures are
+  dropped); one that becomes empty (p1 made the same change) is dropped.
+  Because where they start is stored, an amended or force-pushed p1
+  doesn't drag its old commits along. A merge among them isn't moved
+  (`its commit <id> is a merge, which isn't moved; rebase by hand`). A
+  branch built on nothing yet has as its own commits those since it left
+  main (or met p1, if that is later).
+- **What you can edit.** p1's committed files are in p2's history, so
+  they are p2's like any other file. p1's uncommitted work shows as a
+  layer: a file only editable layers changed is writable; one a see-only
+  layer changed too stays read-only until that layer is editable as well.
+  `--edit` can't name a tag or a commit (it never moves: show it with
+  `gitfold layer add`), the main branch (every branch sits on it
+  already), or a branch that builds on yours (exit 2). `gitfold branch p2
+  --edit main` makes an ordinary branch.
+- **For now, git sees such files whole.** A file the base has that only
+  editable layers changed isn't hidden from git: `git status` and `git
+  diff` show p1's uncommitted lines in it as p2's changes, and `git commit
+  -a` commits them on p2. Commit such a file once p1 has committed its
+  change, or stage only your own lines (`git add -p`). Edits to p1's
+  uncommitted lines that wait until p1 commits them (what the denial's
+  note says) aren't built yet.
+- **What moves your commits.** Only adding, removing or changing an
+  editable layer, and following one at the agent's turns. Each asked move
+  says first what it moves, then what it did:
+  - `layer add p1 --edit` moves them onto p1's tip (`moves 3 commits of
+    p2 onto p1`; `p2: moved; 2 files changed in its workspace`). Added
+    again, onto p1's new commits; a frozen one is brought up to date.
+  - `layer add p1` on an editable p1 makes it see-only: p2's own commits
+    come off p1, onto its other editable layers (a merge of them) or
+    main's tip (`p1 becomes see-only: moves 3 commits of p2 off p1, onto
+    main (p1 stays shown, read-only)`). `layer remove p1` does the same,
+    and p1 goes. Both refuse (exit 4), listing them, when some of p2's
+    commits change p1's lines: `2 commits change p1's lines, so they can't
+    stand without p1: <id> <subject> (<paths>); ...`. `layer remove --all`
+    takes them off every editable layer, onto main.
+  - At the start of p2's agent's turn, the `UserPromptSubmit` hook
+    (`gitfold layer --claude-hook user-prompt-submit`, in the plugin)
+    moves p2 onto its live editable layers' new commits and tells the
+    agent which files changed under it, then moves its live layers' work
+    as usual. Never mid-turn. Frozen ones aren't followed, and the
+    daemon's following in a workspace without an agent moves layers' work,
+    never commits: `list` and the listing note `needs update: its next
+    turn, or gitfold layer add <LAYER> --edit`.
+- **Pushing.** gitfold never pushes. An asked move refuses (exit 4)
   commits already pushed (reachable from p2's upstream, or `origin/p2`)
-  unless given `--yes`; the hook's moves aren't asked. After a move it
-  prints the push to run for each branch whose remote-tracking branch it
-  left behind, with a lease on that tip (`git push --force-with-lease=p2:<old>
-  origin p2:p2`), and `list` shows the same `push with: ...` until it is
-  pushed.
-- **Stored** in git: the base's name, whether it is frozen and a blocked
-  move and when it last moved in the branch's config (renamed and deleted
-  with it), where its own commits start in `refs/gitfold-own/<branch>`
-  (a fork keeps both; moved
-  with the branch in one ref transaction; after `git branch -m` it is
-  guessed from the base's reflog, as `git merge-base --fork-point` does),
-  and, while a workspace is moved, a `move` intent in its state
-  directory, so a crash half-way is finished or undone (one gitfold can't
-  tell apart is reported, and `gitfold layer base main` forgets it,
-  moving nothing).
-- **A base that landed.** When p1 is merged into main, p2 moves onto main
-  with only its own commits, and has no base from then on, as a branch
-  never given one (`Base: main`; `p2: p1 looks squash- or rebase-merged
-  into main as 9f8e7d; moved there with its own 2 commits and now built on
-  main. Its pull request's base should now be main: push it, then gh pr
-  edit p2 --base main`). Merged into its own base instead (p1 into p0), p2
-  is built on p0 from then on. What counts is whether the commit p2's own
-  commits start from landed, so a fix p1 got after its merge doesn't stop
-  it.
-- **Followed once the base is gone, or when named.** The turn-boundary
-  hook, `gitfold layer base p1` and `layer base --all` move p2 onto where
-  p1 landed only once p1's branch is gone (deleted here, or on its remote
-  and fetched with `--prune`), whatever the kind of landing: a merge may
-  be one of several while p1 goes on, and a squash is found by content.
-  Until then they keep p2 following p1 as before (onto its new commits,
-  if it gets any) and say the landing: the hook tells the agent once (`p1 was
-  merged into main by 9f8e7d, but p1 is still there; gitfold layer base
-  main moves p2 there with only its own commits`), and `list` notes it.
-  - Found: a merge commit (also of commits p1 got later); a squash or
-    rebase merge (merging the start into a main commit touching its files
-    changes nothing), also one the maintainer tweaked, or with main
-    editing the same lines later. A squash is found by content, so main
-    making the same change on its own looks the same: it is said to "look"
-    merged.
-  - `gitfold layer base main` (where it landed: `p0` for p1 merged into
-    p0) follows the landing as the hook would: only p2's own commits move,
-    onto the landing commit, also while p1 exists. Asked for, it refuses
-    (exit 4) to move commits already pushed without `--yes`; the hook's
-    moves aren't asked.
-  - A fast-forward too: p2's start on main's first-parent line looks like
-    a fresh p1 with no commits of its own, so whenever gitfold sets or
-    moves it, it records whether it was on p1's target then
-    (`branch.p2.gitfoldBaseOnTarget`). One that wasn't, and now is, came by
-    a fast-forward; it "looks" merged.
-  - Not found, so not taken: a squash rewritten when merged: `gitfold
-    layer base main -w p2` moves p2's own commits onto main's tip by hand
-    (or `layer base <BRANCH>` onto what p1 was built on, once p1 is
-    deleted: that deletes its own base's name too).
-  - p2 lands on the commit that merged p1, not main's tip: only its own
-    commits move, onto exactly what p1 became, and nothing else main did
-    appears in its workspace mid-task. Following main's later commits is
-    then an ordinary rebase. A branch built on main itself (set by an
-    earlier gitfold, or by hand) isn't moved at turn boundaries, nor said
-    to need it, nor by `--all`; `layer base main` takes that base away.
-  - The main branch is `gitfold.trunk` if set (`git config gitfold.trunk
-    origin/main`), else the branch `origin/HEAD` names, else `main` or
-    `master`; a base that has a base itself lands on its own base instead
-    (stacked pull requests merged into each other). `list` notes `p1
-    landed in main` (or `looks landed`) `: gitfold layer base main moves it
-    there`. gitfold doesn't fetch: it sees what was fetched, and after a fetch
-    it checks only the main branch's new commits.
+  unless given `--yes` (`1 of them is pushed already (origin/p2): moving
+  rewrites them, and the branch then needs a push with
+  --force-with-lease; --yes moves them`). The hook's moves aren't asked:
+  pushed commits move too. After a move it prints the push to run, with a
+  lease on the remote-tracking tip it left behind (`git push
+  --force-with-lease=p2:<old> origin p2:p2`), and `list` and the listing
+  note `push with: ...` until it is pushed.
+- **Nothing changes unless it moves.** A move that is refused or can't
+  happen leaves the commits, the layers and what shows as they were (exit
+  4):
+  - a commit that conflicts with p1's new ones: `p2: blocked: commit <id>
+    conflicts on <paths> with p1; nothing moved. Rebase it by hand, then
+    retry`. It is recorded, the hook says it once, and `list` notes
+    `blocked: conflicts on <paths>` until p2 moves;
+  - uncommitted work on a path the move changes: `waits: uncommitted
+    changes to f.txt overlap the move; commit or stash them` (staged
+    there: `staged changes overlap the move; commit or unstage them`);
+    the hook says it once while it stays so, and tries again each turn.
+    Uncommitted work elsewhere is kept, mounted or not;
+  - git busy in the workspace, or the branch checked out in another git
+    worktree (it names the `git rebase --onto` to run there);
+  - editable layers that conflict with each other (below).
+
+  At a turn start, editable layers whose new commits p2 couldn't move
+  onto keep their work as it showed (it would show their new commits as
+  conflicts).
+- **Several editable layers.** Adding a second one warns: `ui will be
+  built on api and db. A pull request for ui shows api's and db's commits
+  as part of ui's until both land: open it after they land, or build on
+  one of them.` The branch's own commits then sit on a merge commit
+  gitfold makes of their tips (identity `gitfold`, 2020-01-01; message
+  `gitfold: built on api + db` with an `on <name>` line each), rebuilt
+  when any of them moves. If they conflict with each other, nothing
+  moves: `not moved: its editable layers conflict with each other on
+  <paths>; nothing moved`. `list` shows the branch under its first
+  editable layer, with `api+db` in the `base` column.
+- **Where p2 lives.** With no workspace, its ref moves. With one, the
+  workspace moves it, mounted (the daemon) or not (the command, under the
+  repository lock), whatever layers it shows: the index on the paths the
+  move changes, the workspace's base with the view built over the new tip
+  (the files the move changes get a new time, so builds see them), then
+  the refs, in one transaction. The layers stay shown over the new
+  commits (an editable layer of p1 then shows only what p1 hasn't
+  committed). Copies of committed files the workspace held (commits made
+  while layers showed: its base waited) and files written back as they
+  show are dropped at the paths the move changes, so the move's version
+  shows. A move interrupted half-way (a crash, Ctrl-C) is finished or
+  undone by whoever comes next (the daemon, the next turn, `layer add`);
+  meanwhile layer changes are refused (`p2 is being moved (or a move of
+  it was interrupted: ...); retry once it is done`). One gitfold can't
+  tell apart is reported; `gitfold layer remove --all` forgets it, moving
+  nothing.
+- **When p1 lands.** Each editable layer's landing is tracked on its own,
+  in its target: the one branch p1 builds on itself (p1 merged into p0,
+  stacked pull requests merged into each other), else the main branch
+  (`gitfold.trunk` if set, else the branch `origin/HEAD` names, else
+  `main` or `master`; with `origin/main`, the newer of the local `main`
+  and `origin/main` is used, so a stale or missing local `main` doesn't
+  matter). Found: a merge commit (also of commits p1 got later); a squash
+  or rebase merge, by content (merging what p2 sits on there changes
+  nothing), also one the maintainer tweaked, or with main editing the
+  same lines later: main making the same change on its own looks the
+  same, so it "looks" merged; a fast-forward, only once p1's branch is
+  gone (until then it looks like a fresh p1 with no commits of its own).
+  What counts is whether the commit p2's own commits sit on landed, so a
+  fix p1 got after its merge doesn't stop it.
+  - While p1's branch exists, the landing is only said: the hook tells
+    the agent once (`p1 looks merged into main as <id>, but p1 is still
+    there: gitfold layer remove p1 moves p2 onto main with only its own
+    commits`), and `list` and the listing note `p1 looks merged into
+    main: gitfold layer remove p1 moves it there`. `layer remove p1` then
+    follows the landing: only p2's own commits move, onto the landing
+    commit (asking `--yes` for pushed ones).
+  - Once p1's branch is gone (deleted here, or on its remote and fetched
+    with `--prune`), the hook follows it by itself, and tells the agent
+    the pull request's base to set (`gh pr edit p2 --base main`, for the
+    user to run after the push).
+  - p2 lands on the commit that merged p1, not main's tip: nothing else
+    main did appears in its workspace mid-task. Following main after that
+    is an ordinary rebase. Landed in another branch (p0), p0 becomes
+    p2's editable layer. With other editable layers left, p2's own
+    commits sit on a merge of the landing commit and their tips.
+  - A landing gitfold can't recognise (a squash rewritten when merged):
+    `gitfold layer remove p1` moves p2's own commits onto main's tip by
+    hand. gitfold doesn't fetch: it sees what was fetched, and after a
+    fetch it checks only the target's new commits (answers are cached in
+    `.git/gitfold/.landings`).
+- **Stored** with the layers, in the layers file of the branch's state
+  directory (`.git/gitfold/<id>/layers`, each editable layer marked
+  `edit`), also for a branch with no workspace, whose state directory
+  then holds little else (it isn't a workspace, and `list` shows it only
+  in the tree). Where its own commits start is in `refs/gitfold-own/<branch>`,
+  moved with the branch in one ref transaction. `gitfold remove` of a
+  workspace keeps its branch's editable layers; a fork (`branch -w`) gets
+  its source's editable layers and own ref. `git branch -m` renames
+  neither: add the layer again under the new name (`gitfold layer add p1
+  --edit -w <new>`).
 
 ### Partial clones
 
@@ -1341,16 +1393,17 @@ mount and real git (build with `--release` first):
 - `tests/layers.sh`: snapshots of workspaces' work, layers shown in a
   workspace (live, frozen, merged, union: the filter and the guard) and
   proposals (sections as above).
-- `tests/stacks.sh`: branches built on another (`layer base`) moved with
-  no workspace, in an open workspace (by the hook and by `layer base`
-  again) and in an unmounted one; conflicts, uncommitted work in the way,
-  commits already pushed (`--yes`), `--frozen`, refusals that change
-  nothing, the base taken away (`layer base main`, also with
-  `origin/main`), `list`'s tree and notes; bases that landed (squash,
-  rebase and merge commits, a tweaked squash, a base's own base, an
-  unmerged base left alone, `layer base main` following a landing, the
-  hook only reporting one while the base exists); moves with layers
-  shown, also killed half-way.
+- `tests/moves.sh`: a branch's own commits moved onto its editable
+  layers' commits (`layer add --edit`, `branch --edit`) and off them
+  (`layer add` without `--edit`, `layer remove`), with no workspace, in an
+  unmounted workspace and in an open one (by the hook and by `layer add`
+  again); conflicts, uncommitted work in the way, commits already pushed
+  (`--yes`), `--frozen`, commits that can't stand without a layer,
+  several editable layers, `list`'s tree and notes; layers that landed
+  (squash, rebase and merge commits, a tweaked squash, a layer's own
+  layer, a stale local `main`, the hook only reporting one while the
+  layer's branch exists, `layer remove` following it); moves with
+  see-only layers and union files shown, also killed half-way.
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
 
