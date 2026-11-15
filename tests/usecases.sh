@@ -7,7 +7,10 @@
 # PRs, a frozen base, pushed commits, a base that landed, a base shown as a
 # layer too, a child on the lead's branch, a layer and a blended file on a
 # branch with a base, snapshots of several agents' work, a proposal, a
-# person working without an agent.
+# person working without an agent, a child denied editing the lead's
+# class and offered to build on it, a list file not marked merge=union,
+# a registry entry among another layer's, a method inside another layer's
+# class in a blended file.
 # usage: tests/usecases.sh (or with the others: tests/run.sh); sections as
 # in tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -454,6 +457,126 @@ check "UC29: but once they pause" grep -q third "$P/api/contract.rs"
 eq "UC29: git sees only the person's own file" "?? notes.txt" "$(git -C "$P" status --short)"
 }
 
+# Claude Code's tool call $3 (Edit, Write) of file $2 in workspace
+# directory $1, through the deny hook, with the tool's other input $4 (JSON
+# fields, strings escaped).
+tool_hook() { printf '{"tool_name":"%s","cwd":"%s","tool_input":{"file_path":"%s",%s}}' "$3" "$1" "$2" "$4" |
+    "$BIN" layer --claude-hook pre-tool-use; }
+
+# UC30: a child edits a class in the lead's work: denied, and offered to
+# build on the lead (`layer base lead`), which makes what the lead
+# committed the child's to edit; what the lead hasn't committed stays the
+# lead's.
+editing_the_leads_class() {
+mkdir "$REPO/api"; printf 'class Billing {\n}\n' >"$REPO/api/billing.rs"; echo 'fn v1() {}' >"$REPO/api/contract.rs"
+R add -A; R commit -qm api
+R branch lead; R branch child; R branch other; R tag v1.2
+"$BIN" -C "$REPO" branch child2 --base other >/dev/null
+mount_fs
+L=$MNT/lead C=$MNT/child
+printf 'class Billing {\n  fn charge() {}\n}\n' >"$L/api/billing.rs"; G "$L" commit -qam "lead: charge"
+echo 'fn draft() {}' >>"$L/api/contract.rs"
+"$BIN" -C "$C" layer add lead >/dev/null
+out=$(edit_hook "$C" api/billing.rs)
+check "UC30: editing the lead's class is denied" has "$out" '"permissionDecision":"deny"'
+check "UC30: offering to build on the lead first" has "$out" "build on lead: \`gitfold layer base lead\`: your commits will sit on lead's, and lead's committed code becomes yours to edit"
+check "UC30: then a proposal, asking, removing" has "$(sed 's/.*layer base lead//' <<<"$out")" "gitfold propose api/billing.rs"
+check "UC30: the change is committed: no caveat" fails has "$out" "hasn't committed"
+out=$(edit_hook "$C" api/contract.rs)
+check "UC30: an uncommitted change: offered too" has "$out" "gitfold layer base lead"
+check "UC30: saying it stays the lead's until committed" has "$out" "lead hasn't committed its change to this file yet: after \`layer base lead\` it stays lead's (read-only) until lead commits it"
+"$BIN" -C "$MNT/child2" layer add lead >/dev/null
+check "UC30: on a branch with another base: it would replace it" \
+    has "$(edit_hook "$MNT/child2" api/billing.rs)" "(it replaces your base other: a branch has one base)"
+check "UC30: the child builds on the lead" "$BIN" -C "$C" layer base lead
+check "UC30: the committed class is the child's to edit now" sh -c "echo '// mine' >>'$C/api/billing.rs'"
+check "UC30: and not denied" fails has "$(edit_hook "$C" api/billing.rs)" deny
+out=$(edit_hook "$C" api/contract.rs)
+check "UC30: the uncommitted change still the lead's" has "$out" '"permissionDecision":"deny"'
+check "UC30: no offer to build on what it is built on" fails has "$out" "layer base lead"
+R switch -q -c rel main; echo 'fn v3() {}' >>"$REPO/api/contract.rs"; R commit -qam v3; R tag v1.3; R switch -q main
+"$BIN" -C "$MNT/other" layer add v1.3 >/dev/null
+out=$(edit_hook "$MNT/other" api/contract.rs)
+check "UC30: a tag's file: denied" has "$out" deny
+check "UC30: no offer to build on a tag" fails has "$out" "layer base"
+}
+
+# UC31: a denied edit that only adds lines to a list file not marked
+# merge=union: the hint to mark it.
+appending_to_an_unmarked_list() {
+printf 'core\nnet\n' >"$REPO/modules.txt"; R add -A; R commit -qm modules
+R branch lead; R branch child
+mount_fs
+L=$MNT/lead C=$MNT/child
+printf 'core\nnet\nbilling\n' >"$L/modules.txt"
+"$BIN" -C "$C" layer add lead >/dev/null
+hint="mark it \`merge=union\` in .gitattributes, and every workspace can add lines to it"
+out=$(tool_hook "$C" modules.txt Edit '"old_string":"net\n","new_string":"net\nui\n"')
+check "UC31: an appended line: denied" has "$out" deny
+check "UC31: with the merge=union hint" has "$out" "$hint"
+out=$(tool_hook "$C" modules.txt Write '"content":"core\nnet\nbilling\nui\n"')
+check "UC31: Write adding a line: the hint" has "$out" "$hint"
+out=$(tool_hook "$C" modules.txt MultiEdit '"edits":[{"old_string":"core","new_string":"auth\ncore"}]')
+check "UC31: MultiEdit adding a line: the hint" has "$out" "$hint"
+out=$(tool_hook "$C" modules.txt Edit '"old_string":"net\n","new_string":"network\n"')
+check "UC31: a changed line: denied" has "$out" deny
+check "UC31: without the hint" fails has "$out" merge=union
+out=$(tool_hook "$C" modules.txt Edit '"old_string":"net","new_string":"net2"')
+check "UC31: text added inside a line: no hint" fails has "$out" merge=union
+}
+
+# UC32: a registry entry one workspace adds between another layer's
+# entries keeps its place where both show; its branch's commits and its
+# snapshot hold only its own line; without the other layer, it is placed
+# by the base's lines, and a note says so.
+an_entry_among_anothers() {
+printf 'registry.txt merge=union\n' >"$REPO/.gitattributes"; printf 'alpha\nzulu\n' >"$REPO/registry.txt"
+R add -A; R commit -qm registry
+R branch a; R branch b; R branch c
+mount_fs
+A=$MNT/a B=$MNT/b C=$MNT/c
+printf 'alpha\nbravo\ndelta\nzulu\n' >"$A/registry.txt"
+"$BIN" -C "$B" layer add a >/dev/null
+printf 'alpha\nbravo\ncharlie\ndelta\nzulu\n' >"$B/registry.txt"
+eq "UC32: b's file, its line among a's" "alpha bravo charlie delta zulu" "$(paste -sd' ' "$B/registry.txt")"
+p=$("$BIN" -C "$REPO" snapshot b)
+eq "UC32: b's snapshot holds only its own line" "alpha charlie zulu" "$(paste -sd' ' "$p/registry.txt")"
+"$BIN" -C "$C" layer add a >/dev/null; "$BIN" -C "$C" layer add b >/dev/null
+eq "UC32: shown with a's, b's line keeps its place" "alpha bravo charlie delta zulu" "$(paste -sd' ' "$C/registry.txt")"
+"$BIN" -C "$C" layer remove a >/dev/null; "$BIN" -C "$C" layer add a >/dev/null
+eq "UC32: in either order" "alpha bravo charlie delta zulu" "$(paste -sd' ' "$C/registry.txt")"
+out=$("$BIN" -C "$C" layer remove a)
+eq "UC32: without a: placed by the base's lines" "alpha charlie zulu" "$(paste -sd' ' "$C/registry.txt")"
+check "UC32: a note says so" has "$out" "note: b's lines in registry.txt are placed by your base's lines"
+check "UC32: the listing too" has "$(listing "$C")" "Note: b's lines in registry.txt are placed by your base's lines"
+G "$B" commit -qam "b: charlie"
+for _ in $(seq 30); do [ "$(R show b:registry.txt | wc -l)" = 3 ] && break; sleep 0.1; done
+eq "UC32: b's commit holds only its own line (placed as extraction does)" "alpha charlie zulu" "$(R show b:registry.txt | LC_ALL=C sort | paste -sd' ')"
+}
+
+# UC33: a method added inside another layer's class, in a file marked
+# merge=union: blended, with a warning that the file may not be a list.
+a_method_inside_anothers_class() {
+printf 'shapes.rs merge=union\n' >"$REPO/.gitattributes"; printf '// shapes\n' >"$REPO/shapes.rs"
+R add -A; R commit -qm shapes
+R branch a; R branch b; R branch c
+mount_fs
+A=$MNT/a B=$MNT/b C=$MNT/c
+printf '// shapes\nimpl Circle {\n    fn area() {}\n}\n' >"$A/shapes.rs"
+"$BIN" -C "$B" layer add a >/dev/null
+printf '// shapes\nimpl Circle {\n    fn area() {}\n    fn radius() {}\n}\n' >"$B/shapes.rs"
+warning="sit among a's: this file may not be a list (it's marked merge=union)"
+check "UC33: the author's listing warns" has "$(listing "$B")" "Warning: your lines in shapes.rs $warning"
+"$BIN" -C "$C" layer add a >/dev/null
+out=$("$BIN" -C "$C" layer add b)
+check "UC33: the method shows inside the class" has "$(paste -sd'|' "$C/shapes.rs")" "fn area() {}|    fn radius() {}|}"
+check "UC33: a note warns" has "$out" "note: b's lines in shapes.rs $warning"
+check "UC33: the listing too" has "$(listing "$C")" "Warning: b's lines in shapes.rs $warning"
+printf '// shapes\nimpl Circle {\n    fn area() {}\n}\nfn helper() {}\n' >"$B/shapes.rs"
+"$BIN" -C "$C" layer add b >/dev/null
+check "UC33: a function after a's block, at the end: no warning" fails has "$(listing "$C")" Warning
+}
+
 section "use cases: a child builds on the lead" a_child_builds_on_the_lead
 section "use cases: modes, own files, mistakes" modes_own_files_and_mistakes
 section "use cases: two layers on one file" two_layers_on_one_file
@@ -466,4 +589,8 @@ section "use cases: an unrelated layer on a base" an_unrelated_layer_on_a_base
 section "use cases: snapshots" snapshots_of_work
 section "use cases: a proposal" a_proposal
 section "use cases: a person without an agent" a_person_without_an_agent
+section "use cases: editing the lead's class" editing_the_leads_class
+section "use cases: appending to an unmarked list" appending_to_an_unmarked_list
+section "use cases: an entry among another's" an_entry_among_anothers
+section "use cases: a method inside another's class" a_method_inside_anothers_class
 finish

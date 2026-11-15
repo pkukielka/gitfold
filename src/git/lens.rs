@@ -28,7 +28,12 @@
 //! same place (two agents adding to a registry) conflict in every 3-way
 //! merge, so when both sides only add lines the conflict is resolved by
 //! keeping both, ours first (`merge=union`, but only there). Any other
-//! conflict drops that layer's change to p and is reported.
+//! conflict drops that layer's change to p and is reported. A seal whose
+//! author added lines among other layers' lines in p records what it saw
+//! and made (`Record`): its change is then folded in from what it saw, so
+//! its lines keep their place among the others'; while those aren't there
+//! (a layer after it brings them, or none does), it waits, and is placed
+//! as above at last (`Note::PlacedByBase`).
 //!
 //! Extracting a commit C made on L (or on the previous commit P of a chain)
 //! onto the branch tip T is a tree merge `merge(base = P, ours = T, theirs =
@@ -257,6 +262,20 @@ pub enum Note {
     /// The layer's change to this hunk path conflicts with what is below it
     /// (B or the layers under it), so it is not blended in.
     NotBlended { layer: usize, path: BString },
+    /// The layer's snapshot records where its lines in this hunk path sat
+    /// among the lines its author saw (`Record`), but those lines aren't
+    /// here (that layer isn't shown, or changed them since): its change is
+    /// placed by the base's lines instead, as without a record.
+    PlacedByBase { layer: usize, path: BString },
+    /// The layer's added lines in this hunk path sit between lines its
+    /// author saw from another branch, next to none of the base's: the file
+    /// may not be a list. `others`: the layers here whose lines those are
+    /// (none: a branch not shown here).
+    Among {
+        layer: usize,
+        path: BString,
+        others: Vec<usize>,
+    },
     /// A layer's change to this whole-file path conflicts: with B's change
     /// since the layer's merge base (`base`; `layers` is that one layer), or
     /// with other layers' changes (`layers` are those layers). M has the
@@ -320,6 +339,13 @@ pub fn build_view(
         true => HashSet::new(),
         false => hunk_paths(&candidates.into_iter().collect::<Vec<_>>())?,
     };
+    // What each layer's author saw in its blended files, if recorded.
+    let records = match is_hunk.is_empty() {
+        true => Vec::new(),
+        false => (layers.iter())
+            .map(|l| record_of(repo, l.seal))
+            .collect::<Result<Vec<_>>>()?,
+    };
     let mut notes = Vec::new();
     let mut hunks: BTreeMap<BString, Option<Item>> = BTreeMap::new();
     let mut blended: BTreeMap<BString, Vec<usize>> = BTreeMap::new();
@@ -328,29 +354,89 @@ pub fn build_view(
     // replacing it).
     let mut whole: HashMap<BString, Vec<(usize, Change)>> = HashMap::new();
     let mut order: Vec<BString> = Vec::new();
+    // Hunk paths' changes by path, in layer order.
+    let mut hunk_changes: BTreeMap<BString, Vec<(usize, Change)>> = BTreeMap::new();
     for (ix, delta) in deltas.into_iter().enumerate() {
-        let mb = layer_bases[ix];
         for (path, change) in delta {
-            if !is_hunk.contains(&path) {
-                let changes = whole.entry(path.clone()).or_default();
-                if changes.is_empty() {
-                    order.push(path);
-                }
-                changes.push((ix, change));
+            if is_hunk.contains(&path) {
+                hunk_changes.entry(path).or_default().push((ix, change));
                 continue;
             }
-            let ours = match hunks.get(&path) {
-                Some(item) => *item,
-                None => lookup(repo, base_tree, path.as_ref())?,
-            };
-            let ancestor = lookup(repo, mb, path.as_ref())?;
-            match blend(repo, ancestor, ours, change.item())? {
-                Some(merged) => {
-                    hunks.insert(path.clone(), merged);
-                    blended.entry(path).or_default().push(ix);
-                }
-                None => notes.push(Note::NotBlended { layer: ix, path }),
+            let changes = whole.entry(path.clone()).or_default();
+            if changes.is_empty() {
+                order.push(path);
             }
+            changes.push((ix, change));
+        }
+    }
+    for (path, mut pending) in hunk_changes {
+        let mut ours = lookup(repo, base_tree, path.as_ref())?;
+        let mut folded = Vec::new();
+        // A recorded change whose context isn't there yet waits for the
+        // others (the lines it sat among may come with a later layer);
+        // once a round folds none in, those waiting are placed by the
+        // base's lines.
+        let mut by_base = false;
+        while !pending.is_empty() {
+            let round = pending.len();
+            let mut waiting = Vec::new();
+            for (ix, change) in std::mem::take(&mut pending) {
+                let ancestor = lookup(repo, layer_bases[ix], path.as_ref())?;
+                let record = records.get(ix).and_then(Option::as_ref);
+                let in_context = match record {
+                    Some(record) if !by_base => {
+                        blend_recorded(repo, record, ancestor, ours, path.as_ref())?
+                    }
+                    _ => None,
+                };
+                let merged = match in_context {
+                    Some(None) => {
+                        waiting.push((ix, change));
+                        continue;
+                    }
+                    Some(Some(merged)) => Some(merged),
+                    // No record of this path (an older snapshot), or what
+                    // its lines sat among isn't here.
+                    None => {
+                        let merged = blend(repo, ancestor, ours, change.item())?;
+                        if by_base && merged.is_some() {
+                            let path = path.clone();
+                            notes.push(Note::PlacedByBase { layer: ix, path });
+                        }
+                        merged
+                    }
+                };
+                match merged {
+                    Some(merged) => {
+                        ours = merged;
+                        folded.push(ix);
+                    }
+                    None => {
+                        let path = path.clone();
+                        notes.push(Note::NotBlended { layer: ix, path });
+                    }
+                }
+            }
+            by_base = waiting.len() == round;
+            pending = waiting;
+        }
+        for &ix in &folded {
+            if let Some(record) = records.get(ix).and_then(Option::as_ref)
+                && let Some(around) = among_others_in(repo, record, path.as_ref())?
+            {
+                let others = whose_lines(repo, layers, &layer_bases, ix, path.as_ref(), &around)?;
+                let path = path.clone();
+                notes.push(Note::Among {
+                    layer: ix,
+                    path,
+                    others,
+                });
+            }
+        }
+        if !folded.is_empty() {
+            folded.sort_unstable();
+            hunks.insert(path.clone(), ours);
+            blended.insert(path, folded);
         }
     }
     let hunk_tree = edit_tree(
@@ -654,6 +740,222 @@ fn blend(
     };
     let oid = repo.write_blob(&merged)?.detach();
     Ok(Some(Some(Item { kind, oid })))
+}
+
+/// The extra header that marks a snapshot's record of its blended files
+/// (`Record`); its value is the commit the author's view was built on.
+pub const SEEN_HEADER: &str = "gitfold-seen";
+
+/// What the author of a seal saw in its blended files and made of them:
+/// for each blended file it added lines to, the blend it saw (the base's
+/// version with the other layers' lines) and its own copy (its lines among
+/// them). The seal's tree holds only its own lines, against its base, so
+/// layers bring their own work, never another's through them; the record
+/// keeps where those lines sat among the others'.
+///
+/// Kept as the seal's second parent: a commit `made` (tree: the files as
+/// the author left them; header `gitfold-seen <base>`) whose only parent
+/// is a root commit `seen` (tree: the same files as the author saw them),
+/// so `git diff <seal>^2^ <seal>^2` is the author's change in context. Both
+/// are made with a fixed identity and date (the same record is the same
+/// commits, and an unchanged workspace's seal stays the same), and the
+/// root commit's message names the branch, base and seal tree, so two
+/// seals never share it. No branch's commit descends from them: they never
+/// become a merge base, and `merge-base(view base, seal)` is as without.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Record {
+    /// The commit the author's view was built on (its base).
+    pub base: ObjectId,
+    /// The tree of the files as the author saw them.
+    pub seen: ObjectId,
+    /// The tree of the same files as the author left them.
+    pub made: ObjectId,
+}
+
+/// Writes the record of a seal of `branch` on `base` whose tree is
+/// `tree`: trees `seen` and `made` (see `Record`). Returns the commit to
+/// make the seal's second parent.
+pub fn write_record(
+    repo: &gix::Repository,
+    branch: &str,
+    base: ObjectId,
+    tree: ObjectId,
+    seen: ObjectId,
+    made: ObjectId,
+) -> Result<ObjectId> {
+    let me = gix::actor::Signature {
+        name: "gitfold".into(),
+        email: "gitfold@localhost".into(),
+        // 2020-01-01T00:00:00Z, as seals (`state::seal::IDENTITY`).
+        time: gix::date::Time {
+            seconds: 1_577_836_800,
+            offset: 0,
+        },
+    };
+    let commit = |tree, parents, message: String, extra_headers| gix::objs::Commit {
+        tree,
+        parents,
+        author: me.clone(),
+        committer: me.clone(),
+        encoding: None,
+        message: message.into(),
+        extra_headers,
+    };
+    let root = commit(
+        seen,
+        Default::default(),
+        format!(
+            "gitfold snapshot: the blended files {branch} saw\n\nOn {base}, for its snapshot \
+             of tree {tree}.\n"
+        ),
+        Vec::new(),
+    );
+    let root = repo.write_object(&root)?.detach();
+    let header = (SEEN_HEADER.into(), base.to_string().into());
+    let made = commit(
+        made,
+        std::iter::once(root).collect(),
+        format!("gitfold snapshot: {branch}'s lines in them, where it put them\n"),
+        vec![header],
+    );
+    Ok(repo.write_object(&made)?.detach())
+}
+
+/// The record of seal `seal` (see `Record`), if it has one: older seals,
+/// branches' commits and revisions have none.
+pub fn record_of(repo: &gix::Repository, seal: ObjectId) -> Result<Option<Record>> {
+    let commit = repo.find_commit(seal)?;
+    let parents: Vec<ObjectId> = commit.parent_ids().map(|p| p.detach()).collect();
+    let [_, made] = parents[..] else {
+        return Ok(None);
+    };
+    let made = repo.find_commit(made)?;
+    let decoded = made.decode()?;
+    let Some(base) = decoded.extra_headers().find(SEEN_HEADER) else {
+        return Ok(None);
+    };
+    let Ok(base) = ObjectId::from_hex(base) else {
+        return Ok(None);
+    };
+    let Some(seen) = decoded.parents().next() else {
+        return Ok(None);
+    };
+    Ok(Some(Record {
+        base,
+        seen: commit_tree(repo, seen)?,
+        made: decoded.tree(),
+    }))
+}
+
+/// Folds a layer's change to hunk path `path` into `ours` by its record:
+/// first its commits up to its author's base (from `ancestor`, its merge
+/// base's entry), then its author's change from what it saw to what it
+/// made, so its lines keep their place among other layers' lines.
+/// `None` if the record doesn't have the path; `Some(None)` if it doesn't
+/// merge (what its lines sat among isn't in `ours`).
+fn blend_recorded(
+    repo: &gix::Repository,
+    record: &Record,
+    ancestor: Option<Item>,
+    ours: Option<Item>,
+    path: &BStr,
+) -> Result<Option<Option<Option<Item>>>> {
+    let (Some(seen), Some(made)) = (
+        lookup(repo, record.seen, path)?,
+        lookup(repo, record.made, path)?,
+    ) else {
+        return Ok(None);
+    };
+    let at_base = lookup(repo, commit_tree(repo, record.base)?, path)?;
+    let Some(on_base) = blend(repo, ancestor, ours, at_base)? else {
+        return Ok(Some(None));
+    };
+    Ok(Some(blend(repo, Some(seen), on_base, Some(made))?))
+}
+
+/// The lines the author's added lines in hunk path `path` sit between, if
+/// any sit between two lines of another branch's (`among_others`), by
+/// `record`.
+fn among_others_in(
+    repo: &gix::Repository,
+    record: &Record,
+    path: &BStr,
+) -> Result<Option<Vec<Vec<u8>>>> {
+    let (Some(seen), Some(made)) = (
+        lookup(repo, record.seen, path)?,
+        lookup(repo, record.made, path)?,
+    ) else {
+        return Ok(None);
+    };
+    let at_base = lookup(repo, commit_tree(repo, record.base)?, path)?;
+    let (base, seen, made) = (
+        read_blob(repo, at_base)?,
+        read_blob(repo, Some(seen))?,
+        read_blob(repo, Some(made))?,
+    );
+    let around = among_others(&base, &seen, &made);
+    Ok((!around.is_empty()).then(|| around.iter().map(|l| l.to_vec()).collect()))
+}
+
+/// The lines that lines `made` added to `seen` sit between, where both
+/// lines around an addition are lines `seen` has and `base` doesn't
+/// (another branch's), next to none of the base's: a sign the file isn't a
+/// list (a method added inside another branch's class). Empty if none
+/// does, or for anything but text.
+pub(crate) fn among_others<'a>(base: &[u8], seen: &'a [u8], made: &[u8]) -> Vec<&'a [u8]> {
+    use imara_diff::{Algorithm, Diff, InternedInput, sources::byte_lines};
+    if [base, seen, made].iter().any(|d| is_binary(d)) {
+        return Vec::new();
+    }
+    let seen_lines: Vec<&[u8]> = lines(seen).collect();
+    let mut others = vec![false; seen_lines.len()];
+    let input = InternedInput::new(byte_lines(base), byte_lines(seen));
+    for hunk in Diff::compute(Algorithm::Histogram, &input).hunks() {
+        for i in hunk.after {
+            others[i as usize] = true;
+        }
+    }
+    let input = InternedInput::new(byte_lines(seen), byte_lines(made));
+    let mut out = Vec::new();
+    for hunk in Diff::compute(Algorithm::Histogram, &input).hunks() {
+        let at = hunk.before.start as usize;
+        if !hunk.before.is_empty() || at == 0 || at >= seen_lines.len() {
+            continue;
+        }
+        if others[at - 1] && others[at] {
+            out.extend([seen_lines[at - 1], seen_lines[at]]);
+        }
+    }
+    out
+}
+
+/// The layers of `layers` but `ix` (with their merge bases' trees,
+/// `bases`) that added any of `around` to `path`.
+fn whose_lines(
+    repo: &gix::Repository,
+    layers: &[Pin],
+    bases: &[ObjectId],
+    ix: usize,
+    path: &BStr,
+    around: &[Vec<u8>],
+) -> Result<Vec<usize>> {
+    let mut out = Vec::new();
+    for (j, layer) in layers.iter().enumerate() {
+        if j == ix {
+            continue;
+        }
+        let theirs = lookup(repo, commit_tree(repo, layer.seal)?, path)?;
+        let ancestor = lookup(repo, bases[j], path)?;
+        if theirs == ancestor {
+            continue;
+        }
+        let (theirs, ancestor) = (read_blob(repo, theirs)?, read_blob(repo, ancestor)?);
+        let added = added_lines(&ancestor, &theirs);
+        if (added.iter()).any(|l| around.iter().any(|a| key(a) == key(l))) {
+            out.push(j);
+        }
+    }
+    Ok(out)
 }
 
 /// The result of a 3-way merge of entries that needs no content merge: one
@@ -1692,6 +1994,132 @@ mod tests {
             view.blended.get(BStr::new("registry.txt")),
             Some(&vec![0, 1])
         );
+    }
+
+    /// A seal of `b` whose author saw `a`'s registry lines and put its own
+    /// among them: its tree holds only its own line, its record what it saw
+    /// and made. Returns (base, a, b's seal).
+    fn recorded_scenario(r: &Repo, made: &str) -> (ObjectId, ObjectId, ObjectId) {
+        r.write("registry.txt", "alpha\nzulu\n");
+        let base = r.commit("base");
+        r.git(&["checkout", "-q", "-b", "a"]);
+        r.write("registry.txt", "alpha\nbravo\ndelta\nzulu\n");
+        let a = r.commit("a");
+        r.git(&["checkout", "-q", "-b", "b", "main"]);
+        let repo = r.open();
+        let blob = |data: &str| Item {
+            kind: EntryKind::Blob,
+            oid: repo.write_blob(data).unwrap().detach(),
+        };
+        let path = BStr::new("registry.txt");
+        let base_tree = tree_of(r, base);
+        let own = super::without_lines(made.as_bytes(), &[b"bravo\n", b"delta\n"]);
+        let own = Item {
+            kind: EntryKind::Blob,
+            oid: repo.write_blob(own).unwrap().detach(),
+        };
+        let tree = edit_tree(&repo, base_tree, [(path, Change::Set(own))]).unwrap();
+        let empty = repo
+            .write_object(gix::objs::Tree::empty())
+            .unwrap()
+            .detach();
+        let side = |data: &str| edit_tree(&repo, empty, [(path, Change::Set(blob(data)))]);
+        let (seen, made_tree) = (
+            side(&r.show(a, "registry.txt")).unwrap(),
+            side(made).unwrap(),
+        );
+        let record = write_record(&repo, "b", base, tree, seen, made_tree).unwrap();
+        let (tree, base_hex, record_hex) = (tree.to_string(), base.to_string(), record.to_string());
+        let seal = r.git(&[
+            "commit-tree",
+            &tree,
+            "-p",
+            &base_hex,
+            "-p",
+            &record_hex,
+            "-m",
+            "seal",
+        ]);
+        r.git(&["checkout", "-q", "main"]);
+        (base, a, ObjectId::from_hex(seal.as_bytes()).unwrap())
+    }
+
+    fn pins(base: ObjectId, layers: &[(&str, ObjectId)]) -> Vec<Pin> {
+        (layers.iter())
+            .map(|(name, seal)| Pin {
+                name: name.to_string(),
+                seal: *seal,
+                merge_base: base,
+            })
+            .collect()
+    }
+
+    /// A layer whose seal records what its author saw keeps its lines'
+    /// place among another layer's, in either order; without that layer
+    /// they are placed by the base's lines, noted. Lines added between two
+    /// of another branch's are warned about.
+    #[test]
+    fn recorded_blends_keep_their_place() {
+        let r = Repo::new("recorded");
+        let made = "alpha\nbravo\ncharlie\ndelta\nzulu\n";
+        let (base, a, b) = recorded_scenario(&r, made);
+        let repo = r.open();
+        let record = record_of(&repo, b).unwrap().unwrap();
+        assert_eq!(record.base, base);
+        assert_eq!(r.show(record.made, "registry.txt"), made.trim_end());
+        assert_eq!(record_of(&repo, a).unwrap(), None, "a branch's commit");
+        assert_eq!(
+            r.git(&["merge-base", &a.to_string(), &b.to_string()]),
+            base.to_string(),
+            "the record is no merge base"
+        );
+        assert_eq!(
+            r.show(b, "registry.txt"),
+            "alpha\ncharlie\nzulu",
+            "own lines"
+        );
+
+        let among = |layer, others| Note::Among {
+            layer,
+            path: "registry.txt".into(),
+            others,
+        };
+        for order in [[("a", a), ("b", b)], [("b", b), ("a", a)]] {
+            let view = build_view(&repo, base, &pins(base, &order), &registries).unwrap();
+            assert_eq!(r.show(view.view_tree, "registry.txt"), made.trim_end());
+            assert_eq!(
+                view.blended.get(BStr::new("registry.txt")),
+                Some(&vec![0, 1])
+            );
+            let b_ix = order.iter().position(|(n, _)| *n == "b").unwrap();
+            assert_eq!(view.notes, [among(b_ix, vec![1 - b_ix])]);
+        }
+
+        let view = build_view(&repo, base, &pins(base, &[("b", b)]), &registries).unwrap();
+        assert_eq!(
+            r.show(view.view_tree, "registry.txt"),
+            "alpha\ncharlie\nzulu"
+        );
+        let placed = Note::PlacedByBase {
+            layer: 0,
+            path: "registry.txt".into(),
+        };
+        assert_eq!(view.notes, [placed, among(0, vec![])]);
+    }
+
+    /// Lines added next to a base's line, or at the end, aren't among
+    /// another branch's; between two of them they are.
+    #[test]
+    fn lines_among_others() {
+        let base = b"head\ntail\n";
+        let seen = b"head\na1\na2\ntail\n";
+        let among = |made: &str| among_others(base, seen, made.as_bytes()).len();
+        assert_eq!(among("head\na1\nb\na2\ntail\n"), 2);
+        assert_eq!(among("head\nb\na1\na2\ntail\n"), 0, "next to the base's");
+        assert_eq!(among("head\na1\na2\nb\ntail\n"), 0, "next to the base's");
+        assert_eq!(among("head\na1\na2\ntail\nb\n"), 0, "at the end");
+        assert_eq!(among_others(b"", b"a1\na2\n", b"a1\na2\nb\n").len(), 0);
+        assert_eq!(among_others(b"", b"a1\na2\n", b"a1\nb\na2\n").len(), 2);
     }
 
     /// Several layers changing one whole-file path: changes to different

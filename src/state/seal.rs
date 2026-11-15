@@ -6,6 +6,12 @@
 //! (`@<sha>`), merged with other workspaces' seals (`gitfold snapshot`), and
 //! is what a layer shows of another workspace (`layers`).
 //!
+//! A blended file (`merge=union`) is sealed with the workspace's own lines
+//! only, against the base; where it added lines among other layers' lines,
+//! the seal also records what it saw there and made of it, as its second
+//! parent (`git::lens::Record`), so the workspaces showing it put those
+//! lines in the same place among the others'.
+//!
 //! Seals are made with a fixed identity and date, so the same work on the same
 //! base gives the same commit: sealing an unchanged workspace again makes
 //! nothing new. Each new seal is kept by a ref, `refs/gitfold-seal/<id>/<seq>`,
@@ -167,12 +173,17 @@ pub fn seal(store: &Store, state: &StateDir, by: By) -> Result<Seal> {
     let s = status::status(store, state)?;
     let base = state.read_base()?;
     let blends = blends(state, &base)?;
-    let tree = tree_of(state, &base.tree, &s.changed, &s.deleted, &blends)
+    let (tree, seen) = tree_of(state, &base.tree, &s.changed, &s.deleted, &blends)
         .with_context(|| format!("taking a snapshot of {}", state.branch))?;
+    let saw = match seen.is_empty() {
+        true => None,
+        false => Some(seen_record(&state.branch, base.id, tree, &seen)?),
+    };
     let commit = commit(
         &state.common_dir,
         &tree,
         &parent(state, &base, tree),
+        saw,
         &state.branch,
     )?;
     let _lock = crate::lock::wait(&state.dir.join(SEAL_LOCK))?;
@@ -301,16 +312,27 @@ pub fn list(common_dir: &std::path::Path, id: &str) -> Result<Vec<(u64, ObjectId
     Ok(seals)
 }
 
+/// A blended file the workspace added lines to among other layers' lines:
+/// the blend it saw and its own copy (`git::lens::Record`).
+struct Seen {
+    path: Vec<u8>,
+    kind: EntryKind,
+    seen: ObjectId,
+    made: ObjectId,
+}
+
 /// The tree `base` becomes with upper's `changed` paths and without `deleted`
 /// ones: blobs written for the changed files, trees only along changed paths.
+/// With the blended files to record (`Seen`).
 fn tree_of(
     state: &StateDir,
     base: &ObjectId,
     changed: &[Vec<u8>],
     deleted: &[Vec<u8>],
     blends: &Blends,
-) -> Result<ObjectId> {
+) -> Result<(ObjectId, Vec<Seen>)> {
     let upper = state.upper();
+    let mut seen = Vec::new();
     git::with_repo(|repo| {
         let mut editor = repo.edit_tree(*base)?;
         // Deletions first: a file can replace a deleted directory.
@@ -342,10 +364,19 @@ fn tree_of(
                     _ => EntryKind::BlobExecutable,
                 };
                 match blends.get(path) {
-                    // A blended file: its own lines only.
+                    // A blended file: its own lines only, and, if they sit
+                    // among other layers' lines, where (`Seen`).
                     Some((blend, before)) => {
-                        let own =
-                            own_lines(&std::env::temp_dir(), &fs::read(&file)?, blend, before)?;
+                        let made = fs::read(&file)?;
+                        let own = own_lines(&std::env::temp_dir(), &made, blend, before)?;
+                        if blend != before && own != *before {
+                            seen.push(Seen {
+                                path: path.clone(),
+                                kind,
+                                seen: repo.write_blob(blend)?.detach(),
+                                made: repo.write_blob(&made)?.detach(),
+                            });
+                        }
                         (kind, repo.write_blob(own)?)
                     }
                     None => {
@@ -357,27 +388,49 @@ fn tree_of(
             };
             editor.upsert(BStr::new(path), kind, blob.detach())?;
         }
-        Ok(editor.write()?.detach())
+        Ok((editor.write()?.detach(), seen))
     })
 }
 
-/// A commit of `tree` with parent `base`, made with `IDENTITY`.
+/// The record (`git::lens::Record`) of a seal of `branch` on `base` with
+/// tree `tree`, of the blended files `seen`: its commit.
+fn seen_record(branch: &str, base: ObjectId, tree: ObjectId, seen: &[Seen]) -> Result<ObjectId> {
+    git::with_repo(|repo| {
+        let empty = repo.write_object(gix::objs::Tree::empty())?.detach();
+        let side = |pick: fn(&Seen) -> ObjectId| {
+            let items = seen.iter().map(|s| {
+                let item = git::lens::Item {
+                    kind: s.kind,
+                    oid: pick(s),
+                };
+                (BStr::new(&s.path), git::lens::Change::Set(item))
+            });
+            git::lens::edit_tree(repo, empty, items)
+        };
+        let (saw, made) = (side(|s| s.seen)?, side(|s| s.made)?);
+        git::lens::write_record(repo, branch, base, tree, saw, made)
+    })
+}
+
+/// A commit of `tree` with parent `base` (and `record`, see
+/// `git::lens::Record`), made with `IDENTITY`.
 fn commit(
     common_dir: &std::path::Path,
     tree: &ObjectId,
     base: &ObjectId,
+    record: Option<ObjectId>,
     branch: &str,
 ) -> Result<ObjectId> {
     let message = format!("gitfold snapshot: {branch}\n\nIts uncommitted work, on its base.");
+    let (tree, base) = (tree.to_string(), base.to_string());
+    let record = record.map(|r| r.to_string());
+    let mut args = vec!["commit-tree", &tree, "-p", &base];
+    if let Some(record) = &record {
+        args.extend(["-p", record]);
+    }
+    args.extend(["-m", &message]);
     let out = git::cmd::command(common_dir)
-        .args([
-            "commit-tree",
-            &tree.to_string(),
-            "-p",
-            &base.to_string(),
-            "-m",
-            &message,
-        ])
+        .args(args)
         .envs(IDENTITY)
         .output()?;
     anyhow::ensure!(

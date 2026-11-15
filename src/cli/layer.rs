@@ -35,7 +35,9 @@ pub struct LayerArgs {
     /// changed; from then on, only its turns move its layers. As
     /// `PreToolUse` on
     /// Edit, Write, MultiEdit and NotebookEdit (`pre-tool-use`): deny
-    /// writing a layer's file, saying why.
+    /// writing a layer's file, saying why and what to do instead (build on
+    /// its branch, propose a change, ask its agent, remove the layer; for
+    /// an edit that only adds lines, mark the file `merge=union`).
     #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit", "pre-tool-use"])]
     pub claude_hook: Option<String>,
     /// The workspace (default: the one you are in).
@@ -346,8 +348,11 @@ pub fn layer_hook(event: &str) -> Result<()> {
 
 /// `gitfold layer --claude-hook pre-tool-use`: denies Claude Code's edit
 /// tools a file a layer shows (the filesystem would refuse it with a bare
-/// EACCES), saying whose it is and what to do instead: first, propose a
-/// change (`gitfold propose`). Allows everything else, and logs its errors.
+/// EACCES), saying whose it is and what to do instead: for one layer's file,
+/// first to build on that branch (`base_offer`), then to propose a change
+/// (`gitfold propose`), ask its agent or remove the layer; for an edit that
+/// only adds lines, to mark the file `merge=union`. Allows everything else,
+/// and logs its errors.
 fn deny_hook() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     let denied = (|| -> Result<Option<String>> {
@@ -389,15 +394,26 @@ fn deny_hook() -> Result<()> {
             .filter(|c| c.path == path.as_bytes())
             .map(|c| format!(" Conflict: {}.", c.describe(&lens)))
             .collect();
-        if let [_] = names[..] {
+        let list_hint = match adds_lines_only(&input, &file) {
+            true => {
+                " If the order of lines in this file doesn't matter (a list, a changelog), mark \
+                 it `merge=union` in .gitattributes, and every workspace can add lines to it."
+            }
+            false => "",
+        };
+        if let [ix] = owners[..] {
+            let (build_on, propose) = match base_offer(&state, &local, &lens.layers[ix], &path)? {
+                Some(offer) => (offer, "Or run"),
+                None => (String::new(), "To change it, run"),
+            };
             return Ok(Some(format!(
                 "{path} shows {owner}'s work (a layer, read-only here): it can't be changed in \
-                 this workspace.{conflict} To change it, run `gitfold propose {path}`: it makes a copy \
-                 of {owner}'s work for you to edit (a proposal), shown here in its place, \
-                 which {owner}'s agent tests against every workspace that read the file and \
-                 accepts. Or leave it to {owner}'s agent (`gitfold send {owner} <text>` asks \
-                 it), or run `gitfold layer remove {owner}` to stop showing the layer and \
-                 edit your own version."
+                 this workspace.{conflict}{build_on} {propose} `gitfold propose {path}`: it \
+                 makes a copy of {owner}'s work for you to edit (a proposal), shown here in its \
+                 place, which {owner}'s agent tests against every workspace that read the file \
+                 and accepts. Or leave it to {owner}'s agent (`gitfold send {owner} <text>` \
+                 asks it), or run `gitfold layer remove {owner}` to stop showing the layer and \
+                 edit your own version.{list_hint}"
             )));
         }
         let all = and_list(names.iter().map(|n| n.to_string()));
@@ -408,7 +424,7 @@ fn deny_hook() -> Result<()> {
              (a proposal), shown here in its place, which its agent tests and accepts. Or \
              leave it to their agents (`gitfold send {owner} <text>` asks {owner}'s), or \
              run `gitfold layer remove {owner}` (and the others) to stop showing them and \
-             edit your own version."
+             edit your own version.{list_hint}"
         )))
     })();
     match denied {
@@ -420,6 +436,97 @@ fn deny_hook() -> Result<()> {
         Err(e) => log::warn!("gitfold layer --claude-hook pre-tool-use: {e:#}"),
     }
     Ok(())
+}
+
+/// The deny hook's offer to build the workspace in `state` on the branch of
+/// `layer`, whose file `path` it denied: its commits then sit on that
+/// branch's, whose committed code becomes theirs to edit. `None` for a
+/// revision, a proposal, or the branch it is built on already.
+fn base_offer(
+    state: &StateDir,
+    local: &Local,
+    layer: &Layer,
+    path: &str,
+) -> Result<Option<String>> {
+    use super::stack::land;
+    let owner = &layer.branch;
+    if layer.updates == Updates::Fixed
+        || !git::branch_exists(owner)
+        || local.proposal(owner).is_some()
+    {
+        return Ok(None);
+    }
+    let common_dir = &state.common_dir;
+    let parent = local.parent(&state.branch);
+    let replaces = match &parent {
+        Some(p) if p == owner => return Ok(None),
+        None if land::is_trunk(common_dir, local, owner) => return Ok(None),
+        Some(p) if !land::is_trunk(common_dir, local, p) => {
+            format!(" (it replaces your base {p}: a branch has one base)")
+        }
+        _ => String::new(),
+    };
+    let tip = git::branch_tip(owner)?.id;
+    let committed = git::with_repo(|repo| -> Result<bool> {
+        let at = |commit: ObjectId| -> Result<_> {
+            let tree = git::lens::commit_tree(repo, commit)?;
+            git::lens::lookup(repo, tree, path.into())
+        };
+        Ok(at(layer.seal)? == at(tip)?)
+    })?;
+    let uncommitted = match committed {
+        true => String::new(),
+        false => format!(
+            " {owner} hasn't committed its change to this file yet: after `layer base {owner}` \
+             it stays {owner}'s (read-only) until {owner} commits it."
+        ),
+    };
+    Ok(Some(format!(
+        " To make it yours to edit, build on {owner}: `gitfold layer base {owner}`{replaces}: \
+         your commits will sit on {owner}'s, and {owner}'s committed code becomes yours to \
+         edit.{uncommitted}"
+    )))
+}
+
+/// Whether the edit tool call in hook input `input`, of file `file`, only
+/// adds whole lines: Edit's (and each of MultiEdit's) `new_string` is its
+/// `old_string` with lines inserted; Write's content is the file's with
+/// lines inserted.
+fn adds_lines_only(input: &str, file: &Path) -> bool {
+    use super::hook::{array_at, field, field_at};
+    let edit = |json: &str, at: &[&str]| {
+        let old = field_at(json, &[at, &["old_string"]].concat());
+        let new = field_at(json, &[at, &["new_string"]].concat());
+        matches!((old, new), (Some(old), Some(new)) if inserts_lines(&old, &new))
+    };
+    match field(input, "tool_name").as_deref() {
+        Some("Edit") => edit(input, &["tool_input"]),
+        Some("MultiEdit") => array_at(input, &["tool_input", "edits"])
+            .is_some_and(|edits| !edits.is_empty() && edits.iter().all(|e| edit(e, &[]))),
+        Some("Write") => match (
+            std::fs::read_to_string(file),
+            field_at(input, &["tool_input", "content"]),
+        ) {
+            (Ok(now), Some(new)) => inserts_lines(&now, &new),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether `new` is `old` (not empty) with whole lines inserted: every
+/// line of `old`, in order, is a line of `new`, and `new` has more.
+fn inserts_lines(old: &str, new: &str) -> bool {
+    if old.is_empty() || new.len() <= old.len() {
+        return false;
+    }
+    let mut old = old.split('\n').peekable();
+    for line in new.split('\n') {
+        if old.peek() == Some(&line) {
+            old.next();
+        }
+    }
+    old.peek().is_none()
 }
 
 /// The layers of `lens` (shown in the workspace in `state`) whose changes
@@ -643,11 +750,15 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
     for [layer, shows, updates] in &rows {
         let _ = writeln!(out, "{layer:<w0$}{shows:<w1$}{updates}");
     }
-    let conflicts = match crate::state::lens::view(common_dir, &state.read_base()?.id, lens)? {
-        Some(view) => view.conflicts,
-        None => Vec::new(),
+    let base = state.read_base()?;
+    let (conflicts, mut warnings) = match crate::state::lens::view(common_dir, &base.id, lens)? {
+        Some(view) => {
+            let own = crate::state::lens::own_among(state, &base, lens, &view)?;
+            (view.conflicts, [view.warnings, own].concat())
+        }
+        None => (Vec::new(), Vec::new()),
     };
-    if !conflicts.is_empty() {
+    if !conflicts.is_empty() || !warnings.is_empty() {
         out += "\n";
     }
     for c in conflicts.iter().take(SHOWN_CONFLICTS) {
@@ -655,6 +766,10 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
     }
     if conflicts.len() > SHOWN_CONFLICTS {
         let _ = writeln!(out, "and {} more", conflicts.len() - SHOWN_CONFLICTS);
+    }
+    warnings.dedup();
+    for w in &warnings {
+        let _ = writeln!(out, "{w}");
     }
     Ok(out)
 }
@@ -729,5 +844,26 @@ fn clock(secs: i64) -> String {
             tm.tm_mon + 1,
             tm.tm_mday
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inserts_lines;
+
+    /// Whole lines inserted anywhere count; text added inside a line, a
+    /// changed or removed line, or an empty old text don't.
+    #[test]
+    fn edits_that_only_add_lines() {
+        assert!(inserts_lines("net\n", "net\nui\n"));
+        assert!(inserts_lines("core", "auth\ncore"));
+        assert!(inserts_lines("a\nb", "a\nx\ny\nb"));
+        assert!(inserts_lines("core\nnet\n", "core\nnet\nbilling\nui\n"));
+        assert!(!inserts_lines("net", "net2"), "inside a line");
+        assert!(!inserts_lines("net\n", "network\n"), "a changed line");
+        assert!(!inserts_lines("a\nb\n", "a\nx\n"), "a removed line");
+        assert!(!inserts_lines("a\n", "a\nb"), "b runs into the next line");
+        assert!(!inserts_lines("", "a\n"), "no old text");
+        assert!(!inserts_lines("a\n", "a\n"), "nothing added");
     }
 }

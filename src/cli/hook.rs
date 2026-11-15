@@ -20,6 +20,34 @@ pub fn field_at(json: &str, path: &[&str]) -> Option<String> {
     p.string()
 }
 
+/// The elements of the array at `path` in JSON object `json`, each as its
+/// JSON text: `["tool_input", "edits"]` is `json.tool_input.edits`.
+pub fn array_at(json: &str, path: &[&str]) -> Option<Vec<String>> {
+    let mut p = Json {
+        s: json.as_bytes(),
+        i: 0,
+    };
+    for key in path {
+        p.find(key)?;
+    }
+    p.expect(b'[')?;
+    let mut out = Vec::new();
+    if p.peek()? == b']' {
+        return Some(out);
+    }
+    loop {
+        p.peek()?;
+        let start = p.i;
+        p.skip_value()?;
+        out.push(String::from_utf8_lossy(&p.s[start..p.i]).into_owned());
+        match p.next()? {
+            b',' => {}
+            b']' => return Some(out),
+            _ => return None,
+        }
+    }
+}
+
 /// A cursor over JSON text; `peek`, `next` and `expect` skip whitespace first.
 struct Json<'a> {
     s: &'a [u8],
@@ -203,5 +231,18 @@ mod tests {
         assert_eq!(field_at(post, &["cwd"]).as_deref(), Some("/m"));
         assert_eq!(field_at(post, &["tool_input", "command"]), None);
         assert_eq!(field_at(post, &["tool_name", "x"]), None, "not an object");
+    }
+
+    /// An array's elements, each as JSON text a field can be read from.
+    #[test]
+    fn hook_input_arrays() {
+        let json = r#"{"tool_input": {"file_path": "/f", "edits": [ {"old_string": "a\n", "new_string": "a]\nb\n"}, {"old_string":"x"} ] }}"#;
+        let edits = array_at(json, &["tool_input", "edits"]).unwrap();
+        assert_eq!(edits.len(), 2);
+        assert_eq!(field(&edits[0], "new_string").as_deref(), Some("a]\nb\n"));
+        assert_eq!(field(&edits[1], "old_string").as_deref(), Some("x"));
+        assert_eq!(array_at(r#"{"a": []}"#, &["a"]), Some(Vec::new()));
+        assert_eq!(array_at(r#"{"a": "x"}"#, &["a"]), None, "not an array");
+        assert_eq!(array_at(r#"{"a": [1, 2"#, &["a"]), None, "unterminated");
     }
 }

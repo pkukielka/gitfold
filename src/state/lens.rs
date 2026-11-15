@@ -391,6 +391,10 @@ pub struct View {
     pub conflicts: Vec<Conflict>,
     /// What the agent should hear about it.
     pub notes: Vec<String>,
+    /// The notes the listing shows too, each with its `Note:` or
+    /// `Warning:`: blended lines placed by the base's lines, or sitting
+    /// among another branch's.
+    pub warnings: Vec<String>,
 }
 
 /// The view of `lens` over base commit `base`, or `None` if it has no
@@ -427,6 +431,7 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
     let name = |ix: usize| lens.layers[ix].branch.clone();
     let mut conflicts = Vec::new();
     let mut notes = Vec::new();
+    let mut warnings = Vec::new();
     let hunk_layers = view.hunk_layers();
     for note in view.notes {
         notes.push(match note {
@@ -434,6 +439,24 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
                 "{path}: {}'s change conflicts with what is below it, so it isn't blended in",
                 name(layer)
             ),
+            git::lens::Note::PlacedByBase { layer, path } => {
+                let note = placed_by_base(&name(layer), &path);
+                warnings.push(format!("Note: {note}"));
+                note
+            }
+            git::lens::Note::Among {
+                layer,
+                path,
+                others,
+            } => {
+                let others = match others.is_empty() {
+                    true => "another branch's".to_string(),
+                    false => format!("{}'s", and_list(others.into_iter().map(name))),
+                };
+                let note = among(&format!("{}'s", name(layer)), &path, &others);
+                warnings.push(format!("Warning: {note}"));
+                note
+            }
             git::lens::Note::Conflict {
                 layers,
                 base,
@@ -473,7 +496,73 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
             .collect(),
         conflicts,
         notes,
+        warnings,
     }))
+}
+
+/// The warnings (`View::warnings`) for the own lines of the workspace in
+/// `state` (on base commit `base`, showing `lens` as `view`) in its blended
+/// files: those added between two lines of its layers', next to none of the
+/// base's.
+pub fn own_among(
+    state: &StateDir,
+    base: &git::Commit,
+    lens: &Lens,
+    view: &View,
+) -> Result<Vec<String>> {
+    let content = |tree: ObjectId, path: &[u8]| -> Result<Vec<u8>> {
+        let item = git::with_repo(|repo| git::lens::lookup(repo, tree, path.into()))?;
+        item.map_or(Ok(Vec::new()), |i| git::read_blob(i.oid))
+    };
+    let mut out = Vec::new();
+    let mut paths: Vec<&Vec<u8>> = view.blended.keys().collect();
+    paths.sort();
+    for path in paths {
+        let Ok(made) = fs::read(super::upper_path(&state.upper(), path)) else {
+            continue;
+        };
+        let (at_base, seen) = (content(base.tree, path)?, content(view.hunk_tree, path)?);
+        let around = git::lens::among_others(&at_base, &seen, &made);
+        if around.is_empty() {
+            continue;
+        }
+        let mut whose = Vec::new();
+        for &ix in &view.blended[path] {
+            let layer = &lens.layers[ix];
+            let theirs = content(git::resolve(&layer.seal.to_string())?.tree, path)?;
+            let mb = git::resolve(&merge_base(&base.id, layer)?.to_string())?;
+            let added = git::lens::added_lines(&content(mb.tree, path)?, &theirs);
+            let key = git::lens::key;
+            if (added.iter()).any(|l| around.iter().any(|a| key(a) == key(l))) {
+                whose.push(layer.branch.clone());
+            }
+        }
+        let others = match whose.is_empty() {
+            true => "the layers'".to_string(),
+            false => format!("{}'s", and_list(whose)),
+        };
+        let path = BString::from(path.as_slice());
+        out.push(format!("Warning: {}", among("your", &path, &others)));
+    }
+    Ok(out)
+}
+
+/// The note for a layer `layer` whose lines in blended file `path` are
+/// placed by the base's lines (`git::lens::Note::PlacedByBase`).
+fn placed_by_base(layer: &str, path: &BString) -> String {
+    format!(
+        "{layer}'s lines in {path} are placed by your base's lines: the lines {layer} added them \
+         among aren't in the layers shown here"
+    )
+}
+
+/// The warning for lines of `whose` (`B's`, `your`) in blended file `path`
+/// that sit among lines of `others` (`A's`): `path` may not be a list.
+pub fn among(whose: &str, path: &BString, others: &str) -> String {
+    format!(
+        "{whose} lines in {path} sit among {others}: this file may not be a list (it's marked \
+         merge=union)"
+    )
 }
 
 /// Where `layer` and base commit `base` diverged: its changes are its

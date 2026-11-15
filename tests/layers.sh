@@ -535,8 +535,8 @@ for c in c1 c2 c3 c5; do "$BIN" -C "$REPO" track-reads $c on >/dev/null; done   
 read_file "$MNT/c1/api.txt" "$MNT/c2/api.txt" "$MNT/c3/a.txt" "$MNT/c5/api.txt"
 echo 'get(1)' >"$MNT/c1/use.txt"; echo 'put(2)' >"$MNT/c2/use.txt"; echo 'get(4)' >"$MNT/c4/use.txt"
 "$BIN" -C "$MNT/c4" propose api.txt >/dev/null                                   # c4 shows a proposal of its own
-eq "the deny hook offers a proposal first" "yes" \
-    "$(edit_hook "$MNT/c1" api.txt | grep -q 'To change it, run `gitfold propose api.txt`' && echo yes)"
+eq "the deny hook offers building on the layer first, then a proposal" "yes" \
+    "$(edit_hook "$MNT/c1" api.txt | grep -q 'build on contracts: `gitfold layer base contracts`.*Or run `gitfold propose api.txt`' && echo yes)"
 check "proposing outside a layer's workspace: no such layer (exit 3)" \
     sh -c "cd '$MNT/c1' && '$BIN' propose api.txt --layer c2; [ \$? = 3 ]"
 out=$(cd "$MNT/c1" && "$BIN" propose api.txt 2>&1)
