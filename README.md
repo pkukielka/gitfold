@@ -149,10 +149,10 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <BRANCH> [-w] [--from <REV> | --on <PARENT>] [--prewarm <MODE>] [--track-reads on|off]
+gitfold branch <BRANCH> [-w] [--from <REV> | --base <BASE>] [--prewarm <MODE>] [--track-reads on|off]
                                               # create a branch for a workspace
                                               # (-w: with a workspace's changes;
-                                              # --on: stacked on PARENT)
+                                              # --base: built on BASE)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
@@ -182,13 +182,10 @@ gitfold consent <PROPOSAL> [--test <CMD>] [--timeout <SECS>] [--only-readers]
                                               # check it with every workspace showing the layer
 gitfold accept <PROPOSAL> [--force] [-w <L>]  # take it into the layer's workspace
 gitfold reject <PROPOSAL> [--reason <TEXT>] [-w <BRANCH>]
-gitfold stack on <PARENT> [-w <BRANCH>] [--base <REV>]
-gitfold stack off [-w <BRANCH>]               # a branch built on another's commits
-gitfold stack sync [<BRANCH>... | --all] [--dry-run]
-                                              # restack onto the parents' new commits
-gitfold stack merged <PARENT> [--at <REV>] [--onto <BRANCH>]
-                                              # PARENT landed: its branches onto it
-gitfold stack list                            # the stacks, parents first
+gitfold layer [-w <BRANCH>] base <BASE> [--frozen] [--yes]
+                                              # build a branch on another's commits
+                                              # (the trunk: off the stack)
+gitfold layer base --all [--yes]              # every such branch, onto its base
 gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
 gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
 ```
@@ -208,11 +205,11 @@ error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
 Six commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
-`mix` (4 conflicts), `consent` (4 a workspace fails, or none checked), `stack sync` and
-`stack merged` (3 a branch not stacked, 4 a branch not restacked: a
-conflict, uncommitted work in the way, git busy, layers shown) and `inbox
+`mix` (4 conflicts), `consent` (4 a workspace fails, or none checked),
+`layer base` (4 a branch not moved: commits already pushed, a conflict,
+uncommitted work in the way, git busy, layers shown) and `inbox
 --claude-hook rewake` (2, to wake the session).
-`gitfold branch` starts the branch at HEAD unless `--from` (or `--on`) says
+`gitfold branch` starts the branch at HEAD unless `--from` (or `--base`) says
 otherwise.
 
 Names below the mount point:
@@ -432,10 +429,12 @@ how many files each workspace has changed and deleted, and how many ignored
 files (build output) it holds, how long ago it last changed (`last`: a file
 written, created or deleted, or a commit; a stalled agent stands out), with a
 note if its branch was deleted or its base is behind the branch tip (mount once
-to update it), and for a stacked branch its parent (`parent`) and whether it
-needs a restack, is blocked or needs a force-push (see
-[Stacked branches](#stacked-branches)); `--stat` adds the lines added and removed in total, reading
-every changed file. `gitfold changes
+to update it). A branch built on another (see
+[Stacked branches](#stacked-branches)) is listed under its base, indented
+with `└─` (with `-` for the counts if it has no workspace, as for its base),
+the base in the `base` column, noting whether it is frozen, needs an update,
+is blocked, or needs a force-push; `--stat` adds the lines added and removed
+in total, reading every changed file. `gitfold changes
 [<BRANCH>]` lists one workspace's uncommitted changes against its base,
 untracked files included and whatever is staged, as `git add -A` and `git diff
 --cached --name-status` would (`A`, `M`, `D` and the path, quoted as git quotes
@@ -740,103 +739,113 @@ depend on lines that would go (see below); 2 usage errors, 1 other errors
 
 ### Stacked branches
 
-Stacked pull requests, `main <- p1 <- p2`: p2 is built on p1's commits.
-When p1 gets review fixes (or is rebased), p2's own commits have to move
-onto them. git can't do it where every branch is checked out in a
-worktree (`git rebase --update-refs` leaves the other worktrees' branches
-behind), and plain `update-ref` moves a branch without its files.
-gitfold does both:
+Stacked pull requests, `main <- p1 <- p2`: p2 is built on p1's commits,
+p1 is its **base**. When p1 gets review fixes (or is rebased), p2's own
+commits have to move onto them. git can't do it where every branch is
+checked out in a worktree (`git rebase --update-refs` leaves the other
+worktrees' branches behind), and plain `update-ref` moves a branch without
+its files. gitfold does both:
 
 ```
-gitfold branch p2 --on p1       # p2 at p1's tip, stacked on it
-gitfold stack on p1 -w p2       # or: an existing branch (--base <REV>: where its own commits start)
-gitfold stack sync              # the workspace you are in, onto its parent's new commits
-gitfold stack sync --all        # every stacked branch, parents first
-gitfold stack list              # p1
-                                #   p2  (needs restack (2))
-gitfold stack off -w p2         # forget the parent; the history stays
+gitfold branch p2 --base p1        # p2 at p1's tip, built on it
+gitfold layer base p1 -w p2        # or: an existing branch, its own commits moved onto p1
+gitfold layer base p1              # again, in p2's workspace: onto p1's new commits now
+gitfold layer base p1 --frozen     # built on p1 as it is, not following it by itself
+gitfold layer base main            # the trunk: off the stack, its own commits onto main
+gitfold layer base --all           # every branch built on another, bases first
+gitfold list                       # p1
+                                   # └─ p2   ... p1  (needs update: gitfold layer base p1)
 ```
 
-- **What a restack is.** p2's own commits are those after its **parent
-  base**, the commit of p1 they sit on (kept by `refs/gitfold-stack/p2`;
-  the parent's name is `branch.p2.gitfoldParent` in git config). Each is
-  copied onto p1's tip with the same author, committer and message, as
-  `git rebase --onto p1 <base> p2` would (signatures are dropped); one
-  that becomes empty (p1 made the same change) is dropped. Because the
-  base is stored, an amended or force-pushed p1 doesn't drag its old
-  commits along. Merge commits in p2's own commits aren't restacked
-  (rebase by hand).
-- **When.** `gitfold stack sync`, or at the start of p2's agent's turn: the
-  `UserPromptSubmit` hook (`gitfold layer --claude-hook user-prompt-submit`,
-  in the plugin) restacks the session's workspace and tells the agent which
-  files changed under it. Never in the middle of a turn. `git config
-  branch.p2.gitfoldRestack manual` leaves it to `stack sync`.
+- **What a move is.** p2's own commits are those after the commit of p1
+  they sit on (kept by `refs/gitfold-stack/p2`; the base's name is
+  `branch.p2.gitfoldParent` in git config). Each is copied onto p1's tip
+  with the same author, committer and message, as `git rebase --onto p1
+  <start> p2` would (signatures are dropped); one that becomes empty (p1
+  made the same change) is dropped. Because where they start is stored, an
+  amended or force-pushed p1 doesn't drag its old commits along. Merge
+  commits in p2's own commits aren't moved (rebase by hand). A branch not
+  built on another yet has as its own commits those since it and p1 met.
+- **When.** `gitfold layer base p1` says what it moves (`moves 3 commits of
+  p2 onto p1`), then moves it; run again, it moves p2 onto p1's new
+  commits. Without it, at the start of p2's agent's turn: the
+  `UserPromptSubmit` hook (`gitfold layer --claude-hook
+  user-prompt-submit`, in the plugin) moves the session's workspace and
+  tells the agent which files changed under it. Never in the middle of a
+  turn. `--frozen` (`branch.p2.gitfoldRestack manual`) leaves it to `layer
+  base p1 --frozen`, run again; `layer base p1` without it follows p1
+  again.
+- **Off the stack.** `gitfold layer base <TRUNK>` forgets p2's base and
+  moves its own commits onto the trunk's tip; on a branch built on nothing
+  it says so and does nothing.
 - **Where p2 lives.** With no workspace, its ref moves (refused if a git
   worktree has it checked out). In a mounted workspace, its files move as in
   a checkout (`git read-tree -m -u`): unstaged, staged and untracked work
   is kept, and the new files get new times, so builds see them. In an
   unmounted one, only without uncommitted changes; otherwise it waits for
-  the mount. A workspace showing layers isn't restacked (`gitfold lens
-  off` first).
+  the mount. A workspace showing layers isn't moved (`gitfold layer remove
+  --all` first).
 - **When it can't.** A commit that conflicts with p1's new ones leaves p2
-  where it was: `stack sync` says which commit and paths (exit 4), the hook
-  tells the agent once, and `list` shows `restack blocked` until p2 is
-  rebased by hand (`git rebase --onto p1 <base>` in its workspace; the next
-  sync records the new base). Uncommitted work on a path the restack
-  changes waits (`waits: uncommitted changes to f.txt overlap the
-  restack`; the hook says it once while it stays so), retried at the next
-  turn.
-- **Pushing.** gitfold never pushes. After a restack, `stack sync` prints
-  the push to run for each branch whose remote-tracking branch it left
-  behind, with a lease on that tip (`git push --force-with-lease=p2:<old>
-  origin p2:p2`), and `list` shows `needs force-push` until it is pushed.
-- **Stored** in git: the parent's name, the restack mode and a blocked
-  restack in the branch's config (renamed and deleted with it), the parent
-  base in `refs/gitfold-stack/<branch>` (a fork keeps both; moved with the
-  branch in one ref transaction; after `git branch -m` it is guessed
-  from the parent's reflog, as `git merge-base --fork-point` does), and,
-  while a workspace is restacked, a `restack` intent in its state
+  where it was: `layer base` says which commit and paths (exit 4), the hook
+  tells the agent once, and `list` shows `blocked: conflicts on <paths>`
+  until p2 is rebased by hand (`git rebase --onto p1 <start>` in its
+  workspace; the next `layer base p1` records where its commits now start).
+  Uncommitted work on a path the move changes waits (`waits: uncommitted
+  changes to f.txt overlap the move`; the hook says it once while it stays
+  so), retried at the next turn.
+- **Pushing.** gitfold never pushes. `layer base` refuses (exit 4) to move
+  commits already pushed (reachable from p2's upstream, or `origin/p2`)
+  unless given `--yes`; the hook's moves aren't asked. After a move it
+  prints the push to run for each branch whose remote-tracking branch it
+  left behind, with a lease on that tip (`git push --force-with-lease=p2:<old>
+  origin p2:p2`), and `list` shows `push with: git push --force-with-lease
+  origin p2` until it is pushed.
+- **Stored** in git: the base's name, whether it is frozen and a blocked
+  move in the branch's config (renamed and deleted with it), where its own
+  commits start in `refs/gitfold-stack/<branch>` (a fork keeps both; moved
+  with the branch in one ref transaction; after `git branch -m` it is
+  guessed from the base's reflog, as `git merge-base --fork-point` does),
+  and, while a workspace is moved, a `restack` intent in its state
   directory, so a crash half-way is finished or undone (one gitfold can't
-  tell apart is reported, and `gitfold stack off` forgets it).
-- **A parent that landed.** When p1 is merged into main, p2 moves onto
-  main with only its own commits, and is stacked on main from then on
-  (`p2  p1 looks squash- or rebase-merged into main as 9f8e7d; moved there
-  with its own 2 commits and now stacked on main. Its pull request's base
-  should now be main: push it, then gh pr edit p2 --base main`). What
-  counts is whether p2's parent base landed, so a fix p1 got after its
-  merge doesn't stop it.
+  tell apart is reported, and `gitfold layer base <TRUNK>` forgets it,
+  moving nothing).
+- **A base that landed.** When p1 is merged into main, p2 moves onto main
+  with only its own commits, and is built on main from then on (`p2: p1
+  looks squash- or rebase-merged into main as 9f8e7d; moved there with its
+  own 2 commits and now built on main. Its pull request's base should now
+  be main: push it, then gh pr edit p2 --base main`). What counts is
+  whether the commit p2's own commits start from landed, so a fix p1 got
+  after its merge doesn't stop it.
   - Found: a merge commit (also of commits p1 got later); a squash or
-    rebase merge (merging the base into a main commit touching its files
+    rebase merge (merging the start into a main commit touching its files
     changes nothing), also one the maintainer tweaked, or with main
     editing the same lines later. A squash is found by content, so main
     making the same change on its own looks the same: it is said to "look"
-    merged, `stack sync` follows it, and the turn-boundary hook follows it
-    only once p1's branch is gone (deleted here, or on its remote and
+    merged, `layer base p1` follows it, and the turn-boundary hook follows
+    it only once p1's branch is gone (deleted here, or on its remote and
     fetched with `--prune`); until then it tells the agent once.
-  - A fast-forward too: p2's base on main's first-parent line looks like a
-    fresh p1 with no commits of its own, so whenever gitfold sets or moves
-    p2's base it records whether the base was on p1's target then
-    (`branch.p2.gitfoldBaseOnTarget`). A base that wasn't, and now is, came
-    by a fast-forward; it "looks" merged and is followed as a squash is.
-    Branches stacked before gitfold kept this record are told apart only
-    once their base next moves.
+  - A fast-forward too: p2's start on main's first-parent line looks like
+    a fresh p1 with no commits of its own, so whenever gitfold sets or
+    moves it, it records whether it was on p1's target then
+    (`branch.p2.gitfoldBaseOnTarget`). One that wasn't, and now is, came by
+    a fast-forward; it "looks" merged and is followed as a squash is.
   - Not found, so not taken: a squash rewritten when merged: `gitfold
-    stack merged p1 [--at <REV>]` says so for every branch on p1 (with
-    `--onto <BRANCH>` once p1 is deleted: that deletes the name of what p1
-    was stacked on too).
+    layer base main -w p2` moves p2 onto main by hand (or `layer base
+    <BRANCH>` onto what p1 was built on, once p1 is deleted: that deletes
+    its own base's name too).
   - p2 lands on the commit that merged p1, not main's tip: only its own
     commits move, onto exactly what p1 became, and nothing else main did
-    appears in its workspace mid-task; `stack sync p2` follows main's tip
-    when wanted. A branch on the trunk (or on the local branch tracking
-    it, `main` for `origin/main`) isn't restacked at turn boundaries, nor
-    said to need it: following main is on request.
+    appears in its workspace mid-task; `layer base main` follows main's
+    tip when wanted. A branch on the trunk (or on the local branch tracking
+    it, `main` for `origin/main`) isn't moved at turn boundaries, nor said
+    to need it: following main is on request.
   - The trunk is `gitfold.trunk` if set (`git config gitfold.trunk
     origin/main`), else the branch `origin/HEAD` names, else `main` or
-    `master`; a parent that is itself stacked lands on its own parent
-    instead (stacked pull requests merged into each other). `list` notes
-    `parent merged` (or `parent looks merged`) `: re-parent with stack
-    sync`. gitfold doesn't fetch: it sees what was fetched, and after a
-    fetch it checks only the trunk's new commits.
+    `master`; a base that is itself stacked lands on its own base instead
+    (stacked pull requests merged into each other). `list` notes `p1
+    landed in main` (or `looks landed`) `: needs update: gitfold layer base
+    p1`. gitfold doesn't fetch: it sees what was fetched, and after a fetch
+    it checks only the trunk's new commits.
 
 ### Partial clones
 
@@ -1141,11 +1150,13 @@ mount and real git (build with `--release` first):
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/layers.sh`: seal, mix, and layers shown in a workspace, blended
   files and the lens commit included (sections as above).
-- `tests/stacks.sh`: stacked branches restacked with no workspace, in an
-  open workspace (by the hook and by `stack sync`) and in an unmounted
-  one; conflicts, uncommitted work in the way, manual mode, `list`'s notes;
-  parents that landed (squash, rebase and merge commits, a tweaked squash,
-  a stacked parent's parent, an unmerged parent left alone).
+- `tests/stacks.sh`: branches built on another (`layer base`) moved with
+  no workspace, in an open workspace (by the hook and by `layer base`
+  again) and in an unmounted one; conflicts, uncommitted work in the way,
+  commits already pushed (`--yes`), `--frozen`, off the stack onto the
+  trunk, `list`'s tree and notes; bases that landed (squash, rebase and
+  merge commits, a tweaked squash, a stacked base's base, an unmerged base
+  left alone).
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
 
