@@ -54,6 +54,7 @@ use anyhow::{Result, anyhow, ensure};
 use gix::ObjectId;
 use gix::bstr::BString;
 
+use super::plural;
 use crate::git::{self, stack};
 use crate::refusal::Refusal;
 use crate::settings::{self, Local};
@@ -1512,15 +1513,7 @@ fn short(id: ObjectId) -> String {
 }
 
 fn commits(n: usize) -> String {
-    match n {
-        1 => "1 new commit".into(),
-        n => format!("{n} new commits"),
-    }
-}
-
-/// `n` and the singular or plural noun: `1 commit`, `2 commits`.
-fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
+    plural(n, "new commit", "new commits")
 }
 
 fn lossy(paths: &[BString]) -> Vec<String> {

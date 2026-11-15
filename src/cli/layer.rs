@@ -345,13 +345,9 @@ pub fn layer_hook(event: &str) -> Result<()> {
             }
             layer.moved = now();
             moved.push(format!(
-                "{} ({files} {})",
+                "{} ({})",
                 layer.branch,
-                if files == 1 {
-                    "file changed"
-                } else {
-                    "files changed"
-                }
+                super::plural(files, "file changed", "files changed")
             ));
         }
         if !stored {

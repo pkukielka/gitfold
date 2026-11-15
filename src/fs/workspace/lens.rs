@@ -942,8 +942,10 @@ fn switched<'a>(
     notes: impl Iterator<Item = &'a String>,
 ) -> String {
     let mut done = match lens_on {
-        true if changed == 1 => format!("{branch}: layers shown (1 path changed)"),
-        true => format!("{branch}: layers shown ({changed} paths changed)"),
+        true => format!(
+            "{branch}: layers shown ({})",
+            crate::cli::plural(changed, "path changed", "paths changed")
+        ),
         false => format!("{branch}: no layers shown"),
     };
     if let Some(why) = git_off {

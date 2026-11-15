@@ -63,6 +63,11 @@ pub fn usage(message: impl std::fmt::Display) -> ! {
     .exit()
 }
 
+/// `n` and the singular or plural noun: `1 commit`, `2 commits`.
+pub fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// The workspace `path` (absolute) is in, below a gitfold mount, and the path
 /// in it: the longest leading path below the mount point that is a workspace
 /// (branches may hold a `/`).

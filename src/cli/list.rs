@@ -69,13 +69,13 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
 /// The summary `git diff --shortstat` prints: ` 2 files changed, 3
 /// insertions(+), 1 deletion(-)`, leaving out zero counts unless both are.
 fn shortstat(files: usize, (added, removed): (u32, u32)) -> String {
-    let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    let mut out = format!(" {} changed", plural(files as u64, "file", "files"));
+    use super::plural;
+    let mut out = format!(" {} changed", plural(files, "file", "files"));
     if added > 0 {
-        out += &format!(", {}(+)", plural(added.into(), "insertion", "insertions"));
+        out += &format!(", {}(+)", plural(added as usize, "insertion", "insertions"));
     }
     if removed > 0 {
-        out += &format!(", {}(-)", plural(removed.into(), "deletion", "deletions"));
+        out += &format!(", {}(-)", plural(removed as usize, "deletion", "deletions"));
     }
     out
 }
