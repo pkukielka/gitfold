@@ -604,6 +604,8 @@ errors.
 place replaces the proposal (which stays, as a branch: `gitfold layer add
 <PROPOSAL>` shows it again in the same place, `gitfold reject <PROPOSAL>`
 drops it); `layer remove <BRANCH>` then removes the proposal's place.
+`layer remove <PROPOSAL>` shows BRANCH again in its place, as it was
+before the proposal (frozen, say); the proposal stays until rejected.
 Adding the branch the workspace's base came from (`layer add main`) shows
 its new commits as they come; it says when there is nothing to show yet.
 

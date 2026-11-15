@@ -207,8 +207,21 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
                 .ok_or_else(|| {
                     Refusal::NotFound.error(format!("{branch} isn't a layer of {name}"))
                 })?;
-            let was = lens.layers.remove(i);
+            let mut was = lens.layers.remove(i);
             match was.branch == branch {
+                // Your proposal shown in its layer's place: that layer back.
+                true if mine => {
+                    let back = was.instead.take().map(|instead| {
+                        let note = format!("; {} shown again as it was", instead.branch);
+                        lens.layers.insert(i, *instead);
+                        note
+                    });
+                    format!(
+                        "layer {branch} removed{}; the proposal stays: `gitfold reject {branch}` \
+                         drops it",
+                        back.unwrap_or_default()
+                    )
+                }
                 true => format!("layer {branch} removed"),
                 false => format!(
                     "layer {branch} removed (it showed your proposal {0}, which stays: `gitfold \

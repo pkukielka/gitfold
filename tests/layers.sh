@@ -615,6 +615,12 @@ out=$("$BIN" -C "$W" layer add lead)
 eq "add the layer while its proposal shows: replaced in place, the proposal kept" "lead|yes|lead-prop/me" \
     "$(layer_names "$W")|$(echo "$out" | head -1 | grep -q '(in place of your proposal lead-prop/me, which stays' && echo yes)|$(R for-each-ref --format='%(refname:short)' 'refs/heads/lead-prop/')"
 check "add the proposal again: in the same place" sh -c "'$BIN' -C '$W' layer add lead-prop/me >/dev/null && [ \"\$('$BIN' -C '$W' layer | grep -c '^lead')\" = 1 ]"
+"$BIN" -C "$W" layer add lead --frozen >/dev/null; "$BIN" -C "$W" layer add lead-prop/me >/dev/null
+out=$("$BIN" -C "$W" layer remove lead-prop/me)
+eq "remove the proposal: the layer it stood in for shown again as it was, the proposal kept" \
+    "layer lead-prop/me removed; lead shown again as it was; the proposal stays: \`gitfold reject lead-prop/me\` drops it|lead all work frozen at HH:MM|lead-prop/me" \
+    "$(echo "$out" | head -1)|$(listing "$W" | grep '^lead')|$(R for-each-ref --format='%(refname:short)' 'refs/heads/lead-prop/')"
+"$BIN" -C "$W" layer add lead-prop/me >/dev/null
 out=$("$BIN" -C "$W" layer remove lead)
 eq "remove the layer while its proposal shows: removed, saying the proposal stays" "yes|No layers." \
     "$(echo "$out" | head -1 | grep -q "it showed your proposal lead-prop/me, which stays: \`gitfold reject lead-prop/me\` drops it" && echo yes)|$("$BIN" -C "$W" layer | tail -1)"
