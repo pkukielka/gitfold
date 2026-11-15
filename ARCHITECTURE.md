@@ -181,7 +181,7 @@ Then, per request (`fs/workspace/`):
 | `src/cli/proposal.rs` | `propose`, `proposals`, `consent`, `accept` and `reject`: changes to a layer's files made in a fork of its workspace, checked against the workspaces that read them, written into the layer's workspace |
 | `src/cli/stack/mod.rs` | `layer base` and `branch --base`: building a branch on another (its base), moving it onto its base's new commits or, its base taken away, onto the trunk, refusing to move pushed commits without `--yes`; the move the `UserPromptSubmit` hook does, re-parenting the children of a base that landed, `list`'s notes |
 | `src/cli/stack/land.rs` | a stacked parent's target (its own parent, or the trunk), whether a parent base landed there (cached in `.git/gitfold/.stack-landings`) |
-| `src/cli/stack/layers.rs` | moving a workspace that shows layers onto its base: the layers taken off (`lens-off`), the move, the layers put back pinned again against the new commits; putting back layers an interrupted move left off |
+| `src/cli/stack/layers.rs` | moving a workspace that shows layers onto its base: what would make it wait checked first, the layers taken off (`lens-off`), the move (worked out again if taking them off moved the branch), the layers put back; putting back layers an interrupted move left off, once the move is finished or undone |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
 | `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
@@ -242,14 +242,17 @@ term; they never appear in messages, help or the README.
   `.git/gitfold/<id>/upper`.
 - **Seal** (*internal*; user-facing: a snapshot of a workspace's work): a
   commit of a workspace's uncommitted work: the tree it shows, ignored
-  files left out, on its base, made with a fixed identity and date.
+  files left out, on its base (or its branch tip, when it committed and
+  its base hasn't caught up, if it has the tip's changes), made with a
+  fixed identity and date.
   `gitfold snapshot` and the `Stop` hook make one. Its refs outlive the
   workspace; the one the workspace's own `Stop` hook made last is recorded
   in its state (`sealed`), so a live layer never follows an earlier
   workspace's.
 - **Layer**: another branch's work shown in a workspace, read-only: one of
   its workspace's seals, or a branch's or a revision's commit, as the
-  changes since a pinned merge base. **Live** layers follow their branch
+  changes since it and the commit the view is built on diverged (their
+  merge base, worked out per view). **Live** layers follow their branch
   (an agent's workspace: the seal its `Stop` hook made at the end of its
   last turn; a workspace without an agent: a seal taken whenever the layer
   moves; or the tip), at the reader's turn starts if it has an agent, else
@@ -1328,14 +1331,14 @@ included, read-only, over its base and under its own changes. Each layer is
 one **seal** of the other workspace (`state::seal`: a commit of the tree it
 shows, ignored files left out, on its base, kept by
 `refs/gitfold-seal/<id>/<n>`), or with `--commits` or without a workspace
-the branch's tip, or a tag's or a commit's commit, with the merge base of
-the two, pinned when the layer is added or moved. A **live** layer moves
+the branch's tip, or a tag's or a commit's commit. A **live** layer moves
 when added again, and at the reader's agent's turn boundaries, or in a
 workspace without an agent, by the daemon once the workspace is idle; a
 **frozen** one
 (`--frozen`) and a revision (**fixed**) don't. The layers' changes
-(`diff-tree <merge base> <seal>`, in the order added) applied to the
-base's tree make the **view tree** (`state::lens::view`,
+(`diff-tree <merge base> <seal>`, in the order added, the merge base of
+the seal and the commit the view is built on, worked out for each view)
+applied to the base's tree make the **view tree** (`state::lens::view`,
 `git::lens::build_view`), loaded into the shared store and used as the
 workspace's lower layer: at each path a layer changed, its change merged
 into what is there (the base's version, or with the layers before it) as
@@ -1372,10 +1375,38 @@ a snapshot, with no change to any workspace.
   writes change nothing a reader has cached, and need no invalidation. Made
   with a fixed identity and date, the same work gives the same commit, so
   sealing an unchanged workspace makes nothing new and moves no layer.
-- **A pinned merge base:** a layer is what its workspace has that this one
-  doesn't (its commits since they diverged, plus its uncommitted work). The
-  merge base is pinned with the seal, so what a layer shows changes only at a
-  switch, not when either branch moves.
+- **The merge base of the view's own base:** a layer is what its
+  workspace has that this one doesn't (its commits since they diverged,
+  plus its uncommitted work), so its changes are taken against
+  `merge-base(B, seal)`, B the commit that very view is built on: the
+  workspace's base for the view tree, the branch tip for the layers
+  commit's blends and for extraction, the base for a proposal's check.
+  It is worked out per view (remembered per process: commits don't
+  change), never stored. Rejected: pinning it when the layer is added or
+  moved. Against the base, it went stale when the base caught up; against
+  the branch tip, it was ahead of the base the view was built on, which
+  lags while layers show (commits made meanwhile, a move onto its base).
+  Either way the lines between the two commits counted as the layer's own
+  changes: a layer of a branch moved onto this workspace's new commits
+  then "changed" the lines those commits made and conflicted with the
+  base falsely. Re-pinning at every catch-up was the other way out, but
+  every place the base or tip moves would have to do it, under the
+  layers' lock, and a crash in between leaves them disagreeing; computed
+  per view, they can't. What a layer shows still changes only at a
+  switch: views are built only then.
+- **A snapshot's parent: what its tree is that commit plus the
+  workspace's own work** (`seal::parent`). Its base, or, when the
+  workspace committed and its base hasn't caught up (it waits while
+  layers show), its branch tip, so a layer of it brings only what came
+  after the commit. The tip only if the workspace has the tip's changes:
+  at each path the base..tip diff touches, the snapshot's tree has the
+  tip's entry, or the workspace's index has (committed through it, then
+  edited further), or merging the tip's change into the tree's entry
+  changes nothing (edited further on other lines). A tip moved without
+  the files (`update-ref`, a push into the branch, `reset --soft` to a
+  descendant) leaves it on the base: on the tip, the snapshot would undo
+  the tip's changes. A file the tip added and the workspace edited
+  further, unstaged, falls back to the base (wider, never wrong).
 - **Switches tell the kernel exactly what changed** (`Workspace::switch`):
   the old and new view trees are diffed; paths upper shadows are skipped; for
   each change, the highest path whose type changed (appeared, vanished,
@@ -1424,7 +1455,7 @@ a snapshot, with no change to any workspace.
   switch's reply, at the next turn, in the deny hook's reason and in
   `gitfold layer`'s listing. A path the base made a directory of stays
   the base's directory. A branch with no commit in common with the base
-  has no merge base: `layer add` refuses it.
+  has no merge base: `layer add` refuses it, and a view can't be built.
 - **Git sees only the workspace's own work: skip-worktree and per-worktree
   excludes** (`tell_git`). The layers' paths the base tracks are marked
   skip-worktree in the worktree's own index, by an index editor
@@ -1547,11 +1578,21 @@ a snapshot, with no change to any workspace.
   agent's newer end-of-turn seal, a tip that moved, or a person's
   workspace written to since its last seal) and (2) nothing has written to
   the reader for `IDLE` (3 s), so files don't change under someone
-  half-way through an edit. The check is cheap: a person's workspace is
-  sealed only when its write count (counted by every write through the
-  mount, `Activity`) or its base changed since its last seal for this
-  reader, and once it has been quiet for 1 s (a save isn't half-seen); a
-  closed one, once per mount and then when its base moves. The move is
+  half-way through an edit, and git is idle in it as a switch wants it
+  (HEAD on the branch, or detached at the layers commit while files are
+  blended). The check is cheap: a person's workspace is sealed only when
+  its write count (counted by every write through the mount, `Activity`),
+  its base or its branch tip (`git commit` writes nothing through the
+  mount, and the base of one showing layers waits) changed since its
+  layer last moved to a seal of it, and once it has been quiet for 1 s (a
+  save isn't half-seen); a closed one, once per mount and then when its
+  base or tip moves. A source counts as seen only once its layer moved;
+  one whose layer couldn't (an error, only logged) is tried again after
+  `BACK_OFF` (10 s). A move refused as a whole (the switch: git busy, a
+  commit on the layers commit that can't go onto the branch, own lines
+  that depend on the layers) is tried again after `BACK_OFF`, or once the
+  reader is written to: not resealed, stored and restored every round.
+  The move is
   the hook's own (`state::follow::follow_live`), so the rules can't
   drift apart; it runs under the layers' `flock`, taken without waiting
   (`try_lock`: a command holding it goes first, the check retries next
@@ -1607,14 +1648,16 @@ a snapshot, with no change to any workspace.
   can't deadlock). The
   repository lock (`lock.rs`) can't serve: a mounted daemon holds it for
   its life.
-- **The layers file's format:** `version 2`, one line per layer: `layer
+- **The layers file's format:** `version 3`, one line per layer: `layer
   <name> TAB <work|commits-only|commits> TAB <live|frozen|fixed> TAB <when
-  it last moved, seconds since the epoch> TAB <commit> TAB <merge base>`,
-  a proposal's line followed by `instead` and the same fields for the layer
-  it stands in for. Version 1 files (`layer <name> TAB <on|off> TAB
-  <commit> TAB <merge base>`, from builds before `--frozen`/`--commits`)
-  are read, also inside `lens-applied`: `on` is live, all work, its time
-  the file's; `off` (a hidden layer, which no longer exists) is dropped.
+  it last moved, seconds since the epoch> TAB <commit>`, a proposal's line
+  followed by `instead` and the same fields for the layer it stands in
+  for. Earlier versions are read, also inside `lens-applied`, their stored
+  merge bases ignored (worked out per view now): version 2, the same with
+  a sixth field, the merge base; version 1 (`layer <name> TAB <on|off> TAB
+  <commit> TAB <merge base>`, from builds before `--frozen`/`--commits`),
+  `on` live, all work, its time the file's, `off` (a hidden layer, which
+  no longer exists) dropped.
   The README names these "the layers files" and leaves the formats here.
 
 **Rejected:**
@@ -1851,24 +1894,32 @@ p2's old tip, so its next restack replays exactly its own commits.
   extracted, HEAD back on the branch, skip-worktree and excludes cleared,
   own lines in blends carried over, the view the base again. Then the
   ordinary move (intent, `read-tree -m -u` after an index refresh, since
-  the switch restamped files, the ref transaction). Then `put_back`: each
-  stored layer's merge base is `merge-base(branch tip, seal)` again (the
-  base it was pinned against moved; a layer of the base's own branch then
-  shows only its uncommitted work), the marker removed, and the switch to
-  them asked for, whose `catch_up_before_layers` rebases the base onto the
-  moved tip first so the files the read-tree wrote are the base's, not
-  the workspace's own hiding the layers'. A refused switch-off moves
-  nothing and leaves the layers as they were.
+  the switch restamped files, the ref transaction), worked out again from
+  the new tip if the switch-off moved the branch (commits made on the
+  layers commit extracted onto it: otherwise every first try in a blended
+  workspace ended "moved meanwhile"). Then `put_back`: the marker removed,
+  and the switch to them asked for, whose `catch_up_before_layers` rebases
+  the base onto the moved tip first so the files the read-tree wrote are
+  the base's, not the workspace's own hiding the layers' (and the layers'
+  merge bases are then taken against it: a layer of the base's own branch
+  shows only its uncommitted work). What would make the move wait anyway
+  (another move to finish, git busy, uncommitted work on a path the move
+  changes, judged from upper against the tip) is checked before the
+  layers come off, so a move that waits doesn't switch the view off and
+  on again; a refused switch-off moves nothing and leaves the layers as
+  they were.
   - **Crash safety:** the layers file is never rewritten for the move, so
     what is stored stays the truth; only the applied state lags. Killed
     anywhere, the marker stays and nobody holds the `flock`: the next one
     along (the sync thread, which takes the `flock` without waiting, every
     pass and at open; the hook and `layer base` (`resume`); `layer add`,
     proposals and follows writing the layers file) first lets the intent
-    finish or undo the move as before, then puts the layers back pinned
-    against wherever the branch is: finishing and rolling back end the
-    same way. Re-pinning is idempotent, so a crash during `put_back` is
-    harmless.
+    finish or undo the move as before, then puts the layers back over
+    wherever the branch is: finishing and rolling back end the same way.
+    While the intent can't be resolved (another move running, or one it
+    can't tell apart), the layers stay off, and a switch never catches
+    the base up while an intent is pending (`catch_up_before_layers`
+    refuses): the base follows the branch only once the move is settled.
   - **Rejected:** writing an empty layers file for the move and the real
     one back after (a crash loses the layers, or needs a second copy and
     rules for which wins); rebasing the base under the view tree (it would
@@ -1936,14 +1987,15 @@ transaction, its stack ref moved to S), then `gitfoldParent` set to the
 target; or, the target being the trunk, its base forgotten altogether
 (`built_on`: no parent, no stack ref), as a branch never stacked, so
 `list` doesn't show it under the trunk and its listing says a plain
-`Base: main`. The hook does this unasked only once the parent's branch
-is gone (`land::gone`), for every kind of landing: a merge into main may
-be one of several while the parent goes on, and a squash is found by
-content. Until then the child follows its parent as before (onto its new
-commits, if any), and the landing is told once and noted in `list`.
-`layer base <target>` (the
-target named as users know it, what the notes advise) or `layer base
-<parent>` does the same on request, asking `--yes` for pushed commits. Config can't join the ref transaction, so the move is recorded
+`Base: main`. The hook, `layer base <parent>` and `--all` do this only
+once the parent's branch is gone (`land::gone`), for every kind of
+landing: a merge into main may be one of several while the parent goes
+on, and a squash is found by content. Until then the child follows its
+parent as before (onto its new commits, if any), and the landing is told
+(once, by the hook) and noted in `list`. Naming the target, `layer base
+<target>` (as users know it, what the notes advise) follows the landing
+while the parent is still there, asking `--yes` for pushed commits.
+Config can't join the ref transaction, so the move is recorded
 first in `branch.<b>.gitfoldLanding` (`<target> <S>`); the next sync
 finishes it if the stack ref is at S (else forgets it, unless a
 workspace's restack intent may still move the refs). Without it, a crash
@@ -1996,8 +2048,9 @@ children still have their stack refs saying where their own commits start.
   treated as a guess like a squash. Main independently making
   the same change looks like a squash: the content is there, but the child
   would leave a parent that may still be going on. So a squash is said to
-  "look" merged; `layer base` (asked for) follows it, and the turn-boundary
-  hook follows it only once the parent's branch is gone (deleted here, or
+  "look" merged; `layer base <target>` (asked for, naming where it landed)
+  follows it, and the turn-boundary hook, `layer base <parent>` and
+  `--all` follow it only once the parent's branch is gone (deleted here, or
   its upstream deleted on its remote, as a forge does when it merges), and
   otherwise tells the agent once. A merge commit too may be one of several
   while the parent goes on, so every kind of landing is followed unasked

@@ -281,7 +281,11 @@ first `rg` takes about 0.5 s instead of 2.9 s.
 shows a workspace's work as it is now in a snapshot, and prints its path,
 `<mount>/@<sha>` (default: the workspace you are in). The commit's tree is
 what the workspace shows, ignored files left out (what `gitfold changes`
-lists), its parent the workspace's base. A branch without a workspace, a
+lists), its parent the workspace's base (or its branch's tip, when the
+workspace committed and its base hasn't caught up yet: a layer then shows
+only what came after the commit; only if the workspace has the tip's
+changes, so not after the branch was moved without them, by a push into
+it say). A branch without a workspace, a
 tag or a commit gives its commit; `--commits` takes only a branch's
 commits even if it has a workspace. Several are merged, in order onto the
 first (or onto `--onto <REV>`), as `git merge-tree` does, to check work
@@ -546,9 +550,10 @@ Conflict: src/api.rs is changed by both agent/api and agent/ui
 A layer of a branch with a workspace is that workspace's work, uncommitted
 included (a snapshot of it, see above); of a branch without one, or with
 `--commits`, the branch's commits; of a tag or a commit, that commit. It is taken as the
-changes it makes since it and the workspace's base diverged; that merge base
-is pinned with the layer, so it shows the same files whatever happens to
-either branch until it moves. A live layer moves whenever `layer add`
+changes it makes since it and what the workspace shows it over diverged:
+the workspace's base, worked out again whenever that changes, so a layer
+whose work is built on the workspace's own commits (a branch moved onto
+yours) brings only what it did after them, never yours again. A live layer moves whenever `layer add`
 names it again, and by itself: in a workspace with an agent, at the start
 of each of its turns (see *Between turns* below); in a workspace without
 one, where a person works, as soon as the layer has new work and nothing
@@ -803,10 +808,13 @@ its new commits as they come; it says when there is nothing to show yet.
   (a person works in it, in an editor or a shell), the mounted daemon
   moves the live layers itself: every 2 seconds it looks for newer work (an
   agent's workspace whose turn ended since, a branch whose tip moved, or a
-  person's workspace written to since its last snapshot; only then is a
-  new snapshot of it taken), and moves the layers once nothing has written
-  to the workspace for 3 seconds, so files don't change under you
-  half-way through an edit. Frozen layers and revisions never move. Each
+  person's workspace written to or committed in since its last snapshot;
+  only then is a new snapshot of it taken), and moves the layers once
+  nothing has written to the workspace for 3 seconds, so files don't
+  change under you half-way through an edit. A move it can't make (git
+  busy, a commit made on the layers commit that can't go onto the branch)
+  is tried again 10 seconds later, or as soon as you write to the
+  workspace. Frozen layers and revisions never move. Each
   move is one line in the daemon's log (`<branch>: its layers moved to
   their latest work ...: agent/api (2 files changed)`), and `gitfold
   layer` shows when each layer last moved (`live, last HH:MM`).
@@ -889,17 +897,18 @@ gitfold list                       # p1
   base's own branch among them: `gitfold layer base api` with `gitfold
   layer add api` builds your commits on api's and shows api's uncommitted
   work on top. A move takes the layers off, moves the branch as above,
-  then puts the same layers back, each one's merge base taken again
-  against the new commits (so a layer of api then shows only what api
-  hasn't committed). Blended files and the layers commit come back with
-  them; git still sees only the workspace's own changes, and its commits
-  hold only those. A move that doesn't happen (a conflict, work in the
-  way) leaves the layers as they were. Interrupted half-way (a crash,
-  Ctrl-C), the layers file is untouched, and whoever comes next (the
-  daemon at once, or when the workspace opens; the next turn; `layer
-  base`; `layer add`) finishes or undoes the move and shows the layers
-  again. Unmounted, the layers are taken off there and shown again when
-  the workspace opens.
+  then puts the same layers back over the new commits (so a layer of api
+  then shows only what api hasn't committed). Blended files and the
+  layers commit come back with them; git still sees only the workspace's
+  own changes, and its commits hold only those, commits made on the
+  layers commit moving along. A move that doesn't happen (a conflict, work
+  in the way) leaves the layers as they were, never taken off for it.
+  Interrupted half-way (a crash, Ctrl-C), the layers file is untouched,
+  and whoever comes next (the daemon at once, or when the workspace opens;
+  the next turn; `layer base`; `layer add`) finishes or undoes the move
+  first, then shows the layers again; while it can't, they stay off.
+  Unmounted, the layers are taken off there and shown again when the
+  workspace opens.
 - **When it can't.** A commit that conflicts with p1's new ones leaves p2
   where it was: `layer base` says which commit and paths (exit 4), the hook
   tells the agent once, and `list` shows `blocked: conflicts on <paths>`
@@ -934,12 +943,13 @@ gitfold list                       # p1
   is built on p0 from then on. What counts is whether the commit p2's own
   commits start from landed, so a fix p1 got after its merge doesn't stop
   it.
-- **Followed by itself only once the base is gone.** The turn-boundary
-  hook moves p2 onto where p1 landed only once p1's branch is gone
-  (deleted here, or on its remote and fetched with `--prune`), whatever
-  the kind of landing: a merge may be one of several while p1 goes on, and
-  a squash is found by content. Until then p2 follows p1 as before (onto
-  its new commits, if it gets any), the hook tells the agent once (`p1 was
+- **Followed once the base is gone, or when named.** The turn-boundary
+  hook, `gitfold layer base p1` and `layer base --all` move p2 onto where
+  p1 landed only once p1's branch is gone (deleted here, or on its remote
+  and fetched with `--prune`), whatever the kind of landing: a merge may
+  be one of several while p1 goes on, and a squash is found by content.
+  Until then they keep p2 following p1 as before (onto its new commits,
+  if it gets any) and say the landing: the hook tells the agent once (`p1 was
   merged into main by 9f8e7d, but p1 is still there; gitfold layer base
   main moves p2 there with only its own commits`), and `list` notes it.
   - Found: a merge commit (also of commits p1 got later); a squash or
@@ -950,9 +960,9 @@ gitfold list                       # p1
     merged.
   - `gitfold layer base main` (where it landed: `p0` for p1 merged into
     p0) follows the landing as the hook would: only p2's own commits move,
-    onto the landing commit. Asked for, it refuses (exit 4) to move commits
-    already pushed without `--yes`; the hook's moves aren't asked. `layer
-    base p1` does the same while p1 exists.
+    onto the landing commit, also while p1 exists. Asked for, it refuses
+    (exit 4) to move commits already pushed without `--yes`; the hook's
+    moves aren't asked.
   - A fast-forward too: p2's start on main's first-parent line looks like
     a fresh p1 with no commits of its own, so whenever gitfold sets or
     moves it, it records whether it was on p1's target then

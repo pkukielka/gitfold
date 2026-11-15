@@ -701,7 +701,7 @@ pub fn store_and_show(
 ) -> Result<String> {
     let before = stored_bytes(state)?;
     lens.write(state)?;
-    // Taken off for a move that was interrupted: back, pinned again.
+    // Taken off for a move that was interrupted: back.
     put_back(state)?;
     show().inspect_err(|_| {
         if let Err(e) = store_bytes(state, &before) {

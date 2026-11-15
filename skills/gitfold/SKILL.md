@@ -332,7 +332,9 @@ gitfold layer remove --all             # stop showing every layer
   unless it is blended (below).
 - **A layer brings only its own changes.** A file it changed shows your
   base's version with the layer's changes merged in (as merging its branch
-  would), so a fix your base got after the layer started stays. Several
+  would), so a fix your base got after the layer started stays, and a
+  layer of a branch built on your commits brings only what it did after
+  them. Several
   layers changing one file are merged in one after another. If a layer
   changed the same lines as your base or another layer, the file shows
   git's conflict markers (`<<<<<<< base + <A>` ... `>>>>>>> <B>`), still
@@ -407,8 +409,10 @@ gitfold layer remove --all             # stop showing every layer
   brings a layer up to date at once.
 - **Without an agent, layers move by themselves.** In a workspace where no
   Claude Code hook has run (a person works in it), the mounted daemon moves
-  its live layers once they have new work and nothing has written to the
-  workspace for 3 seconds; each move is a line in the daemon's log, and
+  its live layers once they have new work (a person's workspace: written
+  to or committed in) and nothing has written to the workspace for 3
+  seconds; a move it can't make is tried again 10 seconds later, or once
+  you write to the workspace. Each move is a line in the daemon's log, and
   `gitfold layer` shows when each last moved. Your own workspace, once your
   first prompt ran its hook, moves only at your turns.
 - **Changed files get a fresh time** at each switch, so incremental builds
@@ -530,14 +534,16 @@ gitfold list                      # each branch under its base, with what it nee
   again on the new commits (a layer of p1 then shows only what p1 hasn't
   committed); blended files and your commits' contents stay right. A
   `layer base` that is refused or can't move the branch leaves its base
-  and your layers as they were.
+  and your layers as they were (never taken off for it). Interrupted, the
+  move is finished first; until it can be, your layers stay off.
 - When the base is merged into main (a merge, squash, rebase merge or
   fast-forward) and its branch is then deleted, your branch moves onto that
   merge with only its own commits and has no base any more (`Base: main`,
   as a branch never given one); you are told. Suggest the push and then
   `gh pr edit <BRANCH> --base main` to the user; don't run them yourself.
   While the base's branch still exists, your branch keeps following it
-  and you are only told it looks merged: suggest `gitfold layer base main`
+  (`gitfold layer base p1` and `--all` too) and you are only told it
+  looks merged: suggest `gitfold layer base main`
   to the user (it follows the landing the same way, and asks for `--yes`
   if your commits are pushed). A base merged into its own base (p1 into p0) works
   the same, naming p0; p2 is then built on p0. A merge gitfold can't

@@ -33,8 +33,7 @@
 //!
 //! Both workspace cases record an intent first (`state::restack`), so a
 //! crash half-way is finished or undone. A workspace showing layers is moved
-//! with them taken off and put back after, pinned again against its new
-//! commits (`layers`).
+//! with them taken off and put back after, over its new commits (`layers`).
 //!
 //! A base that landed (merged, squashed or rebased onto its own base or the
 //! trunk, `land`) has its children moved the same way onto the landing
