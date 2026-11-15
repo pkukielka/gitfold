@@ -351,7 +351,13 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
              `gitfold stack off` forgets it"
         )));
     };
-    let base = stack::parent_base(common_dir, name, &parent, tip, parent_tip)?;
+    let base = stack::parent_base(
+        common_dir,
+        name,
+        &format!("refs/heads/{parent}"),
+        tip,
+        parent_tip,
+    )?;
     if on_parent(common_dir, base.commit, parent_tip, tip)? {
         if dry_run || base.stored == Some(parent_tip) {
             return Ok(Outcome::UpToDate);
@@ -696,8 +702,13 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
     };
     if local.restack_blocked(name).is_some() {
         notes.push("restack blocked".into());
-    } else if let Ok(base) = stack::parent_base(common_dir, name, &parent, tip, parent_tip)
-        && !on_parent(common_dir, base.commit, parent_tip, tip).unwrap_or(true)
+    } else if let Ok(base) = stack::parent_base(
+        common_dir,
+        name,
+        &format!("refs/heads/{parent}"),
+        tip,
+        parent_tip,
+    ) && !on_parent(common_dir, base.commit, parent_tip, tip).unwrap_or(true)
     {
         let n = stack::count(common_dir, base.commit, parent_tip).unwrap_or(0);
         notes.push(format!("needs restack ({n})"));

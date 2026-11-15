@@ -49,14 +49,15 @@ pub struct Base {
     pub guessed: bool,
 }
 
-/// The parent base of `branch` (at `tip`) on `parent` (at `parent_tip`): its
-/// stack ref, if that is an ancestor of `tip`; else guessed by git's
-/// `--fork-point` rule (the newest entry of the parent's reflog that is an
-/// ancestor of the branch), else their merge base.
+/// The parent base of `branch` (at `tip`) on the parent with full ref name
+/// `parent_ref` (at `parent_tip`): its stack ref, if that is an ancestor of
+/// `tip`; else guessed by git's `--fork-point` rule (the newest entry of the
+/// parent's reflog that is an ancestor of the branch), else their merge
+/// base.
 pub fn parent_base(
     common_dir: &Path,
     branch: &str,
-    parent: &str,
+    parent_ref: &str,
     tip: ObjectId,
     parent_tip: ObjectId,
 ) -> Result<Base> {
@@ -70,10 +71,9 @@ pub fn parent_base(
             guessed: false,
         });
     }
-    let parent_ref = format!("refs/heads/{parent}");
     let tip_hex = tip.to_string();
     let fork_point = cmd::command(common_dir)
-        .args(["merge-base", "--fork-point", &parent_ref, &tip_hex])
+        .args(["merge-base", "--fork-point", parent_ref, &tip_hex])
         .output()?;
     let commit = match fork_point.status.success() {
         true => parse_id(&fork_point.stdout)?,
@@ -246,6 +246,139 @@ pub fn drop_base(common_dir: &Path, branch: &str) -> Result<()> {
         Some(_) => cmd::output(common_dir, &["update-ref", "-d", &name]).map(drop),
         None => Ok(()),
     }
+}
+
+/// How a parent base landed on its target (trunk, or the parent's own
+/// parent).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum How {
+    /// In the target's history: a merge commit.
+    Merged,
+    /// Its content, as other commits: a squash or a rebase merge.
+    Squashed,
+    /// Said so (`gitfold stack merged`).
+    Declared,
+}
+
+impl How {
+    pub fn name(self) -> &'static str {
+        match self {
+            How::Merged => "merged",
+            How::Squashed => "squashed or rebased",
+            How::Declared => "declared",
+        }
+    }
+}
+
+/// Where a parent base landed: `at`, the first commit of the target that
+/// has all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Landing {
+    pub at: ObjectId,
+    pub how: How,
+}
+
+/// The most target commits `landing` tries a no-op merge on.
+const MAX_WALK: usize = 2000;
+
+/// Whether parent base `base` (what the child's own commits sit on) landed
+/// on target tip `target`, and where. What matters is the base, not the
+/// parent: a fix the parent got after its merge is the parent's business.
+///
+/// - `base` in the target's history, brought in by a merge: the merge.
+///   One on the target's first-parent line (a fresh parent with no commits
+///   of its own, or a fast-forward) isn't told apart, so isn't taken.
+/// - Else, if the base has changes of its own since it and the target
+///   diverged (MB): the first commit S of `MB..target` touching their paths
+///   where merging the base changes nothing (`merge_trees(MB, S, base)` is
+///   S's tree): a squash merge, the last commit of a rebase merge, also
+///   with a maintainer's tweak elsewhere, or main editing near the lines
+///   later. A per-commit patch id (`git cherry`) misses a squash of several
+///   commits; a patch id of the whole range misses context changes.
+pub fn landing(
+    repo: &gix::Repository,
+    base: ObjectId,
+    target: ObjectId,
+) -> Result<Option<Landing>> {
+    let common_dir = repo.common_dir();
+    if base == target {
+        return Ok(None);
+    }
+    if is_ancestor(common_dir, base, target)? {
+        let range = format!("{base}..{target}");
+        let args = [
+            "rev-list",
+            "--first-parent",
+            "--ancestry-path",
+            "--reverse",
+            &range,
+        ];
+        let out = cmd::output(common_dir, &args)?;
+        let Some(first) = String::from_utf8_lossy(&out)
+            .lines()
+            .next()
+            .map(str::to_string)
+        else {
+            return Ok(None);
+        };
+        let first = ObjectId::from_hex(first.as_bytes())?;
+        let on_line = repo
+            .find_commit(first)?
+            .parent_ids()
+            .next()
+            .map(|p| p.detach())
+            == Some(base);
+        return Ok((!on_line).then_some(Landing {
+            at: first,
+            how: How::Merged,
+        }));
+    }
+    let mb = match cmd::output(
+        common_dir,
+        &["merge-base", &base.to_string(), &target.to_string()],
+    ) {
+        Ok(out) => parse_id(&out)?,
+        // Unrelated histories.
+        Err(_) => return Ok(None),
+    };
+    let (mb_tree, base_tree) = (commit_tree(repo, mb)?, commit_tree(repo, base)?);
+    let paths: Vec<String> = super::lens::delta(repo, mb_tree, base_tree)?
+        .into_iter()
+        .map(|(path, _)| path.to_string())
+        .collect();
+    // Nothing of its own: trivially "landed" anywhere.
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let range = format!("{mb}..{target}");
+    let out = cmd::command(common_dir)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args([
+            "rev-list",
+            "--reverse",
+            "--topo-order",
+            "--ancestry-path",
+            &range,
+            "--",
+        ])
+        .args(&paths)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git rev-list {range}: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    for hex in String::from_utf8_lossy(&out.stdout).lines().take(MAX_WALK) {
+        let at = ObjectId::from_hex(hex.as_bytes())?;
+        let at_tree = commit_tree(repo, at)?;
+        if merge_trees(repo, mb_tree, at_tree, base_tree)? == Ok(at_tree) {
+            return Ok(Some(Landing {
+                at,
+                how: How::Squashed,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -443,7 +576,8 @@ mod tests {
         let r = stack("stack-base");
         let common = r.common();
         let old_p1 = r.id("p1");
-        let base = |r: &Repo| parent_base(&common, "p2", "p1", r.id("p2"), r.id("p1")).unwrap();
+        let base =
+            |r: &Repo| parent_base(&common, "p2", "refs/heads/p1", r.id("p2"), r.id("p1")).unwrap();
         let guessed = base(&r);
         assert_eq!((guessed.commit, guessed.guessed), (old_p1, true));
         set_base(&common, "p2", old_p1).unwrap();
@@ -465,5 +599,90 @@ mod tests {
         drop_base(&common, "p2").unwrap();
         assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), None);
         assert_eq!(count(&common, old_p1, r.id("p1")).unwrap(), 1);
+    }
+
+    /// `stack` with main moved on (another file), checked out on main.
+    fn landing_repo(name: &str) -> Repo {
+        let r = stack(name);
+        r.git(&["switch", "-q", "main"]);
+        r.write("other.txt", "other\n");
+        r.commit("main moves on");
+        r
+    }
+
+    fn landed(r: &Repo, base: &str, target: &str) -> Option<Landing> {
+        landing(&r.open(), r.id(base), r.id(target)).unwrap()
+    }
+
+    #[test]
+    fn a_squash_merge_lands() {
+        let r = landing_repo("land-squash");
+        r.git(&["merge", "-q", "--squash", "p1"]);
+        let squash = r.commit("p1 (#1)");
+        // A later main commit that edits p1's line again: found further
+        // back, at the squash.
+        edit(&r, "5 p1", "5 p1 edited on main");
+        r.commit("main edits p1's line");
+        let expected = Some(Landing {
+            at: squash,
+            how: How::Squashed,
+        });
+        assert_eq!(landed(&r, "p1", "main"), expected);
+        // A fix p1 got after the merge is p1's business: its old tip landed.
+        let base = r.id("p1");
+        fix_p1(&r, "6", "late fix");
+        assert_eq!(landing(&r.open(), base, r.id("main")).unwrap(), expected);
+        assert_eq!(landed(&r, "p1", "main"), None, "the fix itself didn't land");
+    }
+
+    #[test]
+    fn a_squash_with_a_tweak_lands() {
+        let r = landing_repo("land-tweak");
+        r.git(&["merge", "-q", "--squash", "p1"]);
+        r.write("m.txt", "m tweaked by the maintainer\n");
+        let squash = r.commit("p1 (#1), tweaked");
+        assert_eq!(landed(&r, "p1", "main").map(|l| l.at), Some(squash));
+    }
+
+    #[test]
+    fn a_rebase_merge_lands_at_its_last_commit() {
+        let r = landing_repo("land-rebase");
+        r.git(&["cherry-pick", "main..p1"]);
+        let last = r.id("main");
+        assert_eq!(
+            landed(&r, "p1", "main"),
+            Some(Landing {
+                at: last,
+                how: How::Squashed
+            })
+        );
+    }
+
+    #[test]
+    fn a_merge_commit_lands() {
+        let r = landing_repo("land-merge");
+        r.git(&["merge", "-q", "--no-ff", "--no-edit", "p1"]);
+        let merge = r.id("main");
+        r.write("after.txt", "after\n");
+        r.commit("after the merge");
+        assert_eq!(
+            landed(&r, "p1", "main"),
+            Some(Landing {
+                at: merge,
+                how: How::Merged
+            })
+        );
+    }
+
+    #[test]
+    fn unmerged_and_fresh_parents_dont_land() {
+        let r = landing_repo("land-not");
+        assert_eq!(landed(&r, "p1", "main"), None, "unmerged");
+        // A parent with nothing of its own yet, at an older main commit.
+        assert_eq!(landed(&r, "main~1", "main"), None, "fresh");
+        assert_eq!(landed(&r, "main", "main"), None, "fresh, at the tip");
+        // p2's base, p1, on p2's own history: p1 is in p2 by its first
+        // parent line, as for a fresh parent.
+        assert_eq!(landed(&r, "p1", "p2"), None);
     }
 }
