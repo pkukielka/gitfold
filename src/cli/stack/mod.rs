@@ -1,44 +1,47 @@
-//! `gitfold stack`: stacked branches. A branch built on a parent branch
-//! (`settings`: `branch.<b>.gitfoldParent`, its parent base kept by
-//! `refs/gitfold-stack/<b>`, see `git::stack`) has its own commits copied
-//! onto the parent's new ones (restacked): by `gitfold stack sync`, or at the
-//! start of its agent's turn (`layer --claude-hook user-prompt-submit`
-//! calls `hook_context`), unless `branch.<b>.gitfoldRestack` is `manual`.
-//! gitfold never pushes; it says what to force-push.
+//! Bases (stacked branches): `gitfold layer base` and `gitfold branch
+//! --base`. A branch built on another branch, its base (`settings`:
+//! `branch.<b>.gitfoldParent`, where its own commits start kept by
+//! `refs/gitfold-stack/<b>`, see `git::stack`), has its own commits copied
+//! onto the base's new ones: by `gitfold layer base <BASE>` again, or at the
+//! start of its agent's turn (`layer --claude-hook user-prompt-submit` calls
+//! `hook_context`), unless `branch.<b>.gitfoldRestack` is `manual` (`layer
+//! base --frozen`). `layer base <TRUNK>` takes it off the stack. gitfold
+//! never pushes; it says what to force-push, and moves commits already
+//! pushed only when asked (`--yes`).
 //!
-//! A restack is computed first, moving nothing (`git::stack::restack`).
+//! A move is computed first, moving nothing (`git::stack::restack`).
 //! A conflict is recorded (`gitfoldRestackBlocked`) and reported, and the
-//! branch stays on the old parent. Otherwise where the branch lives decides
+//! branch stays on the old base. Otherwise where the branch lives decides
 //! how it moves:
 //!
 //! - no workspace: its ref, with its stack ref, in one transaction (refused
 //!   if a git worktree has it checked out);
 //! - a workspace, mounted: `git read-tree -m -u C C'` in it (through the
 //!   mount, so the kernel sees the files change; it keeps unstaged, staged
-//!   and untracked work and refuses if any is on a path the restack
-//!   changes), then the refs; the sync thread's ordinary rebase then drops
-//!   the files the read-tree copied up;
+//!   and untracked work and refuses if any is on a path the move changes),
+//!   then the refs; the sync thread's ordinary rebase then drops the files
+//!   the read-tree copied up;
 //! - a workspace, unmounted: only without uncommitted changes, under the
 //!   repository lock: its index, its base (`fs::workspace::restack_closed`),
 //!   the refs.
 //!
 //! Both workspace cases record an intent first (`state::restack`), so a
 //! crash half-way is finished or undone. Workspaces showing layers aren't
-//! restacked (v1).
+//! moved (not yet).
 //!
-//! A parent that landed (merged, squashed or rebased onto its own parent
-//! or the trunk, `land`) has its children moved the same way onto the
-//! landing commit, with only their own commits, and stacked on its target
-//! (`reparent`). A branch on the trunk follows it only by `stack sync`.
+//! A base that landed (merged, squashed or rebased onto its own base or the
+//! trunk, `land`) has its children moved the same way onto the landing
+//! commit, with only their own commits, and built on its target
+//! (`reparent`). A branch on the trunk follows it only when asked (`layer
+//! base <TRUNK>`, which also takes it off the stack).
 //!
-//! - `land`: a parent's target, whether a parent base landed there
-//!   (cached), the trunk.
+//! - `land`: a base's target, whether a parent base landed there (cached),
+//!   the trunk.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anyhow::{Result, ensure};
-use clap::{Args, Subcommand};
+use anyhow::{Result, anyhow, ensure};
 use gix::ObjectId;
 use gix::bstr::BString;
 
@@ -56,132 +59,122 @@ pub(crate) mod land;
 /// How many paths a line of output names before "and N more".
 const SHOWN_PATHS: usize = 5;
 
-#[derive(Args)]
-pub struct StackArgs {
-    #[command(subcommand)]
-    pub op: StackOp,
-}
-
-#[derive(Subcommand)]
-pub enum StackOp {
-    /// Build a branch on PARENT: its own commits then follow PARENT's new
-    /// ones (restacked).
-    ///
-    /// Its own commits are those after the parent base: --base, or where it
-    /// and PARENT meet. If PARENT has commits it doesn't, `stack sync`
-    /// (or its agent's next turn) restacks it.
-    On {
-        parent: String,
-        /// The branch (default: the workspace you are in).
-        #[arg(short = 'w', long, value_name = "BRANCH")]
-        workspace: Option<String>,
-        /// The commit of PARENT the branch's own commits sit on.
-        #[arg(long, value_name = "REV")]
-        base: Option<String>,
-    },
-    /// Forget a branch's parent (its history stays as it is).
-    Off {
-        /// The branch (default: the workspace you are in).
-        #[arg(short = 'w', long, value_name = "BRANCH")]
-        workspace: Option<String>,
-    },
-    /// Restack branches onto their parents' new commits, bottom-up.
-    Sync {
-        /// The branches (default: the workspace you are in).
-        branches: Vec<String>,
-        /// Every stacked branch.
-        #[arg(long, conflicts_with = "branches")]
-        all: bool,
-        /// Only say what would be restacked.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Say PARENT was merged where detection didn't see it: the branches
-    /// stacked on it move onto its target with only their own commits.
-    ///
-    /// Its target is its own parent if it is stacked, else the trunk
-    /// (gitfold.trunk, else origin/HEAD's branch, else main or master).
-    /// `stack sync` finds merge commits, squash and rebase merges itself.
-    Merged {
-        parent: String,
-        /// The target's commit that has PARENT's work (default: its tip).
-        #[arg(long, value_name = "REV")]
-        at: Option<String>,
-        /// Where it landed (default: its own parent, else the trunk;
-        /// needed once PARENT is deleted, which deletes its own parent's
-        /// name with it).
-        #[arg(long, value_name = "BRANCH")]
-        onto: Option<String>,
-    },
-    /// List the stacks, each parent above its branches.
-    List,
-}
-
-/// `gitfold stack`.
-pub fn stack(repo: &Path, args: StackArgs) -> Result<()> {
+/// `gitfold layer base TARGET`: builds branch `workspace` (default: the
+/// workspace you are in) on `target` and moves its own commits onto it now,
+/// or, on it already, onto its new commits; `frozen`: it doesn't follow
+/// `target` by itself after that. The trunk as `target` takes it off the
+/// stack (`unstack`). Commits already pushed move only with `yes`. `all`:
+/// every stacked branch is brought up to date, bottom-up (`target` unused).
+pub fn base(
+    repo: &Path,
+    workspace: Option<String>,
+    target: &str,
+    frozen: bool,
+    yes: bool,
+    all: bool,
+) -> Result<()> {
     let common_dir = git::init(repo)?;
-    match args.op {
-        StackOp::On {
-            parent,
-            workspace,
-            base,
-        } => {
-            let name = super::branch_or_current(workspace, repo)?;
-            println!("{}", declare(&common_dir, &name, &parent, base.as_deref())?);
+    let local = Local::read(&common_dir);
+    if all {
+        let mut branches: Vec<String> = local.parents().into_iter().map(|(b, _)| b).collect();
+        if branches.is_empty() {
+            println!("no branch is built on another");
+            return Ok(());
         }
-        StackOp::Off { workspace } => {
-            let name = super::branch_or_current(workspace, repo)?;
-            check_name(&name)?;
-            let Some(parent) = Local::read(&common_dir).parent(&name) else {
-                return Err(Refusal::NotFound.error(format!("{name} isn't stacked")));
+        // Bottom-up: a branch moves onto its base's moved commits.
+        branches.sort_by_cached_key(|b| (depth(&local, b), b.clone()));
+        return each(&common_dir, &branches, None, |name| {
+            update(&common_dir, name, yes)
+        });
+    }
+    let name = super::branch_or_current(workspace, repo)?;
+    check_name(&name)?;
+    check_name(target)?;
+    git::require_branch(&name)?;
+    ensure!(name != target, "a branch can't be built on itself");
+    if land::is_trunk(&common_dir, &local, target) {
+        return unstack(&common_dir, &name, target, yes);
+    }
+    // Whether what moves was said already.
+    let mut asked = false;
+    match local.parent(&name) {
+        // Again: brought up to date (onto where it landed, if it is gone).
+        Some(parent) if parent == target => {}
+        parent => {
+            git::require_branch(target)?;
+            check_cycle(&local, &name, target)?;
+            let (tip, target_tip) = (tip_of(&common_dir, &name)?, tip_of(&common_dir, target)?);
+            // Its own commits: those after its current base's, else those
+            // since it and `target` met.
+            let base = match &parent {
+                Some(parent) => {
+                    let resolved = land::resolve(&common_dir, parent)?;
+                    let own = own_base(&common_dir, &name, resolved.as_ref(), tip)?;
+                    own.map(|b| b.commit).ok_or_else(|| {
+                        anyhow!(
+                            "{parent} is gone, and with it where {name}'s own commits start: \
+                             rebase it onto {target} by hand"
+                        )
+                    })?
+                }
+                None => git::merge_base(target_tip, tip)?,
             };
-            settings::set_parent(&common_dir, &name, None)?;
-            settings::set_restack_blocked(&common_dir, &name, None)?;
-            settings::set_landing(&common_dir, &name, None)?;
-            stack::drop_base(&common_dir, &name)?;
-            // The way out of an interrupted restack recovery can't tell apart.
-            let forgot = match restack::forget(&StateDir::of(&common_dir, &name))? {
-                true => "; an interrupted restack's intent is forgotten",
-                false => "",
-            };
-            println!("{name} is no longer stacked on {parent}; its history is as it was{forgot}");
+            if !on_parent(&common_dir, base, target_tip, tip)? {
+                if let Some(why) = ask(&common_dir, &name, base, target, yes)? {
+                    return Err(Refusal::Changes.error(why));
+                }
+                asked = true;
+            }
+            declare(&common_dir, &name, target, base)?;
         }
-        StackOp::Sync {
-            branches,
-            all,
-            dry_run,
-        } => return sync(repo, &common_dir, branches, all, dry_run),
-        StackOp::Merged { parent, at, onto } => {
-            return merged(&common_dir, &parent, at.as_deref(), onto);
-        }
-        StackOp::List => print!("{}", listing(&common_dir)?),
+    }
+    settings::set_restack_manual(&common_dir, &name, frozen)?;
+    each(
+        &common_dir,
+        std::slice::from_ref(&name),
+        None,
+        |name| match asked {
+            true => restack_branch(&common_dir, name, false, false),
+            false => update(&common_dir, name, yes),
+        },
+    )?;
+    if frozen {
+        println!(
+            "frozen: {name} doesn't follow {target}'s new commits; `gitfold layer base \
+             {target} --frozen` brings it up to date again"
+        );
     }
     Ok(())
 }
 
-/// Stacks `name` on `parent` with parent base `base` (default: where they
-/// meet), refusing a cycle; says where it stands.
-pub fn declare(common_dir: &Path, name: &str, parent: &str, base: Option<&str>) -> Result<String> {
-    check_name(name)?;
-    check_name(parent)?;
-    git::require_branch(name)?;
-    git::require_branch(parent)?;
-    ensure!(name != parent, "a branch can't be stacked on itself");
-    let local = Local::read(common_dir);
+/// Whether `name` is the trunk (see `land`): a branch on it isn't stacked.
+pub fn is_trunk(common_dir: &Path, name: &str) -> bool {
+    land::is_trunk(common_dir, &Local::read(common_dir), name)
+}
+
+/// Refuses building `name` on `parent` if `parent` is built on `name`.
+fn check_cycle(local: &Local, name: &str, parent: &str) -> Result<()> {
     let mut above = parent.to_string();
     while let Some(next) = local.parent(&above) {
         ensure!(
             next != name,
-            "{parent} is stacked on {name} (through {above}): that would be a cycle"
+            "{parent} is built on {name} (through {above}): that would be a cycle"
         );
         above = next;
     }
-    let (tip, parent_tip) = (tip_of(common_dir, name)?, tip_of(common_dir, parent)?);
-    let base = match base {
-        Some(rev) => stack::rev(common_dir, rev)?
-            .ok_or_else(|| Refusal::NotFound.error(format!("no commit {rev}")))?,
-        None => git::merge_base(parent_tip, tip)?,
-    };
+    Ok(())
+}
+
+/// Builds `name` on `parent`, its own commits starting after `base`,
+/// moving nothing.
+pub fn declare(common_dir: &Path, name: &str, parent: &str, base: ObjectId) -> Result<()> {
+    check_name(name)?;
+    check_name(parent)?;
+    git::require_branch(name)?;
+    git::require_branch(parent)?;
+    ensure!(name != parent, "a branch can't be built on itself");
+    check_cycle(&Local::read(common_dir), name, parent)?;
+    let tip = tip_of(common_dir, name)?;
     ensure!(
         stack::is_ancestor(common_dir, base, tip)?,
         "the base {base} isn't in {name}'s history"
@@ -189,52 +182,161 @@ pub fn declare(common_dir: &Path, name: &str, parent: &str, base: Option<&str>) 
     settings::set_parent(common_dir, name, Some(parent))?;
     settings::set_restack_blocked(common_dir, name, None)?;
     stack::set_base(common_dir, name, base)?;
-    land::record(common_dir, name, parent, base)?;
-    let short = short(base);
-    Ok(match stack::is_ancestor(common_dir, parent_tip, tip)? {
-        true => format!("{name} is on {parent} (base {short}); up to date"),
-        false => {
-            let n = stack::count(common_dir, base, parent_tip)?;
-            format!(
-                "{name} is on {parent} (base {short}); {parent} has {}: `gitfold stack sync \
-                 {name}` restacks it (or its agent's next turn)",
-                commits(n)
-            )
-        }
-    })
+    land::record(common_dir, name, parent, base)
 }
 
-/// What one branch's restack did.
+/// Forgets that `name` is built on another branch: its base, how it
+/// follows it, a blocked move and a landing under way.
+fn forget_base(common_dir: &Path, name: &str) -> Result<()> {
+    settings::set_parent(common_dir, name, None)?;
+    settings::set_restack_manual(common_dir, name, false)?;
+    settings::set_restack_blocked(common_dir, name, None)?;
+    settings::set_landing(common_dir, name, None)?;
+    settings::set_base_on_target(common_dir, name, None)?;
+    let _ = std::fs::remove_file(StateDir::of(common_dir, name).dir.join(TOLD));
+    stack::drop_base(common_dir, name)
+}
+
+/// `gitfold layer base <TRUNK>`: takes `name` off the stack, its own
+/// commits moved onto the trunk (named `trunk`); nothing to do if it isn't
+/// stacked. What `stack merged --onto` did, by hand.
+fn unstack(common_dir: &Path, name: &str, trunk: &str, yes: bool) -> Result<()> {
+    let Some(parent) = Local::read(common_dir).parent(name) else {
+        println!("{name} isn't built on another branch; nothing to do");
+        return Ok(());
+    };
+    let off = format!("{name} is off the stack (it was built on {parent}); its base is {trunk}");
+    // An interrupted move nobody can finish: the way out, as it was.
+    let state = StateDir::of(common_dir, name);
+    if state.opened()
+        && matches!(restack::recover(&state), Ok(Recovery::Stuck(_)) | Err(_))
+        && restack::forget(&state)?
+    {
+        forget_base(common_dir, name)?;
+        println!("{off}; nothing moved, and an interrupted move's intent is forgotten");
+        return Ok(());
+    }
+    let tip = tip_of(common_dir, name)?;
+    let resolved = land::resolve(common_dir, &parent)?;
+    let Some(base) = own_base(common_dir, name, resolved.as_ref(), tip)? else {
+        forget_base(common_dir, name)?;
+        println!(
+            "{off}; nothing moved: {parent} is gone, and with it where {name}'s own commits \
+             start (rebase it onto {trunk} by hand if it needs it)"
+        );
+        return Ok(());
+    };
+    let Some((_, trunk_tip)) = land::resolve(common_dir, trunk)? else {
+        return Err(Refusal::NotFound.error(format!("no branch {trunk}")));
+    };
+    if on_parent(common_dir, base.commit, trunk_tip, tip)? {
+        forget_base(common_dir, name)?;
+        println!("{off}; it has {trunk}'s tip already, nothing moved");
+        return Ok(());
+    }
+    each(common_dir, &[name.to_string()], Some(trunk), |name| {
+        if let Some(why) = ask(common_dir, name, base.commit, trunk, yes)? {
+            return Ok(Outcome::Refused(why));
+        }
+        let new = stack::count(common_dir, base.commit, trunk_tip)?;
+        let onto = (trunk, trunk);
+        Ok(
+            match copy_onto(common_dir, name, onto, &base, tip, trunk_tip, false)? {
+                Copied::Moved { files, dropped } => Outcome::Restacked {
+                    new,
+                    dropped,
+                    files,
+                    guessed: base.guessed,
+                },
+                Copied::Dry => Outcome::UpToDate,
+                Copied::Stop(outcome) => outcome,
+            },
+        )
+    })?;
+    forget_base(common_dir, name)?;
+    println!("{off}");
+    Ok(())
+}
+
+/// Says what moving the own commits of `name` (`base..` its tip) onto
+/// `onto` does; why not, if some of them are pushed already (reachable from
+/// its upstream, else `origin/<name>`) and `yes` doesn't say to.
+fn ask(
+    common_dir: &Path,
+    name: &str,
+    base: ObjectId,
+    onto: &str,
+    yes: bool,
+) -> Result<Option<String>> {
+    let tip = tip_of(common_dir, name)?;
+    let own = stack::count(common_dir, base, tip)?;
+    match own {
+        0 => println!("moves {name} onto {onto} (it has no commits of its own)"),
+        n => println!(
+            "moves {} of {name} onto {onto}",
+            plural(n, "commit", "commits")
+        ),
+    }
+    let Some((remote, theirs, at)) = upstream(common_dir, name)?.filter(|_| !yes && own > 0) else {
+        return Ok(None);
+    };
+    let Ok(meet) = git::merge_base(at, tip) else {
+        return Ok(None);
+    };
+    let pushed = stack::count(common_dir, base, meet)?;
+    Ok((pushed > 0).then(|| {
+        format!(
+            "{pushed} of them {} pushed already ({remote}/{theirs}): moving rewrites them, and \
+             the branch then needs a push with --force-with-lease; --yes moves them",
+            if pushed == 1 { "is" } else { "are" }
+        )
+    }))
+}
+
+/// Brings `name` up to date with its base, asked for: says what moves
+/// first, and moves commits already pushed only with `yes`.
+fn update(common_dir: &Path, name: &str, yes: bool) -> Result<Outcome> {
+    // First, so what is said is about where it is now.
+    finish_landing(common_dir, name)?;
+    if let Outcome::Would { onto, base } = restack_branch(common_dir, name, true, false)?
+        && let Some(why) = ask(common_dir, name, base, &onto, yes)?
+    {
+        return Ok(Outcome::Refused(why));
+    }
+    restack_branch(common_dir, name, false, false)
+}
+
+/// What one branch's move did.
 enum Outcome {
-    /// Its parent has no new commits.
+    /// Its base has no new commits.
     UpToDate,
-    /// It has the parent's tip already (rebased by hand): its parent base
-    /// was moved there.
+    /// It has the base's tip already (rebased by hand): where its own
+    /// commits start was moved there.
     BaseMoved,
-    /// Restacked: onto how many new commits of the parent, how many of its
-    /// own were dropped (made empty), the paths changed in its workspace
-    /// (`None`: no workspace).
+    /// Moved onto its base: onto how many new commits of the base, how
+    /// many of its own were dropped (made empty), the paths changed in its
+    /// workspace (`None`: no workspace).
     Restacked {
         new: usize,
         dropped: usize,
         files: Option<Vec<BString>>,
-        /// The parent base was guessed (no stack ref, or a stale one).
+        /// Where its own commits start was guessed (no stack ref, or a
+        /// stale one).
         guessed: bool,
     },
-    /// `--dry-run`: would be restacked onto that many new commits.
-    Would(usize),
-    /// Its parent landed: it moved onto the landing commit with its `own`
-    /// commits (`dropped` made empty), now stacked on the target.
+    /// Only asked what it would do: its own commits (after `base`) would
+    /// move onto `onto` (named).
+    Would { onto: String, base: ObjectId },
+    /// Its base landed: it moved onto the landing commit with its `own`
+    /// commits (`dropped` made empty), now built on the target.
     Landed {
         landed: Landed,
         own: usize,
         dropped: usize,
         files: Option<Vec<BString>>,
     },
-    /// `--dry-run`: its parent landed, it would move there.
-    WouldLand(Landed),
-    /// At a turn boundary: its parent looks squash-merged, but its branch
-    /// is still there, so it is only said (`stack sync` moves it).
+    /// At a turn boundary: its base looks squash-merged, but its branch
+    /// is still there, so it is only said (`layer base` moves it).
     LooksLanded(Landed),
     /// A commit conflicts with what it would move onto (`onto`, named);
     /// `told` if that commit had blocked it already; `rebase` the command
@@ -248,11 +350,12 @@ enum Outcome {
     },
     /// Not now: why (uncommitted work in the way, git busy, layers shown).
     Waits(String),
-    /// Not at all as it stands: why (a merge in its commits, no parent).
+    /// Not at all as it stands: why (a merge in its commits, no base,
+    /// commits already pushed).
     Refused(String),
 }
 
-/// A parent that landed on its target.
+/// A base that landed on its target.
 struct Landed {
     parent: String,
     target: String,
@@ -275,7 +378,6 @@ impl Landed {
             stack::How::FastForward => {
                 format!("{parent} looks fast-forwarded into {target} up to {at}")
             }
-            stack::How::Declared => format!("{parent} was declared merged into {target} at {at}"),
         }
     }
 }
@@ -289,96 +391,14 @@ impl Outcome {
     }
 }
 
-/// `gitfold stack merged`: `parent` landed on its target at `at` (default:
-/// the target's tip), as detection didn't see (a squash heavily edited
-/// when merged, say): every branch stacked on it moves there now.
-fn merged(common_dir: &Path, parent: &str, at: Option<&str>, onto: Option<String>) -> Result<()> {
-    check_name(parent)?;
-    let local = Local::read(common_dir);
-    let children: Vec<String> = (local.parents().into_iter())
-        .filter(|(_, p)| p == parent)
-        .map(|(b, _)| b)
-        .collect();
-    if children.is_empty() {
-        return Err(Refusal::NotFound.error(format!("no branch is stacked on {parent}")));
-    }
-    let target = match onto {
-        Some(onto) => land::named(common_dir, onto.clone())?
-            .ok_or_else(|| Refusal::NotFound.error(format!("no branch {onto}")))?,
-        // Deleting a branch deletes its config, its own parent's name too:
-        // the trunk would be a guess.
-        None if land::resolve(common_dir, parent)?.is_none() => {
-            return Err(Refusal::NotFound.error(format!(
-                "{parent} is gone, and with it the name of what it was stacked on: say where \
-                 it landed with --onto <BRANCH>"
-            )));
-        }
-        None => land::target(common_dir, &local, parent)?.ok_or_else(|| {
-            Refusal::NotFound.error(format!(
-                "{parent} has no parent of its own and there is no trunk to land on \
-                 (`git config gitfold.trunk <BRANCH>` names it, or --onto)"
-            ))
-        })?,
-    };
-    let at = match at {
-        Some(rev) => stack::rev(common_dir, rev)?
-            .ok_or_else(|| Refusal::NotFound.error(format!("no commit {rev}")))?,
-        None => target.tip,
-    };
-    let landing = stack::Landing {
-        at,
-        how: stack::How::Declared,
-    };
-    each(common_dir, &children, |name| {
-        let tip = tip_of(common_dir, name)?;
-        let resolved = land::resolve(common_dir, parent)?;
-        let Some(base) = own_base(common_dir, name, resolved.as_ref(), tip)? else {
-            return Ok(Outcome::Refused(format!(
-                "{parent} is gone and its stack ref doesn't say where {name}'s own commits \
-                 start; rebase it by hand"
-            )));
-        };
-        reparent(
-            common_dir, name, parent, &target, landing, &base, tip, false,
-        )
-    })
-}
-
-/// `gitfold stack sync`: restacks `branches` (default: the workspace's;
-/// `all`: every stacked branch), parents before their branches, and says
-/// what to force-push.
-fn sync(
-    repo: &Path,
-    common_dir: &Path,
-    branches: Vec<String>,
-    all: bool,
-    dry_run: bool,
-) -> Result<()> {
-    let local = Local::read(common_dir);
-    let mut branches = match (all, branches.is_empty()) {
-        (true, _) => local.parents().into_iter().map(|(b, _)| b).collect(),
-        (false, true) => vec![super::branch_or_current(None, repo)?],
-        (false, false) => branches,
-    };
-    for name in &branches {
-        check_name(name)?;
-        if local.parent(name).is_none() {
-            return Err(Refusal::NotFound.error(format!("{name} isn't stacked")));
-        }
-    }
-    // Bottom-up: a branch restacks onto its parent's restacked commits.
-    branches.sort_by_cached_key(|b| (depth(&local, b), b.clone()));
-    branches.dedup();
-    each(common_dir, &branches, |name| {
-        restack_branch(common_dir, name, dry_run, false)
-    })
-}
-
 /// Runs `restack` for each of `branches`, says what it did, one line each,
-/// then the force-pushes to run; fails (exit 4) if any wasn't restacked.
+/// then the force-pushes to run; fails (exit 4) if any wasn't brought up to
+/// date. `onto` names what they move onto in what is said (default: each
+/// one's base).
 fn each(
     common_dir: &Path,
     branches: &[String],
+    onto: Option<&str>,
     restack: impl Fn(&str) -> Result<Outcome>,
 ) -> Result<()> {
     let mut failed = 0;
@@ -386,9 +406,10 @@ fn each(
     for name in branches {
         let outcome = restack(name).unwrap_or_else(|e| Outcome::Refused(format!("{e:#}")));
         // As now: finishing an interrupted move onto a landing changes it.
-        let parent = Local::read(common_dir).parent(name).unwrap_or_default();
+        let parent = (onto.map(str::to_string))
+            .unwrap_or_else(|| Local::read(common_dir).parent(name).unwrap_or_default());
         failed += usize::from(!outcome.done());
-        println!("{name}\t{}", describe(&outcome, name, &parent));
+        println!("{name}: {}", describe(&outcome, name, &parent));
         if matches!(outcome, Outcome::Restacked { .. } | Outcome::Landed { .. })
             && let Some(push) = force_push(common_dir, name)?
         {
@@ -402,10 +423,11 @@ fn each(
         }
     }
     if failed > 0 {
-        return Err(Refusal::Changes.error(format!(
-            "{failed} of {} not restacked (see above)",
-            branches.len()
-        )));
+        let what = match branches {
+            [one] => format!("{one} not moved"),
+            _ => format!("{failed} of {} not moved", branches.len()),
+        };
+        return Err(Refusal::Changes.error(format!("{what} (see above)")));
     }
     Ok(())
 }
@@ -425,39 +447,36 @@ fn depth(local: &Local, branch: &str) -> usize {
     depth
 }
 
-/// One line of `stack sync` for `name` (stacked on `parent`).
+/// One line of `layer base` for `name` (built on `parent`).
 fn describe(outcome: &Outcome, name: &str, parent: &str) -> String {
     match outcome {
         Outcome::UpToDate => format!("up to date with {parent}"),
-        Outcome::BaseMoved => format!("has {parent}'s tip already; its parent base moved there"),
+        Outcome::BaseMoved => {
+            format!("has {parent}'s tip already; its own commits now start there")
+        }
         Outcome::Restacked {
             new,
             dropped,
             files,
             guessed,
         } => {
-            let mut line = format!("restacked onto {parent} ({})", commits(*new));
+            let mut line = format!("moved onto {parent} ({})", commits(*new));
             if *guessed {
-                line += "; its parent base was guessed (from the parent's reflog)";
+                line += "; where its own commits start was guessed (from the base's reflog)";
             }
             if *dropped > 0 {
                 let _ = write!(line, "; {dropped} of its commits made empty, dropped");
             }
             if let Some(files) = files {
-                let n = files.len();
                 let _ = write!(
                     line,
-                    "; {n} {} in its workspace",
-                    if n == 1 {
-                        "file changed"
-                    } else {
-                        "files changed"
-                    }
+                    "; {} in its workspace",
+                    plural(files.len(), "file changed", "files changed")
                 );
             }
             line
         }
-        Outcome::Would(n) => format!("would be restacked onto {parent} ({})", commits(*n)),
+        Outcome::Would { onto, .. } => format!("would move onto {onto}"),
         Outcome::Landed {
             landed,
             own,
@@ -465,7 +484,7 @@ fn describe(outcome: &Outcome, name: &str, parent: &str) -> String {
             files,
         } => {
             let mut line = format!(
-                "{}; moved there with its own {} and now stacked on {}",
+                "{}; moved there with its own {} and now built on {}",
                 landed.said(),
                 plural(*own, "commit", "commits"),
                 landed.target
@@ -487,14 +506,10 @@ fn describe(outcome: &Outcome, name: &str, parent: &str) -> String {
             );
             line
         }
-        Outcome::WouldLand(landed) => format!(
-            "{}; would move there and be stacked on {}",
-            landed.said(),
-            landed.target
-        ),
         Outcome::LooksLanded(landed) => format!(
-            "{}, but {} is still there; `gitfold stack sync {name}` moves it there",
+            "{}, but {} is still there; `gitfold layer base {}` moves it there",
             landed.said(),
+            landed.parent,
             landed.parent
         ),
         Outcome::Blocked {
@@ -505,12 +520,12 @@ fn describe(outcome: &Outcome, name: &str, parent: &str) -> String {
             ..
         } => format!(
             "blocked: commit {} conflicts on {} with {onto}; nothing moved. Rebase by hand in \
-             its workspace (`{rebase}`), then `gitfold stack sync {name}`",
+             its workspace (`{rebase}`), then `gitfold layer base {parent}`",
             short(*commit),
             shown(paths)
         ),
         Outcome::Waits(why) => format!("waits: {why}"),
-        Outcome::Refused(why) => format!("not restacked: {why}"),
+        Outcome::Refused(why) => format!("not moved: {why}"),
     }
 }
 
@@ -521,9 +536,9 @@ fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
         .flatten()
 }
 
-/// Restacks branch `name` onto its parent's tip, if it moved, or onto
-/// where its parent base landed, if its parent was merged (see the module
-/// doc); with `dry_run`, only says what it would do. `auto` (the hook, not
+/// Moves branch `name` onto its base's tip, if it moved, or onto where its
+/// parent base landed, if its base was merged (see the module doc); with
+/// `dry_run`, only says what it would do. `auto` (the hook, not
 /// asked by anyone): a parent that only looks squash-merged (found by
 /// content) is followed only if its branch is gone, here or on its remote;
 /// else it is only said.
@@ -533,7 +548,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
     }
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
-        return Err(Refusal::NotFound.error(format!("{name} isn't stacked")));
+        return Err(Refusal::NotFound.error(format!("{name} isn't built on another branch")));
     };
     let tip = tip_of(common_dir, name)?;
     let resolved = land::resolve(common_dir, &parent)?;
@@ -562,8 +577,8 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
     }
     let (Some((_, parent_tip)), Some(base)) = (resolved, base) else {
         return Ok(Outcome::Refused(format!(
-            "its parent {parent} is missing; `gitfold stack on <PARENT>` names another, \
-             `gitfold stack off` forgets it"
+            "its base {parent} is missing; `gitfold layer base <BRANCH>` names another, \
+             `gitfold layer base <TRUNK>` takes it off the stack"
         )));
     };
     if on_parent(common_dir, base.commit, parent_tip, tip)? {
@@ -575,7 +590,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
             name,
             (tip, tip),
             (base.stored, parent_tip),
-            "gitfold: stack base",
+            "gitfold: base",
         )?;
         settings::set_restack_blocked(common_dir, name, None)?;
         land::record(common_dir, name, &parent, parent_tip)?;
@@ -589,7 +604,12 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
     let (files, dropped) = match copy_onto(common_dir, name, onto, &base, tip, parent_tip, dry_run)?
     {
         Copied::Moved { files, dropped } => (files, dropped),
-        Copied::Dry => return Ok(Outcome::Would(new)),
+        Copied::Dry => {
+            return Ok(Outcome::Would {
+                onto: parent,
+                base: base.commit,
+            });
+        }
         Copied::Stop(outcome) => return Ok(outcome),
     };
     land::record(common_dir, name, &parent, parent_tip)?;
@@ -639,7 +659,7 @@ fn own_base(
 /// an agent's workspace mid-task, and a conflict can only be with the
 /// parent's landed form, not with whatever else main did. The branch's
 /// pull request shows the same diff either way (against the merge base).
-/// Following the target's tip is a later, separate `stack sync`.
+/// Following the target's tip is a later, separate `layer base`.
 #[allow(clippy::too_many_arguments)]
 fn reparent(
     common_dir: &Path,
@@ -677,7 +697,12 @@ fn reparent(
     );
     let (files, dropped) = match copied {
         Ok(Copied::Moved { files, dropped }) => (files, dropped),
-        Ok(Copied::Dry) => return Ok(Outcome::WouldLand(landed)),
+        Ok(Copied::Dry) => {
+            return Ok(Outcome::Would {
+                onto: format!("{} ({})", target.name, landed.said()),
+                base: base.commit,
+            });
+        }
         // Not moved, or moved there by another sync first (up to date).
         Ok(Copied::Stop(outcome)) => {
             finish_landing(common_dir, name)?;
@@ -755,14 +780,16 @@ fn copy_onto(
     let state = StateDir::of(common_dir, name);
     if state.opened() && lensed(&state)? {
         return Ok(Copied::Stop(Outcome::Waits(
-            "layers are shown in its workspace; `gitfold layer remove --all` first".into(),
+            "its workspace shows layers, and a branch with a base can't move while it does \
+             (not yet); `gitfold layer remove --all` first"
+                .into(),
         )));
     }
     let computed = git::with_repo(|repo| stack::restack(repo, base.commit, onto, tip))?;
     let (new_tip, dropped) = match computed {
         stack::Restack::Merge(commit) => {
             return Ok(Copied::Stop(Outcome::Refused(format!(
-                "its commit {} is a merge, which isn't restacked; rebase by hand",
+                "its commit {} is a merge, which isn't moved; rebase by hand",
                 short(commit)
             ))));
         }
@@ -789,7 +816,7 @@ fn copy_onto(
     }
     if let Some(other) = git::worktree::checked_out_elsewhere(common_dir, name, &state.admin) {
         return Ok(Copied::Stop(Outcome::Refused(format!(
-            "it is checked out in {other}; restack it there (`git rebase --onto {onto_rev} {}`)",
+            "it is checked out in {other}; move it there (`git rebase --onto {onto_rev} {}`)",
             short(base.commit)
         ))));
     }
@@ -820,7 +847,7 @@ fn copy_onto(
             name,
             (tip, new_tip),
             (base.stored, onto),
-            "gitfold: restack",
+            "gitfold: move onto base",
         ) {
             Ok(()) => Moved::Done(None),
             Err(_) if stack::rev(common_dir, &format!("refs/heads/{name}"))? == Some(new_tip) => {
@@ -864,7 +891,7 @@ fn lensed(state: &StateDir) -> Result<bool> {
 fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
     Ok(match restack::recover(state)? {
         Recovery::Nothing | Recovery::Finished | Recovery::Undone => Ok(()),
-        Recovery::InProgress => Err("another restack of it is running".into()),
+        Recovery::InProgress => Err("another move of it is running".into()),
         Recovery::Stuck(why) => Err(why),
     })
 }
@@ -873,7 +900,7 @@ fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
 enum Moved {
     /// Moved: the paths changed in its workspace (`None`: no workspace).
     Done(Option<Vec<BString>>),
-    /// Another restack (the hook and `stack sync` at once) got there first.
+    /// Another move (the hook and `layer base` at once) got there first.
     Already,
     /// Not now: why.
     Waits(String),
@@ -938,9 +965,7 @@ fn apply_open(state: &StateDir, dir: &Path, intent: &Intent) -> Result<Moved> {
         } else {
             held.keep();
         }
-        return Ok(Moved::Waits(format!(
-            "the branch moved during the restack ({e:#})"
-        )));
+        return Ok(Moved::Waits(format!("the branch moved meanwhile ({e:#})")));
     }
     held.done()?;
     Ok(Moved::Done(Some(paths)))
@@ -956,7 +981,7 @@ fn refused(said: &str) -> String {
     match in_the_way.is_empty() {
         true => format!("git read-tree refused: {}", said.trim()),
         false => format!(
-            "uncommitted changes to {} overlap the restack; commit or stash them",
+            "uncommitted changes to {} overlap the move; commit or stash them",
             shown_str(&in_the_way)
         ),
     }
@@ -981,7 +1006,7 @@ fn apply_closed(state: &StateDir, intent: &Intent) -> Result<Moved> {
     let s = crate::state::status::status(&store, state)?;
     if !s.changed.is_empty() || !s.deleted.is_empty() || !index_matches_head(&state.admin)? {
         return Ok(Moved::Waits(
-            "its workspace has uncommitted changes; restacked once it is mounted".into(),
+            "its workspace has uncommitted changes; moved once it is mounted".into(),
         ));
     }
     let (from, to) = (
@@ -1027,7 +1052,7 @@ fn move_refs(state: &StateDir, intent: &Intent) -> Result<()> {
         &state.branch,
         (intent.from, intent.to),
         (intent.stack_old, intent.parent_tip),
-        "gitfold: restack",
+        "gitfold: move onto base",
     )
 }
 
@@ -1060,10 +1085,10 @@ fn upstream(common_dir: &Path, name: &str) -> Result<Option<(String, String, Obj
     Ok(stack::rev(common_dir, &tracking)?.map(|at| ("origin".into(), name.into(), at)))
 }
 
-/// The notes `gitfold list` shows for stacked branch `name`: the parent's
-/// state (merged, missing), and whether it needs a restack or a
+/// The notes `gitfold list` shows for stacked branch `name`: its base's
+/// state (landed, missing), and whether it needs an update or a
 /// force-push. A branch on the trunk isn't said to need one each time the
-/// trunk moves: following it is `stack sync`'s, on request.
+/// trunk moves: following it is `layer base`'s, on request.
 pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
     let Some(parent) = local.parent(name) else {
         return Vec::new();
@@ -1076,6 +1101,7 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
         .ok()
         .flatten();
     let trunk = land::is_trunk(common_dir, local, &parent);
+    let update = format!("needs update: gitfold layer base {parent}");
     let mut notes = Vec::new();
     if !trunk
         && let Some(base) = &base
@@ -1083,89 +1109,48 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
         && let was_on = land::was_on_target(local, name, base.commit, &target.name)
         && let Ok(Some(landing)) = land::landed(common_dir, base.commit, &target, was_on)
     {
-        notes.push(match landing.how {
-            stack::How::Squashed | stack::How::FastForward => {
-                "parent looks merged: re-parent with stack sync".into()
-            }
-            _ => "parent merged: re-parent with stack sync".into(),
-        });
-    } else if local.restack_blocked(name).is_some() {
-        notes.push("restack blocked".into());
+        let landed = match landing.how {
+            stack::How::Squashed | stack::How::FastForward => "looks landed",
+            _ => "landed",
+        };
+        notes.push(format!("{parent} {landed} in {}: {update}", target.name));
+    } else if let Some(blocked) = local.restack_blocked(name) {
+        // `<onto> <commit> <paths>`.
+        let paths: Vec<&str> = blocked.split(' ').skip(2).collect();
+        notes.push(format!("blocked: conflicts on {}", shown_str(&paths)));
     } else if let (Some((_, parent_tip)), Some(base)) = (&resolved, &base) {
         if !trunk && !on_parent(common_dir, base.commit, *parent_tip, tip).unwrap_or(true) {
-            let n = stack::count(common_dir, base.commit, *parent_tip).unwrap_or(0);
-            notes.push(format!("needs restack ({n})"));
+            notes.push(update);
         }
     } else if resolved.is_none() {
-        notes.push("parent missing".into());
+        notes.push(format!("base {parent} missing"));
     }
-    if force_push(common_dir, name).is_ok_and(|p| p.is_some()) {
-        notes.push("needs force-push".into());
+    if force_push(common_dir, name).is_ok_and(|p| p.is_some())
+        && let Ok(Some((remote, theirs, _))) = upstream(common_dir, name)
+    {
+        let refspec = match theirs == name {
+            true => name.to_string(),
+            false => format!("{name}:{theirs}"),
+        };
+        notes.push(format!(
+            "push with: git push --force-with-lease {remote} {refspec}"
+        ));
     }
     notes
 }
 
-/// `gitfold stack list`: each stack from its bottom (a branch that isn't
-/// stacked), every branch indented below its parent, with its notes.
-fn listing(common_dir: &Path) -> Result<String> {
-    let local = Local::read(common_dir);
-    let edges = local.parents();
-    if edges.is_empty() {
-        return Ok("no stacked branches\n".into());
-    }
-    let mut roots: Vec<&str> = (edges.iter())
-        .map(|(_, p)| p.as_str())
-        .filter(|p| local.parent(p).is_none())
-        .collect();
-    roots.sort();
-    roots.dedup();
-    let mut out = String::new();
-    for root in roots {
-        let missing = match land::resolve(common_dir, root)?.is_some() {
-            true => "",
-            false => "  (missing)",
-        };
-        let _ = writeln!(out, "{root}{missing}");
-        tree(common_dir, &local, &edges, root, 1, &mut out);
-    }
-    Ok(out)
-}
-
-fn tree(
-    common_dir: &Path,
-    local: &Local,
-    edges: &[(String, String)],
-    parent: &str,
-    depth: usize,
-    out: &mut String,
-) {
-    // A cycle written into the config by hand.
-    if depth > 100 {
-        return;
-    }
-    for (branch, _) in edges.iter().filter(|(_, p)| p == parent) {
-        let notes = notes(common_dir, local, branch);
-        let notes = match notes.is_empty() {
-            true => String::new(),
-            false => format!("  ({})", notes.join("; ")),
-        };
-        let _ = writeln!(out, "{}{branch}{notes}", "  ".repeat(depth));
-        tree(common_dir, local, edges, branch, depth + 1, out);
-    }
-}
-
-/// `gitfold layer --claude-hook user-prompt-submit`'s part for stacks: at
-/// the start of a turn, the session's workspace is restacked onto its
-/// parent's new commits (unless its restacks are manual), and what happened
-/// is said as context. Nothing when nothing happened, or when what keeps it
-/// from happening was told before (a block per parent tip, anything else
-/// while it says the same: `restack-told` in the state directory).
+/// `gitfold layer --claude-hook user-prompt-submit`'s part for bases: at
+/// the start of a turn, the session's workspace is moved onto its base's
+/// new commits (unless it is frozen), and what happened is said as context.
+/// Nothing when nothing happened, or when what keeps it from happening was
+/// told before (a block per base tip, anything else while it says the same:
+/// `restack-told` in the state directory).
 pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
         return Ok(None);
     };
-    // Not onto the trunk's every move: that is `stack sync`'s, on request.
+    // Not onto the trunk's every move: that is `layer base`'s, on request.
     if local.restack_manual(name) || land::is_trunk(common_dir, &local, &parent) {
         return Ok(None);
     }
@@ -1185,7 +1170,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
         let _ = std::fs::remove_file(&told_file);
     }
     Ok(match outcome {
-        Outcome::UpToDate | Outcome::BaseMoved | Outcome::Would(_) | Outcome::WouldLand(_) => None,
+        Outcome::UpToDate | Outcome::BaseMoved | Outcome::Would { .. } => None,
         Outcome::Blocked { told: true, .. } => None,
         Outcome::Landed {
             landed, own, files, ..
@@ -1196,14 +1181,14 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
                 false => format!("files changed under you: {}", shown(&files)),
             };
             Some(format!(
-                "gitfold: this branch's parent {}. {name} now sits there with only its own \
-                 {}, stacked on {}; {files}. Its history was rewritten, so it needs a push with \
+                "gitfold: this branch's base {}; {name} is now built on {} with only its own \
+                 {}; {files}. Its history was rewritten, so it needs a push with \
                  --force-with-lease, and then its pull request's base should be {}: suggest \
                  `gh pr edit {name} --base {}` to the user after that push rather than running \
                  it yourself.",
                 landed.said(),
-                plural(own, "commit", "commits"),
                 landed.target,
+                plural(own, "commit", "commits"),
                 landed.pr_base,
                 landed.pr_base
             ))
@@ -1216,9 +1201,8 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
         } => {
             let guessed = match guessed {
                 true => {
-                    " Its parent base (where its own commits start) was guessed from \
-                     the parent's reflog, its stack ref being missing: check that only \
-                     its own commits were moved."
+                    " Where its own commits start was guessed from the base's reflog, its \
+                     stack ref being missing: check that only its own commits were moved."
                 }
                 false => "",
             };
@@ -1235,23 +1219,23 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
                 false => format!("files changed under you: {}", shown(&files)),
             };
             Some(format!(
-                "gitfold: this branch, {name}, was restacked onto {parent}'s {}{what}; {files}. \
-                 Its history was rewritten: push it with --force-with-lease when you push.\
-                 {guessed}",
+                "gitfold: this branch, {name}, was moved onto its base {parent}'s {}{what}; \
+                 {files}. Its history was rewritten: push it with --force-with-lease when you \
+                 push.{guessed}",
                 commits(new)
             ))
         }
         Outcome::Blocked { .. } => Some(format!(
-            "gitfold: {name} is stacked on {parent}, which has new commits; {}",
+            "gitfold: {name} is built on {parent}, which has new commits; {}",
             describe(&outcome, name, &parent)
         )),
         Outcome::LooksLanded(_) => say(format!(
-            "gitfold: {name}'s parent {}; suggest it to the user rather than running it \
+            "gitfold: {name}'s base {}; suggest it to the user rather than running it \
              yourself: it rewrites {name}'s history.",
             describe(&outcome, name, &parent)
         ))?,
         other => say(format!(
-            "gitfold: {name} is stacked on {parent}, which has new commits; {}",
+            "gitfold: {name} is built on {parent}, which has new commits; {}",
             describe(&other, name, &parent)
         ))?,
     })
@@ -1314,18 +1298,6 @@ fn shown_str(paths: &[&str]) -> String {
     out
 }
 
-/// `gitfold layer base`: a stub until the stacks rework lands.
-pub fn base(
-    _repo: &Path,
-    _workspace: Option<String>,
-    _target: &str,
-    _frozen: bool,
-    _yes: bool,
-    _all: bool,
-) -> Result<()> {
-    anyhow::bail!("gitfold layer base: not yet")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1345,7 +1317,7 @@ mod tests {
                     error: Untracked working tree file 'n.txt' would be overwritten by merge.\n";
         assert_eq!(
             refused(said),
-            "uncommitted changes to d/c.txt, n.txt overlap the restack; commit or stash them"
+            "uncommitted changes to d/c.txt, n.txt overlap the move; commit or stash them"
         );
         let locked = "fatal: Unable to create '/x/index.lock': File exists.";
         assert_eq!(refused(locked), format!("git read-tree refused: {locked}"));

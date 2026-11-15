@@ -66,22 +66,37 @@ pub enum LayerOp {
         #[arg(long, conflicts_with = "branch")]
         all: bool,
     },
-    /// Build the branch on TARGET: move its own commits onto it, or bring
-    /// them up to date.
+    /// Build the branch on TARGET (stacked): its own commits move onto
+    /// TARGET now, and onto TARGET's new commits from then on.
     ///
-    /// They then follow TARGET's new commits (unless --frozen). The trunk
-    /// (main, say) takes the branch off its base.
+    /// It says first what it moves, and refuses (exit 4) to move commits
+    /// already pushed (reachable from its upstream, or origin/<BRANCH>)
+    /// without --yes. From then on its agent's next turn moves it (the
+    /// `UserPromptSubmit` hook), unless --frozen; running it again moves it
+    /// now. A workspace's files move as in a checkout, keeping uncommitted
+    /// work; one whose uncommitted work is on a path the move changes waits,
+    /// and a conflict leaves the branch as it was, reported (`gitfold list`
+    /// shows both). When TARGET lands (a merge, squash, rebase merge or
+    /// fast-forward), the branch moves onto what it landed in, by itself.
+    /// The trunk (gitfold.trunk, else origin/HEAD's branch, else main or
+    /// master) as TARGET takes it off the stack, its own commits moved onto
+    /// the trunk's tip. gitfold never pushes: it prints the force-pushes to
+    /// run. Exit codes: 3 no such branch, 4 not moved (commits already
+    /// pushed, a conflict, uncommitted work in the way, git busy, layers
+    /// shown), 1 other errors, 2 usage errors.
     Base {
-        #[arg(required_unless_present = "all")]
+        /// The branch to build on (the trunk: none, off the stack).
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
         target: Option<String>,
-        /// Build on TARGET as it is now; don't follow it.
+        /// Build on TARGET as it is now, and don't follow its new commits
+        /// (running this again brings it up to date, still frozen).
         #[arg(long)]
         frozen: bool,
-        /// Move commits that were pushed already.
+        /// Move commits already pushed too.
         #[arg(long)]
         yes: bool,
-        /// Bring every branch built on another up to date.
-        #[arg(long, conflicts_with = "target")]
+        /// Bring every branch built on another up to date, bases first.
+        #[arg(long)]
         all: bool,
     },
 }
@@ -93,10 +108,10 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         frozen,
         yes,
         all,
-    }) = args.op
+    }) = &args.op
     {
-        let target = target.unwrap_or_default();
-        return super::stack::base(repo, args.workspace, &target, frozen, yes, all);
+        let target = target.as_deref().unwrap_or_default();
+        return super::stack::base(repo, args.workspace, target, *frozen, *yes, *all);
     }
     let name = super::branch_or_current(args.workspace, repo)?;
     check_name(&name)?;
@@ -457,7 +472,7 @@ pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) 
             .parent(&state.branch)
             .unwrap_or_else(|| "<base>".into());
         return Err(Refusal::Changes.error(format!(
-            "{} is being moved onto {base} (or that was interrupted: `gitfold layer base \
+            "{} is being moved onto its base {base} (or that was interrupted: `gitfold layer base \
              {base}` finishes it); retry once it is done",
             state.branch
         )));

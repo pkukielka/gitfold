@@ -174,7 +174,7 @@ It runs the `gitfold` on `PATH`, or else the release matching the plugin
 
 The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove
 --claude-hook worktree-remove`, the `inbox --claude-hook` ones above, and for
-layers `gitfold seal --claude-hook stop` (`Stop`), `gitfold layer
+layers `gitfold snapshot --claude-hook stop` (`Stop`), `gitfold layer
 --claude-hook user-prompt-submit` (`UserPromptSubmit`) and `gitfold layer
 --claude-hook pre-tool-use` (`PreToolUse` on `Edit|Write|MultiEdit|NotebookEdit`). A
 plugin's `WorktreeCreate` hook doesn't run for `claude --worktree --tmux`; for
@@ -236,14 +236,16 @@ even on a huge tree. Each workspace then changes on its own.
   uncommitted work included, before merging anything:
 
   ```
-  cd $(gitfold mix main agent/task-17 agent/task-18)   # build and test there
+  cd $(gitfold snapshot main agent/task-17 agent/task-18)   # build and test there
   ```
 
-  It merges each workspace's work (its uncommitted changes as a commit,
-  `gitfold seal`), or a branch's or revision's commit, in order onto the
-  first (or `--onto <REV>`), and prints the merge as a snapshot path. No
-  workspace, index or branch changes. It exits 4 on conflicts, listing the
-  paths. The same work gives the same snapshot.
+  It merges each workspace's work (its uncommitted changes included), or a
+  branch's or revision's commit, in order onto the first (or `--onto
+  <REV>`), and prints the merge as a snapshot path. `--commits` takes only
+  the branches' commits. No workspace, index or branch changes. It exits 4
+  on conflicts, listing the paths. The same work gives the same snapshot.
+  With one branch, `gitfold snapshot <BRANCH>` shows that workspace's work
+  alone, as `<mount>/@<sha>` (unmounted, it prints the commit).
 
   Committed work only, without gitfold: make the merge commit with git and
   open it as a snapshot. No working tree, index or ref is touched (git 2.38
@@ -383,7 +385,7 @@ gitfold layer remove --all             # stop showing every layer
   still show. Run `gitfold layer remove --all` to use git again; `gitfold`
   commands keep working meanwhile.
 - **Layers move between turns, not during them.** With the gitfold plugin, a
-  workspace shown as a layer is sealed when its session stops, and your
+  workspace shown as a layer is snapshotted when its session stops, and your
   live layers move to their newest work when your next prompt starts; you
   are then told which layers changed (files you read from them may have
   changed: read them again). Without the plugin, or for a workspace no
@@ -408,12 +410,11 @@ The workspace a layer is added to must have been opened (else exit 3); a
 layer of a branch without a workspace shows its commits.
 
 Children can also be layers of each other, or of a reviewer's workspace. To
-**check the work together**, mix it into a snapshot (`cd $(gitfold mix
-agent/contracts agent/child-1 agent/child-2)`, see the merge previews
-above), or add the children as layers of a workspace that builds and tests
-them (`gitfold layer add`, then `gitfold layer remove --all` when done).
-`gitfold seal <BRANCH>` prints one workspace's uncommitted work as a commit, to open as
-`<mount>/@<sha>`.
+**check the work together**, merge it into a snapshot (`cd $(gitfold
+snapshot agent/contracts agent/child-1 agent/child-2)`, see the merge
+previews above), or add the children as layers of a workspace that builds
+and tests them (`gitfold layer add`, then `gitfold layer remove --all`
+when done).
 
 ### Contracts: proposing a change, consent of the affected
 
@@ -471,40 +472,48 @@ came mid-turn: the layer moves at your next prompt), and adapts its work.
 ## Stacked branches
 
 For stacked pull requests (`main <- p1 <- p2`), build the child on the
-parent's commits and let gitfold carry it along when the parent changes:
+parent's commits (p1 is p2's **base**) and let gitfold carry it along when
+the base changes:
 
 ```
-gitfold branch p2 --on p1         # p2 at p1's tip, stacked on it
-gitfold stack on p1 -w p2         # or stack an existing branch
-gitfold stack sync                # your workspace onto its parent's new commits
-gitfold stack sync --all          # every stacked branch, parents first
-gitfold stack list                # the stacks, with what each needs
+gitfold branch p2 --base p1       # p2 at p1's tip, built on it
+gitfold layer base p1 -w p2       # or: an existing branch, its own commits moved onto p1
+gitfold layer base p1             # again, in your workspace: onto p1's new commits now
+gitfold layer base p1 --frozen    # built on p1 as it is now; not followed by itself
+gitfold layer base main           # the trunk: off the stack, own commits onto main
+gitfold list                      # the stacks as a tree, with what each needs
 ```
 
+- `layer base` says first what it moves (`moves 3 commits of p2 onto p1`).
+  It refuses (exit 4) to move commits already pushed; `--yes` moves them.
+  Ask the user before adding `--yes`: it rewrites published history.
 - When p1 gets new commits (review fixes, a rebase), p2's own commits are
   copied onto them: at the start of p2's agent's next turn (the plugin's
   `UserPromptSubmit` hook, which tells you which files changed under you),
-  or by `gitfold stack sync`. Your uncommitted work stays; never mid-turn.
-- A commit that conflicts with the parent's new ones leaves your branch as
-  it was, and you are told once (`list`: `restack blocked`). Rebase by hand
-  in your workspace, `git rebase --onto p1 <base>` (the line names it), then
-  `gitfold stack sync`.
-- Uncommitted changes to a file the restack changes: it waits, and tells
-  you which; commit or stash them, and it happens at the next turn.
-- It is refused while layers are shown (`gitfold layer remove --all` first).
-- When the parent is merged into main (a merge, squash, rebase merge or
+  or by `gitfold layer base p1` again. Your uncommitted work stays; never
+  mid-turn. With `--frozen`, only `gitfold layer base p1 --frozen` moves it;
+  `gitfold layer base p1` makes it follow again.
+- A commit that conflicts with the base's new ones leaves your branch as
+  it was, and you are told once (`list`: `blocked: conflicts on <paths>`).
+  Rebase by hand in your workspace, `git rebase --onto p1 <start>` (the line
+  names it), then `gitfold layer base p1`.
+- Uncommitted changes to a file the move changes: it waits, and tells you
+  which; commit or stash them, and it happens at the next turn.
+- It is refused while layers are shown (`gitfold layer remove --all`
+  first).
+- When the base is merged into main (a merge, squash, rebase merge or
   fast-forward), your branch moves onto that merge with only its own
-  commits and is stacked on main from then on; you are told. Suggest the
+  commits and is built on main from then on; you are told. Suggest the
   push and then `gh pr edit <BRANCH> --base main` to the user; don't run
   them yourself. A squash (or fast-forward) is a guess, so while the
-  parent's branch still exists you are only told it looks merged: suggest
-  `gitfold stack sync` to the user. It doesn't follow main's later commits
-  by itself: `gitfold stack sync` does, when wanted. A merge gitfold can't recognise (a squash
-  rewritten when merged): `gitfold stack merged <PARENT>`.
-- gitfold never pushes. After a restack your branch's history is rewritten:
-  push with `--force-with-lease` (`stack sync` prints the command).
-- `git config branch.<BRANCH>.gitfoldRestack manual`: only `stack sync`
-  restacks it.
+  base's branch still exists you are only told it looks merged: suggest
+  `gitfold layer base p1` to the user. It doesn't follow main's later
+  commits by itself: `gitfold layer base main` does, when wanted (and
+  takes it off the stack). A merge gitfold can't recognise (a squash
+  rewritten when merged): `gitfold layer base main` too.
+- gitfold never pushes. After a move your branch's history is rewritten:
+  push with `--force-with-lease` (`layer base` prints the command, `list`
+  notes it).
 
 ## When something fails
 

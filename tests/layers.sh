@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end test of layers (other branches' work shown in a workspace,
-# proposals to change it) and of snapshots of workspaces' work (seal, mix).
+# proposals to change it) and of snapshots of workspaces' work (snapshot).
 # usage: tests/layers.sh (or with the others: tests/run.sh); sections as in
 # tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -10,68 +10,88 @@ NAME=layers
 . "$(dirname "$0")/lib.sh"
 . "$(dirname "$0")/fixture.sh"
 
-seal_uncommitted_work_as_a_commit() {
-R branch s1
-check "no workspace yet: nothing to seal (exit 3)" sh -c "'$BIN' -C '$REPO' seal s1; [ \$? = 3 ]"
+snapshot_of_one_workspace() {
+R branch s1; R branch s2
+out=$("$BIN" -C "$REPO" snapshot s1 2>&1 >/dev/null)
+eq "unmounted, no workspace yet: the branch's tip, as a commit" "$(R rev-parse s1)|yes" \
+    "$("$BIN" -C "$REPO" snapshot s1 2>/dev/null)|$(echo "$out" | grep -q '^not mounted' && echo yes)"
 mount_fs
 echo s >>"$MNT/s1/a.txt"; echo n >"$MNT/s1/new.txt"; rm "$MNT/s1/d/b.txt"
 ln -s a.txt "$MNT/s1/link"; echo x >"$MNT/s1/run.sh"; chmod +x "$MNT/s1/run.sh"
 echo '*.o' >>"$MNT/s1/.gitignore"; echo o >"$MNT/s1/build.o"
-c=$("$BIN" -C "$MNT/s1" seal)
+p=$("$BIN" -C "$MNT/s1" snapshot)
+eq "printed as a snapshot path" "$MNT/@" "${p%@*}@"
+c=${p##*@}
 eq "the parent is the base" "$(R rev-parse s1)" "$(R rev-parse "$c^")"
 eq "the tree is what git would commit with add -A" \
     "$(G "$MNT/s1" add -A && G "$MNT/s1" write-tree)" "$(R rev-parse "$c^{tree}")"
 eq "ignored files left out" "" "$(R ls-tree --name-only "$c" build.o)"
 eq "kept by a ref" "$c" "$(R rev-parse refs/gitfold-seal/s1/1)"
-eq "unchanged work: the same commit, no new ref" "$c 1" \
-    "$("$BIN" -C "$REPO" seal s1) $(R for-each-ref refs/gitfold-seal/s1 | wc -l)"
+out=$("$BIN" -C "$REPO" snapshot s1 2>&1 >/dev/null)
+eq "unchanged work: the same snapshot, no new ref, said so" "$p 1|unchanged since its last snapshot" \
+    "$("$BIN" -C "$REPO" snapshot s1 2>/dev/null) $(R for-each-ref refs/gitfold-seal/s1 | wc -l)|$out"
 echo more >>"$MNT/s1/a.txt"
-c2=$("$BIN" -C "$REPO" seal s1)
-check "new work: a new seal" test "$c2" != "$c"
-eq "numbered on" "$c2" "$(R rev-parse refs/gitfold-seal/s1/2)"
+p2=$("$BIN" -C "$REPO" snapshot s1)
+check "new work: a new snapshot" test "$p2" != "$p"
+eq "numbered on" "${p2##*@}" "$(R rev-parse refs/gitfold-seal/s1/2)"
 eq "the workspace unchanged" "A	.gitignore
 M	a.txt
 D	d/b.txt
 A	link
 A	new.txt
 A	run.sh" "$("$BIN" -C "$REPO" changes s1)"
-eq "opens as a snapshot" "a
+eq "opens as a folder" "a
 s
-more" "$(cat "$MNT/@$c2/a.txt")"
+more" "$(cat "$p2/a.txt")"
+eq "--commits: only its commits" "$MNT/@$(R rev-parse s1)" "$("$BIN" -C "$REPO" snapshot --commits s1)"
+echo again >>"$MNT/s1/a.txt"
+eq "the stop hook: nothing printed, nothing new while no workspace shows it" "|2" \
+    "$(cd "$MNT/s1" && "$BIN" snapshot --claude-hook stop)|$(R for-each-ref refs/gitfold-seal/s1 | wc -l)"
+ls "$MNT/s2" >/dev/null; "$BIN" -C "$REPO" layer add s1 -w s2 >/dev/null
+echo last >>"$MNT/s1/a.txt"
+(cd "$MNT/s1" && "$BIN" snapshot --claude-hook stop)
+newest=$(R for-each-ref --sort=-refname --count=1 --format='%(refname)' refs/gitfold-seal/s1)
+eq "the stop hook: a new one once a layer shows it" "last" "$(R show "$newest:a.txt" | tail -1)"
+check "the hook takes no branch" fails "$BIN" -C "$REPO" snapshot s1 --claude-hook stop
 "$BIN" unmount "$MNT" >/dev/null 2>&1; wait "$PID" 2>/dev/null
-eq "unmounted: the same seal" "$c2" "$("$BIN" -C "$REPO" seal s1)"
+eq "unmounted: the same work, as a commit" "$(R rev-parse "$newest")" \
+    "$("$BIN" -C "$REPO" snapshot s1 2>/dev/null)"
 }
 
-mix_workspaces_into_a_snapshot() {
+snapshot_of_several_merged() {
 R branch m1; R branch m2; R branch m3
 mount_fs
 echo one >>"$MNT/m1/a.txt"; echo n1 >"$MNT/m1/n1.txt"
 echo two >>"$MNT/m2/d/c.txt"; rm "$MNT/m2/d/b.txt"
-p=$("$BIN" -C "$REPO" mix m1 m2)
+p=$("$BIN" -C "$REPO" snapshot m1 m2)
 eq "printed as a snapshot path" "$MNT/@" "${p%@*}@"
 eq "both workspaces' work" "a
 one|c
 two|n1" "$(cat "$p/a.txt")|$(cat "$p/d/c.txt")|$(cat "$p/n1.txt")"
 check "a deletion carried" test ! -e "$p/d/b.txt"
-eq "the same work: the same snapshot" "$p" "$("$BIN" -C "$REPO" mix m1 m2)"
-eq "--commit prints the commit" "${p##*@}" "$("$BIN" -C "$REPO" mix --commit m1 m2)"
+eq "the same work: the same snapshot" "$p" "$("$BIN" -C "$REPO" snapshot m1 m2)"
 echo three >>"$MNT/m3/a.txt"
-out=$("$BIN" -C "$REPO" mix m1 m3 2>&1); rc=$?
+out=$("$BIN" -C "$REPO" snapshot m1 m3 2>&1); rc=$?
 eq "conflicts: exit 4, the paths listed" "4 a.txt" "$rc $(echo "$out" | sed -n 's/^  //p')"
+G "$MNT/m3" commit -qam three
+p=$("$BIN" -C "$REPO" snapshot --commits m1 m3)
+eq "--commits: only commits, no uncommitted work" "a
+three|" "$(cat "$p/a.txt")|$(ls "$p/n1.txt" 2>/dev/null)"
 R switch -q main; echo top >"$REPO/top.txt"; R add top.txt; R commit -qm top
-p=$("$BIN" -C "$REPO" mix --onto main m2)
+p=$("$BIN" -C "$REPO" snapshot --onto main m2 2>/dev/null)
 eq "--onto: onto another revision" "top|c
 two" "$(cat "$p/top.txt")|$(cat "$p/d/c.txt")"
 eq "a branch without a workspace: its tip" "top" \
-    "$(cat "$("$BIN" -C "$REPO" mix m1 main)/top.txt")"
-check "neither a workspace nor a revision" fails "$BIN" -C "$REPO" mix m1 nope
+    "$(cat "$("$BIN" -C "$REPO" snapshot m1 main)/top.txt")"
+check "neither a workspace nor a revision (exit 3)" \
+    sh -c "'$BIN' -C '$REPO' snapshot m1 nope 2>/dev/null; [ \$? = 3 ]"
 eq "nothing changed in the workspaces" "M	a.txt
 A	n1.txt" "$("$BIN" -C "$REPO" changes m1)"
 }
 
 # A snapshot of workspace $1's work, as its agent's Stop hook makes one: its
 # commit.
-snap() { "$BIN" -C "$REPO" seal "$1" 2>/dev/null; }
+snap() { "$BIN" -C "$REPO" snapshot "$1" 2>/dev/null | sed "s/.*@//"; }
 # The layers the listing of workspace $2 (or the one $1 is in) names, on one
 # line.
 layer_names() { "$BIN" -C "$1" layer ${2:+-w "$2"} | awk '/^LAYER/{t=1;next} t&&!NF{exit} t{print $1}' | paste -sd' '; }
@@ -431,7 +451,7 @@ check "reject in a third workspace: refused (exit 3)" \
 check "reject" "$BIN" -C "$MNT/contracts" reject contracts-prop/c2 --reason "keep fetch"
 eq "the layer shown again, the proposer told why, the proposal gone" "contracts|yes|" \
     "$(layer_names "$MNT/c2" | tr " " "\n" | grep contracts)|$("$BIN" -C "$REPO" inbox c2 | grep -q 'was rejected: keep fetch' && echo yes)|$(R branch --list 'contracts-prop/*')"
-eq "no seal or start refs of removed proposals left" "" \
+eq "no snapshot or start refs of removed proposals left" "" \
     "$(R for-each-ref --format='%(refname)' refs/gitfold-proposal/ 'refs/gitfold-seal/contracts-prop*')"
 (cd "$MNT/c2" && "$BIN" propose lib.txt --layer lib >/dev/null)
 out=$("$BIN" -C "$REPO" consent lib-prop/c2 --only-readers 2>&1); rc=$?
@@ -459,7 +479,7 @@ section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
 section "layers: several changing one file" layers_changing_one_file
 section "layers: blended files, the layers commit" blended_files_and_the_layers_commit
-section "seal: uncommitted work as a commit" seal_uncommitted_work_as_a_commit
-section "mix: workspaces merged into a snapshot" mix_workspaces_into_a_snapshot
+section "snapshot: one workspace's work" snapshot_of_one_workspace
+section "snapshot: several merged" snapshot_of_several_merged
 section "proposals: a contract changed by consent" proposals_to_change_a_contract
 finish
