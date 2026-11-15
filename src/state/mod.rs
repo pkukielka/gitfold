@@ -8,6 +8,8 @@
 //! - `fork`: a new branch with a copy of a workspace (`branch --with-changes`).
 //! - `seal`: a workspace's uncommitted work as a commit (`gitfold seal`).
 //! - `lens`: other workspaces' work shown in one (layers), and its storage.
+//! - `restack`: a stacked branch's restack under way in a workspace (its
+//!   intent file), and recovering one a crash interrupted.
 //! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //!
 //! The state of the workspace of branch `b` is `.git/gitfold/<id>/`, `<id>`
@@ -21,6 +23,7 @@ pub mod fork;
 pub mod lens;
 pub mod markers;
 pub mod reads;
+pub mod restack;
 pub mod retire;
 pub mod seal;
 pub mod status;

@@ -2,7 +2,11 @@
 //!
 //! - per branch, `branch.<branch>.<key>`, which git keeps with the branch
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
-//!   mode) and `gitfoldTrackReads` (whether it records reads);
+//!   mode), `gitfoldTrackReads` (whether it records reads), and for a
+//!   stacked branch `gitfoldParent` (the branch it is built on),
+//!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only) and
+//!   `gitfoldRestackBlocked` (the restack that conflicted, see
+//!   `cli::stack`);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again).
@@ -24,6 +28,13 @@ use crate::prewarm::Prewarm;
 const PREWARM: &str = "gitfoldPrewarm";
 /// `branch.<branch>.gitfoldTrackReads`: a boolean.
 const TRACK_READS: &str = "gitfoldTrackReads";
+/// `branch.<branch>.gitfoldParent`: the branch it is stacked on.
+const PARENT: &str = "gitfoldParent";
+/// `branch.<branch>.gitfoldRestack`: `manual`, or (unset) at turn boundaries.
+const RESTACK: &str = "gitfoldRestack";
+/// `branch.<branch>.gitfoldRestackBlocked`: `<parent tip> <commit> <paths>`,
+/// the restack onto that parent tip that conflicted.
+const RESTACK_BLOCKED: &str = "gitfoldRestackBlocked";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -122,6 +133,44 @@ impl Local {
         self.branch_bool(branch, TRACK_READS)
     }
 
+    /// The branch `branch` is stacked on, if any.
+    pub fn parent(&self, branch: &str) -> Option<String> {
+        self.branch(branch, PARENT)
+    }
+
+    /// Every stacked branch with its parent, in config order.
+    pub fn parents(&self) -> Vec<(String, String)> {
+        let Some(sections) = self.0.as_ref().and_then(|c| c.sections_by_name("branch")) else {
+            return Vec::new();
+        };
+        sections
+            .filter_map(|s| {
+                let branch = s.header().subsection_name()?.to_string();
+                let parent = non_empty(s.value(PARENT)?.to_string())?;
+                Some((branch, parent))
+            })
+            .collect()
+    }
+
+    /// Whether `branch` is restacked only by `gitfold stack sync`
+    /// (`gitfoldRestack` is `manual`), not at its turn boundaries.
+    pub fn restack_manual(&self, branch: &str) -> bool {
+        self.branch(branch, RESTACK).as_deref() == Some("manual")
+    }
+
+    /// The restack of `branch` that conflicted, if any (see `RESTACK_BLOCKED`).
+    pub fn restack_blocked(&self, branch: &str) -> Option<String> {
+        self.branch(branch, RESTACK_BLOCKED)
+    }
+
+    /// The remote `branch` pushes to and its branch there, from git's own
+    /// `branch.<branch>.remote` and `.merge`, if both are set.
+    pub fn upstream(&self, branch: &str) -> Option<(String, String)> {
+        let merge = self.branch(branch, "merge")?;
+        let theirs = merge.strip_prefix("refs/heads/").unwrap_or(&merge);
+        Some((self.branch(branch, "remote")?, theirs.to_string()))
+    }
+
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
     fn branch(&self, branch: &str, key: &str) -> Option<String> {
         let config = self.0.as_ref()?;
@@ -175,6 +224,30 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
+/// Stores `parent` as the branch `branch` is stacked on, or forgets it.
+pub fn set_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
+    match parent {
+        Some(parent) => set_branch(git_dir, branch, PARENT, parent),
+        None => unset_branch(git_dir, branch, PARENT),
+    }
+}
+
+/// Stores the restack mode of `branch`: `manual` or not (unset).
+pub fn set_restack_manual(git_dir: &Path, branch: &str, manual: bool) -> Result<()> {
+    match manual {
+        true => set_branch(git_dir, branch, RESTACK, "manual"),
+        false => unset_branch(git_dir, branch, RESTACK),
+    }
+}
+
+/// Records the restack of `branch` that conflicted, or forgets it.
+pub fn set_restack_blocked(git_dir: &Path, branch: &str, blocked: Option<&str>) -> Result<()> {
+    match blocked {
+        Some(blocked) => set_branch(git_dir, branch, RESTACK_BLOCKED, blocked),
+        None => unset_branch(git_dir, branch, RESTACK_BLOCKED),
+    }
+}
+
 /// Records `mountpoint` as where the repository is mounted
 /// (`gitfold.mountpoint`), given its git directory or one of its worktrees'.
 pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path) -> Result<()> {
@@ -195,6 +268,19 @@ fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()
     )
 }
 
+/// Unsets `branch.<branch>.<key>` (see `set_branch`), if it is set.
+fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
+    let key = branch_key(branch, key);
+    let status = git::cmd::command(git_dir)
+        .args(["config", "--local", "--unset-all", &key])
+        .status()?;
+    // 5: it wasn't set.
+    match status.code() {
+        Some(0 | 5) => Ok(()),
+        _ => anyhow::bail!("git config --unset-all {key} failed ({status})"),
+    }
+}
+
 /// Gives branch `to` the settings set for branch `from` (a fork); one that
 /// can't be written is warned about.
 pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
@@ -211,6 +297,17 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
             local
                 .track_reads(from)
                 .map(|on| set_track_reads(common_dir, to, on)),
+        ),
+        // A fork of a stacked branch is built on the same parent.
+        (
+            PARENT,
+            local
+                .parent(from)
+                .map(|parent| set_parent(common_dir, to, Some(&parent))),
+        ),
+        (
+            RESTACK,
+            (local.restack_manual(from)).then(|| set_restack_manual(common_dir, to, true)),
         ),
     ];
     for (key, result) in copied {

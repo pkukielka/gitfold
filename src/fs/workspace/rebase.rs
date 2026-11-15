@@ -49,6 +49,7 @@ use crate::fsutil::not_found;
 use crate::git::{self, Commit};
 use crate::inode;
 use crate::state::markers::Kind;
+use crate::state::restack::{self, Recovery};
 use crate::state::{ModeCheck, ancestors, join, matches_stored};
 use crate::store::{EMPTY_TREE, Lower, Store, TEntry};
 
@@ -149,6 +150,14 @@ impl Workspace {
         if !self.git_idle() {
             self.limit_touched();
             return Ok(());
+        }
+        // A restack of the branch (`state::restack`): while one runs, or one
+        // a crash interrupted can't be told apart, the base waits. One that
+        // finishes moves the branch, which the rebase below then follows.
+        match restack::recover(&self.state)? {
+            Recovery::Nothing | Recovery::Finished | Recovery::Undone => {}
+            Recovery::InProgress => return Ok(()),
+            Recovery::Stuck(why) => return Err(anyhow!("{why}")),
         }
         let tip = git::branch_tip(&self.state.branch)?;
         let rebased = if tip.id != self.layers.read().base {
