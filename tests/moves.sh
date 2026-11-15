@@ -165,6 +165,15 @@ eq "again, --frozen: brought up to date, still frozen" "$(R rev-parse q1)|yes" \
     "$(lay z add q1 --edit --frozen >/dev/null; R rev-parse z^)|$(grep -qP '^layer q1\t[^\t]*\tfrozen\t' "$COMMON/gitfold/z/layers" && echo yes)"
 check "again without --frozen: live" lay z add q1 --edit
 check "live" grep -qP '^layer q1\t[^\t]*\tlive\t' "$COMMON/gitfold/z/layers"
+
+# A branch started from origin/main tracks main: its commits aren't
+# pushed, and no force-push onto main is ever suggested.
+commit_on main m0.txt m0; R push -q origin main
+R branch -q --track tm origin/main; commit_on tm tm.txt tm
+out=$(lay tm add q1 --edit 2>&1); rc=$?
+eq "tracking main: moved without --yes, no push suggested" "0||$(R rev-parse q1)" \
+    "$rc|$(grep -i 'push' <<<"$out")|$(R rev-parse tm^)"
+eq "list: no push either" "q1" "$(listed tm)"
 }
 
 an_open_workspace() {
@@ -326,6 +335,18 @@ out=$("$BIN" -C "$W" layer remove --all)
 eq "layer remove --all forgets it, nothing moved" "yes||" \
     "$(has "$out" "nothing moved, and an interrupted move's intent is forgotten" && echo yes)|$(editable p2)|$(own_ref p2)"
 check "then layers switch again" "$BIN" -C "$W" layer add la
+# An intent whose recovery fails (its base unreadable): not forgotten.
+check "built on p1 again" "$BIN" -C "$W" layer add p1 --edit
+unmount_fs
+cp "$S/base" "$T/base.kept"; echo junk >"$S/base"
+printf '%s %s %s -\n' "$(R rev-parse p2)" "$(R rev-parse p1)" "$(R rev-parse p1)" >"$S/move"
+out=$(lay p2 remove --all 2>&1); rc=$?
+eq "a recovery that fails: the error said, nothing forgotten" "1|yes|p1" \
+    "$rc|$(test -e "$S/move" && echo yes)|$(editable p2)"
+cp "$T/base.kept" "$S/base"
+lay p2 add p1 --edit >/dev/null 2>&1
+eq "the base readable again: the next command recovers it" "no|p1" \
+    "$(test -e "$S/move" && echo yes || echo no)|$(editable p2)"
 }
 
 # Branches $1 (on main, file $1.txt) and $2 built on it (file $2.txt).
@@ -478,6 +499,25 @@ prompt_hook "$W" >/dev/null
 check "j1 gone: moved onto the merge" landed_on h2 "$(R rev-parse main)" main
 }
 
+# Two editable layers landing before the same turn, the older landing
+# processed last: the branch goes onto the newer, which has both.
+two_layers_landing_at_once() {
+R branch e1; commit_on e1 e1.txt e1
+R branch e2; commit_on e2 e2.txt e2
+"$BIN" -C "$REPO" branch g --edit e1 >/dev/null
+mount_fs
+W=$MNT/g
+"$BIN" -C "$W" layer add e2 --edit >/dev/null
+echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm "g own"
+squash e2 >/dev/null; s1=$(squash e1)
+R branch -q -D e1; R branch -q -D e2
+out=$(prompt_hook "$W")
+eq "the hook: both followed" yes "$(has "$out" "e1 looks merged into main" && has "$out" "e2 looks merged into main" && echo yes)"
+eq "onto the newer landing, built on nothing" "$s1||" "$(R rev-parse g^)|$(editable g)|$(own_ref g)"
+eq "with both layers' work and its own" "e1.txt e2.txt own.txt" \
+    "$(R ls-tree --name-only g | grep -E '^(e1|e2|own)' | paste -sd' ')"
+}
+
 # The next gitfold command moving branch $1 dies (SIGKILL) right after the
 # branch moved: a reference-transaction hook kills git's parent, then
 # removes itself.
@@ -589,6 +629,7 @@ section "moves: an interrupted move with layers" an_interrupted_move_with_layers
 section "moves: a layer that landed" a_layer_that_landed
 section "moves: a stale local main" a_stale_local_main
 section "moves: a landed layer, an open workspace" a_landed_layer_in_an_open_workspace
+section "moves: two layers landing at once" two_layers_landing_at_once
 section "moves: an open workspace" an_open_workspace
 section "moves: layers, an unmounted workspace" layers_or_an_unmounted_workspace
 finish

@@ -473,10 +473,10 @@ fn move_branch(state: &StateDir, intent: Intent) -> Result<Moved> {
 }
 
 /// Why a move of the own commits of `name` (`base..tip`) needs `--yes`:
-/// some are pushed already (reachable from its upstream, else
-/// `origin/<name>`).
+/// some are pushed already (reachable from its branch of the same name on
+/// its remote, `pushed_to`).
 fn pushed(common_dir: &Path, name: &str, base: ObjectId, tip: ObjectId) -> Result<Option<String>> {
-    let Some((remote, theirs, at)) = upstream(common_dir, name)? else {
+    let Some((remote, at)) = pushed_to(common_dir, name)? else {
         return Ok(None);
     };
     let Ok(meet) = git::merge_base(at, tip) else {
@@ -485,18 +485,18 @@ fn pushed(common_dir: &Path, name: &str, base: ObjectId, tip: ObjectId) -> Resul
     let pushed = stack::count(common_dir, base, meet)?;
     Ok((pushed > 0).then(|| {
         format!(
-            "{pushed} of them {} pushed already ({remote}/{theirs}): moving rewrites them, and \
+            "{pushed} of them {} pushed already ({remote}/{name}): moving rewrites them, and \
              the branch then needs a push with --force-with-lease; --yes moves them",
             if pushed == 1 { "is" } else { "are" }
         )
     }))
 }
 
-/// What to run to push `name` after a move, if it has a remote-tracking
-/// branch the move left behind: a push with a lease on that tip, so a
-/// push someone else made meanwhile is refused.
+/// What to run to push `name` after a move, if its branch of the same name
+/// on its remote has commits the move left behind: a push with a lease on
+/// that tip, so a push someone else made meanwhile is refused.
 pub fn force_push(common_dir: &Path, name: &str) -> Result<Option<String>> {
-    let Some((remote, theirs, at)) = upstream(common_dir, name)? else {
+    let Some((remote, at)) = pushed_to(common_dir, name)? else {
         return Ok(None);
     };
     let tip = tip_of(common_dir, name)?;
@@ -504,21 +504,21 @@ pub fn force_push(common_dir: &Path, name: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     Ok(Some(format!(
-        "git push --force-with-lease={theirs}:{at} {remote} {name}:{theirs}"
+        "git push --force-with-lease={name}:{at} {remote} {name}:{name}"
     )))
 }
 
-/// The remote, branch and remote-tracking tip `name` pushes to: its
-/// upstream, else `origin`'s branch of the same name, if fetched.
-fn upstream(common_dir: &Path, name: &str) -> Result<Option<(String, String, ObjectId)>> {
-    let local = Local::read(common_dir);
-    if let Some(at) = stack::rev(common_dir, &format!("refs/heads/{name}@{{upstream}}"))?
-        && let Some((remote, theirs)) = local.upstream(name)
-    {
-        return Ok(Some((remote, theirs, at)));
-    }
-    let tracking = format!("refs/remotes/origin/{name}");
-    Ok(stack::rev(common_dir, &tracking)?.map(|at| ("origin".into(), name.into(), at)))
+/// The remote `name` pushes to (its upstream's, else `origin`) and the tip
+/// of its branch of the same name there, if fetched. Never the upstream
+/// branch itself: a branch started from `origin/main` tracks main, and a
+/// force-push onto main is never what to run.
+fn pushed_to(common_dir: &Path, name: &str) -> Result<Option<(String, ObjectId)>> {
+    let remote = match Local::read(common_dir).upstream(name) {
+        Some((remote, _)) if remote != "." => remote,
+        _ => "origin".to_string(),
+    };
+    let tracking = format!("refs/remotes/{remote}/{name}");
+    Ok(stack::rev(common_dir, &tracking)?.map(|at| (remote, at)))
 }
 
 /// Says `outcome` for `name` (`<name>: ...`) and, if it moved, the
@@ -634,20 +634,44 @@ pub fn after_landing(
             None => next.layers.push(theirs),
         }
     }
-    let mut out: Vec<Part> = parts
-        .iter()
-        .filter(|(n, _)| *n != landing.layer && *n != landing.target_name)
-        .cloned()
-        .collect();
     let name = match trunk {
         true => land::main_name(common_dir, &local),
         false => landing.target_name.clone(),
     };
+    let target = |n: &str| n == name || n == landing.target_name;
+    let mut out: Vec<Part> = parts
+        .iter()
+        .filter(|(n, _)| *n != landing.layer && !target(n))
+        .cloned()
+        .collect();
+    // The newest of the target's commits: another landing followed before
+    // (or the target's own tip, an editable layer) may be newer than this
+    // one, and has this one's work then. Two that diverged both stay.
+    let mut at = vec![landing.landing.at];
+    for &(_, earlier) in parts
+        .iter()
+        .filter(|(n, _)| *n != landing.layer && target(n))
+    {
+        let mut placed = false;
+        for a in &mut at {
+            if *a == earlier || stack::is_ancestor(common_dir, earlier, *a)? {
+                placed = true;
+            } else if stack::is_ancestor(common_dir, *a, earlier)? {
+                (*a, placed) = (earlier, true);
+            }
+        }
+        if !placed {
+            at.push(earlier);
+        }
+    }
+    at.dedup();
     // With nothing else to build on, the landing commit alone.
     if trunk && next.editable().next().is_none() {
         out.clear();
     }
-    out.insert(0, (name, landing.landing.at));
+    for (i, at) in at.into_iter().enumerate() {
+        out.insert(i, (name.clone(), at));
+    }
     Ok((next, out))
 }
 
