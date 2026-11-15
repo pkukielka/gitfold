@@ -315,4 +315,26 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
             warn!("copying {} to {to}: {e:#}", branch_key(from, key));
         }
     }
+    // And the parent base, if it is in the fork's history (not a ref, but
+    // what makes its own commits known rather than guessed).
+    if local.parent(from).is_some()
+        && let Err(e) = copy_stack_base(common_dir, from, to)
+    {
+        warn!("copying the parent base of {from} to {to}: {e:#}");
+    }
+}
+
+/// Points `to`'s stack ref where `from`'s is, if that is in `to`'s history.
+fn copy_stack_base(common_dir: &Path, from: &str, to: &str) -> Result<()> {
+    use git::stack;
+    let (Some(base), Some(tip)) = (
+        stack::rev(common_dir, &stack::stack_ref(from))?,
+        stack::rev(common_dir, &format!("refs/heads/{to}"))?,
+    ) else {
+        return Ok(());
+    };
+    if stack::is_ancestor(common_dir, base, tip)? {
+        stack::set_base(common_dir, to, base)?;
+    }
+    Ok(())
 }

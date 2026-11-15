@@ -95,6 +95,14 @@ to push (rewritten since last push):
 eq "not pushed" "$pushed" "$(git -C "$T/remote.git" rev-parse p2)"
 eq "list: needs force-push" "  p2  (needs force-push)" "$("$BIN" -C "$REPO" stack list | grep '^  p2')"
 
+# The parent rewound behind the base: its dropped commit goes from p2 too.
+commit_on p1 x.txt dropped-later
+"$BIN" -C "$REPO" stack sync p2 >/dev/null
+R branch -f p1 p1~1
+eq "parent rewound: restacked without the dropped commit" "p2	restacked onto p1 (0 new commits)|" \
+    "$("$BIN" -C "$REPO" stack sync p2 2>&1 | head -1)|$(R ls-tree --name-only p2 x.txt)"
+check "onto the parent's tip, its two commits on it" test "$(R rev-parse p2~2)" = "$(R rev-parse p1)"
+
 check "stack off" "$BIN" -C "$REPO" stack off -w p2
 eq "forgotten, ref and all" "||" "$(R config branch.p2.gitfoldParent)|$(stack_ref p2)|$("$BIN" -C "$REPO" stack list | grep '^  p2 ')"
 check "not stacked: sync refused (exit 3)" sh -c "'$BIN' -C '$REPO' stack sync p2; [ \$? = 3 ]"
@@ -134,10 +142,26 @@ eq "overlapping uncommitted work: waits (exit 4)" "4 yes" "$rc $(grep -q '^p2	wa
 eq "nothing moved" "$tip| M d/c.txt" "$(R rev-parse p2)|$(git -C "$W" status --short d/c.txt)"
 eq "list: the parent, and what it needs" "p1 (needs restack (1))" \
     "$("$BIN" -C "$REPO" list | awk '$1 == "p2" { $1=$2=$3=$4=$5=$6=""; sub(/^ +/, ""); print }')"
+eq "the hook says it waits" yes "$(prompt_hook "$W" | grep -q 'waits: uncommitted changes to d/c.txt' && echo yes)"
+eq "once, while it stays so" "" "$(prompt_hook "$W")"
 G "$W" checkout -q d/c.txt
 check "once it is out of the way: synced" "$BIN" -C "$W" stack sync
 eq "the parent's change shows" "c
 c2" "$(cat "$W/d/c.txt")"
+
+# The hook and stack sync at once: one restacks, the other leaves it be
+# (it used to put the files and index back under the new tip).
+for i in 1 2 3; do
+    echo "r$i" >"$MNT/p1/r.txt"; G "$MNT/p1" add r.txt; G "$MNT/p1" commit -qm "p1 r$i"
+    prompt_hook "$W" >/dev/null & "$BIN" -C "$REPO" stack sync p2 >/dev/null 2>&1; wait $!
+done
+check "both at once: on the parent's tip" parent_is p2 p1
+eq "its files and index at the tip" "r3|" "$(cat "$W/r.txt")|$(git -C "$W" status --short r.txt)"
+check "no intent left" test ! -e "$COMMON/gitfold/p2/restack"
+
+# A fork keeps the parent base.
+"$BIN" -C "$W" branch p2f -w >/dev/null
+eq "a fork of it: the same parent and base" "p1 $(stack_ref p2)" "$(R config branch.p2f.gitfoldParent) $(stack_ref p2f)"
 
 # Manual mode: only stack sync restacks.
 R config branch.p2.gitfoldRestack manual
@@ -191,6 +215,13 @@ mount_fs
 out=$(prompt_hook "$W")
 eq "mounted: the hook restacks it" yes "$(grep -q 'restacked onto p1' <<<"$out" && echo yes)"
 eq "own change kept" " M a.txt" "$(git -C "$W" status --short)"
+# An intent recovery can't read: layer switches wait, stack off forgets it.
+echo junk >"$COMMON/gitfold/p2/restack"
+out=$("$BIN" -C "$W" layer on la 2>&1); rc=$?
+eq "an intent left: layer switches refused (exit 4)" "4 yes" "$rc $(grep -q 'a restack of p2 is under way' <<<"$out" && echo yes)"
+echo "$out" >&2
+check "stack off forgets it" sh -c "'$BIN' -C '$REPO' stack off -w p2 | grep -q 'intent is forgotten'"
+check "then layers switch again" "$BIN" -C "$W" layer on la
 }
 
 section "stacks: branches with no workspace" branches_with_no_workspace

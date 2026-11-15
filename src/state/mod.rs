@@ -16,7 +16,8 @@
 //! being `b` with `%`, `/` and a leading `.` escaped (`workspace_id`): `base` (the
 //! commit its changes are against, written last when it is made, so its
 //! presence means the workspace was opened), `branch`, `upper/`, `markers`,
-//! `times`, `reads`, `tmp/`, while a restack runs `restack`. Its worktree
+//! `times`, `reads`, `tmp/`, while a restack runs `restack` (and what the
+//! hook last said about one, `restack-told`). Its worktree
 //! registration (the admin directory, with its index and HEAD) is
 //! `.git/worktrees/gitfold-ws-<id>/`.
 

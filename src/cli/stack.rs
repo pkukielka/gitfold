@@ -111,7 +111,12 @@ pub fn stack(repo: &Path, args: StackArgs) -> Result<()> {
             settings::set_parent(&common_dir, &name, None)?;
             settings::set_restack_blocked(&common_dir, &name, None)?;
             stack::drop_base(&common_dir, &name)?;
-            println!("{name} is no longer stacked on {parent}; its history is as it was");
+            // The way out of an interrupted restack recovery can't tell apart.
+            let forgot = match restack::forget(&StateDir::of(&common_dir, &name))? {
+                true => "; an interrupted restack's intent is forgotten",
+                false => "",
+            };
+            println!("{name} is no longer stacked on {parent}; its history is as it was{forgot}");
         }
         StackOp::Sync {
             branches,
@@ -347,7 +352,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
         )));
     };
     let base = stack::parent_base(common_dir, name, &parent, tip, parent_tip)?;
-    if base.commit == parent_tip || stack::is_ancestor(common_dir, parent_tip, tip)? {
+    if on_parent(common_dir, base.commit, parent_tip, tip)? {
         if dry_run || base.stored == Some(parent_tip) {
             return Ok(Outcome::UpToDate);
         }
@@ -411,7 +416,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
         parent_tip,
         stack_old: base.stored,
     };
-    let files = if state.opened() {
+    let moved = if state.opened() {
         match crate::mount_table::mount_of(common_dir)? {
             Some(mount) => apply_open(&state, &mount.join(name), &intent)?,
             None => match crate::lock::lock(common_dir)? {
@@ -422,22 +427,28 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
                         ..intent
                     },
                 )?,
-                None => Err("the repository is being mounted or unmounted; retry".into()),
+                None => Moved::Waits("the repository is being mounted or unmounted; retry".into()),
             },
         }
     } else {
-        stack::move_refs(
+        match stack::move_refs(
             common_dir,
             name,
             (tip, new_tip),
             (base.stored, parent_tip),
             "gitfold: restack",
-        )?;
-        Ok(None)
+        ) {
+            Ok(()) => Moved::Done(None),
+            Err(_) if stack::rev(common_dir, &format!("refs/heads/{name}"))? == Some(new_tip) => {
+                Moved::Already
+            }
+            Err(e) => return Err(e),
+        }
     };
-    let files = match files {
-        Ok(files) => files,
-        Err(why) => return Ok(Outcome::Waits(why)),
+    let files = match moved {
+        Moved::Done(files) => files,
+        Moved::Already => return Ok(Outcome::UpToDate),
+        Moved::Waits(why) => return Ok(Outcome::Waits(why)),
     };
     settings::set_restack_blocked(common_dir, name, None)?;
     Ok(Outcome::Restacked {
@@ -446,6 +457,22 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
         files,
         guessed: base.guessed,
     })
+}
+
+/// Whether a branch at `tip` with parent base `base` needs no restack onto
+/// parent tip `parent_tip`: it is the base, or it is past the base and in
+/// the branch already (rebased by hand). Not a parent rewound behind the
+/// base: the commits it dropped go from the branch too, as `git rebase
+/// --onto` drops them.
+fn on_parent(
+    common_dir: &Path,
+    base: ObjectId,
+    parent_tip: ObjectId,
+    tip: ObjectId,
+) -> Result<bool> {
+    Ok(base == parent_tip
+        || (stack::is_ancestor(common_dir, base, parent_tip)?
+            && stack::is_ancestor(common_dir, parent_tip, tip)?))
 }
 
 /// Whether the workspace in `state` shows layers, as stored or as applied.
@@ -463,68 +490,108 @@ fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
     })
 }
 
-/// Restacks the mounted workspace in `state`, at `dir`, as `intent` says:
-/// its files and index by `git read-tree -m -u`, then the refs. The paths
-/// changed, or why it waits.
-fn apply_open(
-    state: &StateDir,
-    dir: &Path,
-    intent: &Intent,
-) -> Result<std::result::Result<Option<Vec<BString>>, String>> {
-    if let Err(why) = recovered(state)? {
-        return Ok(Err(why));
-    }
-    if let Some(why) = state.git_busy() {
-        return Ok(Err(format!("{why} in its workspace")));
-    }
-    let paths = restack::changed_paths(intent)?;
-    let held = intent.begin(state)?;
-    let (from, to) = (intent.from.to_string(), intent.to.to_string());
-    let out = std::process::Command::new("git")
+/// How moving a branch for a restack ended.
+enum Moved {
+    /// Moved: the paths changed in its workspace (`None`: no workspace).
+    Done(Option<Vec<BString>>),
+    /// Another restack (the hook and `stack sync` at once) got there first.
+    Already,
+    /// Not now: why.
+    Waits(String),
+}
+
+/// With the intent held: whether the branch and its stack ref are still
+/// where `intent` starts from (`None`), else how it ended. A restack
+/// computed before another one finished would otherwise run its read-tree
+/// against the other's result.
+fn moved_meanwhile(state: &StateDir, intent: &Intent) -> Result<Option<Moved>> {
+    let tip = stack::rev(&state.common_dir, &format!("refs/heads/{}", state.branch))?;
+    let stored = stack::rev(&state.common_dir, &stack::stack_ref(&state.branch))?;
+    Ok(if tip == Some(intent.from) && stored == intent.stack_old {
+        None
+    } else if tip == Some(intent.to) {
+        Some(Moved::Already)
+    } else {
+        Some(Moved::Waits(
+            "the branch moved meanwhile; retried next time".into(),
+        ))
+    })
+}
+
+/// `git read-tree -m -u <from> <to>` in the workspace at `dir`.
+fn read_tree(dir: &Path, from: ObjectId, to: ObjectId) -> Result<std::process::Output> {
+    let (from, to) = (from.to_string(), to.to_string());
+    Ok(git::cmd::git()
         .arg("-C")
         .arg(dir)
         .args(["read-tree", "-m", "-u", &from, &to])
-        .output()?;
+        .output()?)
+}
+
+/// Restacks the mounted workspace in `state`, at `dir`, as `intent` says:
+/// its files and index by `git read-tree -m -u`, then the refs.
+fn apply_open(state: &StateDir, dir: &Path, intent: &Intent) -> Result<Moved> {
+    if let Err(why) = recovered(state)? {
+        return Ok(Moved::Waits(why));
+    }
+    if let Some(why) = state.git_busy() {
+        return Ok(Moved::Waits(format!("{why} in its workspace")));
+    }
+    let paths = restack::changed_paths(intent)?;
+    let held = intent.begin(state)?;
+    if let Some(moved) = moved_meanwhile(state, intent)? {
+        return Ok(moved);
+    }
+    let out = read_tree(dir, intent.from, intent.to)?;
     if !out.status.success() {
-        held.done()?;
-        let said = String::from_utf8_lossy(&out.stderr);
-        let quoted: Vec<&str> = said.lines().filter_map(|l| l.split('\'').nth(1)).collect();
-        return Ok(Err(match quoted.is_empty() {
-            true => format!("git read-tree refused: {}", said.trim()),
-            false => format!(
-                "uncommitted changes to {} overlap the restack; commit or stash them",
-                shown_str(&quoted)
-            ),
-        }));
+        return Ok(Moved::Waits(refused(&String::from_utf8_lossy(&out.stderr))));
     }
     if let Err(e) = move_refs(state, intent) {
-        // The branch moved meanwhile: the files go back, as before.
-        let back = std::process::Command::new("git")
-            .arg("-C")
-            .arg(dir)
-            .args(["read-tree", "-m", "-u", &to, &from])
-            .status()?;
-        if back.success() {
+        let tip = stack::rev(&state.common_dir, &format!("refs/heads/{}", state.branch))?;
+        if tip == Some(intent.to) {
             held.done()?;
+            return Ok(Moved::Already);
         }
-        return Ok(Err(format!("the branch moved during the restack ({e:#})")));
+        // Moved by git meanwhile: the files go back, as before, if the
+        // branch is where they were taken from.
+        if tip == Some(intent.from) && read_tree(dir, intent.to, intent.from)?.status.success() {
+            held.done()?;
+        } else {
+            held.keep();
+        }
+        return Ok(Moved::Waits(format!(
+            "the branch moved during the restack ({e:#})"
+        )));
     }
     held.done()?;
-    Ok(Ok(Some(paths)))
+    Ok(Moved::Done(Some(paths)))
+}
+
+/// Why `git read-tree -m -u` refused, from what it said: the uncommitted
+/// (or untracked) files in the way, else its own words (a lock, say).
+fn refused(said: &str) -> String {
+    let in_the_way: Vec<&str> = (said.lines())
+        .filter(|l| l.contains("not uptodate") || l.contains("would be overwritten"))
+        .filter_map(|l| l.split('\'').nth(1))
+        .collect();
+    match in_the_way.is_empty() {
+        true => format!("git read-tree refused: {}", said.trim()),
+        false => format!(
+            "uncommitted changes to {} overlap the restack; commit or stash them",
+            shown_str(&in_the_way)
+        ),
+    }
 }
 
 /// Restacks the unmounted workspace in `state` (the repository lock held),
 /// only if it has no uncommitted changes: its index, its base, then the
-/// refs. The paths changed, or why it waits.
-fn apply_closed(
-    state: &StateDir,
-    intent: &Intent,
-) -> Result<std::result::Result<Option<Vec<BString>>, String>> {
+/// refs.
+fn apply_closed(state: &StateDir, intent: &Intent) -> Result<Moved> {
     if let Err(why) = recovered(state)? {
-        return Ok(Err(why));
+        return Ok(Moved::Waits(why));
     }
     if let Some(why) = state.git_busy() {
-        return Ok(Err(format!("{why} in its workspace")));
+        return Ok(Moved::Waits(format!("{why} in its workspace")));
     }
     let store = Store::default();
     let base = state.read_base()?.id;
@@ -534,7 +601,7 @@ fn apply_closed(
     }
     let s = crate::state::status::status(&store, state)?;
     if !s.changed.is_empty() || !s.deleted.is_empty() || !index_matches_head(&state.admin)? {
-        return Ok(Err(
+        return Ok(Moved::Waits(
             "its workspace has uncommitted changes; restacked once it is mounted".into(),
         ));
     }
@@ -544,20 +611,34 @@ fn apply_closed(
     );
     let paths = restack::changed_paths(intent)?;
     let held = intent.begin(state)?;
+    if let Some(moved) = moved_meanwhile(state, intent)? {
+        return Ok(moved);
+    }
     let moved = crate::fs::workspace::restack_closed(&store, state.clone(), &from, &to, || {
         restack::move_index(state, intent, false)
-    })?;
+    });
+    let moved = match moved {
+        Ok(moved) => moved,
+        // The index or the base may have moved: `recover` sees to it.
+        Err(e) => {
+            held.keep();
+            return Err(e);
+        }
+    };
     if let Err(in_the_way) = moved {
         held.done()?;
         let in_the_way: Vec<BString> = in_the_way.into_iter().map(BString::from).collect();
-        return Ok(Err(format!(
+        return Ok(Moved::Waits(format!(
             "its workspace has files of its own (ignored ones) at {}",
             shown(&in_the_way)
         )));
     }
-    move_refs(state, intent)?;
+    if let Err(e) = move_refs(state, intent) {
+        held.keep();
+        return Err(e);
+    }
     held.done()?;
-    Ok(Ok(Some(paths)))
+    Ok(Moved::Done(Some(paths)))
 }
 
 /// The branch from C to C' and its stack ref to A, as `intent` says.
@@ -616,7 +697,7 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
     if local.restack_blocked(name).is_some() {
         notes.push("restack blocked".into());
     } else if let Ok(base) = stack::parent_base(common_dir, name, &parent, tip, parent_tip)
-        && !stack::is_ancestor(common_dir, parent_tip, tip).unwrap_or(true)
+        && !on_parent(common_dir, base.commit, parent_tip, tip).unwrap_or(true)
     {
         let n = stack::count(common_dir, base.commit, parent_tip).unwrap_or(0);
         notes.push(format!("needs restack ({n})"));
@@ -679,8 +760,9 @@ fn tree(
 /// `gitfold layer --claude-hook user-prompt-submit`'s part for stacks: at
 /// the start of a turn, the session's workspace is restacked onto its
 /// parent's new commits (unless its restacks are manual), and what happened
-/// is said as context. Nothing when nothing happened, or a block was told
-/// before.
+/// is said as context. Nothing when nothing happened, or when what keeps it
+/// from happening was told before (a block per parent tip, anything else
+/// while it says the same: `restack-told` in the state directory).
 pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
@@ -689,12 +771,38 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
     if local.restack_manual(name) {
         return Ok(None);
     }
+    let told_file = StateDir::of(common_dir, name).dir.join(TOLD);
     let before = stack_base(common_dir, name);
     let outcome = restack_branch(common_dir, name, false)?;
+    let say = |text: String| -> Result<Option<String>> {
+        if std::fs::read_to_string(&told_file).is_ok_and(|told| told == text) {
+            return Ok(None);
+        }
+        if told_file.parent().is_some_and(Path::exists) {
+            crate::fsutil::write_atomic(&told_file, text.as_bytes())?;
+        }
+        Ok(Some(text))
+    };
+    if outcome.done() {
+        let _ = std::fs::remove_file(&told_file);
+    }
     Ok(match outcome {
         Outcome::UpToDate | Outcome::BaseMoved | Outcome::Would(_) => None,
         Outcome::Blocked { told: true, .. } => None,
-        Outcome::Restacked { new, files, .. } => {
+        Outcome::Restacked {
+            new,
+            files,
+            guessed,
+            ..
+        } => {
+            let guessed = match guessed {
+                true => {
+                    " Its parent base (where its own commits start) was guessed from \
+                     the parent's reflog, its stack ref being missing: check that only \
+                     its own commits were moved."
+                }
+                false => "",
+            };
             let parent_tip = tip_of(common_dir, &parent)?;
             let subjects =
                 before.map_or(Ok(Vec::new()), |b| subjects(common_dir, b, parent_tip))?;
@@ -709,16 +817,25 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
             };
             Some(format!(
                 "gitfold: this branch, {name}, was restacked onto {parent}'s {}{what}; {files}. \
-                 Its history was rewritten: push it with --force-with-lease when you push.",
+                 Its history was rewritten: push it with --force-with-lease when you push.\
+                 {guessed}",
                 commits(new)
             ))
         }
-        other => Some(format!(
+        Outcome::Blocked { .. } => Some(format!(
+            "gitfold: {name} is stacked on {parent}, which has new commits; {}",
+            describe(&outcome, name, &parent, common_dir)
+        )),
+        other => say(format!(
             "gitfold: {name} is stacked on {parent}, which has new commits; {}",
             describe(&other, name, &parent, common_dir)
-        )),
+        ))?,
     })
 }
+
+/// The hook's last message about why a workspace wasn't restacked, in its
+/// state directory: said once while it stays the same.
+const TOLD: &str = "restack-told";
 
 /// The subjects of `from..to`, oldest first, at most three.
 fn subjects(common_dir: &Path, from: ObjectId, to: ObjectId) -> Result<Vec<String>> {
@@ -779,5 +896,17 @@ mod tests {
             shown_str(&["1", "2", "3", "4", "5", "6", "7"]),
             "1, 2, 3, 4, 5 and 2 more"
         );
+    }
+
+    #[test]
+    fn read_tree_refusals_name_the_files_in_the_way() {
+        let said = "error: Entry 'd/c.txt' not uptodate. Cannot merge.\n\
+                    error: Untracked working tree file 'n.txt' would be overwritten by merge.\n";
+        assert_eq!(
+            refused(said),
+            "uncommitted changes to d/c.txt, n.txt overlap the restack; commit or stash them"
+        );
+        let locked = "fatal: Unable to create '/x/index.lock': File exists.";
+        assert_eq!(refused(locked), format!("git read-tree refused: {locked}"));
     }
 }

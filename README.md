@@ -711,18 +711,20 @@ gitfold stack off -w p2         # forget the parent; the history stays
   rebased by hand (`git rebase --onto p1 <base>` in its workspace; the next
   sync records the new base). Uncommitted work on a path the restack
   changes waits (`waits: uncommitted changes to f.txt overlap the
-  restack`), retried at the next turn.
+  restack`; the hook says it once while it stays so), retried at the next
+  turn.
 - **Pushing.** gitfold never pushes. After a restack, `stack sync` prints
   the push to run for each branch whose remote-tracking branch it left
   behind, with a lease on that tip (`git push --force-with-lease=p2:<old>
   origin p2:p2`), and `list` shows `needs force-push` until it is pushed.
 - **Stored** in git: the parent's name, the restack mode and a blocked
-  restack in the branch's config (renamed and deleted with it; a fork keeps
-  its parent), the parent base in `refs/gitfold-stack/<branch>` (moved with
-  the branch in one ref transaction; after `git branch -m` it is guessed
+  restack in the branch's config (renamed and deleted with it), the parent
+  base in `refs/gitfold-stack/<branch>` (a fork keeps both; moved with the
+  branch in one ref transaction; after `git branch -m` it is guessed
   from the parent's reflog, as `git merge-base --fork-point` does), and,
   while a workspace is restacked, a `restack` intent in its state
-  directory, so a crash half-way is finished or undone.
+  directory, so a crash half-way is finished or undone (one gitfold can't
+  tell apart is reported, and `gitfold stack off` forgets it).
 - **Not yet.** A parent merged into main (squash merges included) isn't
   detected. `gitfold stack on main -w p2 --base refs/gitfold-stack/p2`
   keeps p2's base, so the next sync moves only p2's own commits onto main.

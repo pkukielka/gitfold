@@ -374,7 +374,7 @@ decision that creates them.
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
   the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times`,
   `reads`, `lens` and `lens-applied` record formats, `lens-git-off`,
-  the `restack` intent, `upper/`), task folders
+  the `restack` intent, `restack-told`, `upper/`), task folders
   in `.git/gitfold/.tasks/<id>/` and the message format of their inboxes
   (README, "Messages"), the base-pinning ref `refs/gitfold/<id>`, the seal
   refs `refs/gitfold-seal/<id>/<n>`, the lens ref `refs/gitfold-lens/<id>`
@@ -1548,13 +1548,26 @@ p2's old tip, so its next restack replays exactly its own commits.
   restack's changed files once.
 - **The intent file, locked while it runs:** a crash between the read-tree
   and the transaction would leave the index at C' and the branch at C.
-  The intent (`<open|closed> C C' A <old stack ref>`) is `flock`ed by the
-  command doing it; anyone else (the sync thread every pass, the next
-  `stack sync` or hook) recovers one nobody holds: tip at C' → set the stack
-  ref; tip at C and the index at C' on the changed paths → move the refs
-  (closed: only if the base moved, else put the index back); index at C →
-  forget it; else leave it and report. The sync thread doesn't rebase while
-  one is held.
+  The intent (`<open|closed> C C' A <old stack ref>`) is written and
+  `flock`ed under another name and hard-linked into place, so nobody sees
+  it unlocked, and stays locked by the command doing it, which deletes it
+  when done or when it stops before anything moved. Anyone else (the sync
+  thread every pass, the next `stack sync` or hook) recovers one nobody
+  holds: tip at C' → set the stack ref if it isn't yet; tip at C and the
+  index at C' on the changed paths → move the refs (closed: only if the
+  base moved, else put the index back); index at C → forget it; the branch
+  moved on and the index describes it → forget it; else leave it and
+  report, and `gitfold stack off` forgets it. While one is there, neither
+  the base nor the layers move (layer switches are refused). A crash in the
+  middle of the read-tree, which writes files before the index, leaves the
+  files it wrote as uncommitted changes against C, as an interrupted `git
+  checkout` does: nothing is lost, and the read-tree had refused to touch
+  files with changes of their own.
+- **With the intent held, the refs are read again:** a restack computed
+  before another one of the same branch finished (the hook and `stack sync`
+  at once) would otherwise run its read-tree against the other's result,
+  fail its compare-and-swap and put the files back under the new tip. The
+  stack ref alone moves only with the branch verified where it was seen.
 - **A closed workspace moves visibly**, unlike a rebase: there is no view
   to keep, and the restack's changes are meant to show. Only without
   uncommitted changes, so upper holds nothing but ignored files; one on a
