@@ -34,12 +34,10 @@ pub fn watch(repo: &Path, args: WatchArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
     let (branch, dir) = match target.split_once(':') {
         Some((b, d)) => (b.to_string(), d),
-        None => match crate::cli::branch_or_current(None, repo) {
-            Ok(b) => (b, target.as_str()),
-            Err(_) => {
-                bail!("not in a workspace: run it inside one, or name the task as <BRANCH>:<DIR>")
-            }
-        },
+        None => (
+            crate::cli::current_or(None, repo, "name the task as <BRANCH>:<DIR>")?,
+            target.as_str(),
+        ),
     };
     let dir = dir.trim_matches('/');
     if dir.split('/').any(|c| c == "..") {

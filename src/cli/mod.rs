@@ -96,8 +96,14 @@ pub fn workspace_at(path: &Path) -> Option<(crate::state::StateDir, String)> {
 /// `branch_or_current` for a command naming the workspace with `-w BRANCH`,
 /// saying so if it is run outside every workspace without it.
 pub fn workspace_or_current(workspace: Option<String>, repo: &Path) -> Result<String> {
-    branch_or_current(workspace, repo)
-        .map_err(|_| anyhow::anyhow!("not in a workspace: run it inside one, or pass -w BRANCH"))
+    current_or(workspace, repo, "pass -w BRANCH")
+}
+
+/// `branch_or_current`, saying `how` to name the branch if it is run
+/// outside every workspace without one.
+pub fn current_or(branch: Option<String>, repo: &Path, how: &str) -> Result<String> {
+    branch_or_current(branch, repo)
+        .map_err(|_| anyhow::anyhow!("not in a workspace: run it inside one, or {how}"))
 }
 
 /// `branch` if given, else the branch of the workspace the current directory is

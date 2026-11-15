@@ -35,9 +35,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         let valid = git::cmd::output(&common_dir, &["check-ref-format", "--branch", name]);
         ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
         // A workspace to copy: `from`, or the one we are in.
-        let source = super::branch_or_current(from, repo).map_err(|_| {
-            anyhow::anyhow!("not in a workspace: run it inside one, or name the source with --from")
-        })?;
+        let source = super::current_or(from, repo, "name the source with --from")?;
         check_name(&source)?;
         if !git::branch_exists(&source) {
             let message = format!("--with-changes copies a branch's workspace: no branch {source}");
