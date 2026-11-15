@@ -2,10 +2,10 @@
 # End-to-end use cases of layers, bases and snapshots, each a scenario a
 # user or an agent would run (written up in the layers user guide): a child
 # building on a lead's unfinished work, live, frozen and commits-only
-# layers, a release tag, two layers on one file, a shared append-only file,
-# a denied edit, a stack of PRs, a frozen base, pushed commits, a base that
-# landed, snapshots of several agents' work, a proposal, a person working
-# without an agent.
+# layers, a release tag, two layers on one file, a base that moved on since
+# the layers started, a shared append-only file, a denied edit, a stack of
+# PRs, a frozen base, pushed commits, a base that landed, snapshots of
+# several agents' work, a proposal, a person working without an agent.
 # usage: tests/usecases.sh (or with the others: tests/run.sh); sections as
 # in tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -156,6 +156,44 @@ check "UC11: in today's words" fails sh -c "grep -Eqi 'lens|seal' <<<'$out'"
 check "UC6: removing one layer" "$BIN" -C "$W" layer remove c
 eq "UC6: the other's version, no conflict" "x = 2" "$(cat "$W/config.rs")"
 check "UC6: the conflict line gone" fails has "$(listing "$W")" "Conflict"
+}
+
+# UC25: the base moved on since the layers started. A layer brings only its
+# own changes: the base's newer fixes stay, two layers that started from
+# different older commits keep all their changes, and a change to a line
+# the base changed too conflicts with the base. A branch that shares no
+# history with the base can't be a layer.
+the_base_moved_on() {
+printf 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n' >"$REPO/util.rs"; echo 'x = 1' >"$REPO/config.rs"
+R add -A; R commit -qm files
+R branch me; R branch b
+commit_on b util.rs "$(printf 'one\ntwo\nthree\nfour\nfive B\nsix\nseven\neight')"
+commit_on b config.rs 'x = 2'
+commit_on me util.rs "$(printf 'one FIX\ntwo\nthree\nfour\nfive\nsix\nseven\neight')"
+R branch c me
+commit_on c util.rs "$(printf 'one FIX\ntwo\nthree C\nfour\nfive\nsix\nseven\neight')"
+commit_on me util.rs "$(printf 'one FIX\ntwo\nthree\nfour\nfive\nsix\nseven\neight FIX')"
+commit_on me config.rs 'x = 9'
+R switch -q --orphan lonely; R rm -rqf .; echo alone >"$REPO/alone.txt"; R add -A; R commit -qm alone
+R switch -q main
+mount_fs
+W=$MNT/me
+"$BIN" -C "$W" layer add b >/dev/null
+eq "UC25: the base's fix stays, the layer's change shows" "one FIX two three four five B six seven eight FIX" \
+    "$(paste -sd' ' "$W/util.rs")"
+"$BIN" -C "$W" layer add c >/dev/null
+eq "UC25: two layers from different older commits: every change" \
+    "one FIX two three C four five B six seven eight FIX" "$(paste -sd' ' "$W/util.rs")"
+check "UC25: read-only" fails sh -c "echo x >>'$W/util.rs'"
+check "UC25: a change to a line the base changed too: git's markers" grep -q '^<<<<<<< base' "$W/config.rs"
+out=$(listing "$W")
+check "UC25: listed as a conflict with the base" has "$out" "Conflict: config.rs: b's change conflicts with your base"
+check "UC25: not the clean merge" fails has "$out" "util.rs"
+check "UC25: the deny hook says so" has "$(edit_hook "$W" config.rs)" "b's change conflicts with your base"
+eq "UC25: git sees none of it" "" "$(git -C "$W" status --short)"
+out=$("$BIN" -C "$W" layer add lonely 2>&1); rc=$?
+eq "UC25: no shared history: refused (exit 4)" "4" "$rc"
+check "UC25: saying why" has "$out" "lonely shares no history with me's base"
 }
 
 # UC10: a file everyone appends to.
@@ -338,6 +376,7 @@ eq "UC24: git sees only the person's own file" "?? notes.txt" "$(git -C "$P" sta
 section "use cases: a child builds on the lead" a_child_builds_on_the_lead
 section "use cases: modes, own files, mistakes" modes_own_files_and_mistakes
 section "use cases: two layers on one file" two_layers_on_one_file
+section "use cases: the base moved on" the_base_moved_on
 section "use cases: an append-only file" an_append_only_file
 section "use cases: a stack of PRs" a_stack_of_prs
 section "use cases: a base and a layer" a_base_and_a_layer
