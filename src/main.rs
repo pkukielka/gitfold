@@ -67,8 +67,9 @@ enum Command {
     ///
     /// For each: how many files it changed and deleted (uncommitted), how many
     /// ignored files it holds, its base commit, how long ago it last changed
-    /// (a file written, created or deleted, or a commit), and notes (branch
-    /// deleted, base behind).
+    /// (a file written, created or deleted, or a commit), its parent if it is
+    /// stacked (`gitfold stack`), and notes (branch deleted, base behind;
+    /// needs restack, restack blocked, needs force-push).
     List(cli::list::ListArgs),
     /// List a workspace's uncommitted changes (A/M/D per path), without git status.
     ///

@@ -181,6 +181,8 @@ enum Outcome {
         new: usize,
         dropped: usize,
         files: Option<Vec<BString>>,
+        /// The parent base was guessed (no stack ref, or a stale one).
+        guessed: bool,
     },
     /// `--dry-run`: would be restacked onto that many new commits.
     Would(usize),
@@ -229,7 +231,7 @@ fn sync(
         }
     }
     // Bottom-up: a branch restacks onto its parent's restacked commits.
-    branches.sort_by_key(|b| depth(&local, b));
+    branches.sort_by_cached_key(|b| (depth(&local, b), b.clone()));
     branches.dedup();
     let mut failed = 0;
     let mut pushes = Vec::new();
@@ -284,8 +286,12 @@ fn describe(outcome: &Outcome, name: &str, parent: &str, common_dir: &Path) -> S
             new,
             dropped,
             files,
+            guessed,
         } => {
             let mut line = format!("restacked onto {parent} ({})", commits(*new));
+            if *guessed {
+                line += "; its parent base was guessed (from the parent's reflog)";
+            }
             if *dropped > 0 {
                 let _ = write!(line, "; {dropped} of its commits made empty, dropped");
             }
@@ -438,6 +444,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool) -> Result<Outcom
         new,
         dropped,
         files,
+        guessed: base.guessed,
     })
 }
 

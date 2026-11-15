@@ -16,8 +16,9 @@
 //! being `b` with `%`, `/` and a leading `.` escaped (`workspace_id`): `base` (the
 //! commit its changes are against, written last when it is made, so its
 //! presence means the workspace was opened), `branch`, `upper/`, `markers`,
-//! `times`, `reads`, `tmp/`. Its worktree registration (the admin directory,
-//! with its index and HEAD) is `.git/worktrees/gitfold-ws-<id>/`.
+//! `times`, `reads`, `tmp/`, while a restack runs `restack`. Its worktree
+//! registration (the admin directory, with its index and HEAD) is
+//! `.git/worktrees/gitfold-ws-<id>/`.
 
 pub mod fork;
 pub mod lens;

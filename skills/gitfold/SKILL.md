@@ -391,6 +391,35 @@ them (`gitfold layer add`, then `gitfold lens off` when done). `gitfold seal
 <BRANCH>` prints one workspace's uncommitted work as a commit, to open as
 `<mount>/@<sha>`.
 
+## Stacked branches
+
+For stacked pull requests (`main <- p1 <- p2`), build the child on the
+parent's commits and let gitfold carry it along when the parent changes:
+
+```
+gitfold branch p2 --on p1         # p2 at p1's tip, stacked on it
+gitfold stack on p1 -w p2         # or stack an existing branch
+gitfold stack sync                # your workspace onto its parent's new commits
+gitfold stack sync --all          # every stacked branch, parents first
+gitfold stack list                # the stacks, with what each needs
+```
+
+- When p1 gets new commits (review fixes, a rebase), p2's own commits are
+  copied onto them: at the start of p2's agent's next turn (the plugin's
+  `UserPromptSubmit` hook, which tells you which files changed under you),
+  or by `gitfold stack sync`. Your uncommitted work stays; never mid-turn.
+- A commit that conflicts with the parent's new ones leaves your branch as
+  it was, and you are told once (`list`: `restack blocked`). Rebase by hand
+  in your workspace, `git rebase --onto p1 <base>` (the line names it), then
+  `gitfold stack sync`.
+- Uncommitted changes to a file the restack changes: it waits, and tells
+  you which; commit or stash them, and it happens at the next turn.
+- It is refused while layers are shown (`gitfold lens off` first).
+- gitfold never pushes. After a restack your branch's history is rewritten:
+  push with `--force-with-lease` (`stack sync` prints the command).
+- `git config branch.<BRANCH>.gitfoldRestack manual`: only `stack sync`
+  restacks it.
+
 ## When something fails
 
 - `Transport endpoint is not connected`: the mount's daemon is gone. Run
