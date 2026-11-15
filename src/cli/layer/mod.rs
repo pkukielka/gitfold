@@ -123,8 +123,9 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     let editable = |b: &str| stored.find(b).is_some_and(|i| stored.layers[i].edit);
     let edits = match &args.op {
         Some(LayerOp::Add { edit, branch, .. }) => *edit || editable(branch),
-        Some(LayerOp::Remove { branch, .. }) => (branch.as_deref())
-            .map_or(stored.editable().next().is_some(), editable),
+        Some(LayerOp::Remove { branch, .. }) => {
+            (branch.as_deref()).map_or(stored.editable().next().is_some(), editable)
+        }
         // The listing of a branch without a workspace: what it builds on.
         None => git::branch_exists(&name) && !StateDir::of(&common_dir, &name).opened(),
     };
