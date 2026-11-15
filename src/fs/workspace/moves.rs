@@ -138,11 +138,12 @@ impl Workspace {
                 )));
             }
         }
-        let paths = moves::index_paths(&self.state, intent)?;
+        let paths = moves::own_paths(&self.state, intent)?;
         let in_the_way = self.in_the_way(store, intent, &paths)?;
         if !in_the_way.is_empty() {
             return Ok(Some(in_the_way_text(&in_the_way)));
         }
+        let paths = moves::changed_paths(intent)?;
         if !paths.is_empty() && !moves::index_matches(&self.state, intent.from, &paths)? {
             return Ok(Some(
                 "staged changes overlap the move; commit or unstage them".into(),
@@ -192,7 +193,7 @@ impl Workspace {
         // And files the same as what shows below them (written back as
         // they were, under the view as it is before the move): no work of
         // its own either.
-        for path in moves::index_paths(&self.state, intent)? {
+        for path in moves::own_paths(&self.state, intent)? {
             if !copies.contains(&path) && self.as_shown(store, layers, path.as_ref())? {
                 copies.push(path);
             }
@@ -206,7 +207,7 @@ impl Workspace {
         }
         let from = git::resolve(&intent.from.to_string())?.tree;
         let mut marked = false;
-        for path in moves::index_paths(&self.state, intent)? {
+        for path in moves::own_paths(&self.state, intent)? {
             let p: &[u8] = path.as_ref();
             if layers.markers.whiteouts.contains(p)
                 && git::with_repo(|repo| git::layers::lookup(repo, from, path.as_ref()))?.is_none()

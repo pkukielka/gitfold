@@ -8,8 +8,9 @@
 //! locked before it is linked into place), so `recover` leaves a move in
 //! progress alone. The steps, mounted or not, layers shown or not:
 //!
-//! 1. the index, on the paths the move changes (`move_index`; union files'
-//!    entries are the layers' to set, and left out);
+//! 1. the index, on the paths the move changes (`move_index`; a union
+//!    file's entry is the branch's version too, the layers' lines kept out
+//!    of it by the filter);
 //! 2. the workspace's base, durably, with the view built over C' (its files
 //!    show C', its layers over it), and the copies of committed files the
 //!    move changes dropped from upper (`stale_copies`);
@@ -316,16 +317,19 @@ pub fn changed_paths(intent: &Intent) -> Result<Vec<BString>> {
     git::with_repo(|repo| {
         let from = git::layers::commit_tree(repo, intent.from)?;
         let to = git::layers::commit_tree(repo, intent.to)?;
-        Ok(git::layers::delta(repo, from, to)?
-            .into_iter()
+        let mut paths: Vec<BString> = (git::layers::delta(repo, from, to)?.into_iter())
             .map(|(path, _)| path)
-            .collect())
+            .collect();
+        // A file turned into a directory: its path once.
+        paths.dedup();
+        Ok(paths)
     })
 }
 
-/// The paths the move changes in the index: `changed_paths` but the union
-/// files shown in the workspace in `state`, whose entries the layers set.
-pub fn index_paths(state: &StateDir, intent: &Intent) -> Result<Vec<BString>> {
+/// The paths the move changes where the workspace's own work may be in its
+/// way: `changed_paths` but the union files shown in the workspace in
+/// `state`, whose own lines a switch carries over.
+pub fn own_paths(state: &StateDir, intent: &Intent) -> Result<Vec<BString>> {
     let union = super::layers::ShownLayers::read(state)?.union;
     let mut paths: Vec<BString> = (changed_paths(intent)?.into_iter())
         .filter(|p| !union.contains(p.as_slice()))
@@ -342,7 +346,7 @@ pub fn stale_copies(state: &StateDir, intent: &Intent) -> Result<Vec<BString>> {
     use std::os::unix::fs::PermissionsExt;
     let from = git::resolve(&intent.from.to_string())?.tree;
     let mut out = Vec::new();
-    for path in index_paths(state, intent)? {
+    for path in own_paths(state, intent)? {
         let file = super::upper_path(&state.upper(), &path);
         let Ok(meta) = fs::symlink_metadata(&file) else {
             continue;
@@ -390,7 +394,7 @@ fn drop_stale_copies(state: &StateDir, intent: &Intent) -> Result<()> {
 /// Whether the workspace's index is at C' (`Some(true)`) or at C
 /// (`Some(false)`) on the paths the move changes, or neither.
 fn index_at(state: &StateDir, intent: &Intent) -> Result<Option<bool>> {
-    let paths = index_paths(state, intent)?;
+    let paths = changed_paths(intent)?;
     // C and C' have the same tree there: the index is at both.
     if paths.is_empty() {
         return Ok(Some(true));
@@ -426,7 +430,7 @@ pub fn index_matches(state: &StateDir, commit: ObjectId, paths: &[BString]) -> R
 }
 
 /// Moves the index of the workspace in `state` from C to C' (`back`: from
-/// C' to C) on `index_paths`, without its files: each entry C' has there
+/// C' to C) on the paths it changes, without its files: each entry C' has there
 /// (none: removed), as `git update-index --index-info` sets them.
 pub fn move_index(state: &StateDir, intent: &Intent, back: bool) -> Result<()> {
     let to = match back {
@@ -435,7 +439,7 @@ pub fn move_index(state: &StateDir, intent: &Intent, back: bool) -> Result<()> {
     };
     let tree = git::resolve(&to.to_string())?.tree;
     let mut input = Vec::new();
-    for path in index_paths(state, intent)? {
+    for path in changed_paths(intent)? {
         let item = git::with_repo(|repo| git::layers::lookup(repo, tree, path.as_ref()))?;
         match item {
             Some(item) => {

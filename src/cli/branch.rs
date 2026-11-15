@@ -103,8 +103,23 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
     if git::branch_exists(name) || !state.dir.exists() {
         return Ok(());
     }
+    // A record of what it built on (its layers and the moves' records),
+    // nothing else.
+    let records = [
+        "layers",
+        "layers.lock",
+        "layers.next",
+        "move-told",
+        "move-blocked",
+    ];
+    let only_records = std::fs::read_dir(&state.dir).is_ok_and(|entries| {
+        let names: Vec<String> = (entries.flatten())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.iter().any(|n| n == "layers") && names.iter().all(|n| records.contains(&n.as_str()))
+    });
     ensure!(
-        !state.holds_workspace(),
+        only_records,
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
     // Only what an earlier branch of that name built on: not this one's.
