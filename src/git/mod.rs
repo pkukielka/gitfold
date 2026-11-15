@@ -10,7 +10,10 @@
 //! - `lens`: layers' trees and commits, and extraction of commits made on them.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
+//! - `stack`: stacked branches: restacking a branch onto its parent's new
+//!   commits, by plumbing, and moving it with its parent base.
 //! - `worktree_config`: a worktree's own excludes and hooks (layers).
+//! - `test_repo`: a scratch repository for unit tests.
 
 pub mod attr;
 pub mod cmd;
@@ -18,6 +21,9 @@ pub mod index;
 pub mod index_edit;
 pub mod lens;
 pub mod promisor;
+pub mod stack;
+#[cfg(test)]
+pub mod test_repo;
 pub mod worktree;
 pub mod worktree_config;
 
