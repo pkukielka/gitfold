@@ -357,12 +357,11 @@ pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
         }
         stack::Move::Done { tip, dropped, .. } => (tip, dropped.len()),
     };
-    if plan.asked {
-        if !plan.yes
-            && let Some(why) = pushed(common_dir, name, base, tip)?
-        {
-            return Ok(Outcome::Refused(why));
-        }
+    if plan.asked
+        && !plan.yes
+        && let Some(why) = pushed(common_dir, name, base, tip)?
+    {
+        return Ok(Outcome::Refused(why));
     }
     if let Some(other) = git::worktree::checked_out_elsewhere(common_dir, name, &state.admin) {
         return Ok(Outcome::Refused(format!(
