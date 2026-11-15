@@ -18,6 +18,7 @@
 //! - `lens`: other workspaces' work shown over the base (layers).
 //! - `nodes`: local id ↔ (parent, name) table.
 //! - `rebase`: moving the base to the branch tip.
+//! - `restack`: a closed workspace's base moved for a restack, visibly.
 //! - `reads`: recording the files read in it (`gitfold overlaps`).
 //! - `times`: timestamps of files dropped from upper (only the mount uses them).
 //! - `write`: mutations and copy-up.
@@ -29,8 +30,11 @@ mod lens;
 mod nodes;
 mod reads;
 mod rebase;
+mod restack;
 mod times;
 mod write;
+
+pub use restack::restack_closed;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};

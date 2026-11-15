@@ -149,9 +149,10 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>] [--track-reads on|off]
+gitfold branch <BRANCH> [-w] [--from <REV> | --on <PARENT>] [--prewarm <MODE>] [--track-reads on|off]
                                               # create a branch for a workspace
-                                              # (-w: with a workspace's changes)
+                                              # (-w: with a workspace's changes;
+                                              # --on: stacked on PARENT)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
@@ -174,6 +175,11 @@ gitfold mix [--onto <REV>] [--commit] <BRANCH|REV>...
 gitfold layer [-w <BRANCH>] add|on|off|rm <BRANCH>
 gitfold layer [-w <BRANCH>] update|list       # other workspaces' work shown in one
 gitfold lens off [<BRANCH>]                   # hide all of a workspace's layers
+gitfold stack on <PARENT> [-w <BRANCH>] [--base <REV>]
+gitfold stack off [-w <BRANCH>]               # a branch built on another's commits
+gitfold stack sync [<BRANCH>... | --all] [--dry-run]
+                                              # restack onto the parents' new commits
+gitfold stack list                            # the stacks, parents first
 gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
 gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
 ```
@@ -191,10 +197,13 @@ would share, and corrupt, the stored workspace changes. The mount is read-write
 Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
 error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
-Four commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
+Five commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
-`mix` (4 conflicts) and `inbox --claude-hook rewake` (2, to wake the session).
-`gitfold branch` starts the branch at HEAD unless `--from` says otherwise.
+`mix` (4 conflicts), `stack sync` (3 a branch not stacked, 4 a branch not
+restacked: a conflict, uncommitted work in the way, git busy, layers shown)
+and `inbox --claude-hook rewake` (2, to wake the session).
+`gitfold branch` starts the branch at HEAD unless `--from` (or `--on`) says
+otherwise.
 
 Names below the mount point:
 
@@ -413,7 +422,9 @@ how many files each workspace has changed and deleted, and how many ignored
 files (build output) it holds, how long ago it last changed (`last`: a file
 written, created or deleted, or a commit; a stalled agent stands out), with a
 note if its branch was deleted or its base is behind the branch tip (mount once
-to update it); `--stat` adds the lines added and removed in total, reading
+to update it), and for a stacked branch its parent (`parent`) and whether it
+needs a restack, is blocked or needs a force-push (see
+[Stacked branches](#stacked-branches)); `--stat` adds the lines added and removed in total, reading
 every changed file. `gitfold changes
 [<BRANCH>]` lists one workspace's uncommitted changes against its base,
 untracked files included and whatever is staged, as `git add -A` and `git diff
@@ -653,6 +664,68 @@ depend on lines that would go (see below); 2 usage errors, 1 other errors
   append at the same place. `--no-verify` skips the push guard. A layer not
   updated while its workspace made 16 newer seals holds a seal no ref
   keeps any more, which `git gc` may prune: `gitfold layer update` it.
+
+### Stacked branches
+
+Stacked pull requests, `main <- p1 <- p2`: p2 is built on p1's commits.
+When p1 gets review fixes (or is rebased), p2's own commits have to move
+onto them. git can't do it where every branch is checked out in a
+worktree (`git rebase --update-refs` leaves the other worktrees' branches
+behind), and plain `update-ref` moves a branch without its files.
+gitfold does both:
+
+```
+gitfold branch p2 --on p1       # p2 at p1's tip, stacked on it
+gitfold stack on p1 -w p2       # or: an existing branch (--base <REV>: where its own commits start)
+gitfold stack sync              # the workspace you are in, onto its parent's new commits
+gitfold stack sync --all        # every stacked branch, parents first
+gitfold stack list              # p1
+                                #   p2  (needs restack (2))
+gitfold stack off -w p2         # forget the parent; the history stays
+```
+
+- **What a restack is.** p2's own commits are those after its **parent
+  base**, the commit of p1 they sit on (kept by `refs/gitfold-stack/p2`;
+  the parent's name is `branch.p2.gitfoldParent` in git config). Each is
+  copied onto p1's tip with the same author, committer and message, as
+  `git rebase --onto p1 <base> p2` would (signatures are dropped); one
+  that becomes empty (p1 made the same change) is dropped. Because the
+  base is stored, an amended or force-pushed p1 doesn't drag its old
+  commits along. Merge commits in p2's own commits aren't restacked
+  (rebase by hand).
+- **When.** `gitfold stack sync`, or at the start of p2's agent's turn: the
+  `UserPromptSubmit` hook (`gitfold layer --claude-hook user-prompt-submit`,
+  in the plugin) restacks the session's workspace and tells the agent which
+  files changed under it. Never in the middle of a turn. `git config
+  branch.p2.gitfoldRestack manual` leaves it to `stack sync`.
+- **Where p2 lives.** With no workspace, its ref moves (refused if a git
+  worktree has it checked out). In a mounted workspace, its files move as in
+  a checkout (`git read-tree -m -u`): unstaged, staged and untracked work
+  is kept, and the new files get new times, so builds see them. In an
+  unmounted one, only without uncommitted changes; otherwise it waits for
+  the mount. A workspace showing layers isn't restacked (`gitfold lens
+  off` first).
+- **When it can't.** A commit that conflicts with p1's new ones leaves p2
+  where it was: `stack sync` says which commit and paths (exit 4), the hook
+  tells the agent once, and `list` shows `restack blocked` until p2 is
+  rebased by hand (`git rebase --onto p1 <base>` in its workspace; the next
+  sync records the new base). Uncommitted work on a path the restack
+  changes waits (`waits: uncommitted changes to f.txt overlap the
+  restack`), retried at the next turn.
+- **Pushing.** gitfold never pushes. After a restack, `stack sync` prints
+  the push to run for each branch whose remote-tracking branch it left
+  behind, with a lease on that tip (`git push --force-with-lease=p2:<old>
+  origin p2:p2`), and `list` shows `needs force-push` until it is pushed.
+- **Stored** in git: the parent's name, the restack mode and a blocked
+  restack in the branch's config (renamed and deleted with it; a fork keeps
+  its parent), the parent base in `refs/gitfold-stack/<branch>` (moved with
+  the branch in one ref transaction; after `git branch -m` it is guessed
+  from the parent's reflog, as `git merge-base --fork-point` does), and,
+  while a workspace is restacked, a `restack` intent in its state
+  directory, so a crash half-way is finished or undone.
+- **Not yet.** A parent merged into main (squash merges included) isn't
+  detected. `gitfold stack on main -w p2 --base refs/gitfold-stack/p2`
+  keeps p2's base, so the next sync moves only p2's own commits onto main.
 
 ### Partial clones
 
@@ -957,6 +1030,9 @@ mount and real git (build with `--release` first):
 - `tests/rebase.sh`: git operations moving a workspace's branch.
 - `tests/layers.sh`: seal, mix, and layers shown in a workspace, blended
   files and the lens commit included (sections as above).
+- `tests/stacks.sh`: stacked branches restacked with no workspace, in an
+  open workspace (by the hook and by `stack sync`) and in an unmounted
+  one; conflicts, uncommitted work in the way, manual mode, `list`'s notes.
 - `tests/workspace.sh <repo>`: workspaces on a scratch clone of `<repo>`.
 - `tests/promisor.sh`: partial clones.
 

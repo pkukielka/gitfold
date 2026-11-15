@@ -67,8 +67,9 @@ enum Command {
     ///
     /// For each: how many files it changed and deleted (uncommitted), how many
     /// ignored files it holds, its base commit, how long ago it last changed
-    /// (a file written, created or deleted, or a commit), and notes (branch
-    /// deleted, base behind).
+    /// (a file written, created or deleted, or a commit), its parent if it is
+    /// stacked (`gitfold stack`), and notes (branch deleted, base behind;
+    /// needs restack, restack blocked, needs force-push).
     List(cli::list::ListArgs),
     /// List a workspace's uncommitted changes (A/M/D per path), without git status.
     ///
@@ -147,6 +148,22 @@ enum Command {
     Layer(cli::layer::LayerArgs),
     /// Hide every layer of a workspace (see `gitfold layer`).
     Lens(cli::layer::LensArgs),
+    /// Stacked branches: a branch built on a parent branch, its own commits
+    /// following the parent's new ones.
+    ///
+    /// `stack on <PARENT>` declares it; from then on, when the parent gets
+    /// new commits (review fixes, a rebase), the branch's own commits are
+    /// copied onto them (restacked) by `stack sync`, or at the start of its
+    /// agent's turn (the `UserPromptSubmit` hook), unless
+    /// branch.<BRANCH>.gitfoldRestack is `manual`. A workspace's files move
+    /// as in a checkout, keeping uncommitted work; one whose uncommitted
+    /// work is on a path the restack changes waits, and a conflict with the
+    /// parent's commits leaves the branch as it was, reported (`list` shows
+    /// both). gitfold never pushes: `stack sync` prints the force-pushes to
+    /// run. Exit codes: 3 no such branch, or not stacked, 4 a branch not
+    /// restacked (a conflict, uncommitted work in the way, git busy, layers
+    /// shown), 1 other errors, 2 usage errors.
+    Stack(cli::stack::StackArgs),
     /// Delete a workspace, or a snapshot's registration.
     ///
     /// A workspace: its registration, stored changes and base ref (its commits
@@ -250,6 +267,7 @@ fn run() -> Result<i32> {
         }) => cli::layer::layer_hook(&event)?,
         Command::Layer(args) => cli::layer::layer(&cli::repo()?, args)?,
         Command::Lens(args) => cli::layer::lens(&cli::repo()?, args)?,
+        Command::Stack(args) => cli::stack::stack(&cli::repo()?, args)?,
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,

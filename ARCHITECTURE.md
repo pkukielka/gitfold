@@ -58,12 +58,13 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, lens, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, lens, restack, upper/, tmp/
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
            refs/gitfold/<id>                 keeps the workspace base from git gc
            refs/gitfold-seal/<id>/<n>        keeps a workspace's seals (the newest 16)
            refs/gitfold-lens/<id>            keeps a lensed workspace's view commit (and its lens commit)
+           refs/gitfold-stack/<branch>       a stacked branch's parent base
 ```
 
 Names below the root are resolved by `Workspaces::resolve`, one component at a
@@ -126,6 +127,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
+| `src/fs/workspace/restack.rs` | a closed workspace's base moved visibly for a restack of its branch, its changed files stamped |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
 | `src/fs/workspace/lens.rs` | layers in an open workspace: the view tree as its lower layer, switches and what the kernel must be told (and own lines in blended files carried over), git told (skip-worktree, excludes, the blends in the index, HEAD at the lens commit, the push guard) or surrendered; extracting commits made on the lens commit onto the branch (`sync_lens`) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
@@ -140,6 +142,7 @@ Then, per request (`fs/workspace/`):
 | `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
+| `src/state/restack.rs` | a restack under way in a workspace: the `restack` intent file (locked while it runs), and finishing or undoing one a crash interrupted |
 | `src/state/seal.rs` | seals: a workspace's uncommitted work as a commit, kept by `refs/gitfold-seal/<id>/<n>` |
 | `src/state/lens.rs` | a workspace's layers: the `lens` file, each layer's changes, the view (view and hunk trees, mixed and blended paths, notes) and which files are blended (`gitfold-blend`) |
 | `src/settings.rs` | every setting gitfold keeps in git config (per branch, per repository): typed reading and writing, copying for a fork |
@@ -156,6 +159,8 @@ Then, per request (`fs/workspace/`):
 | `src/git/index_edit.rs` | editing an index git wrote (v2, v3, v4): skip-worktree bits, stat data and ids of given paths, under git's `index.lock` protocol |
 | `src/git/worktree_config.rs` | a linked worktree's own config: the excludes file for layers' new files (keeping the user's global ignore file); the push guard hooks, installed while HEAD is a lens commit |
 | `src/git/hooks/` | the push guard's `pre-push` and the shell library the worktree's hooks share (embedded) |
+| `src/git/stack.rs` | stacked branches' git side: the parent base (`refs/gitfold-stack/<branch>`, guessed by the fork point without it), restacking by plumbing, moving a branch and its stack ref in one transaction |
+| `src/git/test_repo.rs` | unit tests' scratch repository |
 | `src/git/lens.rs` | layers' git side: the view and hunk trees (blending), the lens and view commits, extracting commits made on the lens commit and moving the branch and HEAD in one transaction |
 | `src/lock.rs` | the repository lock, held by a mounted daemon and by commands working on stored state unmounted |
 | `src/git/promisor.rs` | partial clones: fetching what a tree load misses from the promisor remotes |
@@ -170,7 +175,8 @@ Then, per request (`fs/workspace/`):
 | `src/cli/list.rs` | `list` and `changes` |
 | `src/cli/remove.rs` | `remove` and `prune` |
 | `src/cli/mix.rs` | `seal` and `mix` (and the `Stop` hook that seals) |
-| `src/cli/layer.rs` | `layer` and `lens` (and the hooks that move layers and deny edits of their files) |
+| `src/cli/layer.rs` | `layer` and `lens` (and the hooks that move layers, restacking a stacked branch first, and deny edits of their files) |
+| `src/cli/stack.rs` | `stack` (on, off, sync, list), the restack the `UserPromptSubmit` hook does, `list`'s stack notes |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
 | `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
@@ -193,6 +199,7 @@ Then, per request (`fs/workspace/`):
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
 | `tests/layers.sh` | end-to-end test of seal, mix and layers in a workspace (refusals, git status and commits, surrender, remounts; blended files, the lens commit, extraction, the push guard) |
+| `tests/stacks.sh` | end-to-end test of stacked branches: restacks with no workspace, in an open workspace (hook and `stack sync`) and an unmounted one, conflicts, uncommitted work in the way, manual mode, `list`'s notes |
 | `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
@@ -248,6 +255,11 @@ Then, per request (`fs/workspace/`):
   layer's lines **waits**.
 - **Push guard**: the per-worktree `pre-push` hook that refuses to publish
   a lens commit while HEAD is one.
+- **Stacked branch**: a branch built on a **parent** branch
+  (`gitfoldParent`); its **parent base** is the commit of the parent its
+  own commits sit on (`refs/gitfold-stack/<branch>`).
+- **Restack**: copying a stacked branch's own commits onto its parent's
+  tip, and moving the branch (and its workspace's files) there.
 - **Switch**: changing what the layers show (a layer added, shown, hidden,
   removed or moved to a newer seal), telling the kernel and git, and
   carrying the workspace's own lines in blended files over.
@@ -362,12 +374,14 @@ decision that creates them.
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
   the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times`,
   `reads`, `lens` and `lens-applied` record formats, `lens-git-off`,
-  `upper/`), task folders
+  the `restack` intent, `upper/`), task folders
   in `.git/gitfold/.tasks/<id>/` and the message format of their inboxes
   (README, "Messages"), the base-pinning ref `refs/gitfold/<id>`, the seal
   refs `refs/gitfold-seal/<id>/<n>`, the lens ref `refs/gitfold-lens/<id>`
   and the lens commit's `gitfold-lens 1` header (the push guard and a
-  remount look for it), the
+  remount look for it), the stack refs `refs/gitfold-stack/<branch>` and
+  the `branch.<b>.gitfoldParent`, `gitfoldRestack` and
+  `gitfoldRestackBlocked` settings, the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
@@ -1466,6 +1480,109 @@ a snapshot, with no change to any workspace.
 - Extraction as a plain merge, with or without `merge=union`: it commits
   the layers' lines, or conflicts on every append.
 
+### Stacked branches: restacks computed by plumbing, moved like a checkout
+
+**What:** a branch b can be built on a parent branch a (`gitfold stack on
+a`, `gitfold branch b --on a`). The edge is a's name in
+`branch.<b>.gitfoldParent` and b's **parent base** B, the commit of a its
+own commits sit on, in `refs/gitfold-stack/<b>`; b's own commits are
+`B..b`. When a's tip A moves past B, b is **restacked**
+(`git::stack::restack`): each commit C of `B..b`, oldest first, becomes
+`merge_trees(base = C^, ours = the copy so far, theirs = C)` with C's
+author, committer and message (`git::lens::copy_commit`, shared with
+extraction). A commit made empty is dropped; a merge in `B..b` is refused;
+a conflict moves nothing and is recorded (`branch.<b>.gitfoldRestackBlocked`,
+with A, so it is told once per parent tip). Then b moves by where it
+lives (`cli::stack`):
+
+1. **No workspace:** one `update-ref --stdin` transaction, b `C → C'` and
+   the stack ref `B → A`, each compared-and-swapped. Refused if a git
+   worktree has b checked out.
+2. **A mounted workspace:** run by the CLI (`gitfold stack sync`, or the
+   `UserPromptSubmit` hook for the session's workspace), not the daemon:
+   write the intent (`state::restack`), `git read-tree -m -u C C'` in the
+   workspace through the mount, the same transaction, delete the intent.
+   Within a second the sync thread sees tip C' ≠ base C and does its
+   ordinary invisible rebase, which finds the files git wrote in upper
+   identical to C' and drops them (keeping their new times).
+3. **An unmounted workspace without uncommitted changes**, under the
+   repository lock: the intent, the index (`read-tree -m -i C C'`), the
+   base moved to C' visibly with the changed files stamped now
+   (`fs::workspace::restack_closed`), the transaction. With uncommitted
+   changes it waits for the mount.
+
+Restacks happen on demand or at the branch's agent's turn boundary,
+never from the daemon's poll; `branch.<b>.gitfoldRestack=manual` leaves
+them to `stack sync`. A stack is consistent bottom-up without a lock across
+workspaces: if p2 was restacked and p3 hasn't been yet, p3's stored base is
+p2's old tip, so its next restack replays exactly its own commits.
+
+**Why:**
+
+- **The parent base is stored, not derived.** With only `merge-base(a,
+  b)`, a rewritten parent (amended, rebased, force-pushed) makes the next
+  restack replay a's old commits, which conflicts on a's own rewritten
+  lines (the design's experiments e4d and e4e). Graphite stores the same
+  pair.
+- **A ref, not config, for B:** the transaction moves b and B together,
+  so a crash can't leave b restacked with B stale; config can't join a ref
+  transaction. B is an ancestor of b, so the ref adds no `gc` risk. A
+  missing or non-ancestor ref (`git branch -m` doesn't rename it) falls
+  back to git's `--fork-point` rule, then the merge base.
+- **Config for the rest:** git renames and deletes it with the branch, a
+  fork copies it (`settings::copy_branch`: a fork of p2 is built on p1
+  too), it works for branches without a workspace, and an orchestrator can
+  set it without gitfold. The blocked record lives there too, so it works
+  the same with or without a workspace.
+- **Computed first, then moved:** the computation needs no worktree, index
+  or lock and changes nothing, so a conflict leaves no half-done state in
+  an agent's worktree (`git rebase` would leave `rebase-merge` there
+  mid-task). The only refusal left when moving is uncommitted work in the
+  way, which also changes nothing.
+- **`read-tree -m -u`, then the refs**, for a mounted workspace: git's
+  two-tree checkout keeps unstaged, staged and untracked work and refuses,
+  changing nothing, when any of it is on a path the restack changes
+  (experiment e8). Through the mount, its writes are ordinary writes: the
+  kernel sees them, builds see new times, and the sync thread's existing
+  rebase cleans up. No new filesystem code; the cost is copying up the
+  restack's changed files once.
+- **The intent file, locked while it runs:** a crash between the read-tree
+  and the transaction would leave the index at C' and the branch at C.
+  The intent (`<open|closed> C C' A <old stack ref>`) is `flock`ed by the
+  command doing it; anyone else (the sync thread every pass, the next
+  `stack sync` or hook) recovers one nobody holds: tip at C' → set the stack
+  ref; tip at C and the index at C' on the changed paths → move the refs
+  (closed: only if the base moved, else put the index back); index at C →
+  forget it; else leave it and report. The sync thread doesn't rebase while
+  one is held.
+- **A closed workspace moves visibly**, unlike a rebase: there is no view
+  to keep, and the restack's changes are meant to show. Only without
+  uncommitted changes, so upper holds nothing but ignored files; one on a
+  changed path (or a whiteout, or an opaque directory above one) waits.
+- **Refused while layers are shown (v1):** a restack moves the base, which
+  waits while lensed ("The base isn't rebased while lensed").
+- **Never pushes:** `stack sync` prints `git push --force-with-lease` with
+  the remote-tracking tip as the lease, and `list` says `needs force-push`
+  while that tip isn't in the branch.
+
+**Rejected:**
+
+- `git rebase --update-refs` from the top of the stack: it skips branches
+  checked out in other worktrees, tearing the stack (e2a); `git rebase` of a
+  branch checked out elsewhere fails (e1).
+- `update-ref` alone (or `git replay`): moves the branch, not its files; the
+  sync thread would then keep the old view, the restack showing as a staged
+  reverse change (e4).
+- `git reset --keep C'` in the workspace: a staged new file became
+  untracked (e7a).
+- Moving the ref first and a "visible base move" in the daemon: new index
+  work (adding and removing entries), and the unsafe order: ref moved,
+  read-tree refused, the workspace left `MM` (e7c).
+- The lens file for the edge: per workspace and only for open ones; an edge
+  has no seal or view and must work for closed branches.
+- Replaying `merge-base(a, b)..b` and dropping commits that become empty
+  (jj-style): conflicts after a squash merge (e4d).
+
 ## Rejected ideas (index)
 
 | idea | why not | where |
@@ -1502,6 +1619,8 @@ a snapshot, with no change to any workspace.
 | Live layers | index rewritten under a running git; views change mid-turn | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | HEAD symbolic to `refs/worktree/lens` | `gc` from another worktree prunes L | [layers](#layers-other-workspaces-work-as-a-view-tree) |
 | Extraction as a plain merge (`merge=union` or not) | commits the layers' lines, or conflicts on every append | [layers](#layers-other-workspaces-work-as-a-view-tree) |
+| `git rebase --update-refs`, `update-ref` alone, `reset --keep` for restacks | skips other worktrees' branches; moves no files; loses staged state | [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout) |
+| The merge base instead of a stored parent base | a rewritten parent's old commits replayed | [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout) |
 
 ## Known limitations
 
@@ -1669,4 +1788,39 @@ compact node table and write measurements. Next:
 - **Layers, next phases.** Telling the agent about a waiting commit (in the
   hook context, not only the daemon log) and retrying it when the layer
   moves; proposals (a change to a layer's file made in a fork of its
-  workspace); and layers built on committed work (stacked branches).
+  workspace).
+- **Stacks, next phases** (see
+  [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout)).
+  *A parent that landed on trunk:* what a child needs to know is whether
+  its parent base B landed on trunk T (`origin/main`, or a configured
+  trunk), not whether the parent merged. Cheapest first: B an ancestor of
+  T (merges, fast-forwards); merging B into T's tip is a no-op
+  (`merge_trees(base = merge-base(T, B), T, B)` gives T's tree: catches
+  squash and rebase merges, also with main edited near the parent's lines);
+  the first commit S of `rev-list merge-base..T -- <paths B changed>` where
+  that merge is a no-op (main edited the parent's lines again later); a
+  forge's answer as a hint (`gh pr view`); `gitfold stack merged <PARENT>
+  [--at S]` when all else fails. Guard against a B with no changes of its
+  own (trivially a no-op). Then the child is re-parented: `B..b` replayed
+  onto S (the smallest rewrite, nothing unrelated in an agent's view
+  mid-turn; trunk's tip on request), the stack ref moved to S in the same
+  transaction, and `gitfoldParent` set to the trunk after it (config can't
+  join the transaction; a base on trunk reads as "on trunk"). Per-commit
+  patch ids (`git cherry`, what `git rebase` skips by) don't recognise a
+  squash of several commits. gitfold doesn't fetch; detection runs on what
+  was fetched. Blocked restacks would also reach the child's inbox, once
+  per parent tip. *Layers and stacks together:* a child stacked on a
+  parent and also showing the parent's uncommitted work as a layer is the
+  natural pairing, but a restack moves the base, which waits while
+  lensed, so v1 refuses it. Doing both at one boundary means switching the
+  layer to the parent's newest seal with merge base A while the read-tree
+  runs with the lens off for those paths, then rebuilding the view on C';
+  and an extraction that "depends on" a layer whose lines the parent has
+  since committed could offer `stack on` that parent instead. Uncommitted
+  work that overlaps a restack could be carried over with a 3-way merge,
+  as `carry_over` does for blends, rather than waiting. *Also:* `stack
+  sync --rebase` (a real `git rebase --onto A B` in the workspace for a
+  blocked restack), merges in a stacked branch (flattened, as extraction
+  does), re-signing copies when `commit.gpgSign` is set, `stack undo`
+  (the previous intent's C and B, if the branch is still at C'), and
+  sharing `refs/gitfold-stack/*` across clones.

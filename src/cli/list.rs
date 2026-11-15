@@ -125,8 +125,8 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         false => String::new(),
     };
     println!(
-        "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  status",
-        "branch", "changed", "deleted", "ignored", "base", "last"
+        "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {:<16} status",
+        "branch", "changed", "deleted", "ignored", "base", "last", "parent"
     );
     for w in list {
         let s = match status::status(&store, &w.state) {
@@ -151,20 +151,27 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         let task = TaskDir::with(&local, &common_dir, &w.branch);
         let last = last_change(&w.state, &s, &task).map_or("-".into(), age);
         // What the agent says it is doing, then what gitfold notes.
-        let status = match (task.status(), base_note(&w.branch, &s.base)) {
-            (Some(status), "") => status,
-            (Some(status), note) => format!("{status} ({note})"),
-            (None, "") => String::new(),
-            (None, note) => format!("({note})"),
+        let notes: Vec<String> = (Some(base_note(&w.branch, &s.base)).filter(|n| !n.is_empty()))
+            .map(str::to_string)
+            .into_iter()
+            .chain(super::stack::notes(&common_dir, &local, &w.branch))
+            .collect();
+        let status = match (task.status(), notes.join("; ")) {
+            (Some(status), notes) if notes.is_empty() => status,
+            (Some(status), notes) => format!("{status} ({notes})"),
+            (None, notes) if notes.is_empty() => String::new(),
+            (None, notes) => format!("({notes})"),
         };
+        let parent = local.parent(&w.branch).unwrap_or_else(|| "-".into());
         println!(
-            "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {}",
+            "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {:<16} {}",
             w.branch,
             s.changed.len(),
             s.deleted.len(),
             s.ignored,
             s.base.to_hex_with_len(12).to_string(),
             last,
+            parent,
             status
         );
     }

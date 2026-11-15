@@ -60,7 +60,7 @@ pub fn lock(common_dir: &Path) -> Result<Option<Lock>> {
 }
 
 /// An exclusive, non-blocking `flock`: whether it was taken.
-fn flock(file: &fs::File) -> std::io::Result<bool> {
+pub fn flock(file: &fs::File) -> std::io::Result<bool> {
     let fd = std::os::fd::AsRawFd::as_raw_fd(file);
     if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
         return Ok(true);

@@ -203,7 +203,8 @@ pub fn lookup(repo: &gix::Repository, tree: ObjectId, path: &BStr) -> Result<Opt
     }))
 }
 
-fn commit_tree(repo: &gix::Repository, commit: ObjectId) -> Result<ObjectId> {
+/// The tree of `commit`.
+pub fn commit_tree(repo: &gix::Repository, commit: ObjectId) -> Result<ObjectId> {
     let commit = repo
         .find_commit(commit)
         .with_context(|| format!("commit {commit}"))?;
@@ -799,16 +800,28 @@ fn extract_one(
                 .collect()));
         }
     };
+    Ok(Ok(copy_commit(repo, commit, tree, tip)?))
+}
+
+/// A copy of `commit` with tree `tree` and the one parent `parent`: the same
+/// author, committer, message and other headers (`git rebase` with the
+/// committer kept). A signature would not match the new commit and is
+/// dropped; so are a merge's tags, and a lens commit's mark, which mustn't
+/// reach a branch (an amended lens commit carries it).
+pub fn copy_commit(
+    repo: &gix::Repository,
+    commit: ObjectId,
+    tree: ObjectId,
+    parent: ObjectId,
+) -> Result<ObjectId> {
     let mut copy: gix::objs::Commit = repo.find_commit(commit)?.decode()?.try_into()?;
     copy.tree = tree;
-    copy.parents = [tip].into_iter().collect();
-    // A signature would not match the new commit; a merge's tags are gone;
-    // an amended lens commit's mark mustn't reach the branch.
+    copy.parents = [parent].into_iter().collect();
     copy.extra_headers.retain(|(k, _)| {
         !matches!(k.as_bytes(), b"gpgsig" | b"gpgsig-sha256" | b"mergetag")
             && k.as_bytes() != LENS_HEADER.as_bytes()
     });
-    Ok(Ok(repo.write_object(&copy)?.detach()))
+    Ok(repo.write_object(&copy)?.detach())
 }
 
 /// The line-set rule for one hunk path (see the module comment): the
@@ -934,123 +947,10 @@ pub fn advance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::test_repo::Repo;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-    use std::process::{Command, Output};
-
-    /// A scratch repository, driven with the git CLI in an isolated
-    /// configuration.
-    struct Repo {
-        dir: PathBuf,
-    }
-
-    impl Drop for Repo {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    impl Repo {
-        fn new(name: &str) -> Repo {
-            let dir =
-                std::env::temp_dir().join(format!("gitfold-lens-{}-{name}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
-            fs::create_dir_all(dir.join("repo")).unwrap();
-            let repo = Repo { dir };
-            repo.git(&["init", "-q", "-b", "main"]);
-            repo
-        }
-
-        fn work(&self) -> PathBuf {
-            self.dir.join("repo")
-        }
-
-        fn run_in(&self, dir: &Path, args: &[&str]) -> Output {
-            Command::new("git")
-                .current_dir(dir)
-                .args(args)
-                .env_clear()
-                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-                .env("HOME", &self.dir)
-                .env("LC_ALL", "C")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_AUTHOR_NAME", "Agent")
-                .env("GIT_AUTHOR_EMAIL", "agent@example.com")
-                .env("GIT_COMMITTER_NAME", "Committer")
-                .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-                .output()
-                .unwrap()
-        }
-
-        /// Runs git in `dir`, which must succeed; its output, trimmed.
-        fn git_in(&self, dir: &Path, args: &[&str]) -> String {
-            let out = self.run_in(dir, args);
-            assert!(
-                out.status.success(),
-                "git {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8(out.stdout)
-                .unwrap()
-                .trim_end()
-                .to_string()
-        }
-
-        fn git(&self, args: &[&str]) -> String {
-            self.git_in(&self.work(), args)
-        }
-
-        fn id(&self, spec: &str) -> ObjectId {
-            ObjectId::from_hex(self.git(&["rev-parse", spec]).as_bytes()).unwrap()
-        }
-
-        fn write(&self, path: &str, content: &str) {
-            let path = self.work().join(path);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, content).unwrap();
-        }
-
-        /// Commits everything on the current branch; the commit.
-        fn commit(&self, message: &str) -> ObjectId {
-            self.git(&["add", "-A"]);
-            self.git(&["commit", "-q", "-m", message]);
-            self.id("HEAD")
-        }
-
-        fn open(&self) -> gix::Repository {
-            gix::open_opts(self.work(), gix::open::Options::isolated()).unwrap()
-        }
-
-        /// `git cat-file -p <object>:<path>`, trimmed.
-        fn show(&self, object: ObjectId, path: &str) -> String {
-            self.git(&["cat-file", "-p", &format!("{object}:{path}")])
-        }
-
-        /// `git diff --name-status` between two trees or commits, renames
-        /// not followed.
-        fn diff(&self, from: ObjectId, to: ObjectId) -> String {
-            let (from, to) = (from.to_string(), to.to_string());
-            self.git(&["diff", "--no-renames", "--name-status", &from, &to])
-        }
-
-        /// `git merge-tree --write-tree` of three trees or commits: the tree,
-        /// or `None` on conflicts.
-        fn merge_tree(&self, base: ObjectId, ours: ObjectId, theirs: ObjectId) -> Option<ObjectId> {
-            let base = format!("--merge-base={base}");
-            let (ours, theirs) = (ours.to_string(), theirs.to_string());
-            let args = ["merge-tree", "--write-tree", &base, &ours, &theirs];
-            let out = self.run_in(&self.work(), &args);
-            let first = String::from_utf8(out.stdout).unwrap();
-            let first = first.lines().next().unwrap_or_default().to_string();
-            match out.status.code() {
-                Some(0) => Some(ObjectId::from_hex(first.as_bytes()).unwrap()),
-                Some(1) => None,
-                _ => panic!("merge-tree: {}", String::from_utf8_lossy(&out.stderr)),
-            }
-        }
-    }
 
     fn lines(n: usize, prefix: &str) -> String {
         (1..=n).map(|i| format!("{prefix}{i}\n")).collect()

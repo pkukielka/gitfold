@@ -199,3 +199,33 @@ pub fn refuse_if_busy(common_dir: &Path, admin: &Path, branch: &str, then: &str)
         None => Ok(()),
     }
 }
+
+/// The branch's checkout in a worktree other than the one with admin
+/// directory `own_admin`, if any: git allows one checkout per branch. A
+/// worktree in the middle of a rebase or bisect of the branch (detached
+/// meanwhile) counts too, as for git.
+pub fn checked_out_elsewhere(common_dir: &Path, branch: &str, own_admin: &Path) -> Option<String> {
+    let full = format!("refs/heads/{branch}");
+    let head = format!("ref: {full}");
+    let reads = |dir: &Path, file: &str, want: &str| {
+        fs::read_to_string(dir.join(file)).is_ok_and(|s| s.trim() == want)
+    };
+    let is_ours = |dir: &Path| {
+        reads(dir, "HEAD", &head)
+            || reads(dir, "rebase-merge/head-name", &full)
+            || reads(dir, "rebase-apply/head-name", &full)
+            || reads(dir, "BISECT_START", branch)
+    };
+    // A bare repository's HEAD names a branch but checks nothing out.
+    if !crate::git::is_bare() && is_ours(common_dir) {
+        return Some("the main worktree".into());
+    }
+    let worktrees = fs::read_dir(common_dir.join("worktrees")).ok()?;
+    worktrees.flatten().find_map(|w| {
+        let name = w.file_name().to_string_lossy().into_owned();
+        (w.path() != own_admin && is_ours(&w.path())).then(|| {
+            fs::read_to_string(w.path().join("gitdir"))
+                .map_or(name, |g| g.trim().trim_end_matches("/.git").to_string())
+        })
+    })
+}
