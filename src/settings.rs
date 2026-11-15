@@ -456,11 +456,11 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
     }
 }
 
-/// Points `to`'s stack ref where `from`'s is, if that is in `to`'s history.
+/// Points `to`'s own ref where `from`'s is, if that is in `to`'s history.
 fn copy_stack_base(common_dir: &Path, from: &str, to: &str) -> Result<()> {
     use git::stack;
     let (Some(base), Some(tip)) = (
-        stack::rev(common_dir, &stack::stack_ref(from))?,
+        stack::rev(common_dir, &stack::own_ref(from))?,
         stack::rev(common_dir, &format!("refs/heads/{to}"))?,
     ) else {
         return Ok(());

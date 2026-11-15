@@ -9,7 +9,7 @@
 //! resolved as a local branch first, then a remote-tracking one.
 //!
 //! The answer for a (parent base, target tip) pair never changes, so it is
-//! kept in `<common>/gitfold/.stack-landings`, one line per pair: `list`
+//! kept in `<common>/gitfold/.landings`, one line per pair: `list`
 //! and the hook ask on every call, and a walk of a busy trunk costs a merge
 //! per commit touching the parent's paths. The key includes what was
 //! recorded about the base (`record`), which tells a fast-forward apart.
@@ -236,7 +236,7 @@ pub fn landed(
 }
 
 fn cache(common_dir: &Path) -> PathBuf {
-    crate::state::state_root(common_dir).join(".stack-landings")
+    crate::state::state_root(common_dir).join(".landings")
 }
 
 /// How a landing is written in the cache (`parse` reads it back).

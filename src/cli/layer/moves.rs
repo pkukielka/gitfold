@@ -1,7 +1,7 @@
 //! Bases (stacked branches): `gitfold layer base` and `gitfold branch
 //! --base`. A branch built on another branch, its base (`settings`:
 //! `branch.<b>.gitfoldParent`, where its own commits start kept by
-//! `refs/gitfold-stack/<b>`, see `git::stack`), has its own commits copied
+//! `refs/gitfold-own/<b>`, see `git::stack`), has its own commits copied
 //! onto the base's new ones: by `gitfold layer base <BASE>` again, or at the
 //! start of its agent's turn (`layer --claude-hook user-prompt-submit` calls
 //! `hook_context`), unless `branch.<b>.gitfoldRestack` is `manual` (`layer
@@ -20,7 +20,7 @@
 //! branch stays on the old base. Otherwise where the branch lives decides
 //! how it moves:
 //!
-//! - no workspace: its ref, with its stack ref, in one transaction (refused
+//! - no workspace: its ref, with its own ref, in one transaction (refused
 //!   if a git worktree has it checked out);
 //! - a workspace, mounted: `git read-tree -m -u C C'` in it (through the
 //!   mount, so the kernel sees the files change; it keeps unstaged, staged
@@ -507,7 +507,7 @@ enum Outcome {
         new: usize,
         dropped: usize,
         files: Option<Vec<BString>>,
-        /// Where its own commits start was guessed (no stack ref, or a
+        /// Where its own commits start was guessed (no own ref, or a
         /// stale one).
         guessed: bool,
     },
@@ -734,9 +734,7 @@ fn under_you(files: Option<Vec<BString>>) -> String {
 
 /// The parent base stored for `name`, if any.
 fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
-    stack::rev(common_dir, &stack::stack_ref(name))
-        .ok()
-        .flatten()
+    stack::rev(common_dir, &stack::own_ref(name)).ok().flatten()
 }
 
 /// Moves branch `name` onto its base's tip, if it moved, or onto where its
@@ -847,7 +845,7 @@ fn onto_parent(
 
 /// Where the own commits of branch `name` (at `tip`) start, on its parent
 /// (`resolved`: its full ref name and tip, if it exists). A merged parent is
-/// often deleted: then its stack ref, if it is in the branch's history.
+/// often deleted: then its own ref, if it is in the branch's history.
 fn own_base(
     common_dir: &Path,
     name: &str,
@@ -946,7 +944,7 @@ fn reparent(
 
 /// Finishes or forgets the move of branch `name` onto a new base (its
 /// parent's landing, or another base) that `gitfoldLanding` records: its
-/// stack ref at the recorded commit means the refs moved, so the target
+/// own ref at the recorded commit means the refs moved, so the target
 /// becomes its parent (following it or not, as recorded); else the move
 /// didn't happen, unless a workspace's interrupted move (its intent) may
 /// still finish it: that is finished or undone first, if it can be.
@@ -1030,7 +1028,7 @@ impl Copied {
 /// Copies the own commits of branch `name` (at `tip`, from `base`) onto
 /// `onto` (named `onto_name` in messages, `onto_rev` in commands), and
 /// moves the branch, its
-/// stack ref (to `onto`) and its workspace's files there.
+/// own ref (to `onto`) and its workspace's files there.
 fn copy_onto(
     common_dir: &Path,
     name: &str,
@@ -1191,13 +1189,13 @@ enum Moved {
     Waits(String),
 }
 
-/// With the intent held: whether the branch and its stack ref are still
+/// With the intent held: whether the branch and its own ref are still
 /// where `intent` starts from (`None`), else how it ended. A restack
 /// computed before another one finished would otherwise run its read-tree
 /// against the other's result.
 fn moved_meanwhile(state: &StateDir, intent: &Intent) -> Result<Option<Moved>> {
     let tip = stack::rev(&state.common_dir, &format!("refs/heads/{}", state.branch))?;
-    let stored = stack::rev(&state.common_dir, &stack::stack_ref(&state.branch))?;
+    let stored = stack::rev(&state.common_dir, &stack::own_ref(&state.branch))?;
     Ok(if tip == Some(intent.from) && stored == intent.stack_old {
         None
     } else if tip == Some(intent.to) {
@@ -1344,7 +1342,7 @@ fn apply_closed(state: &StateDir, intent: &Intent) -> Result<Moved> {
     Ok(Moved::Done(Some(paths)))
 }
 
-/// The branch from C to C' and its stack ref to A, as `intent` says.
+/// The branch from C to C' and its own ref to A, as `intent` says.
 fn move_refs(state: &StateDir, intent: &Intent) -> Result<()> {
     stack::move_refs(
         &state.common_dir,

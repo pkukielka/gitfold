@@ -25,7 +25,7 @@ parent_is() { [ "$(R rev-parse "$1^")" = "$(R rev-parse "$2")" ]; }
 # Runs Claude Code's UserPromptSubmit hook in directory $1.
 prompt_hook() { (cd "$1" && "$BIN" layer --claude-hook user-prompt-submit); }
 has() { grep -qF -- "$2" <<<"$1"; }
-stack_ref() { R rev-parse -q --verify "refs/gitfold-stack/$1"; }
+own_ref() { R rev-parse -q --verify "refs/gitfold-own/$1"; }
 # `gitfold layer base` for branch $1, the rest its arguments.
 base() { local b=$1; shift; "$BIN" -C "$REPO" layer base -w "$b" "$@"; }
 # What `gitfold list` says of branch $1: its base and status columns.
@@ -42,7 +42,7 @@ commit_on p1 p1.txt one
 out=$("$BIN" -C "$REPO" branch p2 --base p1)
 eq "branch --base: created on the base's tip" "created branch p2 on p1; open it under the mount as p2 (gitfold mount)" "$out"
 eq "its base recorded" "p1" "$(R config branch.p2.gitfoldParent)"
-eq "and where its own commits start" "$(R rev-parse p1)" "$(stack_ref p2)"
+eq "and where its own commits start" "$(R rev-parse p1)" "$(own_ref p2)"
 commit_on p2 p2.txt two
 eq "layer base p1 again: up to date" "p2: up to date with p1" "$(base p2 p1)"
 check "a cycle is refused" fails base p1 p2
@@ -58,7 +58,7 @@ p2: moved onto p1 (1 new commit)" "$out"
 check "onto the base's tip" parent_is p2 p1
 eq "with its own commit's author, message and tree change" "t p2: p2.txt|p2.txt" \
     "$(R log -1 --format='%an %s' p2)|$(R diff --name-only p2^ p2)"
-eq "where its own commits start moved with it" "$(R rev-parse p1)" "$(stack_ref p2)"
+eq "where its own commits start moved with it" "$(R rev-parse p1)" "$(own_ref p2)"
 check "the old commit is in the reflog" sh -c "git -C '$REPO' reflog p2 | grep -q '^${mine:0:7}'"
 eq "nothing left to do" "p2: up to date with p1" "$(base p2 p1)"
 
@@ -127,12 +127,12 @@ tip=$(R rev-parse p2)
 out=$(base p2 other 2>&1); rc=$?
 eq "pushed, onto another base: refused (exit 4)" "4 yes" "$rc $(grep -q '^p2: not moved: .*--yes moves them' <<<"$out" && echo yes)"
 eq "its base, where its commits start and its tip unchanged" "p1 $(R rev-parse p1) $tip" \
-    "$(R config branch.p2.gitfoldParent) $(stack_ref p2) $(R rev-parse p2)"
+    "$(R config branch.p2.gitfoldParent) $(own_ref p2) $(R rev-parse p2)"
 commit_on other p2.txt other-side
 out=$(base p2 other --yes 2>&1); rc=$?
 eq "a conflict with another base: refused (exit 4)" "4 yes" "$rc $(grep -q '^p2: blocked: commit .* conflicts on p2.txt with other' <<<"$out" && echo yes)"
 eq "nothing changed, no block recorded" "p1 $(R rev-parse p1) $tip|" \
-    "$(R config branch.p2.gitfoldParent) $(stack_ref p2) $(R rev-parse p2)|$(R config branch.p2.gitfoldRestackBlocked)"
+    "$(R config branch.p2.gitfoldParent) $(own_ref p2) $(R rev-parse p2)|$(R config branch.p2.gitfoldRestackBlocked)"
 eq "a refused --frozen doesn't freeze it" "" "$(base p2 other --frozen --yes >/dev/null 2>&1; R config branch.p2.gitfoldRestack)"
 
 # The base rewound behind where its own commits start: its dropped commit
@@ -171,7 +171,7 @@ z: moved onto main (1 new commit)
 z is now built on main (was p1)" "$out"
 check "on main" parent_is z main
 eq "without p1's work" "" "$(R ls-tree --name-only z p1.txt)"
-eq "forgotten, ref and all" "|||" "$(R config branch.z.gitfoldParent)|$(stack_ref z)|$(R config branch.z.gitfoldRestack)|$(listed z)"
+eq "forgotten, ref and all" "|||" "$(R config branch.z.gitfoldParent)|$(own_ref z)|$(R config branch.z.gitfoldRestack)|$(listed z)"
 eq "again: nothing to do" "z's base is main already; nothing to do|$(R rev-parse z)" \
     "$(base z main)|$(R rev-parse z)"
 eq "branch --base main: an ordinary branch" "created branch o on main; open it under the mount as o (gitfold mount)|" \
@@ -233,7 +233,7 @@ check "no intent left" test ! -e "$COMMON/gitfold/p2/restack"
 
 # A fork keeps the base.
 "$BIN" -C "$W" branch p2f -w >/dev/null
-eq "a fork of it: the same base, its own commits from the same place" "p1 $(stack_ref p2)" "$(R config branch.p2f.gitfoldParent) $(stack_ref p2f)"
+eq "a fork of it: the same base, its own commits from the same place" "p1 $(own_ref p2)" "$(R config branch.p2f.gitfoldParent) $(own_ref p2f)"
 
 # --frozen: only layer base moves it.
 "$BIN" -C "$W" layer base p1 --frozen >/dev/null
@@ -332,14 +332,14 @@ squash() {
     R merge -q --squash "$1" >/dev/null 2>&1; R commit -qm "$1 (#1)"; R rev-parse main
 }
 # Says whether branch $1 sits right on commit $2 with its one own commit,
-# built on $3, its stack ref at $2; or, $3 main (the trunk), with no base
+# built on $3, its own ref at $2; or, $3 main (the trunk), with no base
 # left at all, as a branch never given one.
 landed_on() {
     [ "$(R rev-parse "$1^")" = "$2" ] || return 1
     if [ "$3" = main ]; then
-        [ -z "$(R config "branch.$1.gitfoldParent")" ] && ! stack_ref "$1" >/dev/null
+        [ -z "$(R config "branch.$1.gitfoldParent")" ] && ! own_ref "$1" >/dev/null
     else
-        [ "$(R config "branch.$1.gitfoldParent")" = "$3" ] && [ "$(stack_ref "$1")" = "$2" ]
+        [ "$(R config "branch.$1.gitfoldParent")" = "$3" ] && [ "$(own_ref "$1")" = "$2" ]
     fi
 }
 
@@ -403,7 +403,7 @@ check "a merge of a later base tip: layer base main, onto the merge" landed_on x
 pair k1 k2
 s=$(squash k1)
 R rebase -q --onto "$s" k1 k2; R switch -q main
-R update-ref refs/gitfold-stack/k2 "$s"; R config branch.k2.gitfoldLanding "main $s"
+R update-ref refs/gitfold-own/k2 "$s"; R config branch.k2.gitfoldLanding "main $s"
 eq "interrupted move onto a landing: finished, no base left" "k2's base is main already; nothing to do|||$(R rev-parse "$s")" \
     "$(base k2 main)|$(R config branch.k2.gitfoldParent)|$(R config branch.k2.gitfoldLanding)|$(R rev-parse k2^)"
 
@@ -456,7 +456,7 @@ a_branch_on_the_local_trunk() {
 git init -q --bare "$T/origin.git"; R remote add origin "$T/origin.git"
 R push -q -u origin main; R remote set-head origin main
 commit_on main x.txt local      # not pushed
-R branch c; R config branch.c.gitfoldParent main; R update-ref refs/gitfold-stack/c main
+R branch c; R config branch.c.gitfoldParent main; R update-ref refs/gitfold-own/c main
 commit_on c c.txt c
 # Someone else pushes; pulling with --rebase rewrites the local commit.
 R switch -q --detach origin/main; echo y >"$REPO/y.txt"; R add y.txt; R commit -qm theirs
@@ -546,11 +546,11 @@ R branch w2; commit_on w2 w2.txt w2
 "$BIN" -C "$REPO" branch z --base a2 >/dev/null; commit_on z z.txt z
 interrupted_base z w2
 eq "interrupted: on w2, still built on a2" "a2|$(R rev-parse w2)|$(R rev-parse w2)" \
-    "$(R config branch.z.gitfoldParent)|$(R rev-parse z^)|$(stack_ref z)"
+    "$(R config branch.z.gitfoldParent)|$(R rev-parse z^)|$(own_ref z)"
 out=$("$BIN" -C "$REPO" layer base --all)
 eq "layer base --all finishes it: not moved back onto a2" "z: up to date with w2|$(R rev-parse w2)" "$out|$(R rev-parse z^)"
 eq "built on w2, following it, nothing under way" "w2|||$(R rev-parse w2)" \
-    "$(R config branch.z.gitfoldParent)|$(R config branch.z.gitfoldRestack)|$(R config branch.z.gitfoldLanding)|$(stack_ref z)"
+    "$(R config branch.z.gitfoldParent)|$(R config branch.z.gitfoldRestack)|$(R config branch.z.gitfoldLanding)|$(own_ref z)"
 commit_on w2 w2b.txt more
 base z w2 >/dev/null
 check "and follows w2 from then on" parent_is z w2
@@ -613,7 +613,7 @@ base p2 p1 >/dev/null 2>&1
 check "killed: the branch moved" parent_is p2 p1
 for _ in $(seq 50); do [ ! -e "$S/layers-off" ] && [ ! -e "$S/restack" ] && break; sleep 0.1; done
 eq "mounted: the daemon finishes it and puts the layers back" "no|no|$(R rev-parse p1)" \
-    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
+    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(own_ref p2)"
 for _ in $(seq 30); do [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
 eq "the layer shows, the new file too, git sees only its own" "a la|n|" \
     "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n.txt")|$(git -C "$W" status --short)"
@@ -634,7 +634,7 @@ mount_fs
 cat "$W/own.txt" >/dev/null
 for _ in $(seq 50); do [ ! -e "$S/layers-off" ] && [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
 eq "opened: finished, the layers back" "no|no|$(R rev-parse p1)" \
-    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
+    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(own_ref p2)"
 eq "the layer, the new file, git clean" "a la|n2|" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n2.txt")|$(git -C "$W" status --short)"
 }
 

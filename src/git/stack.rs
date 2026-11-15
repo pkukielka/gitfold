@@ -1,6 +1,6 @@
 //! Stacked branches on the git side. Branch b is built on a parent branch a
 //! (`settings`: `branch.<b>.gitfoldParent`); its **parent base** B is the
-//! commit of a that b's own commits sit on, kept by `refs/gitfold-stack/<b>`.
+//! commit of a that b's own commits sit on, kept by `refs/gitfold-own/<b>`.
 //! b's own commits are `B..b`, whatever happens to a later (amends, force
 //! pushes): with only `merge-base(a, b)`, a rewritten parent would have its
 //! old commits replayed too.
@@ -24,16 +24,16 @@ use gix::bstr::BString;
 use super::cmd;
 use super::layers::{commit_tree, copy_commit, merge_trees};
 
-/// The stack refs: `refs/gitfold-stack/<branch>` keeps a stacked branch's
+/// The own refs: `refs/gitfold-own/<branch>` keeps a stacked branch's
 /// parent base.
-pub const STACK_REFS: &str = "refs/gitfold-stack/";
+pub const OWN_REFS: &str = "refs/gitfold-own/";
 
 /// No object: in an `update-ref` transaction, "the ref must not exist".
 const NO_REF: &str = "0000000000000000000000000000000000000000";
 
 /// The ref keeping the parent base of `branch`.
-pub fn stack_ref(branch: &str) -> String {
-    format!("{STACK_REFS}{branch}")
+pub fn own_ref(branch: &str) -> String {
+    format!("{OWN_REFS}{branch}")
 }
 
 /// A stacked branch's parent base.
@@ -41,7 +41,7 @@ pub fn stack_ref(branch: &str) -> String {
 pub struct Base {
     /// B: the commit the branch's own commits sit on.
     pub commit: ObjectId,
-    /// What its stack ref holds now (`None`: no ref), for the transaction's
+    /// What its own ref holds now (`None`: no ref), for the transaction's
     /// compare-and-swap.
     pub stored: Option<ObjectId>,
     /// The ref was missing or not an ancestor of the branch (a `git branch
@@ -50,7 +50,7 @@ pub struct Base {
 }
 
 /// The parent base of `branch` (at `tip`) on the parent with full ref name
-/// `parent_ref` (at `parent_tip`): its stack ref, if that is an ancestor of
+/// `parent_ref` (at `parent_tip`): its own ref, if that is an ancestor of
 /// `tip`; else guessed by git's `--fork-point` rule (the newest entry of the
 /// parent's reflog that is an ancestor of the branch), else their merge
 /// base.
@@ -61,7 +61,7 @@ pub fn parent_base(
     tip: ObjectId,
     parent_tip: ObjectId,
 ) -> Result<Base> {
-    let stored = rev(common_dir, &stack_ref(branch))?;
+    let stored = rev(common_dir, &own_ref(branch))?;
     if let Some(commit) = stored
         && is_ancestor(common_dir, commit, tip)?
     {
@@ -199,7 +199,7 @@ pub fn restack(
     })
 }
 
-/// Moves `branch` from `tip.0` to `tip.1` and its stack ref from
+/// Moves `branch` from `tip.0` to `tip.1` and its own ref from
 /// `stack.0` (`None`: no ref) to `stack.1`, in one `update-ref`
 /// transaction: both move, or, if either was moved meanwhile, neither does
 /// and this fails. Git moves a branch checked out in a worktree without a
@@ -213,7 +213,7 @@ pub fn move_refs(
 ) -> Result<()> {
     let old_stack = stack.0.map_or(NO_REF.to_string(), |o| o.to_string());
     let mut script = String::new();
-    // Unmoved, the branch is still compared: the stack ref moves only with
+    // Unmoved, the branch is still compared: the own ref moves only with
     // the branch where the caller saw it.
     if tip.0 == tip.1 {
         script += &format!("verify refs/heads/{branch} {}\n", tip.0);
@@ -221,7 +221,7 @@ pub fn move_refs(
         script += &format!("update refs/heads/{branch} {} {}\n", tip.1, tip.0);
     }
     if stack.0 != Some(stack.1) {
-        script += &format!("update {} {} {old_stack}\n", stack_ref(branch), stack.1);
+        script += &format!("update {} {} {old_stack}\n", own_ref(branch), stack.1);
     }
     if tip.0 == tip.1 && stack.0 == Some(stack.1) {
         return Ok(());
@@ -231,17 +231,17 @@ pub fn move_refs(
     Ok(())
 }
 
-/// Points the stack ref of `branch` at `base`, whatever it held.
+/// Points the own ref of `branch` at `base`, whatever it held.
 pub fn set_base(common_dir: &Path, branch: &str, base: ObjectId) -> Result<()> {
     let args = ["update-ref", "-m", "gitfold: base"];
-    let name = stack_ref(branch);
+    let name = own_ref(branch);
     let base = base.to_string();
     cmd::output(common_dir, &[&args[..], &[&name, &base]].concat()).map(drop)
 }
 
-/// Deletes the stack ref of `branch`, if it has one.
+/// Deletes the own ref of `branch`, if it has one.
 pub fn drop_base(common_dir: &Path, branch: &str) -> Result<()> {
-    let name = stack_ref(branch);
+    let name = own_ref(branch);
     match rev(common_dir, &name)? {
         Some(_) => cmd::output(common_dir, &["update-ref", "-d", &name]).map(drop),
         None => Ok(()),
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn refs_move_together_or_not_at_all() {
-        let r = stack("stack-refs");
+        let r = stack("own-refs");
         let common = r.common();
         let old_p1 = r.id("p1");
         // Both checked out in linked worktrees, as in gitfold.
@@ -591,24 +591,24 @@ mod tests {
         let Restack::Done { tip, .. } = restack(&r.open(), old_p1, p1, p2).unwrap() else {
             panic!("a conflict")
         };
-        // A stale compare-and-swap value for the stack ref: nothing moves.
+        // A stale compare-and-swap value for the own ref: nothing moves.
         let wrong = Some(p2);
         assert!(move_refs(&common, "p2", (p2, tip), (wrong, p1), "test").is_err());
         assert_eq!(
-            (r.id("p2"), rev(&common, &stack_ref("p2")).unwrap()),
+            (r.id("p2"), rev(&common, &own_ref("p2")).unwrap()),
             (p2, None)
         );
         move_refs(&common, "p2", (p2, tip), (None, p1), "test").unwrap();
         assert_eq!(r.id("p2"), tip);
-        assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), Some(p1));
+        assert_eq!(rev(&common, &own_ref("p2")).unwrap(), Some(p1));
         // Again from the old tip: refused.
         assert!(move_refs(&common, "p2", (p2, tip), (Some(p1), p1), "test").is_err());
-        // The stack ref alone, with the branch not where the caller saw it:
+        // The own ref alone, with the branch not where the caller saw it:
         // refused too.
         assert!(move_refs(&common, "p2", (p2, p2), (Some(p1), old_p1), "test").is_err());
-        assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), Some(p1));
+        assert_eq!(rev(&common, &own_ref("p2")).unwrap(), Some(p1));
         move_refs(&common, "p2", (tip, tip), (Some(p1), old_p1), "test").unwrap();
-        assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), Some(old_p1));
+        assert_eq!(rev(&common, &own_ref("p2")).unwrap(), Some(old_p1));
         let wt2 = r.dir.join("wt-p2");
         assert_eq!(
             r.git_in(&wt2, &["status", "--short"]),
@@ -652,7 +652,7 @@ mod tests {
         let fork_point = base(&r);
         assert_eq!((fork_point.commit, fork_point.guessed), (old_p1, true));
         drop_base(&common, "p2").unwrap();
-        assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), None);
+        assert_eq!(rev(&common, &own_ref("p2")).unwrap(), None);
         assert_eq!(count(&common, old_p1, r.id("p1")).unwrap(), 1);
     }
 

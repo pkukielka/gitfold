@@ -905,7 +905,7 @@ gitfold list                       # p1
 ```
 
 - **What a move is.** p2's own commits are those after the commit of p1
-  they sit on (kept by `refs/gitfold-stack/p2`; the base's name is
+  they sit on (kept by `refs/gitfold-own/p2`; the base's name is
   `branch.p2.gitfoldParent` in git config). Each is copied onto p1's tip
   with the same author, committer and message, as `git rebase --onto p1
   <start> p2` would (signatures are dropped); one that becomes empty (p1
@@ -973,7 +973,7 @@ gitfold list                       # p1
   pushed.
 - **Stored** in git: the base's name, whether it is frozen and a blocked
   move and when it last moved in the branch's config (renamed and deleted
-  with it), where its own commits start in `refs/gitfold-stack/<branch>`
+  with it), where its own commits start in `refs/gitfold-own/<branch>`
   (a fork keeps both; moved
   with the branch in one ref transaction; after `git branch -m` it is
   guessed from the base's reflog, as `git merge-base --fork-point` does),

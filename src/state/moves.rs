@@ -2,8 +2,8 @@
 //! `restack` in the state directory, and finishing or undoing one a crash
 //! interrupted.
 //!
-//! The intent is `<mode> <C> <C'> <A> <stack ref>`: the branch moves from C
-//! to C' onto parent tip A, its stack ref from what it held (`-`: none) to
+//! The intent is `<mode> <C> <C'> <A> <own ref>`: the branch moves from C
+//! to C' onto parent tip A, its own ref from what it held (`-`: none) to
 //! A. The command doing it holds the file locked (`flock`; locked before
 //! it is linked into place), so `recover` leaves a restack in progress
 //! alone. The steps, by mode:
@@ -17,7 +17,7 @@
 //! What a crash left is told by the branch tip, the index on the paths the
 //! restack changes, and (closed) the base:
 //!
-//! - tip at C': the refs moved; the stack ref is set if it isn't yet;
+//! - tip at C': the refs moved; the own ref is set if it isn't yet;
 //! - tip at C, index at C': open, the files moved too, so the refs follow;
 //!   closed, they follow if the base moved, else the index goes back;
 //! - tip at C, index at C: nothing moved;
@@ -55,9 +55,9 @@ pub struct Intent {
     pub from: ObjectId,
     /// C': the branch tip after.
     pub to: ObjectId,
-    /// A: the parent's tip, the stack ref's new value.
+    /// A: the parent's tip, the own ref's new value.
     pub parent_tip: ObjectId,
-    /// What the stack ref held (`None`: no ref).
+    /// What the own ref held (`None`: no ref).
     pub stack_old: Option<ObjectId>,
 }
 
@@ -306,9 +306,9 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
 }
 
 /// Moves the branch from `tip` to the intent's C' (if not there) and its
-/// stack ref to A, unless the stack ref was moved past the intent meanwhile.
+/// own ref to A, unless the own ref was moved past the intent meanwhile.
 fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
-    let stored = stack::rev(&state.common_dir, &stack::stack_ref(&state.branch))?;
+    let stored = stack::rev(&state.common_dir, &stack::own_ref(&state.branch))?;
     // Both moved already (the restack itself got that far).
     if tip == intent.to && stored == Some(intent.parent_tip) {
         return Ok(());
@@ -323,7 +323,7 @@ fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
     if moved.is_err() && tip == intent.to {
         // Another move or `layer base` set it since: theirs stands.
         log::warn!(
-            "{}: the stack ref moved during a move onto its base; left at {stored:?}",
+            "{}: the own ref moved during a move onto its base; left at {stored:?}",
             state.branch
         );
         return Ok(());
@@ -432,7 +432,7 @@ mod tests {
     fn a_finished_restack_is_recovered_as_finished() {
         let (r, state, [c1, c2, c3]) = workspace("restack-finished");
         let common = r.common();
-        // The branch and its stack ref both moved: the restack got that far.
+        // The branch and its own ref both moved: the restack got that far.
         stack::set_base(&common, "p2", c1).unwrap();
         let intent = Intent {
             mode: Mode::Open,
@@ -447,10 +447,10 @@ mod tests {
         assert!(!pending(&state), "the intent goes");
         assert_eq!(r.id("p2"), c3);
         assert_eq!(
-            stack::rev(&common, &stack::stack_ref("p2")).unwrap(),
+            stack::rev(&common, &stack::own_ref("p2")).unwrap(),
             Some(c1)
         );
-        // Only the stack ref left to move.
+        // Only the own ref left to move.
         let intent = Intent {
             stack_old: Some(c1),
             parent_tip: c2,
@@ -459,7 +459,7 @@ mod tests {
         intent.begin(&state).unwrap().keep();
         assert_eq!(settled(&state), Recovery::Finished);
         assert_eq!(
-            stack::rev(&common, &stack::stack_ref("p2")).unwrap(),
+            stack::rev(&common, &stack::own_ref("p2")).unwrap(),
             Some(c2)
         );
     }
