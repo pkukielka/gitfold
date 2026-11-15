@@ -517,18 +517,22 @@ gitfold list                      # each branch under its base, with what it nee
   base: the notes say which).
 - Uncommitted changes to a file the move changes: it waits, and tells you
   which; commit or stash them, and it happens at the next turn.
-- It is refused while layers are shown, before anything changes
-  (`gitfold layer remove --all` first). A `layer base` that is refused or
-  can't move the branch leaves its base as it was.
+- Layers work on a branch with a base too. To build on p1's commits and
+  also see its uncommitted work: `gitfold layer base p1` and `gitfold layer
+  add p1`. A move takes your layers off, moves the branch and shows them
+  again on the new commits (a layer of p1 then shows only what p1 hasn't
+  committed); blended files and your commits' contents stay right. A
+  `layer base` that is refused or can't move the branch leaves its base
+  and your layers as they were.
 - When the base is merged into main (a merge, squash, rebase merge or
-  fast-forward), your branch moves onto that merge with only its own
-  commits and has no base any more (`Base: main`, as a branch never given
-  one); you are told. Suggest the push and then `gh pr edit <BRANCH>
-  --base main` to the user; don't run them yourself. A squash (or
-  fast-forward) is a guess, so while the base's branch still exists you
-  are only told it looks merged: suggest `gitfold layer base main` to the
-  user (it follows the landing the same way, and asks for `--yes` if your
-  commits are pushed). A base merged into its own base (p1 into p0) works
+  fast-forward) and its branch is then deleted, your branch moves onto that
+  merge with only its own commits and has no base any more (`Base: main`,
+  as a branch never given one); you are told. Suggest the push and then
+  `gh pr edit <BRANCH> --base main` to the user; don't run them yourself.
+  While the base's branch still exists, your branch keeps following it
+  and you are only told it looks merged: suggest `gitfold layer base main`
+  to the user (it follows the landing the same way, and asks for `--yes`
+  if your commits are pushed). A base merged into its own base (p1 into p0) works
   the same, naming p0; p2 is then built on p0. A merge gitfold can't
   recognise (a squash rewritten when merged): `gitfold layer base main`
   moves your own commits onto main's tip.

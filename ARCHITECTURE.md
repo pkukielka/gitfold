@@ -58,7 +58,7 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, lens, restack, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, lens, lens-off, restack, upper/, tmp/
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
            refs/gitfold/<id>                 keeps the workspace base from git gc
@@ -181,6 +181,7 @@ Then, per request (`fs/workspace/`):
 | `src/cli/proposal.rs` | `propose`, `proposals`, `consent`, `accept` and `reject`: changes to a layer's files made in a fork of its workspace, checked against the workspaces that read them, written into the layer's workspace |
 | `src/cli/stack/mod.rs` | `layer base` and `branch --base`: building a branch on another (its base), moving it onto its base's new commits or, its base taken away, onto the trunk, refusing to move pushed commits without `--yes`; the move the `UserPromptSubmit` hook does, re-parenting the children of a base that landed, `list`'s notes |
 | `src/cli/stack/land.rs` | a stacked parent's target (its own parent, or the trunk), whether a parent base landed there (cached in `.git/gitfold/.stack-landings`) |
+| `src/cli/stack/layers.rs` | moving a workspace that shows layers onto its base: the layers taken off (`lens-off`), the move, the layers put back pinned again against the new commits; putting back layers an interrupted move left off |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
 | `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
@@ -417,8 +418,8 @@ decision that creates them.
   and the lens commit's `gitfold-lens 1` header (the push guard and a
   remount look for it), the stack refs `refs/gitfold-stack/<branch>` and
   the `branch.<b>.gitfoldParent`, `gitfoldRestack`,
-  `gitfoldRestackBlocked`, `gitfoldLanding` and `gitfoldBaseOnTarget`
-  settings, the
+  `gitfoldRestackBlocked`, `gitfoldLanding`, `gitfoldBaseOnTarget` and
+  `gitfoldMoved` settings, the `lens-off` marker, the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
@@ -1506,7 +1507,10 @@ a snapshot, with no change to any workspace.
   with a view tree as lower either could turn a layer's content into this
   workspace's own. Commits still move the branch (with a lens commit, by
   extraction, L then built over the tip rather than the base); the base
-  catches up once no layer shows.
+  catches up once no layer shows, and before layers go on in a workspace
+  showing none (`catch_up_before_layers`: the switch rebases first, or is
+  refused and retried). A move onto its base (below, "Stacked branches")
+  takes the layers off for the move instead of rebasing under them.
 - **Moves at turn boundaries, by hooks:** a workspace shown as a layer is
   sealed when its Claude Code session stops (`snapshot --claude-hook stop`), and
   a reader's live layers move to their latest work (below; for commits, the
@@ -1755,7 +1759,7 @@ trunk's tip ("the trunk" is internal: users see "the main branch", named
 as they know it, `main` for `origin/main`; `land::trunk_tip` takes the
 newer of the local branch and the configured trunk, the configured one if
 they diverged). A move onto a new base is made before the edge is
-written (`rebase_onto`): a refusal (pushed commits, layers shown,
+written (`rebase_onto`): a refusal (pushed commits,
 checked first) or a move that doesn't happen (a conflict, work in the way)
 leaves the old edge, frozen setting and block record as they were. A stack is consistent bottom-up without a lock across
 workspaces: if p2 was restacked and p3 hasn't been yet, p3's stored base is
@@ -1777,7 +1781,9 @@ p2's old tip, so its next restack replays exactly its own commits.
   fork copies it (`settings::copy_branch`: a fork of p2 is built on p1
   too), it works for branches without a workspace, and an orchestrator can
   set it without gitfold. The blocked record lives there too, so it works
-  the same with or without a workspace.
+  the same with or without a workspace, and when it last moved
+  (`gitfoldMoved`, the listing's "last moved"): the stack ref's file time
+  was used before, which `git pack-refs` loses.
 - **Computed first, then moved:** the computation needs no worktree, index
   or lock and changes nothing, so a conflict leaves no half-done state in
   an agent's worktree (`git rebase` would leave `rebase-merge` there
@@ -1817,12 +1823,43 @@ p2's old tip, so its next restack replays exactly its own commits.
   to keep, and the restack's changes are meant to show. Only without
   uncommitted changes, so upper holds nothing but ignored files; one on a
   changed path (or a whiteout, or an opaque directory above one) waits.
-- **Refused while layers are shown (v1):** a restack moves the base, which
-  waits while lensed ("The base isn't rebased while lensed"). `layer base`
-  refuses before anything changes, and every command gitfold advises for
-  such a branch (`list`'s notes, the hook, `layer base`'s lines; `advice`)
-  starts with `gitfold layer remove --all`, so following advice never
-  meets this refusal.
+- **With layers shown: off, moved, back** (`cli::stack::layers`): a
+  restack moves the base, which can't move under a view tree ("The base
+  isn't rebased while lensed"). So, under the layers' `flock` (held
+  throughout: no `layer add`, hook or daemon follow changes them
+  meanwhile, and the daemon's own follow waits for it, the same lock
+  order: the `flock`, then the workspace's lock), a marker `lens-off` in
+  the state directory makes what shows none whatever the layers file says
+  (`state::lens::to_show`), and the daemon (unmounted: this process, under
+  the repository lock) switches to that: commits on the layers commit
+  extracted, HEAD back on the branch, skip-worktree and excludes cleared,
+  own lines in blends carried over, the view the base again. Then the
+  ordinary move (intent, `read-tree -m -u` after an index refresh, since
+  the switch restamped files, the ref transaction). Then `put_back`: each
+  stored layer's merge base is `merge-base(branch tip, seal)` again (the
+  base it was pinned against moved; a layer of the base's own branch then
+  shows only its uncommitted work), the marker removed, and the switch to
+  them asked for, whose `catch_up_before_layers` rebases the base onto the
+  moved tip first so the files the read-tree wrote are the base's, not
+  the workspace's own hiding the layers'. A refused switch-off moves
+  nothing and leaves the layers as they were.
+  - **Crash safety:** the layers file is never rewritten for the move, so
+    what is stored stays the truth; only the applied state lags. Killed
+    anywhere, the marker stays and nobody holds the `flock`: the next one
+    along (the sync thread, which takes the `flock` without waiting, every
+    pass and at open; the hook and `layer base` (`resume`); `layer add`,
+    proposals and follows writing the layers file) first lets the intent
+    finish or undo the move as before, then puts the layers back pinned
+    against wherever the branch is: finishing and rolling back end the
+    same way. Re-pinning is idempotent, so a crash during `put_back` is
+    harmless.
+  - **Rejected:** writing an empty layers file for the move and the real
+    one back after (a crash loses the layers, or needs a second copy and
+    rules for which wins); rebasing the base under the view tree (it would
+    copy layers' files into the workspace's own); a daemon-side move (the
+    move is the CLI's, with its intent; the daemon only needed the marker
+    and the catch-up); refusing, as v1 did (the stack-plus-layer pairing
+    is the common one).
 - **Never pushes:** `layer base` prints `git push --force-with-lease=b:<tip>
   origin b:b` with the remote-tracking tip as the lease, and `list` says
   the same (`push with: ...`) while that tip isn't in the branch.
@@ -1883,7 +1920,12 @@ transaction, its stack ref moved to S), then `gitfoldParent` set to the
 target; or, the target being the trunk, its base forgotten altogether
 (`built_on`: no parent, no stack ref), as a branch never stacked, so
 `list` doesn't show it under the trunk and its listing says a plain
-`Base: main`. The hook does this unasked; `layer base <target>` (the
+`Base: main`. The hook does this unasked only once the parent's branch
+is gone (`land::gone`), for every kind of landing: a merge into main may
+be one of several while the parent goes on, and a squash is found by
+content. Until then the child follows its parent as before (onto its new
+commits, if any), and the landing is told once and noted in `list`.
+`layer base <target>` (the
 target named as users know it, what the notes advise) or `layer base
 <parent>` does the same on request, asking `--yes` for pushed commits. Config can't join the ref transaction, so the move is recorded
 first in `branch.<b>.gitfoldLanding` (`<target> <S>`); the next sync
@@ -1941,7 +1983,9 @@ children still have their stack refs saying where their own commits start.
   "look" merged; `layer base` (asked for) follows it, and the turn-boundary
   hook follows it only once the parent's branch is gone (deleted here, or
   its upstream deleted on its remote, as a forge does when it merges), and
-  otherwise tells the agent once.
+  otherwise tells the agent once. A merge commit too may be one of several
+  while the parent goes on, so every kind of landing is followed unasked
+  only then (see above).
 - **The parent's own parent as target:** a stacked pull request is merged
   into its base branch; looking only at the trunk would miss it until the
   whole stack lands.
@@ -2175,13 +2219,10 @@ compact node table and write measurements. Next:
   [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout)).
   *Landings:* a forge's answer as a hint (`gh pr view`), `layer base
   --fetch`, and blocked restacks reaching the child's inbox, once per
-  parent tip. *Layers and stacks together:* a child stacked on a
-  parent and also showing the parent's uncommitted work as a layer is the
-  natural pairing, but a restack moves the base, which waits while
-  lensed, so v1 refuses it. Doing both at one boundary means switching the
-  layer to the parent's newest seal with merge base A while the read-tree
-  runs with the lens off for those paths, then rebuilding the view on C';
-  and an extraction that "depends on" a layer whose lines the parent has
+  parent tip. *Layers and stacks together:* the hook switches
+  twice at a boundary that moves both the base and a live layer (once
+  putting the layers back after the move, once following); one switch
+  would do. An extraction that "depends on" a layer whose lines the parent has
   since committed could offer `layer base` that parent instead. Uncommitted
   work that overlaps a restack could be carried over with a 3-way merge,
   as `carry_over` does for blends, rather than waiting. *Also:* `layer
