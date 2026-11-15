@@ -349,7 +349,9 @@ impl Workspace {
     /// branch onto its base (`cli::stack`, which takes the layers off for
     /// it), the files the move wrote are then the new base's, not the
     /// workspace's own, which would hide the layers' at those paths. Fails
-    /// (the switch refused, retried) if it can't catch up now.
+    /// (the switch refused, retried) if it can't catch up now, and while a
+    /// move of the branch is under way or was interrupted (`state::restack`):
+    /// the base follows the branch only once that is finished or undone.
     fn catch_up_before_layers(&self, store: &Store, stored: &Lens) -> Result<()> {
         let (none_shown, base) = {
             let layers = self.layers.read();
@@ -360,6 +362,12 @@ impl Workspace {
         };
         if !stored.is_on() || !none_shown {
             return Ok(());
+        }
+        if crate::state::restack::pending(&self.state) {
+            return Err(Refusal::Changes.error(format!(
+                "{} is being moved onto its base; its layers show once the move is done",
+                self.state.branch
+            )));
         }
         let tip = git::branch_tip(&self.state.branch)?;
         if tip.id == base {

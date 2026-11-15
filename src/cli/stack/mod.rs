@@ -1083,7 +1083,37 @@ fn copy_onto(
         parent_tip: onto,
         stack_old: base.stored,
     };
-    let files = match layers::with_layers_off(&state, || move_branch(&state, intent))? {
+    let mut dropped = dropped;
+    let moved = layers::with_layers_off(&state, &intent, || {
+        // Taking the layers off moved commits made on the layers commit
+        // onto the branch: they move too.
+        let now = tip_of(common_dir, name)?;
+        if now == tip || now == new_tip || !stack::is_ancestor(common_dir, tip, now)? {
+            return move_branch(&state, intent);
+        }
+        match git::with_repo(|repo| stack::restack(repo, base.commit, onto, now))? {
+            stack::Restack::Done {
+                tip: to,
+                dropped: d,
+                ..
+            } => {
+                dropped = d.len();
+                move_branch(
+                    &state,
+                    Intent {
+                        from: now,
+                        to,
+                        ..intent
+                    },
+                )
+            }
+            // Said by the next try, worked out from the start.
+            _ => Ok(Moved::Waits(
+                "the branch moved meanwhile; retried next time".into(),
+            )),
+        }
+    })?;
+    let files = match moved {
         Moved::Done(files) => files,
         Moved::Already => return Ok(Copied::Stop(Outcome::UpToDate)),
         Moved::Waits(why) => return Ok(Copied::Stop(Outcome::Waits(why))),
@@ -1242,11 +1272,17 @@ fn refused(said: &str) -> String {
         .collect();
     match in_the_way.is_empty() {
         true => format!("git read-tree refused: {}", said.trim()),
-        false => format!(
-            "uncommitted changes to {} overlap the move; commit or stash them",
-            shown_str(&in_the_way)
-        ),
+        false => self::in_the_way(&in_the_way),
     }
+}
+
+/// Why a move waits for uncommitted work on `paths`.
+fn in_the_way<S: AsRef<str>>(paths: &[S]) -> String {
+    let paths: Vec<&str> = paths.iter().map(AsRef::as_ref).collect();
+    format!(
+        "uncommitted changes to {} overlap the move; commit or stash them",
+        shown_str(&paths)
+    )
 }
 
 /// Restacks the unmounted workspace in `state` (the repository lock held),

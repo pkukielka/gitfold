@@ -375,6 +375,14 @@ eq "UC28: ui's commits hold only its own changes" "CHANGELOG.md" "$(R diff --nam
 echo '- ui: more' >>"$U/CHANGELOG.md"; G "$U" commit -qam "ui: more"
 for _ in $(seq 30); do [ "$(R show ui:CHANGELOG.md | wc -l)" = 3 ] && break; sleep 0.1; done
 eq "UC28: commits still go onto the branch, own lines only" "# log|- ui: screen|- ui: more" "$(R show ui:CHANGELOG.md | paste -sd'|')"
+# api moves on while ui's newest commit is still on the layers commit:
+# the move takes it along, at the first try.
+echo api2 >"$A/api2.txt"; G "$A" add api2.txt; G "$A" commit -qm "api: again"
+echo '- ui: third' >>"$U/CHANGELOG.md"; G "$U" commit -qam "ui: third"
+out=$("$BIN" -C "$U" layer base api 2>&1)
+check "UC28: moved at once" has "$out" "ui: moved onto api"
+eq "UC28: its three commits on api's tip, own lines only" "$(R rev-parse api)|# log|- ui: screen|- ui: more|- ui: third" \
+    "$(R rev-parse ui~3)|$(R show ui:CHANGELOG.md | paste -sd'|')"
 }
 
 # UC20-UC22: snapshots.

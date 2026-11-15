@@ -271,11 +271,14 @@ eq "the layer still shows, git sees only its own" "a la|n0|" "$(paste -sd' ' "$W
 eq "nothing left taken off" "no" "$(test -e "$COMMON/gitfold/p2/lens-off" && echo yes || echo no)"
 echo m0 >"$MNT/p1/m0.txt"; G "$MNT/p1" add m0.txt; G "$MNT/p1" commit -qm "p1 m0"
 eq "list: what it needs" "p1 (needs update: gitfold layer base p1)" "$(listed p2)"
-# Uncommitted work in the way: it waits, the layers and the work kept.
+# Uncommitted work in the way: it waits, the layers and the work kept,
+# never taken off meanwhile (their files would be stamped anew).
 echo mine >"$W/m0.txt"
+stamp=$(stat -c %y "$W/a.txt")
 out=$(prompt_hook "$W")
 eq "the hook: waits for the work in the way" yes "$(grep -q 'waits: uncommitted changes to m0.txt overlap the move' <<<"$out" && echo yes)"
 eq "the layer and the work kept" "a la|mine" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/m0.txt")"
+eq "the layers not taken off and back for a move that waits" "$stamp" "$(stat -c %y "$W/a.txt")"
 rm "$W/m0.txt"
 eq "the hook moves it" yes "$(prompt_hook "$W" | grep -q 'was moved onto its base p1' && echo yes)"
 eq "on p1, the layer shown" "$(R rev-parse p1)|a la|m0" "$(R rev-parse p2^)|$(paste -sd' ' "$W/a.txt")|$(cat "$W/m0.txt")"
@@ -308,6 +311,11 @@ eq "own change kept" " M a.txt" "$(git -C "$W" status --short)"
 echo junk >"$COMMON/gitfold/p2/restack"
 out=$("$BIN" -C "$W" layer add la 2>&1); rc=$?
 eq "an intent left: layer switches refused (exit 4)" "4 yes" "$rc $(grep -q 'p2 is being moved onto its base' <<<"$out" && echo yes)"
+# The layers taken off by that move: the next turn leaves them off while
+# the move can't be finished, rather than showing them half-way.
+: >"$COMMON/gitfold/p2/lens-off"
+prompt_hook "$W" >/dev/null
+eq "taken off, the move stuck: they stay off" "yes" "$(test -e "$COMMON/gitfold/p2/lens-off" && echo yes || echo no)"
 out=$(base p2 main)
 eq "layer base main forgets it, nothing moved" "p2 is now built on main (was p1); nothing moved, and an interrupted move's intent is forgotten|" \
     "$out|$(R config branch.p2.gitfoldParent)"
