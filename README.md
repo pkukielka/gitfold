@@ -799,8 +799,14 @@ gitfold stack off -w p2         # forget the parent; the history stays
     merged, `stack sync` follows it, and the turn-boundary hook follows it
     only once p1's branch is gone (deleted here, or on its remote and
     fetched with `--prune`); until then it tells the agent once.
-  - Not found, so not taken: a fast-forward (a parent with no commits of
-    its own looks the same), or a squash rewritten when merged: `gitfold
+  - A fast-forward too: p2's base on main's first-parent line looks like a
+    fresh p1 with no commits of its own, so whenever gitfold sets or moves
+    p2's base it records whether the base was on p1's target then
+    (`branch.p2.gitfoldBaseOnTarget`). A base that wasn't, and now is, came
+    by a fast-forward; it "looks" merged and is followed as a squash is.
+    Branches stacked before gitfold kept this record are told apart only
+    once their base next moves.
+  - Not found, so not taken: a squash rewritten when merged: `gitfold
     stack merged p1 [--at <REV>]` says so for every branch on p1 (with
     `--onto <BRANCH>` once p1 is deleted: that deletes the name of what p1
     was stacked on too).

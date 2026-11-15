@@ -11,7 +11,8 @@
 //! The answer for a (parent base, target tip) pair never changes, so it is
 //! kept in `<common>/gitfold/.stack-landings`, one line per pair: `list`
 //! and the hook ask on every call, and a walk of a busy trunk costs a merge
-//! per commit touching the parent's paths.
+//! per commit touching the parent's paths. The key includes what was
+//! recorded about the base (`record`), which tells a fast-forward apart.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -133,10 +134,20 @@ pub fn named(common_dir: &Path, name: String) -> Result<Option<Target>> {
 /// (`git::stack::landing`), remembered: a landing while the target still
 /// has it, "not landed up to tip T" as a starting point, so after a fetch
 /// only the target's new commits are walked.
-pub fn landed(common_dir: &Path, base: ObjectId, target: &Target) -> Result<Option<Landing>> {
+pub fn landed(
+    common_dir: &Path,
+    base: ObjectId,
+    target: &Target,
+    was_on_target: Option<bool>,
+) -> Result<Option<Landing>> {
     let path = cache(common_dir);
     let text = fs::read_to_string(&path).unwrap_or_default();
-    let key = format!("{base} {} ", target.name);
+    let recorded = match was_on_target {
+        Some(true) => "y",
+        Some(false) => "n",
+        None => "-",
+    };
+    let key = format!("{base} {} {recorded} ", target.name);
     let mut since = None;
     if let Some(line) = text.lines().find(|l| l.starts_with(&key))
         && let Some((tip, known)) = parse(&line[key.len()..])
@@ -151,10 +162,11 @@ pub fn landed(common_dir: &Path, base: ObjectId, target: &Target) -> Result<Opti
             _ => {}
         }
     }
-    let found = git::with_repo(|repo| stack::landing(repo, base, target.tip, since))?;
+    let found =
+        git::with_repo(|repo| stack::landing(repo, base, target.tip, since, was_on_target))?;
     let answer = match found {
         None => "-".to_string(),
-        Some(l) => format!("{} {}", l.at, if l.how == How::Merged { "m" } else { "s" }),
+        Some(l) => format!("{} {}", l.at, how_code(l.how)),
     };
     let mut lines: Vec<&str> = text.lines().filter(|l| !l.starts_with(&key)).collect();
     let skip = lines.len().saturating_sub(CACHED - 1);
@@ -177,6 +189,54 @@ fn cache(common_dir: &Path) -> PathBuf {
     crate::state::state_root(common_dir).join(".stack-landings")
 }
 
+/// How a landing is written in the cache (`parse` reads it back).
+fn how_code(how: How) -> &'static str {
+    match how {
+        How::Merged => "m",
+        How::FastForward => "f",
+        // Declared landings aren't found, so never cached.
+        How::Squashed | How::Declared => "s",
+    }
+}
+
+/// Whether the parent base `base` of `branch` was in `target` (named) when
+/// it was recorded, if that is what was recorded (`gitfoldBaseOnTarget`).
+pub fn was_on_target(local: &Local, branch: &str, base: ObjectId, target: &str) -> Option<bool> {
+    let record = local.base_on_target(branch)?;
+    let mut words = record.split(' ');
+    let (Some(at), Some(on), Some(answer)) = (words.next(), words.next(), words.next()) else {
+        return None;
+    };
+    if ObjectId::from_hex(at.as_bytes()).ok() != Some(base) || on != target {
+        return None;
+    }
+    match answer {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Records whether parent base `base` of `branch`, stacked on `parent`, is
+/// in the parent's target now (`gitfoldBaseOnTarget`): a later fast-forward
+/// of the parent into it is then told apart from a fresh parent, whose base
+/// was there all along. Forgotten where the parent has no target.
+pub fn record(common_dir: &Path, branch: &str, parent: &str, base: ObjectId) -> Result<()> {
+    let local = Local::read(common_dir);
+    let record = match target(common_dir, &local, parent)? {
+        Some(target) => {
+            let on = stack::is_ancestor(common_dir, base, target.tip)?;
+            Some(format!(
+                "{base} {} {}",
+                target.name,
+                if on { "yes" } else { "no" }
+            ))
+        }
+        None => None,
+    };
+    crate::settings::set_base_on_target(common_dir, branch, record.as_deref())
+}
+
 /// A cached answer, after its key: the target tip it was found at, then
 /// `-` (not landed up to it) or `<at> m|s`; `None` if unreadable.
 fn parse(answer: &str) -> Option<(ObjectId, Option<Landing>)> {
@@ -189,6 +249,7 @@ fn parse(answer: &str) -> Option<(ObjectId, Option<Landing>)> {
     let how = match how {
         "m" => How::Merged,
         "s" => How::Squashed,
+        "f" => How::FastForward,
         _ => return None,
     };
     let at = ObjectId::from_hex(at.as_bytes()).ok()?;

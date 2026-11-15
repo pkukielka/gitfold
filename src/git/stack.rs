@@ -256,6 +256,9 @@ pub enum How {
     Merged,
     /// Its content, as other commits: a squash or a rebase merge.
     Squashed,
+    /// In the target's first-parent line, where it wasn't when recorded: a
+    /// fast-forward.
+    FastForward,
     /// Said so (`gitfold stack merged`).
     Declared,
 }
@@ -280,9 +283,11 @@ const MAX_WALK: usize = 2000;
 ///
 /// - `base` in the target's history, brought in by a merge (of it, or of a
 ///   later parent tip): that merge, the first commit of the target's
-///   first-parent line that has it. One on the first-parent line itself (a
-///   fresh parent with no commits of its own, or a fast-forward) isn't told
-///   apart, so isn't taken.
+///   first-parent line that has it. One on the first-parent line itself
+///   landed by a fast-forward if `was_on_target` (whether it was in the
+///   target when its parent base was recorded) is `Some(false)`; otherwise
+///   it looks like a fresh parent with no commits of its own, so isn't
+///   taken.
 /// - Else, if the base has changes of its own since it and the target
 ///   diverged (MB): the first commit S of `MB..target` touching their paths
 ///   where merging the base changes nothing (`merge_trees(MB, S, base)` is
@@ -296,13 +301,14 @@ pub fn landing(
     base: ObjectId,
     target: ObjectId,
     since: Option<ObjectId>,
+    was_on_target: Option<bool>,
 ) -> Result<Option<Landing>> {
     let common_dir = repo.common_dir();
-    if base == target {
+    if base == target && was_on_target != Some(false) {
         return Ok(None);
     }
     if is_ancestor(common_dir, base, target)? {
-        return merged_in(repo, base, target);
+        return merged_in(repo, base, target, was_on_target);
     }
     let mb = match cmd::output(
         common_dir,
@@ -347,7 +353,12 @@ pub fn landing(
 /// target's first-parent line that has it (found by bisection: once one
 /// has it, every later one does), unless that is the base's own child on
 /// the line.
-fn merged_in(repo: &gix::Repository, base: ObjectId, target: ObjectId) -> Result<Option<Landing>> {
+fn merged_in(
+    repo: &gix::Repository,
+    base: ObjectId,
+    target: ObjectId,
+    was_on_target: Option<bool>,
+) -> Result<Option<Landing>> {
     let common_dir = repo.common_dir();
     let range = format!("^{base}");
     let target_hex = target.to_string();
@@ -370,17 +381,24 @@ fn merged_in(repo: &gix::Repository, base: ObjectId, target: ObjectId) -> Result
             false => lo = mid + 1,
         }
     }
-    let Some(&first) = line.get(lo) else {
-        return Ok(None);
-    };
-    let first_parent = repo
-        .find_commit(first)?
-        .parent_ids()
-        .next()
-        .map(|p| p.detach());
-    Ok((first_parent != Some(base)).then_some(Landing {
-        at: first,
-        how: How::Merged,
+    if let Some(&first) = line.get(lo)
+        && repo
+            .find_commit(first)?
+            .parent_ids()
+            .next()
+            .map(|p| p.detach())
+            != Some(base)
+    {
+        return Ok(Some(Landing {
+            at: first,
+            how: How::Merged,
+        }));
+    }
+    // On the line (or the target's tip): a fast-forward, if it wasn't in
+    // the target when recorded.
+    Ok((was_on_target == Some(false)).then_some(Landing {
+        at: base,
+        how: How::FastForward,
     }))
 }
 
@@ -647,7 +665,7 @@ mod tests {
     }
 
     fn landed(r: &Repo, base: &str, target: &str) -> Option<Landing> {
-        landing(&r.open(), r.id(base), r.id(target), None).unwrap()
+        landing(&r.open(), r.id(base), r.id(target), None, None).unwrap()
     }
 
     #[test]
@@ -668,7 +686,7 @@ mod tests {
         let base = r.id("p1");
         fix_p1(&r, "6", "late fix");
         assert_eq!(
-            landing(&r.open(), base, r.id("main"), None).unwrap(),
+            landing(&r.open(), base, r.id("main"), None, None).unwrap(),
             expected
         );
         assert_eq!(landed(&r, "p1", "main"), None, "the fix itself didn't land");
@@ -724,7 +742,7 @@ mod tests {
         let merge = r.id("main");
         r.write("after.txt", "after\n");
         r.commit("after the merge");
-        let found = landing(&r.open(), base, r.id("main"), None).unwrap();
+        let found = landing(&r.open(), base, r.id("main"), None, None).unwrap();
         assert_eq!(
             found,
             Some(Landing {
@@ -743,9 +761,43 @@ mod tests {
         r.write("after.txt", "after\n");
         let after = r.commit("after the squash");
         let (repo, base) = (r.open(), r.id("p1"));
-        let found = |since| landing(&repo, base, after, since).unwrap().map(|l| l.at);
+        let found = |since| {
+            landing(&repo, base, after, since, None)
+                .unwrap()
+                .map(|l| l.at)
+        };
         assert_eq!(found(Some(before)), Some(squash));
         assert_eq!(found(Some(squash)), None, "the squash is before it");
+    }
+
+    #[test]
+    fn a_fast_forward_lands_if_the_base_was_off_the_target() {
+        let r = stack("land-ff");
+        r.git(&["switch", "-q", "main"]);
+        let fresh = r.id("main");
+        r.git(&["merge", "-q", "--ff-only", "p1"]);
+        r.write("after.txt", "after\n");
+        r.commit("after the merge");
+        let (repo, base, main) = (r.open(), r.id("p1"), r.id("main"));
+        let ff = Some(Landing {
+            at: base,
+            how: How::FastForward,
+        });
+        assert_eq!(landing(&repo, base, main, None, Some(false)).unwrap(), ff);
+        assert_eq!(
+            landing(&repo, base, base, None, Some(false)).unwrap(),
+            ff,
+            "the target's tip"
+        );
+        // Nothing recorded (stacked before this was kept): not told apart.
+        assert_eq!(landing(&repo, base, main, None, None).unwrap(), None);
+        // A fresh parent: its base was on the target already.
+        assert_eq!(landing(&repo, fresh, main, None, Some(true)).unwrap(), None);
+        // The target moved back behind the base.
+        assert_eq!(
+            landing(&repo, base, fresh, None, Some(false)).unwrap(),
+            None
+        );
     }
 
     #[test]

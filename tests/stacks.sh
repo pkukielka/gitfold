@@ -308,6 +308,22 @@ check "stack merged, the parent gone: --onto needed (exit 3)" sh -c "'$BIN' -C '
 "$BIN" -C "$REPO" stack merged g1 --onto g0 >/dev/null
 check "--onto: onto it" landed_on g2 "$(R rev-parse g0)" g0
 
+# A fast-forward, told apart from a fresh parent by what was recorded
+# when the base was set: off main then.
+pair f1 f2
+f1=$(R rev-parse f1)
+eq "the base recorded off main" "$f1 main no" "$(R config branch.f2.gitfoldBaseOnTarget)"
+R merge -q --ff-only f1
+eq "a fast-forward: re-parented onto it" "f2	f1 looks fast-forwarded into main up to ${f1:0:12}; moved there with its own 1 commit and now stacked on main. Its pull request's base should now be main: push it, then \`gh pr edit f2 --base main\`" \
+    "$("$BIN" -C "$REPO" stack sync f2)"
+check "stacked on main at f1's commit" landed_on f2 "$f1" main
+# A fresh parent: its base was on main all along.
+R branch e1; "$BIN" -C "$REPO" branch e2 --on e1 >/dev/null; commit_on e2 e2.txt e2
+eq "a fresh parent: recorded on main" "$(R rev-parse e1) main yes" "$(R config branch.e2.gitfoldBaseOnTarget)"
+commit_on main m.txt after-e
+eq "a fresh parent: not taken for a fast-forward" "e2	up to date with e1|e1" \
+    "$("$BIN" -C "$REPO" stack sync e2)|$(R config branch.e2.gitfoldParent)"
+
 # Not merged: nothing said, nothing moved.
 pair u1 u2
 commit_on main m.txt moved-again

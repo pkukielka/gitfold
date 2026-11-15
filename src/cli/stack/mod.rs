@@ -189,6 +189,7 @@ pub fn declare(common_dir: &Path, name: &str, parent: &str, base: Option<&str>) 
     settings::set_parent(common_dir, name, Some(parent))?;
     settings::set_restack_blocked(common_dir, name, None)?;
     stack::set_base(common_dir, name, base)?;
+    land::record(common_dir, name, parent, base)?;
     let short = short(base);
     Ok(match stack::is_ancestor(common_dir, parent_tip, tip)? {
         true => format!("{name} is on {parent} (base {short}); up to date"),
@@ -270,6 +271,9 @@ impl Landed {
             stack::How::Merged => format!("{parent} was merged into {target} by {at}"),
             stack::How::Squashed => {
                 format!("{parent} looks squash- or rebase-merged into {target} as {at}")
+            }
+            stack::How::FastForward => {
+                format!("{parent} looks fast-forwarded into {target} up to {at}")
             }
             stack::How::Declared => format!("{parent} was declared merged into {target} at {at}"),
         }
@@ -537,10 +541,14 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
     if let Some(base) = &base
         && !land::is_trunk(common_dir, &local, &parent)
         && let Some(target) = land::target(common_dir, &local, &parent)?
-        && let Some(landing) = land::landed(common_dir, base.commit, &target)?
+        && let was_on = land::was_on_target(&local, name, base.commit, &target.name)
+        && let Some(landing) = land::landed(common_dir, base.commit, &target, was_on)?
     {
-        if auto && landing.how == stack::How::Squashed && !land::gone(common_dir, &local, &parent)?
-        {
+        // Found by content, or by a record that may be stale (a target
+        // reset to a later commit, say): followed unasked only once the
+        // parent is gone.
+        let guessed = matches!(landing.how, stack::How::Squashed | stack::How::FastForward);
+        if auto && guessed && !land::gone(common_dir, &local, &parent)? {
             return Ok(Outcome::LooksLanded(Landed {
                 parent: parent.clone(),
                 target: target.name.clone(),
@@ -570,6 +578,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
             "gitfold: stack base",
         )?;
         settings::set_restack_blocked(common_dir, name, None)?;
+        land::record(common_dir, name, &parent, parent_tip)?;
         return Ok(match base.commit == parent_tip {
             true => Outcome::UpToDate,
             false => Outcome::BaseMoved,
@@ -583,6 +592,7 @@ fn restack_branch(common_dir: &Path, name: &str, dry_run: bool, auto: bool) -> R
         Copied::Dry => return Ok(Outcome::Would(new)),
         Copied::Stop(outcome) => return Ok(outcome),
     };
+    land::record(common_dir, name, &parent, parent_tip)?;
     Ok(Outcome::Restacked {
         new,
         dropped,
@@ -677,6 +687,7 @@ fn reparent(
         Err(e) => return Err(e),
     };
     settings::set_parent(common_dir, name, Some(&target.name))?;
+    land::record(common_dir, name, &target.name, landing.at)?;
     settings::set_landing(common_dir, name, None)?;
     let own = stack::count(common_dir, landing.at, tip_of(common_dir, name)?)?;
     Ok(Outcome::Landed {
@@ -704,6 +715,9 @@ fn finish_landing(common_dir: &Path, name: &str) -> Result<()> {
         == Some(at)
     {
         settings::set_parent(common_dir, name, Some(target))?;
+        if let Ok(at) = ObjectId::from_hex(at.as_bytes()) {
+            land::record(common_dir, name, target, at)?;
+        }
     } else if restack::pending(&StateDir::of(common_dir, name)) {
         return Ok(());
     }
@@ -1066,10 +1080,13 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
     if !trunk
         && let Some(base) = &base
         && let Ok(Some(target)) = land::target(common_dir, local, &parent)
-        && let Ok(Some(landing)) = land::landed(common_dir, base.commit, &target)
+        && let was_on = land::was_on_target(local, name, base.commit, &target.name)
+        && let Ok(Some(landing)) = land::landed(common_dir, base.commit, &target, was_on)
     {
         notes.push(match landing.how {
-            stack::How::Squashed => "parent looks merged: re-parent with stack sync".into(),
+            stack::How::Squashed | stack::How::FastForward => {
+                "parent looks merged: re-parent with stack sync".into()
+            }
             _ => "parent merged: re-parent with stack sync".into(),
         });
     } else if local.restack_blocked(name).is_some() {

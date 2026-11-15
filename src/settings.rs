@@ -5,11 +5,13 @@
 //!   mode), `gitfoldTrackReads` (whether it records reads), and for a
 //!   stacked branch `gitfoldParent` (the branch it is built on),
 //!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only),
-//!   `gitfoldRestackBlocked` (the restack that conflicted) and
-//!   `gitfoldLanding` (a move onto a parent's landing under way; see
-//!   `cli::stack`); for a proposal (`gitfold propose`), `gitfoldProposal`
-//!   (the layer it would change), `gitfoldProposedBy` (the workspace that
-//!   proposed it) and `gitfoldConsent` (the last `gitfold consent`);
+//!   `gitfoldRestackBlocked` (the restack that conflicted),
+//!   `gitfoldLanding` (a move onto a parent's landing under way) and
+//!   `gitfoldBaseOnTarget` (whether its parent base was in the parent's
+//!   target when recorded; see `cli::stack`); for a proposal (`gitfold
+//!   propose`), `gitfoldProposal` (the layer it would change),
+//!   `gitfoldProposedBy` (the workspace that proposed it) and
+//!   `gitfoldConsent` (the last `gitfold consent`);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again),
@@ -50,6 +52,11 @@ const CONSENT: &str = "gitfoldConsent";
 /// the branch moves onto where its parent landed, until the target is its
 /// parent.
 const LANDING: &str = "gitfoldLanding";
+/// `branch.<branch>.gitfoldBaseOnTarget`: `<parent base> <target> <yes|no>`,
+/// whether the parent base was in its parent's target (trunk, or the
+/// parent's own parent) when it was set, to tell a fast-forward landing
+/// from a fresh parent.
+const BASE_ON_TARGET: &str = "gitfoldBaseOnTarget";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -218,6 +225,12 @@ impl Local {
         self.branch(branch, LANDING)
     }
 
+    /// Whether the parent base of `branch` was in its parent's target when
+    /// it was set, if recorded (see `BASE_ON_TARGET`).
+    pub fn base_on_target(&self, branch: &str) -> Option<String> {
+        self.branch(branch, BASE_ON_TARGET)
+    }
+
     /// The remote `branch` pushes to and its branch there, from git's own
     /// `branch.<branch>.remote` and `.merge`, if both are set.
     pub fn upstream(&self, branch: &str) -> Option<(String, String)> {
@@ -315,6 +328,15 @@ pub fn set_consent(git_dir: &Path, branch: &str, consent: &str) -> Result<()> {
     set_branch(git_dir, branch, CONSENT, consent)
 }
 
+/// Records whether the parent base of `branch` was in its parent's target
+/// (see `BASE_ON_TARGET`), or forgets it.
+pub fn set_base_on_target(git_dir: &Path, branch: &str, record: Option<&str>) -> Result<()> {
+    match record {
+        Some(record) => set_branch(git_dir, branch, BASE_ON_TARGET, record),
+        None => unset_branch(git_dir, branch, BASE_ON_TARGET),
+    }
+}
+
 /// Records the move of `branch` onto its parent's landing under way, or
 /// forgets it.
 pub fn set_landing(git_dir: &Path, branch: &str, landing: Option<&str>) -> Result<()> {
@@ -384,6 +406,11 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
         (
             RESTACK,
             (local.restack_manual(from)).then(|| set_restack_manual(common_dir, to, true)),
+        ),
+        // Names the base it is about: stale on the fork if its base differs.
+        (
+            BASE_ON_TARGET,
+            (local.base_on_target(from)).map(|r| set_base_on_target(common_dir, to, Some(&r))),
         ),
     ];
     for (key, result) in copied {

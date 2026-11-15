@@ -388,7 +388,8 @@ decision that creates them.
   and the lens commit's `gitfold-lens 1` header (the push guard and a
   remount look for it), the stack refs `refs/gitfold-stack/<branch>` and
   the `branch.<b>.gitfoldParent`, `gitfoldRestack`,
-  `gitfoldRestackBlocked` and `gitfoldLanding` settings, the
+  `gitfoldRestackBlocked`, `gitfoldLanding` and `gitfoldBaseOnTarget`
+  settings, the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
@@ -1681,7 +1682,9 @@ pull requests merged into each other), else the **trunk**
 1. B in the target's history, brought in by a merge (of B, or of commits
    the parent got later): the first commit of the target's first-parent
    line that has B, found by bisection (once one has it, every later one
-   does); landed there unless that is B's own child on the line.
+   does); landed there unless that is B's own child on the line. On the
+   line itself, B landed by a fast-forward if it wasn't in the target when
+   recorded (see the guards below).
 2. Else, if B has changes since it and the target diverged (MB): the
    first commit S of `rev-list --ancestry-path MB..target -- <paths B
    changed>` (the paths on its standard input) where `merge_trees(MB, S,
@@ -1734,8 +1737,15 @@ their stack refs saying where their own commits start.
   bottom branch.
 - **Guards:** B with nothing of its own since the merge base is trivially
   a no-op merge, so it never counts; B on the target's first-parent line
-  is what a fresh parent (no commits yet) looks like, so a fast-forward
-  isn't taken either (`stack merged` says it). Main independently making
+  is also what a fresh parent (no commits yet) looks like, so a
+  fast-forward is taken only if B wasn't in the target when gitfold set
+  it: every `stack on`, `branch --on`, restack and re-parent records that
+  (`branch.<b>.gitfoldBaseOnTarget = <B> <target> <yes|no>`, naming the
+  base and target it is about, so a stale record says nothing). Without a
+  record (branches stacked before it was kept), a fast-forward isn't
+  taken (`stack merged` says it). A target moved back behind B finds
+  nothing; one reset forward over B looks like a fast-forward, so it is
+  treated as a guess like a squash. Main independently making
   the same change looks like a squash: the content is there, but the child
   would leave a parent that may still be going on. So a squash is said to
   "look" merged; `stack sync` (asked for) follows it, and the turn-boundary
@@ -1971,8 +1981,7 @@ compact node table and write measurements. Next:
   than per path.
 - **Stacks, next phases** (see
   [stacks](#stacked-branches-restacks-computed-by-plumbing-moved-like-a-checkout)).
-  *Landings:* a forge's answer as a hint (`gh pr view`), fast-forwards
-  told apart from fresh parents (by the target's reflog), `stack sync
+  *Landings:* a forge's answer as a hint (`gh pr view`), `stack sync
   --fetch`, and blocked restacks reaching the child's inbox, once per
   parent tip. *Layers and stacks together:* a child stacked on a
   parent and also showing the parent's uncommitted work as a layer is the
