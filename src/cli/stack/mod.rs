@@ -316,15 +316,28 @@ fn layers_shown(
     target: &str,
     frozen: bool,
 ) -> Result<Option<String>> {
-    let state = StateDir::of(common_dir, name);
-    if !state.opened() || !lensed(&state)? {
+    if !lensed(&StateDir::of(common_dir, name))? {
         return Ok(None);
     }
-    let again = if frozen { " --frozen" } else { "" };
     Ok(Some(format!(
-        "can't move while layers are shown: `gitfold layer remove --all`, then `gitfold layer \
-         base {target}{again}`"
+        "can't move while layers are shown: `gitfold layer remove --all`, then {}",
+        base_command(target, frozen, true)
     )))
+}
+
+/// `gitfold layer base TARGET`, with `--frozen` if `frozen`; `tick`: in
+/// backticks.
+pub(super) fn base_command(target: &str, frozen: bool, tick: bool) -> String {
+    let again = if frozen { " --frozen" } else { "" };
+    let q = if tick { "`" } else { "" };
+    format!("{q}gitfold layer base {target}{again}{q}")
+}
+
+/// Whether a move of branch `name` onto `target` is asked for with
+/// `--frozen`: its base is frozen, and `target` isn't the trunk (which takes
+/// the base away).
+fn frozen_onto(common_dir: &Path, local: &Local, name: &str, target: &str) -> bool {
+    local.restack_manual(name) && !land::is_trunk(common_dir, local, target)
 }
 
 /// `layers_shown` for a move of branch `name` onto `target` (as users name
@@ -335,7 +348,7 @@ fn layers_wait(
     name: &str,
     target: &str,
 ) -> Result<Option<Outcome>> {
-    let frozen = local.restack_manual(name) && !land::is_trunk(common_dir, local, target);
+    let frozen = frozen_onto(common_dir, local, name, target);
     Ok(layers_shown(common_dir, name, target, frozen)?.map(Outcome::Waits))
 }
 
@@ -345,12 +358,9 @@ fn layers_wait(
 /// its workspace shows layers (a move waits for that), so the advice given
 /// is never refused for it. `tick`: each command in backticks.
 fn advice(common_dir: &Path, local: &Local, name: &str, target: &str, tick: bool) -> String {
-    let frozen = local.restack_manual(name) && !land::is_trunk(common_dir, local, target);
-    let again = if frozen { " --frozen" } else { "" };
+    let base = base_command(target, frozen_onto(common_dir, local, name, target), tick);
     let q = if tick { "`" } else { "" };
-    let base = format!("{q}gitfold layer base {target}{again}{q}");
-    let state = StateDir::of(common_dir, name);
-    match state.opened() && lensed(&state).unwrap_or(false) {
+    match lensed(&StateDir::of(common_dir, name)).unwrap_or(false) {
         true => format!("{q}gitfold layer remove --all{q}, then {base}"),
         false => base,
     }
@@ -1028,7 +1038,7 @@ fn copy_onto(
 ) -> Result<Copied> {
     let local = Local::read(common_dir);
     let state = StateDir::of(common_dir, name);
-    if state.opened() && lensed(&state)? {
+    if lensed(&state)? {
         return Ok(Copied::Stop(Outcome::Waits(
             "can't move while layers are shown: `gitfold layer remove --all` first".into(),
         )));
@@ -1129,9 +1139,10 @@ fn on_parent(
             && stack::is_ancestor(common_dir, parent_tip, tip)?))
 }
 
-/// Whether the workspace in `state` shows layers, as stored or as applied.
+/// Whether the workspace in `state`, if it has opened, shows layers, as
+/// stored or as applied.
 fn lensed(state: &StateDir) -> Result<bool> {
-    Ok(Lens::read(state)?.is_on() || Applied::read(state)?.layers()?.is_on())
+    Ok(state.opened() && (Lens::read(state)?.is_on() || Applied::read(state)?.layers()?.is_on()))
 }
 
 /// An interrupted restack of the workspace in `state` finished or undone

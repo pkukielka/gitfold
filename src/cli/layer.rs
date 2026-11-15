@@ -791,9 +791,11 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
         Some(n) => format!("your {n} commits sit on {parent}"),
         None => format!("your commits sit on {parent}"),
     };
-    let again = if frozen { " --frozen" } else { "" };
     let how = match (frozen || trunk, own) {
-        (true, _) => format!("`gitfold layer base {parent}{again}` updates it"),
+        (true, _) => format!(
+            "{} updates it",
+            super::stack::base_command(&parent, frozen, true)
+        ),
         (false, Some(0)) => format!("it follows {parent}"),
         (false, Some(1)) => format!("it moves when {parent} gets new commits"),
         (false, _) => format!("they move when {parent} gets new commits"),
