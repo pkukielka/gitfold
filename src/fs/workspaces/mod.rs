@@ -185,18 +185,40 @@ impl Workspaces {
     }
 
     /// (inode, last component) of the entries directly below `prefix` ("" for
-    /// the root).
+    /// the root), without namespaces left empty (`namespace_empty`).
     pub fn children(&self, prefix: &str) -> Vec<(u64, Vec<u8>)> {
-        let list = self.list.read();
-        (list.iter().enumerate())
-            .filter(|(_, (_, entry))| {
-                !matches!(entry, Registered::Removing(_) | Registered::Removed)
-            })
-            .filter_map(|(slot, (path, _))| {
-                let rest = super::child_name(prefix, path.as_bytes())?;
-                Some((inode::ws(slot as u32, 0), rest.to_vec()))
-            })
+        let found: Vec<(u64, Vec<u8>, Option<String>)> = {
+            let list = self.list.read();
+            (list.iter().enumerate())
+                .filter(|(_, (_, entry))| {
+                    !matches!(entry, Registered::Removing(_) | Registered::Removed)
+                })
+                .filter_map(|(slot, (path, entry))| {
+                    let rest = super::child_name(prefix, path.as_bytes())?;
+                    let namespace = matches!(entry, Registered::Namespace).then(|| path.clone());
+                    Some((inode::ws(slot as u32, 0), rest.to_vec(), namespace))
+                })
+                .collect()
+        };
+        (found.into_iter())
+            .filter(|(_, _, ns)| ns.as_deref().is_none_or(|ns| !self.namespace_empty(ns)))
+            .map(|(ino, name, _)| (ino, name))
             .collect()
+    }
+
+    /// Whether namespace `path` of branches holds nothing any more: no open
+    /// workspace below it, and no branch (its last one removed, such as a
+    /// proposal's after it is accepted or rejected). Listings leave it out.
+    pub fn namespace_empty(&self, path: &str) -> bool {
+        if path.starts_with('@') {
+            return false;
+        }
+        let prefix = format!("{path}/");
+        let open = (self.list.read().iter()).any(|(p, entry)| {
+            p.starts_with(&prefix)
+                && matches!(entry, Registered::Workspace(_) | Registered::Removing(_))
+        });
+        !open && !git::any_ref_under(&[format!("refs/heads/{prefix}")])
     }
 
     fn add(&self, path: &str, entry: Registered) -> u32 {

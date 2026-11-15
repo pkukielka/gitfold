@@ -386,6 +386,18 @@ pub fn build_view(
                 (change.item(), None)
             }
             _ => {
+                // Merged against B's entry: a layer's version from before a
+                // change B made since reverts it, as with one layer.
+                for &(ix, change) in changes {
+                    if change.item() != in_base
+                        && lookup(repo, layer_bases[ix], path.as_ref())? != in_base
+                    {
+                        notes.push(Note::HidesBase {
+                            layer: ix,
+                            path: path.clone(),
+                        });
+                    }
+                }
                 let sides: Vec<(Option<Item>, &str)> = (changes.iter())
                     .map(|(ix, c)| (c.item(), layers[*ix].name.as_str()))
                     .collect();
@@ -399,7 +411,7 @@ pub fn build_view(
         edits.push((path.as_ref(), Change::from_item(entry)));
         if let Some(markers) = conflict {
             notes.push(Note::Conflict {
-                layers: ixs.clone(),
+                layers: conflicting(repo, in_base, changes, layers)?,
                 path: path.clone(),
                 markers,
             });
@@ -415,6 +427,33 @@ pub fn build_view(
         mixed,
         blended,
         notes,
+    })
+}
+
+/// Of the layers whose `changes` to one whole-file path don't merge, those
+/// that conflict: the layers of each pair whose changes don't merge (against
+/// `base`, B's entry); all of them if no pair alone conflicts.
+fn conflicting(
+    repo: &gix::Repository,
+    base: Option<Item>,
+    changes: &[(usize, Change)],
+    layers: &[Pin],
+) -> Result<Vec<usize>> {
+    let side = |(ix, c): &(usize, Change)| (c.item(), layers[*ix].name.as_str());
+    let mut out = BTreeSet::new();
+    for (i, a) in changes.iter().enumerate() {
+        for b in &changes[i + 1..] {
+            if !matches!(
+                merge_layers(repo, base, &[side(a), side(b)])?,
+                Merged::Clean(_)
+            ) {
+                out.extend([a.0, b.0]);
+            }
+        }
+    }
+    Ok(match out.is_empty() {
+        true => changes.iter().map(|(ix, _)| *ix).collect(),
+        false => out.into_iter().collect(),
     })
 }
 
@@ -1296,6 +1335,41 @@ mod tests {
         );
     }
 
+    /// The same with two layers changing the path, merged against the base:
+    /// the older one's version would revert the base's change, reported too.
+    #[test]
+    fn view_on_a_newer_base_merged() {
+        let r = Repo::new("newer-merged");
+        let old = scenario(&r);
+        let util = lines(8, "util");
+        r.git(&["checkout", "-q", "-b", "low", "main"]);
+        r.write("src/util.c", &util.replace("util1\n", "util1 LOW\n"));
+        r.commit("low");
+        r.git(&["checkout", "-q", "main"]);
+        r.write("src/util.c", &util.replace("util4\n", "util4 UP\n"));
+        let new = r.commit("upstream");
+        r.git(&["checkout", "-q", "-b", "high", "main"]);
+        r.write(
+            "src/util.c",
+            &util
+                .replace("util4\n", "util4 UP\n")
+                .replace("util8\n", "util8 HIGH\n"),
+        );
+        r.commit("high");
+        r.git(&["checkout", "-q", "main"]);
+        let repo = r.open();
+        let mut layers = stack(&r, old, &["low"]);
+        layers.extend(stack(&r, new, &["high"]));
+        let view = build_view(&repo, new, &layers, &registries).unwrap();
+        assert_eq!(
+            view.notes,
+            [Note::HidesBase {
+                layer: 0,
+                path: "src/util.c".into()
+            }]
+        );
+    }
+
     /// Two layers append to the registry: a plain 3-way merge conflicts
     /// (git's too), the blend keeps both. Two layers changing the same line
     /// differently: the upper one's change is dropped and reported.
@@ -1406,13 +1480,19 @@ mod tests {
             "{shown}"
         );
         assert!(shown.ends_with(">>>>>>> other"), "{shown}");
+        // Named: the two whose changes conflict, not top's, which merges.
         assert_eq!(
             view.notes,
             [Note::Conflict {
-                layers: vec![0, 1, 2],
+                layers: vec![1, 2],
                 path: "src/util.c".into(),
                 markers: true
             }]
+        );
+        // The path is still all three's.
+        assert_eq!(
+            view.mixed.get(BStr::new("src/util.c")),
+            Some(&vec![0, 1, 2])
         );
 
         let view = build_view(

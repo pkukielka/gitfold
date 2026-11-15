@@ -114,6 +114,15 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         return super::stack::base(repo, args.workspace, target, *frozen, *yes, *all);
     }
     let name = super::branch_or_current(args.workspace, repo)?;
+    if let Some(LayerOp::Add { branch, .. }) = &args.op
+        && *branch == name
+    {
+        clap::Error::raw(
+            clap::error::ErrorKind::ValueValidation,
+            format!("{name} can't be a layer of its own workspace\n"),
+        )
+        .exit();
+    }
     check_name(&name)?;
     let common_dir = git::init(repo)?;
     let state = StateDir::of(&common_dir, &name);
@@ -122,29 +131,56 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
         return Err(Refusal::NotFound.error(format!("{name} has no workspace yet")));
     }
     let store = Store::default();
+    if args.op.is_none() {
+        print!("{}", listing(&common_dir, &state, &Lens::read(&state)?)?);
+        return Ok(());
+    }
+    let local = Local::read(&common_dir);
+    // Read, changed and stored with no other change in between.
+    let _lock = crate::state::lens::lock(&state)?;
     let mut lens = Lens::read(&state)?;
     let done = match args.op {
-        None => {
-            print!("{}", listing(&common_dir, &state, &lens)?);
-            return Ok(());
-        }
-        Some(LayerOp::Base { .. }) => unreachable!("handled above"),
+        None | Some(LayerOp::Base { .. }) => unreachable!("handled above"),
         Some(LayerOp::Add {
             branch,
             frozen,
             commits,
         }) => {
-            ensure!(branch != name, "a workspace can't be its own layer");
+            refuse_with_base(&common_dir, &local, &name)?;
             let mut layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
-            let what = describe(&layer);
-            match lens.find(&branch) {
+            let mut what = describe(&layer);
+            if layer.updates == Updates::Live && layer.merge_base == layer.seal {
+                let _ = write!(
+                    what,
+                    " (nothing to show yet: all of {branch} is in your base already; what it \
+                     does next shows here)"
+                );
+            }
+            match slot(&local, &lens, &name, &branch) {
                 Some(i) => {
+                    let was = &lens.layers[i];
                     // Not moved if it is where it was.
-                    if lens.layers[i].seal == layer.seal {
-                        layer.moved = lens.layers[i].moved;
+                    if was.seal == layer.seal {
+                        layer.moved = was.moved;
                     }
+                    let mine = |b: &str| local.proposal(b).is_some_and(|(_, by)| by == name);
+                    let note = if was.branch == branch {
+                        // A proposal again: still in place of its layer.
+                        layer.instead = was.instead.clone();
+                        String::new()
+                    } else if mine(&branch) {
+                        // A proposal in place of its layer, put back later.
+                        layer.instead = Some(Box::new(was.clone()));
+                        format!(" (in place of {})", was.branch)
+                    } else {
+                        format!(
+                            " (in place of your proposal {0}, which stays: `gitfold layer add \
+                             {0}` shows it again, `gitfold reject {0}` drops it)",
+                            was.branch
+                        )
+                    };
                     lens.layers[i] = layer;
-                    format!("layer {branch} updated: {what}")
+                    format!("layer {branch} updated: {what}{note}")
                 }
                 None => {
                     lens.layers.push(layer);
@@ -160,16 +196,69 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             branch: Some(branch),
             ..
         }) => {
-            let i = lens.find(&branch).ok_or_else(|| {
-                Refusal::NotFound.error(format!("{branch} isn't a layer of {name}"))
-            })?;
-            lens.layers.remove(i);
-            format!("layer {branch} removed")
+            // Its layer, or this workspace's proposal shown in its place; a
+            // proposal only itself.
+            let mine = local.proposal(&branch).is_some_and(|(_, by)| by == name);
+            let i = slot(&local, &lens, &name, &branch)
+                .filter(|&i| !mine || lens.layers[i].branch == branch)
+                .ok_or_else(|| {
+                    Refusal::NotFound.error(format!("{branch} isn't a layer of {name}"))
+                })?;
+            let was = lens.layers.remove(i);
+            match was.branch == branch {
+                true => format!("layer {branch} removed"),
+                false => format!(
+                    "layer {branch} removed (it showed your proposal {0}, which stays: `gitfold \
+                     reject {0}` drops it)",
+                    was.branch
+                ),
+            }
         }
     };
     let applied = store_and_apply(&common_dir, &state, &lens)?;
     println!("{done}\n{applied}");
     Ok(())
+}
+
+/// The layer of `lens` (the layers of workspace `name`) that stands for
+/// `branch`: `branch`'s own, or `name`'s proposal to change it shown in its
+/// place. A proposal of `name`'s stands for its layer: the same one.
+pub(super) fn slot(local: &Local, lens: &Lens, name: &str, branch: &str) -> Option<usize> {
+    let target_of = |b: &str| {
+        (local.proposal(b))
+            .filter(|(_, by)| by == name)
+            .map_or_else(|| b.to_string(), |(layer, _)| layer)
+    };
+    let target = target_of(branch);
+    (lens.layers.iter()).position(|l| l.branch == branch || target_of(&l.branch) == target)
+}
+
+/// Refuses layers in the workspace of `name` if it is built on a base (not
+/// the trunk): moving it onto its base's new commits with layers shown
+/// isn't supported yet.
+fn refuse_with_base(common_dir: &Path, local: &Local, name: &str) -> Result<()> {
+    let Some(parent) = local.parent(name) else {
+        return Ok(());
+    };
+    if super::stack::land::is_trunk(common_dir, local, &parent) {
+        return Ok(());
+    }
+    let trunk = trunk_name(common_dir, local).unwrap_or_else(|| "main".into());
+    Err(Refusal::Changes.error(format!(
+        "{name} is built on {parent}; layers on a branch with a base aren't supported yet: \
+         show {parent}'s work with a snapshot (`gitfold snapshot {parent}`), or take {name} \
+         off its base first (`gitfold layer base {trunk}`)"
+    )))
+}
+
+/// The trunk's branch name, as the user knows it: `main` for `origin/main`.
+fn trunk_name(common_dir: &Path, local: &Local) -> Option<String> {
+    let trunk = super::stack::land::trunk(common_dir, local)?;
+    let remote = format!("refs/remotes/{trunk}");
+    match (trunk.split_once('/'), git::resolve(&remote)) {
+        (Some((_, branch)), Ok(_)) if !git::branch_exists(&trunk) => Some(branch.to_string()),
+        _ => Some(trunk),
+    }
 }
 
 /// What `layer` shows and how it updates, as the listing says it.
@@ -217,8 +306,14 @@ pub fn layer_hook(event: &str) -> Result<()> {
             Err(e) => log::debug!("gitfold layer --claude-hook: moving {name}: {e:#}"),
         }
         let state = StateDir::of(&common_dir, &name);
+        let live = |lens: &Lens| lens.layers.iter().any(|l| l.updates == Updates::Live);
+        // Most turns: nothing to lock for.
+        if !live(&Lens::read(&state)?) {
+            return Ok(());
+        }
+        let _lock = crate::state::lens::lock(&state)?;
         let mut lens = Lens::read(&state)?;
-        let mut moved = Vec::new();
+        let (mut moved, mut stored) = (Vec::new(), false);
         let local = Local::read(&common_dir);
         for layer in &mut lens.layers {
             if layer.updates != Updates::Live {
@@ -235,7 +330,7 @@ pub fn layer_hook(event: &str) -> Result<()> {
             {
                 seal::seal(&Store::default(), &theirs)?;
             }
-            let Some((newest, shows)) = newest(&common_dir, layer)? else {
+            let Some((newest, shows)) = newest(&common_dir, &local, layer)? else {
                 continue;
             };
             if newest == layer.seal {
@@ -249,6 +344,12 @@ pub fn layer_hook(event: &str) -> Result<()> {
             layer.merge_base = git::merge_base(state.read_base()?.id, newest)?;
             layer.seal = newest;
             layer.shows = shows;
+            stored = true;
+            // The same files (its snapshot of what its tip has): nothing to
+            // say, nor a move to show.
+            if files == 0 {
+                continue;
+            }
             layer.moved = now();
             moved.push(format!(
                 "{} ({files} {})",
@@ -260,10 +361,13 @@ pub fn layer_hook(event: &str) -> Result<()> {
                 }
             ));
         }
-        if moved.is_empty() {
+        if !stored {
             return Ok(());
         }
         let applied = store_and_apply(&common_dir, &state, &lens)?;
+        if moved.is_empty() {
+            return Ok(());
+        }
         println!(
             "gitfold: the layers shown in this workspace moved to their latest work: {}. \
              Files you read from them may have changed.",
@@ -280,22 +384,38 @@ pub fn layer_hook(event: &str) -> Result<()> {
 }
 
 /// Where live `layer` is now, and what it shows there: its workspace's
-/// newest snapshot (`None` if it has none), or with `--commits` or without
-/// a workspace, its branch's tip (`None` if the branch is gone).
-fn newest(common_dir: &Path, layer: &Layer) -> Result<Option<(ObjectId, Shows)>> {
+/// newest snapshot, or with `--commits` or without a workspace, its
+/// branch's tip (`None` if the branch is gone).
+///
+/// Only a snapshot of its workspace as it is now counts, never one of an
+/// earlier workspace of the branch (removed, then opened again: its
+/// snapshots' refs outlive it). A workspace with none yet (opened since, or
+/// whose sessions never stopped, as a person's) gets one now, at this
+/// turn's start: the layer follows its work rather than going stale.
+fn newest(common_dir: &Path, local: &Local, layer: &Layer) -> Result<Option<(ObjectId, Shows)>> {
     if !git::branch_exists(&layer.branch) {
         return Ok(None);
     }
-    if layer.shows != Shows::CommitsOnly && StateDir::of(common_dir, &layer.branch).opened() {
-        let id = crate::state::workspace_id(&layer.branch);
-        let newest = seal::list(common_dir, &id)?.last().map(|&(_, s)| s);
-        return Ok(newest.map(|s| (s, Shows::Work)));
+    let theirs = StateDir::of(common_dir, &layer.branch);
+    if layer.shows != Shows::CommitsOnly && theirs.opened() {
+        let newest = match seal::newest(&theirs) {
+            Some(newest) => newest,
+            None => seal::seal(&Store::default(), &theirs)?.commit,
+        };
+        return Ok(Some((newest, Shows::Work)));
     }
     let shows = match layer.shows {
         Shows::CommitsOnly => Shows::CommitsOnly,
+        _ if is_proposal(local, &layer.branch) => Shows::Work,
         _ => Shows::Commits,
     };
     Ok(Some((git::branch_tip(&layer.branch)?.id, shows)))
+}
+
+/// Whether `branch` is a proposal: a workspace to edit, its work shown as
+/// all work even before it first opens (its tip, then).
+fn is_proposal(local: &Local, branch: &str) -> bool {
+    local.proposal(branch).is_some()
 }
 
 /// `gitfold layer --claude-hook pre-tool-use`: denies Claude Code's edit
@@ -332,8 +452,8 @@ fn deny_hook() -> Result<()> {
             let there = mount.join(owner).join(&path);
             return Ok(Some(format!(
                 "{path} shows your proposal {owner} (a change to {layer}'s work), read-only \
-                 here: edit it there, at {}; `gitfold layer add {owner}` then shows your \
-                 edits here (your next turn does too).",
+                 here: edit it there, at {}; your next turn shows your edits here (or now: \
+                 `gitfold layer add {owner}`).",
                 there.display()
             )));
         }
@@ -350,12 +470,15 @@ fn deny_hook() -> Result<()> {
         }
         let all = and_list(names.iter().map(|n| n.to_string()));
         let base = state.read_base()?;
-        let conflict = match crate::state::lens::view(&state.common_dir, &base.id, &lens)? {
-            Some(v) if v.conflicts.iter().any(|c| c.path == path.as_bytes()) => {
-                " Their changes to it conflict."
-            }
-            _ => "",
-        };
+        let view = crate::state::lens::view(&state.common_dir, &base.id, &lens)?;
+        let conflict =
+            match view.and_then(|v| v.conflicts.into_iter().find(|c| c.path == path.as_bytes())) {
+                Some(c) => {
+                    let names = c.layers.iter().map(|&i| lens.layers[i].branch.clone());
+                    format!(" The changes of {} conflict there.", and_list(names))
+                }
+                None => String::new(),
+            };
         Ok(Some(format!(
             "{path} shows the merge of {all}'s work (layers, read-only here): it can't be \
              changed in this workspace.{conflict} To change it, run `gitfold propose {path} \
@@ -440,7 +563,13 @@ pub(super) fn layer_of(
         match (theirs.opened(), commits) {
             (true, false) => (seal::seal(store, &theirs)?.commit, Shows::Work, updates),
             (_, true) => (git::branch_tip(branch)?.id, Shows::CommitsOnly, updates),
-            (false, false) => (git::branch_tip(branch)?.id, Shows::Commits, updates),
+            (false, false) => {
+                let shows = match is_proposal(&Local::read(common_dir), branch) {
+                    true => Shows::Work,
+                    false => Shows::Commits,
+                };
+                (git::branch_tip(branch)?.id, shows, updates)
+            }
         }
     } else {
         // Stored in a line of tab-separated fields.
@@ -470,7 +599,39 @@ pub(super) fn layer_of(
         moved: now(),
         seal,
         merge_base,
+        instead: None,
     })
+}
+
+/// For a workspace told `branch`'s work changed: when its layer `layer` of
+/// it shows that (`None`: it shows something else in its place).
+pub(super) fn when_shown(layer: Option<&Layer>, branch: &str) -> String {
+    match layer {
+        Some(l) if l.updates == Updates::Frozen => format!(
+            "your layer of {branch} is frozen: `{}` takes its work as it is now",
+            add_command(l)
+        ),
+        Some(l) if l.shows == Shows::CommitsOnly => format!(
+            "your layer of {branch} shows only its commits: it shows the change once {branch} \
+             commits it"
+        ),
+        _ => format!(
+            "your layer of {branch} shows it from your next turn (or now: `gitfold layer add \
+             {branch}`)"
+        ),
+    }
+}
+
+/// The command that adds `layer` again as it updates.
+fn add_command(layer: &Layer) -> String {
+    let mut out = format!("gitfold layer add {}", layer.branch);
+    if layer.updates == Updates::Frozen {
+        out += " --frozen";
+    }
+    if layer.shows == Shows::CommitsOnly {
+        out += " --commits";
+    }
+    out
 }
 
 /// Stores `lens` for the workspace in `state` and has the daemon show it
@@ -577,7 +738,7 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
     use super::stack::land;
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(branch) else {
-        let trunk = land::trunk(common_dir, &local).unwrap_or_else(|| "-".into());
+        let trunk = trunk_name(common_dir, &local).unwrap_or_else(|| "-".into());
         return Ok(format!("Base: {trunk}\n"));
     };
     let trunk = land::is_trunk(common_dir, &local, &parent);

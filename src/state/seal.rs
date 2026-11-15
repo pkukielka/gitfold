@@ -10,6 +10,12 @@
 //! nothing new. Each new seal is kept by a ref, `refs/gitfold-seal/<id>/<seq>`,
 //! numbered from 1 (git would prune it otherwise); the oldest beyond
 //! `KEPT` are deleted.
+//!
+//! The refs outlive the workspace (`gitfold remove` keeps them while layers
+//! name them, and the id comes from the branch name), so the newest ref may
+//! hold an earlier workspace's work. What this workspace's newest seal is
+//! is recorded in its state directory (`SEALED`), which goes with it: a live
+//! layer follows that (`newest`), never an earlier workspace's work.
 
 use std::collections::HashMap;
 use std::fs;
@@ -27,6 +33,9 @@ use crate::store::Store;
 
 /// How many seals of one workspace are kept (the newest).
 const KEPT: usize = 16;
+
+/// The file in a workspace's state directory naming its newest seal.
+const SEALED: &str = "sealed";
 
 /// The identity and date seals (and mixes) are made with: the same trees and
 /// parents give the same commit.
@@ -64,9 +73,14 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
         .with_context(|| format!("taking a snapshot of {}", state.branch))?;
     let commit = commit(&state.common_dir, &tree, &base.id, &state.branch)?;
     let seals = list(&state.common_dir, &state.id)?;
+    let record = || {
+        crate::fsutil::write_atomic(&state.dir.join(SEALED), commit.to_string().as_bytes())
+            .with_context(|| format!("recording the snapshot of {}", state.branch))
+    };
     if let Some(&(_, newest)) = seals.last()
         && newest == commit
     {
+        record()?;
         return Ok(Seal { commit, same: true });
     }
     let seq = seals.last().map_or(1, |&(seq, _)| seq + 1);
@@ -75,6 +89,7 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
         &state.common_dir,
         &["update-ref", &name, &commit.to_string(), ""],
     )?;
+    record()?;
     // The oldest go, unless a workspace's layers name them.
     let named = super::lens::named_seals(&state.common_dir);
     let old = seals.iter().take((seals.len() + 1).saturating_sub(KEPT));
@@ -86,6 +101,13 @@ pub fn seal(store: &Store, state: &StateDir) -> Result<Seal> {
         commit,
         same: false,
     })
+}
+
+/// The newest seal of the workspace in `state` (this one, not an earlier
+/// workspace of its branch: see the module doc), if it has one.
+pub fn newest(state: &StateDir) -> Option<ObjectId> {
+    let hex = fs::read_to_string(state.dir.join(SEALED)).ok()?;
+    ObjectId::from_hex(hex.trim().as_bytes()).ok()
 }
 
 /// Workspace `id`'s seals, oldest first: (number, commit).

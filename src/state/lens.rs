@@ -23,10 +23,19 @@
 //! TAB <updates> TAB <moved> TAB <seal> TAB <merge base>`, with `<shows>`
 //! `work`, `commits-only` or `commits` (`Shows`), `<updates>` `live`,
 //! `frozen` or `fixed` (`Updates`) and `<moved>` when it last moved, in
-//! seconds since the epoch (names hold no control characters).
+//! seconds since the epoch (names hold no control characters). A layer line
+//! may be followed by an `instead` line with the same fields: the layer it
+//! stands in for, as it was (a proposal shown in its layer's place, see
+//! `cli::proposal`), put back when the proposal goes. Read and written under
+//! `lock`, so concurrent changes don't undo each other.
+//!
+//! Version 1 files (from builds before `layer add --frozen/--commits`) are
+//! read too: `layer <name> TAB <on|off> TAB <seal> TAB <merge base>`; a
+//! layer `on` is live and shows all work, one `off` (hidden) is dropped.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::os::fd::AsRawFd as _;
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
@@ -38,6 +47,40 @@ use crate::git;
 
 /// The file holding a workspace's layers.
 pub const LENS: &str = "lens";
+
+/// The file `lock` locks.
+const LOCK: &str = "lens.lock";
+
+/// Held while a command reads, changes and stores a workspace's layers
+/// (`lock`); released when dropped, also when the process dies.
+pub struct LayersLock {
+    _file: fs::File,
+}
+
+/// Locks the layers of the workspace in `state` against other commands
+/// changing them, waiting for one that does: an exclusive `flock` on a file
+/// in its state directory. Taken across each read-modify-write of the
+/// stored layers, so two at once (a hook moving live layers while `layer
+/// add` runs, a proposal accepted meanwhile) don't lose one's change. The
+/// daemon only reads them, and takes no such lock.
+pub fn lock(state: &StateDir) -> Result<LayersLock> {
+    let path = state.dir.join(LOCK);
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("locking {}", path.display()))?;
+    loop {
+        // SAFETY: a plain syscall on a descriptor `file` owns.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+            return Ok(LayersLock { _file: file });
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e).with_context(|| format!("locking {}", path.display()));
+        }
+    }
+}
 
 /// What a layer shows of its branch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +155,41 @@ pub struct Layer {
     /// Where the two workspaces' histories diverged: the layer's changes are
     /// its seal's against this.
     pub merge_base: ObjectId,
+    /// For a proposal shown in its layer's place: that layer as it was, put
+    /// back (its way of updating kept) when the proposal goes.
+    pub instead: Option<Box<Layer>>,
+}
+
+impl Layer {
+    /// Its fields as stored (see the module doc), from the name on.
+    fn fields(&self) -> String {
+        format!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            self.branch,
+            self.shows.word(),
+            self.updates.word(),
+            self.moved,
+            self.seal,
+            self.merge_base
+        )
+    }
+
+    /// A layer from its stored fields (see `fields`), of `line`.
+    fn from_fields(line: &str, fields: &str) -> Result<Layer> {
+        let fields: Vec<&str> = fields.split('\t').collect();
+        let [branch, shows, updates, moved, seal, merge_base] = fields[..] else {
+            bail!("bad line {line:?}");
+        };
+        Ok(Layer {
+            branch: branch.to_string(),
+            shows: Shows::parse(shows)?,
+            updates: Updates::parse(updates)?,
+            moved: moved.parse()?,
+            seal: ObjectId::from_hex(seal.as_bytes())?,
+            merge_base: ObjectId::from_hex(merge_base.as_bytes())?,
+            instead: None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -124,7 +202,19 @@ impl Lens {
     /// The layers stored for the workspace in `state` (none if it has no file).
     pub fn read(state: &StateDir) -> Result<Lens> {
         let path = state.dir.join(LENS);
-        Lens::parse(&stored_bytes(state)?).with_context(|| format!("reading {}", path.display()))
+        let mut lens = Lens::parse(&stored_bytes(state)?)
+            .with_context(|| format!("reading {}", path.display()))?;
+        // A version 1 file doesn't say when its layers moved: when it was
+        // last written, then.
+        if lens.layers.iter().any(|l| l.moved == 0)
+            && let Ok(at) = fs::metadata(&path).and_then(|m| m.modified())
+        {
+            let secs = (at.duration_since(std::time::UNIX_EPOCH)).map_or(0, |d| d.as_secs() as i64);
+            for l in lens.layers.iter_mut().filter(|l| l.moved == 0) {
+                l.moved = secs;
+            }
+        }
+        Ok(lens)
     }
 
     /// A layers file's content (empty: no layers).
@@ -134,27 +224,45 @@ impl Lens {
         }
         let text = std::str::from_utf8(data)?;
         let mut lines = text.lines();
-        if lines.next() != Some("version 2") {
+        let version = lines.next();
+        let mut layers: Vec<Layer> = Vec::new();
+        if version == Some("version 1") {
+            for line in lines {
+                let fields: Vec<&str> = (line.strip_prefix("layer ").unwrap_or(""))
+                    .split('\t')
+                    .collect();
+                let [branch, on, seal, merge_base] = fields[..] else {
+                    bail!("bad line {line:?}");
+                };
+                // Hidden: there are no hidden layers now.
+                if on != "on" {
+                    continue;
+                }
+                layers.push(Layer {
+                    branch: branch.to_string(),
+                    shows: Shows::Work,
+                    updates: Updates::Live,
+                    moved: 0,
+                    seal: ObjectId::from_hex(seal.as_bytes())?,
+                    merge_base: ObjectId::from_hex(merge_base.as_bytes())?,
+                    instead: None,
+                });
+            }
+            return Ok(Lens { layers });
+        }
+        if version != Some("version 2") {
             bail!("not a layers file this gitfold knows");
         }
-        let mut layers = Vec::new();
         for line in lines {
-            let fields: Vec<&str> = line
-                .strip_prefix("layer ")
-                .unwrap_or("")
-                .split('\t')
-                .collect();
-            let [branch, shows, updates, moved, seal, merge_base] = fields[..] else {
-                bail!("bad line {line:?}");
-            };
-            layers.push(Layer {
-                branch: branch.to_string(),
-                shows: Shows::parse(shows)?,
-                updates: Updates::parse(updates)?,
-                moved: moved.parse()?,
-                seal: ObjectId::from_hex(seal.as_bytes())?,
-                merge_base: ObjectId::from_hex(merge_base.as_bytes())?,
-            });
+            if let Some(fields) = line.strip_prefix("instead ") {
+                let Some(last) = layers.last_mut() else {
+                    bail!("bad line {line:?}");
+                };
+                last.instead = Some(Box::new(Layer::from_fields(line, fields)?));
+                continue;
+            }
+            let fields = line.strip_prefix("layer ").unwrap_or("");
+            layers.push(Layer::from_fields(line, fields)?);
         }
         Ok(Lens { layers })
     }
@@ -166,15 +274,10 @@ impl Lens {
             text += "version 2\n";
         }
         for l in &self.layers {
-            text += &format!(
-                "layer {}\t{}\t{}\t{}\t{}\t{}\n",
-                l.branch,
-                l.shows.word(),
-                l.updates.word(),
-                l.moved,
-                l.seal,
-                l.merge_base
-            );
+            text += &format!("layer {}\n", l.fields());
+            if let Some(instead) = &l.instead {
+                text += &format!("instead {}\n", instead.fields());
+            }
         }
         store_bytes(state, text.as_bytes())
     }
@@ -219,11 +322,13 @@ pub fn shown_anywhere(common_dir: &std::path::Path, branch: &str) -> bool {
     every_lens(common_dir, false).any(|lens| lens.find(branch).is_some())
 }
 
-/// Every seal a workspace's layers name, stored or applied: their refs are
-/// kept (`seal`).
+/// Every seal a workspace's layers name, stored or applied, and those of the
+/// layers proposals stand in for (put back later): their refs are kept
+/// (`seal`).
 pub fn named_seals(common_dir: &std::path::Path) -> HashSet<ObjectId> {
     every_lens(common_dir, true)
-        .flat_map(|lens| lens.layers.into_iter().map(|l| l.seal))
+        .flat_map(|lens| lens.layers.into_iter())
+        .flat_map(|l| std::iter::once(l.seal).chain(l.instead.map(|i| i.seal)))
         .collect()
 }
 
@@ -297,7 +402,8 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
                 name(layer)
             ),
             git::lens::Note::HidesBase { layer, path } => format!(
-                "{path}: {}'s version hides a change on your base since it diverged",
+                "{path}: {0}'s version is older than your base's (it hides a change made \
+                 since); ask {0} to update",
                 name(layer)
             ),
             git::lens::Note::Conflict {
@@ -470,4 +576,51 @@ pub fn store_bytes(state: &StateDir, data: &[u8]) -> Result<()> {
         };
     }
     Ok(write_atomic(&path, data)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: &str = "1111111111111111111111111111111111111111";
+    const B: &str = "2222222222222222222222222222222222222222";
+
+    #[test]
+    fn version_1_files_are_read() {
+        let v1 = format!("version 1\nlayer on1\ton\t{A}\t{B}\nlayer off1\toff\t{B}\t{A}\n");
+        let lens = Lens::parse(v1.as_bytes()).unwrap();
+        // On: live, all work; off (hidden): dropped.
+        assert_eq!(lens.layers.len(), 1);
+        let l = &lens.layers[0];
+        assert_eq!(
+            (l.branch.as_str(), l.shows, l.updates, l.seal.to_string()),
+            ("on1", Shows::Work, Updates::Live, A.to_string())
+        );
+        assert!(l.instead.is_none());
+        assert!(Lens::parse(b"version 9\n").is_err());
+    }
+
+    #[test]
+    fn a_proposal_keeps_the_layer_it_stands_in_for() {
+        let text = format!(
+            "version 2\nlayer b-prop/c\twork\tlive\t5\t{A}\t{B}\n\
+             instead b\tcommits-only\tfrozen\t3\t{B}\t{A}\nlayer d\tcommits\tfixed\t4\t{A}\t{A}\n"
+        );
+        let lens = Lens::parse(text.as_bytes()).unwrap();
+        let was = lens.layers[0].instead.as_deref().unwrap();
+        assert_eq!(
+            (was.branch.as_str(), was.shows, was.updates, was.moved),
+            ("b", Shows::CommitsOnly, Updates::Frozen, 3)
+        );
+        assert!(lens.layers[1].instead.is_none());
+        let dir = std::env::temp_dir().join(format!("gitfold-lens-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let state = StateDir {
+            dir: dir.clone(),
+            ..StateDir::of(&dir, "x")
+        };
+        lens.write(&state).unwrap();
+        assert_eq!(fs::read_to_string(dir.join(LENS)).unwrap(), text);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 }

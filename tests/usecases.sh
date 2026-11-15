@@ -112,7 +112,7 @@ mine" "$(cat "$W/a.txt")"
 check "UC8: and stays writable" sh -c "echo more >>'$W/a.txt'"
 eq "UC8: git sees only my change" " M a.txt" "$(git -C "$W" status --short)"
 eq "UC13: an unknown name: exit 3" "3" "$("$BIN" -C "$W" layer add nosuch >/dev/null 2>&1; echo $?)"
-check "UC13: a workspace can't show itself" fails "$BIN" -C "$W" layer add me
+eq "UC13: a workspace can't show itself: a usage error (exit 2)" "2" "$("$BIN" -C "$W" layer add me >/dev/null 2>&1; echo $?)"
 eq "UC13: removing what isn't a layer: exit 3" "3" "$("$BIN" -C "$W" layer remove nosuch >/dev/null 2>&1; echo $?)"
 check "UC9: remove --all" "$BIN" -C "$W" layer remove --all
 check "UC9: the layer's files are gone" test ! -e "$W/b.txt"
@@ -246,13 +246,10 @@ mount_fs
 U=$MNT/ui
 echo wip >>"$MNT/api/api.txt"
 out=$("$BIN" -C "$U" layer add api 2>&1); rc=$?
-if [ "$rc" = 0 ]; then
-    check "UC19: shown: api's work on top" grep -q wip "$U/api.txt"
-    check "UC19: git still clean" test -z "$(git -C "$U" status --short)"
-else
-    check "UC19: refused with a reason" test -n "$out"
-    eq "UC19: nothing changed" "one" "$(cat "$U/api.txt")"
-fi
+eq "UC19: layers on a branch with a base: refused (exit 4)" "4" "$rc"
+check "UC19: saying what to do instead" has "$out" \
+    "show api's work with a snapshot (\`gitfold snapshot api\`), or take ui off its base first (\`gitfold layer base main\`)"
+eq "UC19: nothing changed" "one|No layers." "$(cat "$U/api.txt")|$("$BIN" -C "$U" layer | tail -1)"
 eq "UC19: the branch untouched" "$(R rev-parse api)" "$(R rev-parse ui)"
 }
 

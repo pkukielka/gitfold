@@ -38,7 +38,7 @@ use crate::git::lens::{Change, Item};
 use crate::mount_table;
 use crate::refusal::Refusal;
 use crate::settings::{self, Local};
-use crate::state::lens::{Layer, Lens};
+use crate::state::lens::{Layer, Lens, Shows, Updates};
 use crate::state::markers::{Kind, Markers};
 use crate::state::retire::check_name;
 use crate::state::seal::IDENTITY;
@@ -268,6 +268,8 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     let paths = workspace_paths(&state, &args.paths)?;
     let store = Store::default();
     let local = Local::read(&common_dir);
+    // Read, changed and stored with no other change in between.
+    let _lock = state::lens::lock(&state)?;
     let mut lens = Lens::read(&state)?;
     let layer = match args.layer {
         Some(layer) => layer,
@@ -313,10 +315,13 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     let copied: Vec<String> = files.iter().map(|(path, _)| path.to_string()).collect();
     let mut out = String::new();
     if made {
+        let copy = match StateDir::of(&common_dir, &target).opened() {
+            true => format!("a copy of {target}'s work, uncommitted included"),
+            false => format!("a copy of {target}'s commits"),
+        };
         let _ = writeln!(
             out,
-            "proposed a change to {target}: branch {proposal}, a copy of workspace {target} \
-             (its uncommitted work too)"
+            "proposed a change to {target}: branch {proposal}, {copy}"
         );
     }
     if !copied.is_empty() {
@@ -325,8 +330,15 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     // The proposal in the layer's place, shown as now.
     let swapped = shown != proposal;
     if swapped || !copied.is_empty() {
-        lens.layers[i] =
+        let was = &lens.layers[i];
+        let mut shown =
             super::layer::layer_of(&store, &common_dir, &state, &proposal, false, false)?;
+        // The layer as it was, put back when the proposal goes.
+        shown.instead = match swapped {
+            true => Some(Box::new(was.clone())),
+            false => was.instead.clone(),
+        };
+        lens.layers[i] = shown;
         super::layer::store_and_apply(&common_dir, &state, &lens)?;
     }
     if swapped {
@@ -349,11 +361,11 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     }
     let _ = write!(
         out,
-        "then: `gitfold layer add {proposal}` shows your edits here (your next turn does \
-         too); when it is ready, tell the agent of {target} (`gitfold send {target} \
-         <text>`): it checks the proposal against every workspace that shows {target} \
-         (`gitfold consent {proposal}`) and takes it (`gitfold accept {proposal}`), after \
-         which {name} shows {target} again"
+        "your next turn shows your edits here (or now: `gitfold layer add {proposal}`); when \
+         it is ready, tell the agent of {target} (`gitfold send {target} <text>`): it checks \
+         the proposal against every workspace that shows {target} (`gitfold consent \
+         {proposal}`) and takes it (`gitfold accept {proposal}`), after which {name} shows \
+         {target} again"
     );
     println!("{out}");
     Ok(())
@@ -762,7 +774,7 @@ impl Read {
 
 /// The workspaces showing `p`'s layer, `p`, or another proposal to change
 /// that layer, but the layer's own and `p`'s.
-fn followers(common_dir: &Path, local: &Local, p: &Proposal) -> Result<Vec<(StateDir, Lens)>> {
+fn followers(common_dir: &Path, local: &Local, p: &Proposal) -> Result<Vec<StateDir>> {
     let mut out = Vec::new();
     for s in state::list(common_dir)? {
         if s.branch == p.layer || s.branch == p.name {
@@ -770,7 +782,7 @@ fn followers(common_dir: &Path, local: &Local, p: &Proposal) -> Result<Vec<(Stat
         }
         let lens = Lens::read(&s.state).unwrap_or_default();
         if lens.layers.iter().any(|l| of_layer(local, p, &l.branch)) {
-            out.push((s.state, lens));
+            out.push(s.state);
         }
     }
     Ok(out)
@@ -854,7 +866,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
     let accepted = p.accepted(&common_dir, &now, &changes)?;
     let mut table = String::from("workspace\tread\tmerges\ttest\n");
     let (mut checked, mut failing) = (0, Vec::new());
-    for (state, lens) in followers(&common_dir, &local, &p)? {
+    for state in followers(&common_dir, &local, &p)? {
         let branch = &state.branch;
         let read = Read::of(&state, &paths)?;
         if read == Read::No && args.only_readers {
@@ -886,6 +898,7 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
             let _ = writeln!(table, "{branch}\t{}\tyes\t-", read.word());
             continue;
         };
+        let lens = Lens::read(&state).unwrap_or_default();
         let view = view_with(&store, &local, &p, &state, lens, accepted)?;
         let at = mount.join(format!("@{view}"));
         let ran = run_test(test, &at, branch, Duration::from_secs(args.timeout));
@@ -1071,19 +1084,18 @@ pub fn accept(repo: &Path, args: AcceptArgs) -> Result<()> {
     let _ = writeln!(out, "consent: {}", says(consent.as_ref(), &p, now.id));
     let diff = short_diff(&common_dir, &p, &changes)?;
     let mut told = Vec::new();
-    for (state, lens) in followers(&common_dir, &local, &p)? {
+    for state in followers(&common_dir, &local, &p)? {
         let branch = state.branch.clone();
-        out += &show_layer_again(&store, &p, &state, lens)?;
+        out += &show_layer_again(&store, &p, &state, true)?;
         if !paths.is_empty() && Read::of(&state, &paths)? != Read::No {
+            let lens = Lens::read(&state)?;
             let body = format!(
-                "contract {} changed: {}'s proposal {} was accepted into {}; your layer of {} \
-                 shows it from your next turn (or now: `gitfold layer add {}`).\n{diff}",
+                "contract {} changed: {}'s proposal {} was accepted into {}; {}.\n{diff}",
                 shown.join(", "),
                 p.by,
                 p.name,
                 p.layer,
-                p.layer,
-                p.layer
+                super::layer::when_shown(lens.find(&p.layer).map(|i| &lens.layers[i]), &p.layer),
             );
             super::inbox::deliver(
                 &common_dir,
@@ -1136,8 +1148,8 @@ pub fn reject(repo: &Path, args: RejectArgs) -> Result<()> {
         )));
     }
     let mut out = format!("rejected {} (to change {})\n", p.name, p.layer);
-    for (state, lens) in followers(&common_dir, &local, &p)? {
-        out += &show_layer_again(&store, &p, &state, lens)?;
+    for state in followers(&common_dir, &local, &p)? {
+        out += &show_layer_again(&store, &p, &state, false)?;
     }
     if here != p.by && git::branch_exists(&p.by) {
         let why = args.reason.as_deref().unwrap_or("no reason given");
@@ -1154,23 +1166,38 @@ pub fn reject(repo: &Path, args: RejectArgs) -> Result<()> {
     Ok(())
 }
 
-/// Shows `p`'s layer again in the workspace in `state` (with layers
-/// `lens`) if it shows `p`, as the layer's work is now; says so.
+/// Shows `p`'s layer again in the workspace in `state` if it shows `p`, as
+/// it was shown before (live or frozen, all work or commits only); says so.
+/// A live one shows the layer's work as now; a frozen one is put back as it
+/// was if `p` was rejected, and taken again (with the change) if `accepted`.
 fn show_layer_again(
     store: &Store,
     p: &Proposal,
     state: &StateDir,
-    mut lens: Lens,
+    accepted: bool,
 ) -> Result<String> {
+    let _lock = state::lens::lock(state)?;
+    let mut lens = Lens::read(state)?;
     let Some(i) = lens.find(&p.name) else {
         return Ok(String::new());
     };
     let common_dir = &state.common_dir;
+    let again = |frozen: bool, commits: bool| {
+        super::layer::layer_of(store, common_dir, state, &p.layer, frozen, commits)
+    };
     match lens.find(&p.layer) {
         Some(_) => drop(lens.layers.remove(i)),
         None => {
-            lens.layers[i] =
-                super::layer::layer_of(store, common_dir, state, &p.layer, false, false)?;
+            lens.layers[i] = match lens.layers[i].instead.take().map(|was| *was) {
+                None => again(false, false)?,
+                Some(was) if was.updates == Updates::Live => {
+                    again(false, was.shows == Shows::CommitsOnly)?
+                }
+                Some(was) if accepted => {
+                    again(true, was.shows == Shows::CommitsOnly).unwrap_or(was)
+                }
+                Some(was) => was,
+            };
         }
     }
     // Stored even if the switch is refused now: the workspace switches to it

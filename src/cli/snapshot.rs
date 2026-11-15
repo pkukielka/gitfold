@@ -80,8 +80,18 @@ pub fn snapshot(repo: &Path, args: SnapshotArgs) -> Result<()> {
         Some(rev) => (git::resolve(rev)?.id, &commits[..]),
         None => (commits[0].1, &commits[1..]),
     };
-    for (what, commit, _) in rest {
-        acc = merge(&common_dir, &acc, commit, what)?;
+    for (name, commit, _) in rest {
+        acc = merge(&common_dir, &acc, commit, name).map_err(|e| {
+            if Refusal::of(&e) != Some(Refusal::Changes) {
+                return e;
+            }
+            let flag = if args.commits { " --commits" } else { "" };
+            let alone = (what.iter()).map(|w| format!("`gitfold snapshot {w}{flag}`"));
+            Refusal::Changes.error(format!(
+                "{e:#}\n{} show each alone",
+                crate::state::lens::and_list(alone)
+            ))
+        })?;
     }
     if let [(_, _, true)] = commits[..] {
         eprintln!("unchanged since its last snapshot");
@@ -113,9 +123,8 @@ fn work_of(
         }
     }
     let rev = what.strip_prefix('@').unwrap_or(what);
-    let commit = git::resolve(rev).map_err(|_| {
-        Refusal::NotFound.error(format!("{what}: neither a workspace nor a revision"))
-    })?;
+    let commit = git::resolve(rev)
+        .map_err(|_| Refusal::NotFound.error(format!("no branch or revision {what}")))?;
     Ok((what.to_string(), commit.id, false))
 }
 

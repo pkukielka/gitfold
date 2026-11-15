@@ -91,6 +91,13 @@ impl Removal {
                 if open {
                     self.names.removed(parent, leaf.as_bytes());
                 }
+                // Its namespace may be left empty (once its branch goes too,
+                // as a proposal's does next): the listing above it is read
+                // again, without it.
+                if let Some((namespace, _)) = name.rsplit_once('/') {
+                    let (above, _) = self.workspaces.parent_and_leaf(namespace);
+                    self.names.changed(&[above]);
+                }
                 Ok(done)
             }
             Err(e) => {
