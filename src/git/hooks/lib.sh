@@ -25,9 +25,9 @@ gitfold_user_hook() {
 
 # Fails, saying why, if a push of the updates "<local ref> <local oid>
 # <remote ref> <remote oid>" (one per line in $1, as pre-push gets them)
-# would publish a lens commit: one with a gitfold-lens header (it holds other
+# would publish a layers commit: one with a gitfold-layers header (it holds other
 # workspaces' uncommitted work). Commits a remote already has don't count.
-gitfold_check_lens() {
+gitfold_check_layers() {
 	printf '%s\n' "$1" | while read -r gitfold_lref gitfold_local gitfold_rref gitfold_remote; do
 		# Deletions push no commits.
 		case $gitfold_local in *[!0]*) ;; *) continue ;; esac
@@ -40,23 +40,23 @@ gitfold_check_lens() {
 		# The first commit with the header, among those pushed; on a failed
 		# walk, a line the headers can't have (they don't hold spaces before
 		# their name), so refused.
-		gitfold_lens=$({
+		gitfold_layers=$({
 			git rev-list --pretty=raw "$gitfold_local" $gitfold_known --not --remotes ||
 				echo ' failed'
 		} | awk '
 			/^ failed$/ { print "?"; exit }
 			/^commit / { commit = $2; header = 1; next }
 			/^$/ { header = 0; next }
-			header && /^gitfold-lens( |$)/ { print commit; exit }
+			header && /^gitfold-layers( |$)/ { print commit; exit }
 		')
-		case $gitfold_lens in
+		case $gitfold_layers in
 		'') ;;
 		'?')
 			echo "gitfold: refusing to push $gitfold_rref: couldn't check it for layers commits" >&2
 			exit 1
 			;;
 		*)
-			echo "gitfold: refusing to push $gitfold_rref: it contains the layers commit $gitfold_lens (other branches' work, shown as layers). Push your branch instead (git push origin <branch>): your commits go onto it without the others' work." >&2
+			echo "gitfold: refusing to push $gitfold_rref: it contains the layers commit $gitfold_layers (other branches' work, shown as layers). Push your branch instead (git push origin <branch>): your commits go onto it without the others' work." >&2
 			exit 1
 			;;
 		esac

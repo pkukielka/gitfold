@@ -7,7 +7,7 @@
 //! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
 //! - `index_edit`: editing an index git wrote (skip-worktree bits).
-//! - `lens`: layers' trees and commits, and extraction of commits made on them.
+//! - `layers`: layers' trees and commits, and extraction of commits made on them.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
 //! - `stack`: stacked branches: restacking a branch onto its parent's new

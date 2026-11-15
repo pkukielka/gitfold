@@ -268,7 +268,7 @@ echo n0 >"$MNT/p1/n0.txt"; G "$MNT/p1" add n0.txt; G "$MNT/p1" commit -qm "p1 n0
 out=$(base p2 p1 2>&1); rc=$?
 eq "layers shown: layer base moves it" "0|p1|$(R rev-parse p1)" "$rc|$(R config branch.p2.gitfoldParent)|$(R rev-parse p2^)"
 eq "the layer still shows, git sees only its own" "a la|n0|" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n0.txt")|$(git -C "$W" status --short)"
-eq "nothing left taken off" "no" "$(test -e "$COMMON/gitfold/p2/lens-off" && echo yes || echo no)"
+eq "nothing left taken off" "no" "$(test -e "$COMMON/gitfold/p2/layers-off" && echo yes || echo no)"
 echo m0 >"$MNT/p1/m0.txt"; G "$MNT/p1" add m0.txt; G "$MNT/p1" commit -qm "p1 m0"
 eq "list: what it needs" "p1 (needs update: gitfold layer base p1)" "$(listed p2)"
 # Uncommitted work in the way: it waits, the layers and the work kept,
@@ -313,9 +313,9 @@ out=$("$BIN" -C "$W" layer add la 2>&1); rc=$?
 eq "an intent left: layer switches refused (exit 4)" "4 yes" "$rc $(grep -q 'p2 is being moved onto its base' <<<"$out" && echo yes)"
 # The layers taken off by that move: the next turn leaves them off while
 # the move can't be finished, rather than showing them half-way.
-: >"$COMMON/gitfold/p2/lens-off"
+: >"$COMMON/gitfold/p2/layers-off"
 prompt_hook "$W" >/dev/null
-eq "taken off, the move stuck: they stay off" "yes" "$(test -e "$COMMON/gitfold/p2/lens-off" && echo yes || echo no)"
+eq "taken off, the move stuck: they stay off" "yes" "$(test -e "$COMMON/gitfold/p2/layers-off" && echo yes || echo no)"
 out=$(base p2 main)
 eq "layer base main forgets it, nothing moved" "p2 is now built on main (was p1); nothing moved, and an interrupted move's intent is forgotten|" \
     "$out|$(R config branch.p2.gitfoldParent)"
@@ -611,9 +611,9 @@ echo n >"$MNT/p1/n.txt"; G "$MNT/p1" add n.txt; G "$MNT/p1" commit -qm "p1 n"
 crash_after_move p2
 base p2 p1 >/dev/null 2>&1
 check "killed: the branch moved" parent_is p2 p1
-for _ in $(seq 50); do [ ! -e "$S/lens-off" ] && [ ! -e "$S/restack" ] && break; sleep 0.1; done
+for _ in $(seq 50); do [ ! -e "$S/layers-off" ] && [ ! -e "$S/restack" ] && break; sleep 0.1; done
 eq "mounted: the daemon finishes it and puts the layers back" "no|no|$(R rev-parse p1)" \
-    "$(test -e "$S/lens-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
+    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
 for _ in $(seq 30); do [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
 eq "the layer shows, the new file too, git sees only its own" "a la|n|" \
     "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n.txt")|$(git -C "$W" status --short)"
@@ -629,12 +629,12 @@ unset GIT_INDEX_FILE
 crash_after_move p2
 base p2 p1 >/dev/null 2>&1
 eq "killed unmounted: moved, the layers off, the intent left" "$(R rev-parse p1)|yes|yes" \
-    "$(R rev-parse p2^)|$(test -e "$S/lens-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)"
+    "$(R rev-parse p2^)|$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)"
 mount_fs
 cat "$W/own.txt" >/dev/null
-for _ in $(seq 50); do [ ! -e "$S/lens-off" ] && [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
+for _ in $(seq 50); do [ ! -e "$S/layers-off" ] && [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
 eq "opened: finished, the layers back" "no|no|$(R rev-parse p1)" \
-    "$(test -e "$S/lens-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
+    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(stack_ref p2)"
 eq "the layer, the new file, git clean" "a la|n2|" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n2.txt")|$(git -C "$W" status --short)"
 }
 

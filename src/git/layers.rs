@@ -16,8 +16,8 @@
 //!   a layer brings only its own changes, not its stale copy of lines B
 //!   changed since; conflict markers kept (or B's entry if a change can't be
 //!   merged at all: binary, a deletion against a change, a type change).
-//! - L, the layers commit (the lens commit in the code): tree H, parents
-//!   `[B, S...]`, an extra header `gitfold-lens 1`. The worktree's HEAD
+//! - L, the layers commit (the layers commit in the code): tree H, parents
+//!   `[B, S...]`, an extra header `gitfold-layers 1`. The worktree's HEAD
 //!   while hunk paths are mixed in, so `git diff` shows only my lines of a
 //!   blended file.
 //! - V, the view commit: tree M, parents `[L or B, S...]`; one ref on it
@@ -63,10 +63,10 @@ use gix::merge::blob::Resolution;
 use gix::merge::blob::builtin_driver::{self, text};
 use gix::objs::tree::EntryKind;
 
-/// The extra header that marks a lens commit (and its value), so that hooks
+/// The extra header that marks a layers commit (and its value), so that hooks
 /// and the daemon recognise one without a list of ids.
-pub const LENS_HEADER: &str = "gitfold-lens";
-const LENS_HEADER_VALUE: &str = "1";
+pub const LAYERS_HEADER: &str = "gitfold-layers";
+const LAYERS_HEADER_VALUE: &str = "1";
 
 /// A tree entry, as far as layers care: what it is and its object.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1026,7 +1026,7 @@ fn merge3(base: &[u8], ours: &[u8], theirs: &[u8], conflict: text::Conflict) -> 
 }
 
 // The line-set rule's helpers, shared by blending, extraction, carrying own
-// lines over a switch (`fs::workspace::lens`) and sealing them
+// lines over a switch (`fs::workspace::layers`) and sealing them
 // (`state::snapshot`). Lines are compared whole but for the `\n`: two registry
 // lines differing in a `\r` are two lines.
 
@@ -1114,16 +1114,16 @@ fn push_line(out: &mut Vec<u8>, line: &[u8]) {
     out.extend_from_slice(line);
 }
 
-/// Writes lens commit L: tree `hunk_tree`, parents `base` then `seals`, the
-/// `gitfold-lens` header and `subject` (see `lens_subject`).
-pub fn lens_commit(
+/// Writes layers commit L: tree `hunk_tree`, parents `base` then `seals`, the
+/// `gitfold-layers` header and `subject` (see `layers_subject`).
+pub fn layers_commit(
     repo: &gix::Repository,
     hunk_tree: ObjectId,
     base: ObjectId,
     seals: &[ObjectId],
     subject: &str,
 ) -> Result<ObjectId> {
-    let header = (LENS_HEADER.into(), LENS_HEADER_VALUE.into());
+    let header = (LAYERS_HEADER.into(), LAYERS_HEADER_VALUE.into());
     write_commit(repo, hunk_tree, base, seals, subject, vec![header])
 }
 
@@ -1140,19 +1140,19 @@ pub fn view_commit(
 }
 
 /// L's subject, as `git log -1` shows it in the workspace.
-pub fn lens_subject(branch: &str, layers: &[&str]) -> String {
+pub fn layers_subject(branch: &str, layers: &[&str]) -> String {
     format!(
         "gitfold layers: {branch} + {} (commits go to {branch}; never push this commit)",
         layers.join(" + ")
     )
 }
 
-/// Whether `commit` is a lens commit (has the `gitfold-lens` header).
+/// Whether `commit` is a layers commit (has the `gitfold-layers` header).
 #[cfg(test)]
-pub fn is_lens(repo: &gix::Repository, commit: ObjectId) -> Result<bool> {
+pub fn is_layers_commit(repo: &gix::Repository, commit: ObjectId) -> Result<bool> {
     let commit = repo.find_commit(commit)?;
     let decoded = commit.decode()?;
-    Ok(decoded.extra_headers().find(LENS_HEADER).is_some())
+    Ok(decoded.extra_headers().find(LAYERS_HEADER).is_some())
 }
 
 fn write_commit(
@@ -1180,18 +1180,18 @@ fn write_commit(
     Ok(repo.write_object(&commit)?.detach())
 }
 
-/// The commits on the first-parent chain from `head` down to `lens`,
-/// oldest first; `None` if `lens` isn't on it within `limit` commits. Empty
-/// when `head` is `lens`.
+/// The commits on the first-parent chain from `head` down to `layers`,
+/// oldest first; `None` if `layers` isn't on it within `limit` commits. Empty
+/// when `head` is `layers`.
 pub fn chain(
     repo: &gix::Repository,
-    lens: ObjectId,
+    layers: ObjectId,
     head: ObjectId,
     limit: usize,
 ) -> Result<Option<Vec<ObjectId>>> {
     let mut out = Vec::new();
     let mut at = head;
-    while at != lens {
+    while at != layers {
         if out.len() == limit {
             return Ok(None);
         }
@@ -1215,7 +1215,7 @@ pub struct Extraction {
     pub extracted: Vec<(ObjectId, ObjectId)>,
     /// L': the tree of the agent's last commit, parents the new tip and the
     /// seals. Only when every commit was extracted.
-    pub lens: Option<ObjectId>,
+    pub layers: Option<ObjectId>,
     /// The first commit that couldn't be: it and the later ones stay where
     /// they are, to retry from the last extracted one.
     pub blocked: Option<Blocked>,
@@ -1239,11 +1239,11 @@ pub struct Conflict {
     pub lines: Vec<BString>,
 }
 
-/// What extraction needs to know about the lens it extracts from.
+/// What extraction needs to know about the layers it extracts from.
 pub struct Extractor<'a> {
     /// L's parents after the base, for L'.
     pub seals: &'a [ObjectId],
-    /// The subject of L' (see `lens_subject`).
+    /// The subject of L' (see `layers_subject`).
     pub subject: &'a str,
     pub is_hunk: &'a dyn Fn(&BStr) -> bool,
     /// The layers whose content is at a path, for conflicts.
@@ -1256,7 +1256,7 @@ pub struct Extractor<'a> {
 /// and only the agent's changes. Moves no ref: see `advance`.
 pub fn extract(
     repo: &gix::Repository,
-    lens: &Extractor,
+    layers: &Extractor,
     prev: ObjectId,
     tip: ObjectId,
     commits: &[ObjectId],
@@ -1264,12 +1264,12 @@ pub fn extract(
     let mut done = Extraction {
         tip,
         extracted: Vec::new(),
-        lens: None,
+        layers: None,
         blocked: None,
     };
     let mut prev = prev;
     for &commit in commits {
-        match extract_one(repo, lens, prev, done.tip, commit)? {
+        match extract_one(repo, layers, prev, done.tip, commit)? {
             Ok(copy) => {
                 done.extracted.push((commit, copy));
                 done.tip = copy;
@@ -1283,7 +1283,13 @@ pub fn extract(
     }
     if let Some(&last) = commits.last() {
         let tree = commit_tree(repo, last)?;
-        done.lens = Some(lens_commit(repo, tree, done.tip, lens.seals, lens.subject)?);
+        done.layers = Some(layers_commit(
+            repo,
+            tree,
+            done.tip,
+            layers.seals,
+            layers.subject,
+        )?);
     }
     Ok(done)
 }
@@ -1291,7 +1297,7 @@ pub fn extract(
 /// One commit of `extract`: its copy on `tip`, or the conflicts.
 fn extract_one(
     repo: &gix::Repository,
-    lens: &Extractor,
+    layers: &Extractor,
     prev: ObjectId,
     tip: ObjectId,
     commit: ObjectId,
@@ -1306,7 +1312,7 @@ fn extract_one(
             .into_iter()
             .chain(delta(repo, prev_tree, commit_tree_id)?)
     {
-        if (lens.is_hunk)(path.as_ref()) {
+        if (layers.is_hunk)(path.as_ref()) {
             paths.insert(path);
         }
     }
@@ -1321,7 +1327,7 @@ fn extract_one(
             }
             Err(lines) => conflicts.push(Conflict {
                 path: path.clone(),
-                layers: (lens.owners)(path.as_ref()),
+                layers: (layers.owners)(path.as_ref()),
                 lines,
             }),
         }
@@ -1339,7 +1345,7 @@ fn extract_one(
             return Ok(Err(paths
                 .into_iter()
                 .map(|path| Conflict {
-                    layers: (lens.owners)(path.as_ref()),
+                    layers: (layers.owners)(path.as_ref()),
                     path,
                     lines: Vec::new(),
                 })
@@ -1352,8 +1358,8 @@ fn extract_one(
 /// A copy of `commit` with tree `tree` and the one parent `parent`: the same
 /// author, committer, message and other headers (`git rebase` with the
 /// committer kept). A signature would not match the new commit and is
-/// dropped; so are a merge's tags, and a lens commit's mark, which mustn't
-/// reach a branch (an amended lens commit carries it).
+/// dropped; so are a merge's tags, and a layers commit's mark, which mustn't
+/// reach a branch (an amended layers commit carries it).
 pub fn copy_commit(
     repo: &gix::Repository,
     commit: ObjectId,
@@ -1365,7 +1371,7 @@ pub fn copy_commit(
     copy.parents = [parent].into_iter().collect();
     copy.extra_headers.retain(|(k, _)| {
         !matches!(k.as_bytes(), b"gpgsig" | b"gpgsig-sha256" | b"mergetag")
-            && k.as_bytes() != LENS_HEADER.as_bytes()
+            && k.as_bytes() != LAYERS_HEADER.as_bytes()
     });
     Ok(repo.write_object(&copy)?.detach())
 }
@@ -1681,12 +1687,12 @@ mod tests {
 
         // L and V, as git sees them.
         let seals: Vec<_> = names.iter().map(|n| r.id(n)).collect();
-        let subject = lens_subject("main", &names);
-        let l = lens_commit(&repo, view.hunk_tree, base, &seals[1..2], &subject).unwrap();
+        let subject = layers_subject("main", &names);
+        let l = layers_commit(&repo, view.hunk_tree, base, &seals[1..2], &subject).unwrap();
         let v = view_commit(&repo, view.view_tree, l, &seals, "gitfold view").unwrap();
-        assert!(is_lens(&repo, l).unwrap());
-        assert!(!is_lens(&repo, v).unwrap());
-        assert!(!is_lens(&repo, base).unwrap());
+        assert!(is_layers_commit(&repo, l).unwrap());
+        assert!(!is_layers_commit(&repo, v).unwrap());
+        assert!(!is_layers_commit(&repo, base).unwrap());
         let l_hex = l.to_string();
         assert_eq!(
             r.git(&["log", "-1", "--format=%P%n%s", &l_hex]),
@@ -1694,9 +1700,9 @@ mod tests {
         );
         assert!(
             r.git(&["cat-file", "-p", &l_hex])
-                .contains("\ngitfold-lens 1\n")
+                .contains("\ngitfold-layers 1\n")
         );
-        r.git(&["update-ref", "refs/gitfold-lens/test", &v.to_string()]);
+        r.git(&["update-ref", "refs/gitfold-layers/test", &v.to_string()]);
         r.git(&["fsck", "--strict", "--no-dangling"]);
     }
 
@@ -2213,10 +2219,10 @@ mod tests {
         );
     }
 
-    /// The lensed worktree as gitfold would serve it: HEAD detached at L,
+    /// The worktree showing layers as gitfold would serve it: HEAD detached at L,
     /// the files of M, skip-worktree on the layers' paths L has and the
     /// layers' new paths excluded. Returns the worktree's directory.
-    fn lensed_worktree(r: &Repo, l: ObjectId, view: &Built) -> PathBuf {
+    fn worktree_showing_layers(r: &Repo, l: ObjectId, view: &Built) -> PathBuf {
         let wt = r.dir.join("mine");
         let wt_str = wt.to_str().unwrap();
         r.git(&["worktree", "add", "-q", "--detach", wt_str, &l.to_string()]);
@@ -2271,13 +2277,13 @@ mod tests {
         let names = ["contracts", "a", "b"];
         let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
         let seals: Vec<_> = names.iter().map(|n| r.id(n)).collect();
-        let subject = lens_subject("mine", &names);
-        let l = lens_commit(&repo, view.hunk_tree, base, &seals, &subject).unwrap();
-        let wt = lensed_worktree(&r, l, &view);
+        let subject = layers_subject("mine", &names);
+        let l = layers_commit(&repo, view.hunk_tree, base, &seals, &subject).unwrap();
+        let wt = worktree_showing_layers(&r, l, &view);
         assert_eq!(
             r.git_in(&wt, &["status", "--porcelain"]),
             "",
-            "lensed and clean"
+            "showing layers and clean"
         );
 
         let edit = |path: &str, from: &str, to: &str| {
@@ -2299,13 +2305,13 @@ mod tests {
         assert_eq!(chain(&repo, base, l, 10).unwrap(), Some(vec![l]));
         assert_eq!(chain(&repo, seals[0], head, 10).unwrap(), None);
         let owners = |p: &BStr| owners_of(&view, p);
-        let lens = Extractor {
+        let layers = Extractor {
             seals: &seals,
             subject: &subject,
             is_hunk: &registry,
             owners: &owners,
         };
-        let out = extract(&repo, &lens, l, base, &commits).unwrap();
+        let out = extract(&repo, &layers, l, base, &commits).unwrap();
         assert!(out.blocked.is_none(), "{:?}", out.blocked);
         let [(c1, c1x), (c2, c2x)] = out.extracted[..] else {
             panic!("{out:?}")
@@ -2334,7 +2340,7 @@ mod tests {
         assert_eq!(Some(tree_of(&r, c2x)), r.merge_tree(c1, c1x, c2));
 
         // L': the agent's tree, on the new tip and the seals.
-        let l2 = out.lens.unwrap();
+        let l2 = out.layers.unwrap();
         assert_eq!(tree_of(&r, l2), tree_of(&r, head));
         let parents: Vec<_> = std::iter::once(c2x).chain(seals.iter().copied()).collect();
         let parents: Vec<_> = parents.iter().map(ObjectId::to_string).collect();
@@ -2342,7 +2348,7 @@ mod tests {
             r.git(&["log", "-1", "--format=%P", &l2.to_string()]),
             parents.join(" ")
         );
-        assert!(is_lens(&repo, l2).unwrap());
+        assert!(is_layers_commit(&repo, l2).unwrap());
 
         let admin = r.work().join(".git/worktrees/mine");
         advance(&admin, "mine", (base, c2x), (head, l2)).unwrap();
@@ -2376,11 +2382,11 @@ mod tests {
         let util = lookup(&repo, tree_of(&r, seals[1]), "src/util.c".into());
         let promoted = [(BStr::new("src/util.c"), Change::Set(util.unwrap().unwrap()))];
         let hunk_tree = edit_tree(&repo, view.hunk_tree, promoted).unwrap();
-        let l = lens_commit(&repo, hunk_tree, base, &seals, "lens").unwrap();
+        let l = layers_commit(&repo, hunk_tree, base, &seals, "layers").unwrap();
         let owners = |p: &BStr| owners_of(&view, p);
-        let lens = Extractor {
+        let layers = Extractor {
             seals: &seals,
-            subject: "lens",
+            subject: "layers",
             is_hunk: &registry,
             owners: &owners,
         };
@@ -2396,8 +2402,8 @@ mod tests {
         };
 
         let changed = commit_on_l("registry.txt", &|t| t.replace("entry_a", "entry_a_v2"));
-        let out = extract(&repo, &lens, l, base, &[changed]).unwrap();
-        assert!(out.extracted.is_empty() && out.lens.is_none() && out.tip == base);
+        let out = extract(&repo, &layers, l, base, &[changed]).unwrap();
+        assert!(out.extracted.is_empty() && out.layers.is_none() && out.tip == base);
         let blocked = out.blocked.unwrap();
         assert_eq!(blocked.commit, changed);
         assert_eq!(
@@ -2413,7 +2419,7 @@ mod tests {
         let inserted = commit_on_l("registry.txt", &|t| {
             t.replace("entry_base1\n", "entry_base1\nentry_mine\n")
         });
-        let out = extract(&repo, &lens, l, base, &[inserted]).unwrap();
+        let out = extract(&repo, &layers, l, base, &[inserted]).unwrap();
         assert!(out.blocked.is_none());
         assert_eq!(
             r.show(out.tip, "registry.txt"),
@@ -2421,7 +2427,7 @@ mod tests {
         );
 
         let adjacent = commit_on_l("src/util.c", &|t| t.replace("util4", "util4 MINE"));
-        let out = extract(&repo, &lens, l, base, &[adjacent]).unwrap();
+        let out = extract(&repo, &layers, l, base, &[adjacent]).unwrap();
         assert_eq!(
             out.blocked.unwrap().conflicts,
             [Conflict {
@@ -2433,7 +2439,7 @@ mod tests {
         assert_eq!(r.merge_tree(l, base, adjacent), None, "git conflicts too");
 
         let away = commit_on_l("src/util.c", &|t| t.replace("util8", "util8 MINE"));
-        let out = extract(&repo, &lens, l, base, &[away]).unwrap();
+        let out = extract(&repo, &layers, l, base, &[away]).unwrap();
         assert!(out.blocked.is_none());
         let expected = lines(8, "util").replace("util8", "util8 MINE");
         assert_eq!(r.show(out.tip, "src/util.c"), expected.trim_end());

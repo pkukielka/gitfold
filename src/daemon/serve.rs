@@ -117,8 +117,8 @@ pub fn run(options: Options) -> Result<()> {
             Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
             Request::TrackReads { branch } => workspaces.track_reads_now(&branch),
             Request::RecordReads { paths } => Ok(workspaces.record_reads(paths)),
-            Request::Lens { branch } => workspaces
-                .switch_lens(&store, &branch)
+            Request::Layers { branch } => workspaces
+                .switch_layers(&store, &branch)
                 .inspect(|done| log::info!("{done}")),
             Request::Fork { from, to } => workspaces
                 .fork(&from, &to)

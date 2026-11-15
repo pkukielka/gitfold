@@ -452,7 +452,7 @@ type Blends = HashMap<Vec<u8>, (Vec<u8>, Vec<u8>)>;
 /// own lines), so a workspace showing it as a layer gets the other layers'
 /// work from them, not through it.
 fn blends(state: &StateDir, base: &git::Commit) -> Result<Blends> {
-    let applied = super::layers::Applied::read(state)?;
+    let applied = super::layers::ShownLayers::read(state)?;
     if applied.blended.is_empty() {
         return Ok(HashMap::new());
     }

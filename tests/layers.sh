@@ -337,7 +337,7 @@ R config --unset gitfold.trunk
 # As a build before --frozen and --commits stored them (version 1).
 seal=$(R rev-parse "$(R for-each-ref --sort=-refname --count=1 --format='%(refname)' refs/gitfold-seal/o2)")
 printf 'version 1\nlayer o2\ton\t%s\t%s\nlayer o3\toff\t%s\t%s\n' "$seal" "$(R rev-parse main)" "$seal" "$(R rev-parse main)" \
-    >"$COMMON/gitfold/me/lens"
+    >"$COMMON/gitfold/me/layers"
 mount_fs
 for _ in $(seq 50); do [ ! -e "$W/o4.txt" ] && break; sleep 0.1; done
 eq "an earlier build's layers file: shown layers live, hidden ones dropped" "o2|o2 all work live, last HH:MM|o2" \
@@ -495,7 +495,7 @@ check "commit" G "$W" commit -qam mine
 for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = fromMe ] && break; sleep 0.1; done
 eq "the branch gets only own lines" "one two fromMe" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
 eq "git status still clean" "" "$(git -C "$W" status --short)"
-eq "HEAD at a new layers commit" "1" "$(G "$W" cat-file -p HEAD | grep -c '^gitfold-lens 1')"
+eq "HEAD at a new layers commit" "1" "$(G "$W" cat-file -p HEAD | grep -c '^gitfold-layers 1')"
 git init -q --bare "$T/remote.git"
 out=$(G "$W" push -q "$T/remote.git" HEAD:refs/heads/main 2>&1); rc=$?
 eq "pushing HEAD is refused, saying why" "1 yes" "$((rc != 0)) $(echo "$out" | grep -q 'it contains the layers commit' && echo yes)"
@@ -509,7 +509,7 @@ check "commit, then amend" sh -c "git -C '$W' -c user.name=t -c user.email=t@t c
     sleep 2 && echo amended2 >>'$W/reg.txt' && git -C '$W' -c user.name=t -c user.email=t@t commit -q --amend -am two"
 for _ in $(seq 50); do [ "$(R show me:reg.txt | tail -1)" = amended2 ] && break; sleep 0.1; done
 eq "the amend reaches the branch" "one two fromMe amended amended2" "$(R show me:reg.txt | tr '\n' ' ' | sed 's/ $//')"
-eq "without the layers commit's mark" "0" "$(R cat-file -p me | grep -c '^gitfold-lens')"
+eq "without the layers commit's mark" "0" "$(R cat-file -p me | grep -c '^gitfold-layers')"
 eq "git status still clean" "" "$(git -C "$W" status --short)"
 echo moreMe >>"$W/reg.txt"
 check "remove --all" "$BIN" -C "$W" layer remove --all
@@ -761,7 +761,7 @@ eq "the tip moved without its files (a push into it): on the base" "$base|" \
 }
 
 # The seal of layer $2 stored for workspace $1.
-stored_seal() { awk -F'\t' -v l="layer $2" '$1 == l {print $5}' "$COMMON/gitfold/$1/lens"; }
+stored_seal() { awk -F'\t' -v l="layer $2" '$1 == l {print $5}' "$COMMON/gitfold/$1/layers"; }
 
 # A person's workspace with a blended file (HEAD at the layers commit): the
 # daemon moves its layers there too, sees a source's commits, and backs off
@@ -803,9 +803,9 @@ for _ in $(seq 30); do G "$P" commit -qam "pe: drops src's line" 2>/dev/null && 
 echo "s 3" >"$S/s.txt"
 for _ in $(seq 100); do grep -q 'pe: its layers not moved' "$LOG" && break; sleep 0.1; done
 check "the move refused" grep -q 'pe: its layers not moved' "$LOG"
-before=$(stat -c %Y.%y "$COMMON/gitfold/pe/lens")
+before=$(stat -c %Y.%y "$COMMON/gitfold/pe/layers")
 sleep 7
-eq "not tried again every round" "$before" "$(stat -c %Y.%y "$COMMON/gitfold/pe/lens")"
+eq "not tried again every round" "$before" "$(stat -c %Y.%y "$COMMON/gitfold/pe/layers")"
 }
 
 section "layers: shown in a workspace" layers_shown_in_a_workspace

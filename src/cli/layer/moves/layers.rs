@@ -36,7 +36,7 @@ use gix::bstr::BString;
 
 use super::Moved;
 use crate::git::{self, worktree};
-use crate::state::layers::{self, Applied, Lens};
+use crate::state::layers::{self, Layers, ShownLayers};
 use crate::state::moves::{self, Intent, Recovery};
 use crate::state::{StateDir, status, upper_path};
 use crate::store::Store;
@@ -114,7 +114,7 @@ fn waits(state: &StateDir, intent: &Intent) -> Result<Option<String>> {
     if let Err(why) = super::recovered(state)? {
         return Ok(Some(why));
     }
-    let applied = Applied::read(state)?;
+    let applied = ShownLayers::read(state)?;
     let busy = match applied.head {
         Some(_) => worktree::git_running(&state.common_dir, &state.admin, &state.branch),
         None => state.git_busy(),
@@ -178,8 +178,8 @@ fn uncommitted_on(
 
 /// Whether the workspace in `state` shows layers, as stored or as applied.
 fn shows_layers(state: &StateDir) -> Result<bool> {
-    let applied = Applied::read(state)?;
-    Ok(Lens::read(state)?.is_on() || applied.layers()?.is_on() || applied.head.is_some())
+    let applied = ShownLayers::read(state)?;
+    Ok(Layers::read(state)?.is_on() || applied.layers()?.is_on() || applied.head.is_some())
 }
 
 /// Step 4: the layers back, shown. A failure is logged: the marker is gone
@@ -219,7 +219,7 @@ fn switch_off(state: &StateDir) -> Result<()> {
             crate::fs::workspace::Workspace::open(&store, state.clone(), None)?.switch(&store)?;
         }
     }
-    let applied = Applied::read(state)?;
+    let applied = ShownLayers::read(state)?;
     anyhow::ensure!(
         !applied.layers()?.is_on() && applied.head.is_none(),
         "they still show"

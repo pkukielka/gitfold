@@ -35,7 +35,7 @@ use anyhow::{Result, bail};
 
 /// The repository commands work on: the one the current directory is in (its
 /// git directory). In a workspace showing layers, whose `.git` turns git away
-/// (see `fs::workspace::lens`), its registration, found from the mount.
+/// (see `fs::workspace::layers`), its registration, found from the mount.
 pub fn repo() -> Result<PathBuf> {
     // The mount first: discovery could skip a surrendered workspace's `.git`
     // and find a repository the mount point is in.

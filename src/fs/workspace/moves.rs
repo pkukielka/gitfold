@@ -39,7 +39,7 @@ pub fn restack_closed(
             from.id
         );
     }
-    if layers.lens_on {
+    if layers.layers_on {
         bail!("layers are shown in it");
     }
     let delta = git::with_repo(|repo| git::layers::delta(repo, from.tree, to.tree))?;

@@ -157,7 +157,7 @@ check "UC11: editing it is denied" has "$out" '"permissionDecision":"deny"'
 check "UC11: naming both layers" has "$out" "b and c"
 check "UC11: offering a proposal" has "$out" "gitfold propose"
 check "UC11: and gitfold layer remove" has "$out" "gitfold layer remove"
-check "UC11: in today's words" fails sh -c "grep -Eqi 'lens|seal' <<<'$out'"
+check "UC11: in today's words" fails sh -c "grep -Eqi 'layers|seal' <<<'$out'"
 check "UC6: removing one layer" "$BIN" -C "$W" layer remove c
 eq "UC6: the other's version, no conflict" "x = 2" "$(cat "$W/config.rs")"
 check "UC6: the conflict line gone" fails has "$(listing "$W")" "Conflict"

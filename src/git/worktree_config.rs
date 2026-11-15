@@ -1,6 +1,6 @@
 //! A linked worktree's own git configuration, for layers: excludes for the
 //! files other workspaces' layers add, and the push guard against publishing
-//! a lens commit. Both are per-worktree config (`<admin>/config.worktree`,
+//! a layers commit. Both are per-worktree config (`<admin>/config.worktree`,
 //! with `extensions.worktreeConfig`), so the main worktree and the others are
 //! unaffected; the files they name live in the admin directory too.
 //!
@@ -83,7 +83,7 @@ pub fn remove_excludes(admin: &Path) -> Result<()> {
 
 /// Installs the push guard in the worktree with admin directory `admin`: its
 /// `core.hooksPath` becomes `<admin>/gitfold-hooks`, where `pre-push`
-/// refuses to push a commit with a `gitfold-lens` header that the remotes
+/// refuses to push a commit with a `gitfold-layers` header that the remotes
 /// don't have, then runs the user's own `pre-push`; every other hook runs
 /// the user's (as git would without this). The hooks find the user's when
 /// they run, so later changes to them apply.
@@ -428,13 +428,13 @@ mod tests {
     }
 
     /// Writes a commit on top of HEAD, with HEAD's tree and a
-    /// `gitfold-lens` header; returns its id.
-    fn lens_commit(w: &Path) -> String {
+    /// `gitfold-layers` header; returns its id.
+    fn layers_commit(w: &Path) -> String {
         let tree = git(w, &["rev-parse", "HEAD^{tree}"]);
         let parent = git(w, &["rev-parse", "HEAD"]);
         let text = format!(
             "tree {}\nparent {}\nauthor T <t@example.com> 0 +0000\n\
-             committer T <t@example.com> 0 +0000\ngitfold-lens 1\n\nlens\n",
+             committer T <t@example.com> 0 +0000\ngitfold-layers 1\n\nlayers\n",
             tree.trim(),
             parent.trim()
         );
@@ -451,7 +451,7 @@ mod tests {
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// The push guard refuses a lens commit (and what is on top of it), lets
+    /// The push guard refuses a layers commit (and what is on top of it), lets
     /// other pushes through, and runs the user's own hooks; the main worktree
     /// has none of it, and removing it restores the worktree.
     #[test]
@@ -476,22 +476,27 @@ mod tests {
         git(&w, &["commit", "-q", "--allow-empty", "-m", "mine"]);
         assert_eq!(fs::read_to_string(&ran).unwrap(), "x\n");
 
-        let lens = lens_commit(&w);
-        git(&w, &["checkout", "-q", "--detach", &lens]);
-        git(&w, &["commit", "-q", "--allow-empty", "-m", "on lens"]);
+        let layers = layers_commit(&w);
+        git(&w, &["checkout", "-q", "--detach", &layers]);
+        git(&w, &["commit", "-q", "--allow-empty", "-m", "on layers"]);
         let out = try_git(&w, &["push", "origin", "HEAD:refs/heads/main"], b"");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(!out.status.success(), "{stderr}");
         let refusal = format!(
-            "gitfold: refusing to push refs/heads/main: it contains the layers commit {lens}"
+            "gitfold: refusing to push refs/heads/main: it contains the layers commit {layers}"
         );
         assert!(stderr.contains(&refusal), "{stderr}");
         assert!(!got.exists(), "the user's pre-push ran after a refusal");
 
-        // A push without the lens commit passes, through the user's pre-push.
+        // A push without the layers commit passes, through the user's pre-push.
         git(
             &w,
-            &["push", "-q", "origin", &format!("{lens}~1:refs/heads/main")],
+            &[
+                "push",
+                "-q",
+                "origin",
+                &format!("{layers}~1:refs/heads/main"),
+            ],
         );
         let pushed = fs::read_to_string(&got).unwrap();
         assert!(pushed.contains(" refs/heads/main 0000000"), "{pushed}");
@@ -504,7 +509,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&ran).unwrap(), "x\nx\nx\n");
         git(
             &r,
-            &["push", "-q", "origin", &format!("{lens}:refs/heads/main")],
+            &["push", "-q", "origin", &format!("{layers}:refs/heads/main")],
         );
 
         remove_push_guard(&admin).unwrap();

@@ -15,7 +15,7 @@ use crate::git;
 use crate::refusal::Refusal;
 use crate::settings::Local;
 use crate::state::StateDir;
-use crate::state::layers::{Layer, Lens, Shows, Updates, View, and_list};
+use crate::state::layers::{Layer, Layers, Shows, Updates, View, and_list};
 use crate::state::retire::check_name;
 use crate::state::{follow, snapshot};
 use crate::store::Store;
@@ -141,13 +141,13 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
     let state = super::opened_workspace(&common_dir, &name)?;
     if args.op.is_none() {
-        print!("{}", listing(&common_dir, &state, &Lens::read(&state)?)?);
+        print!("{}", listing(&common_dir, &state, &Layers::read(&state)?)?);
         return Ok(());
     }
     let local = Local::read(&common_dir);
     // Read, changed and stored with no other change in between.
     let _lock = crate::state::layers::lock(&state)?;
-    let mut lens = Lens::read(&state)?;
+    let mut layers = Layers::read(&state)?;
     let done = match args.op {
         None | Some(LayerOp::Base { .. }) => unreachable!("handled above"),
         Some(LayerOp::Add {
@@ -160,26 +160,26 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             let store = Store::default();
             let layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
             let in_base = in_base(&state, layer.seal)?;
-            add(&local, &mut lens, &name, layer, in_base)
+            add(&local, &mut layers, &name, layer, in_base)
         }
         Some(LayerOp::Remove { branch: None, .. }) => {
-            lens.layers.clear();
+            layers.layers.clear();
             format!("{name}: every layer removed")
         }
         Some(LayerOp::Remove {
             branch: Some(branch),
             ..
-        }) => remove(&local, &mut lens, &name, &branch)?,
+        }) => remove(&local, &mut layers, &name, &branch)?,
     };
-    let applied = store_and_apply(&common_dir, &state, &lens)?;
+    let applied = store_and_apply(&common_dir, &state, &layers)?;
     println!("{done}\n{applied}");
     Ok(())
 }
 
-/// `gitfold layer add`: `layer` added to `lens` (the layers of workspace
+/// `gitfold layer add`: `layer` added to `layers` (the layers of workspace
 /// `name`), or put in place of the one standing for its branch (`slot`);
 /// says which. `in_base`: all of it is in the workspace's base already.
-fn add(local: &Local, lens: &mut Lens, name: &str, mut layer: Layer, in_base: bool) -> String {
+fn add(local: &Local, layers: &mut Layers, name: &str, mut layer: Layer, in_base: bool) -> String {
     let branch = layer.branch.clone();
     let mut what = describe(&layer);
     if layer.updates == Updates::Live && in_base {
@@ -189,11 +189,11 @@ fn add(local: &Local, lens: &mut Lens, name: &str, mut layer: Layer, in_base: bo
              next shows here)"
         );
     }
-    let Some(i) = slot(local, lens, name, &branch) else {
-        lens.layers.push(layer);
+    let Some(i) = slot(local, layers, name, &branch) else {
+        layers.layers.push(layer);
         return format!("layer {branch} added: {what}");
     };
-    let was = &lens.layers[i];
+    let was = &layers.layers[i];
     // Not moved if it is where it was.
     if was.seal == layer.seal {
         layer.moved = was.moved;
@@ -213,25 +213,25 @@ fn add(local: &Local, lens: &mut Lens, name: &str, mut layer: Layer, in_base: bo
             was.branch
         )
     };
-    lens.layers[i] = layer;
+    layers.layers[i] = layer;
     format!("layer {branch} updated: {what}{note}")
 }
 
-/// `gitfold layer remove BRANCH`: its layer removed from `lens` (the layers
+/// `gitfold layer remove BRANCH`: its layer removed from `layers` (the layers
 /// of workspace `name`), or this workspace's proposal shown in its place; a
 /// proposal only itself. Says what it did.
-fn remove(local: &Local, lens: &mut Lens, name: &str, branch: &str) -> Result<String> {
+fn remove(local: &Local, layers: &mut Layers, name: &str, branch: &str) -> Result<String> {
     let mine = mine(local, branch, name);
-    let i = slot(local, lens, name, branch)
-        .filter(|&i| !mine || lens.layers[i].branch == branch)
+    let i = slot(local, layers, name, branch)
+        .filter(|&i| !mine || layers.layers[i].branch == branch)
         .ok_or_else(|| Refusal::NotFound.error(format!("{branch} isn't a layer of {name}")))?;
-    let mut was = lens.layers.remove(i);
+    let mut was = layers.layers.remove(i);
     Ok(match was.branch == branch {
         // Your proposal shown in its layer's place: that layer back.
         true if mine => {
             let back = was.instead.take().map(|instead| {
                 let note = format!("; {} shown again as it was", instead.branch);
-                lens.layers.insert(i, *instead);
+                layers.layers.insert(i, *instead);
                 note
             });
             format!(
@@ -253,17 +253,17 @@ fn mine(local: &Local, branch: &str, name: &str) -> bool {
     local.proposal(branch).is_some_and(|(_, by)| by == name)
 }
 
-/// The layer of `lens` (the layers of workspace `name`) that stands for
+/// The layer of `layers` (the layers of workspace `name`) that stands for
 /// `branch`: `branch`'s own, or `name`'s proposal to change it shown in its
 /// place. A proposal of `name`'s stands for its layer: the same one.
-pub(super) fn slot(local: &Local, lens: &Lens, name: &str, branch: &str) -> Option<usize> {
+pub(super) fn slot(local: &Local, layers: &Layers, name: &str, branch: &str) -> Option<usize> {
     let target_of = |b: &str| {
         (local.proposal(b))
             .filter(|(_, by)| by == name)
             .map_or_else(|| b.to_string(), |(layer, _)| layer)
     };
     let target = target_of(branch);
-    (lens.layers.iter()).position(|l| l.branch == branch || target_of(&l.branch) == target)
+    (layers.layers.iter()).position(|l| l.branch == branch || target_of(&l.branch) == target)
 }
 
 /// What `layer` shows and how it updates, as the listing says it.
@@ -318,9 +318,9 @@ pub fn layer_hook(event: &str) -> Result<()> {
         {
             log::debug!("gitfold layer --claude-hook: {e:#}");
         }
-        let live = |lens: &Lens| lens.layers.iter().any(|l| l.updates == Updates::Live);
+        let live = |layers: &Layers| layers.layers.iter().any(|l| l.updates == Updates::Live);
         // Most turns: nothing to lock for.
-        if !live(&Lens::read(&state)?) {
+        if !live(&Layers::read(&state)?) {
             return Ok(());
         }
         let lock = crate::state::layers::lock(&state)?;
@@ -369,12 +369,12 @@ fn deny_hook() -> Result<()> {
             return Ok(None);
         };
         // What is shown, which a pending switch may not have changed yet.
-        let lens = crate::state::layers::Applied::read(&state)?.layers()?;
-        let Some((owners, view)) = owners_in_view(&state, &lens, path.as_bytes())? else {
+        let layers = crate::state::layers::ShownLayers::read(&state)?.layers()?;
+        let Some((owners, view)) = owners_in_view(&state, &layers, path.as_bytes())? else {
             return Ok(None);
         };
         let names: Vec<&str> = (owners.iter())
-            .map(|&i| lens.layers[i].branch.as_str())
+            .map(|&i| layers.layers[i].branch.as_str())
             .collect();
         let Some(&owner) = names.first() else {
             return Ok(None);
@@ -395,7 +395,7 @@ fn deny_hook() -> Result<()> {
         }
         let conflict: String = (view.conflicts.iter())
             .filter(|c| c.path == path.as_bytes())
-            .map(|c| format!(" Conflict: {}.", c.describe(&lens)))
+            .map(|c| format!(" Conflict: {}.", c.describe(&layers)))
             .collect();
         let list_hint = match adds_lines_only(&input, &file) {
             true => {
@@ -405,7 +405,7 @@ fn deny_hook() -> Result<()> {
             false => "",
         };
         if let [ix] = owners[..] {
-            let (build_on, propose) = match base_offer(&state, &local, &lens.layers[ix], &path)? {
+            let (build_on, propose) = match base_offer(&state, &local, &layers.layers[ix], &path)? {
                 Some(offer) => (offer, "Or run"),
                 None => (String::new(), "To change it, run"),
             };
@@ -531,21 +531,21 @@ fn inserts_lines(old: &str, new: &str) -> bool {
     old.peek().is_none()
 }
 
-/// The layers of `lens` (shown in the workspace in `state`) whose changes
+/// The layers of `layers` (shown in the workspace in `state`) whose changes
 /// show at `path`, read-only there: one, or those whose changes are merged
 /// there. None if what shows is the workspace's own or its base's.
-pub(super) fn owners(state: &StateDir, lens: &Lens, path: &[u8]) -> Result<Vec<usize>> {
-    Ok(owners_in_view(state, lens, path)?.map_or_else(Vec::new, |(owners, _)| owners))
+pub(super) fn owners(state: &StateDir, layers: &Layers, path: &[u8]) -> Result<Vec<usize>> {
+    Ok(owners_in_view(state, layers, path)?.map_or_else(Vec::new, |(owners, _)| owners))
 }
 
 /// `owners`, with the view they were found in (`None` if none was built:
 /// no owners).
 fn owners_in_view(
     state: &StateDir,
-    lens: &Lens,
+    layers: &Layers,
     path: &[u8],
 ) -> Result<Option<(Vec<usize>, View)>> {
-    if !lens.is_on() {
+    if !layers.is_on() {
         return Ok(None);
     }
     // Its own file at that path wins: writable.
@@ -556,21 +556,21 @@ fn owners_in_view(
     let base = state.read_base()?;
     // Most edits are of files no layer changes: told apart without building
     // the view (the deny hook runs on every edit).
-    if !differs_from_base(lens, base.tree, path)? {
+    if !differs_from_base(layers, base.tree, path)? {
         return Ok(None);
     }
-    let view = crate::state::layers::view(&state.common_dir, &base.id, lens)?;
+    let view = crate::state::layers::view(&state.common_dir, &base.id, layers)?;
     Ok(view.map(|view| (view.mixed.get(path).cloned().unwrap_or_default(), view)))
 }
 
-/// Whether a layer of `lens` has another entry at `path` than base tree
+/// Whether a layer of `layers` has another entry at `path` than base tree
 /// `base`: if none has, the view shows the base's there (each layer's
 /// change, merged in turn, is then the base's own version).
-fn differs_from_base(lens: &Lens, base: ObjectId, path: &[u8]) -> Result<bool> {
+fn differs_from_base(layers: &Layers, base: ObjectId, path: &[u8]) -> Result<bool> {
     git::with_repo(|repo| {
         let at = |tree: ObjectId| git::layers::lookup(repo, tree, path.into());
         let in_base = at(base)?;
-        for layer in &lens.layers {
+        for layer in &layers.layers {
             if at(git::layers::commit_tree(repo, layer.seal)?)? != in_base {
                 return Ok(true);
             }
@@ -687,12 +687,16 @@ fn add_command(layer: &Layer) -> String {
     out
 }
 
-/// Stores `lens` for the workspace in `state` and has the daemon show it
+/// Stores `layers` for the workspace in `state` and has the daemon show it
 /// now, if mounted; says what happened. If the daemon refuses, the layers
 /// stored before are put back, so what is stored is what shows.
-pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
+pub(super) fn store_and_apply(
+    common_dir: &Path,
+    state: &StateDir,
+    layers: &Layers,
+) -> Result<String> {
     refuse_if_moving(common_dir, state)?;
-    crate::state::layers::store_and_show(state, lens, || apply(common_dir, &state.branch))
+    crate::state::layers::store_and_show(state, layers, || apply(common_dir, &state.branch))
 }
 
 /// Refuses changing the layers of the workspace in `state` while it is
@@ -714,7 +718,7 @@ fn refuse_if_moving(common_dir: &Path, state: &StateDir) -> Result<()> {
 
 /// Has the daemon show the stored layers now, if mounted; says what happened.
 pub(super) fn apply(common_dir: &Path, name: &str) -> Result<String> {
-    let request = Request::Lens {
+    let request = Request::Layers {
         branch: name.to_string(),
     };
     match control::request(common_dir, &request, None)? {
@@ -726,9 +730,9 @@ pub(super) fn apply(common_dir: &Path, name: &str) -> Result<String> {
 }
 
 /// `gitfold layer`: the base line, then the layers and their conflicts.
-fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
+fn listing(common_dir: &Path, state: &StateDir, layers: &Layers) -> Result<String> {
     let mut out = base_line(common_dir, &state.branch)?;
-    if lens.layers.is_empty() {
+    if layers.layers.is_empty() {
         out += "No layers.\n";
         return Ok(out);
     }
@@ -736,7 +740,8 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
     let rows: Vec<[String; 3]> =
         std::iter::once(["LAYER".into(), "SHOWS".into(), "UPDATES".into()])
             .chain(
-                lens.layers
+                layers
+                    .layers
                     .iter()
                     .map(|l| [l.branch.clone(), shows(l.shows).into(), updates(l)]),
             )
@@ -753,9 +758,10 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
         let _ = writeln!(out, "{layer:<w0$}{shows:<w1$}{updates}");
     }
     let base = state.read_base()?;
-    let (conflicts, mut warnings) = match crate::state::layers::view(common_dir, &base.id, lens)? {
+    let (conflicts, mut warnings) = match crate::state::layers::view(common_dir, &base.id, layers)?
+    {
         Some(view) => {
-            let own = crate::state::layers::own_among(state, &base, lens, &view)?;
+            let own = crate::state::layers::own_among(state, &base, layers, &view)?;
             (view.conflicts, [view.warnings, own].concat())
         }
         None => (Vec::new(), Vec::new()),
@@ -764,7 +770,7 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
         out += "\n";
     }
     for c in conflicts.iter().take(SHOWN_CONFLICTS) {
-        let _ = writeln!(out, "Conflict: {}", c.describe(lens));
+        let _ = writeln!(out, "Conflict: {}", c.describe(layers));
     }
     if conflicts.len() > SHOWN_CONFLICTS {
         let _ = writeln!(out, "and {} more", conflicts.len() - SHOWN_CONFLICTS);

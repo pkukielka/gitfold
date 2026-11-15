@@ -15,7 +15,7 @@
 //!
 //! The base follows the branch tip (`rebase`), without visible effect.
 //!
-//! - `lens`: other workspaces' work shown over the base (layers).
+//! - `layers`: other workspaces' work shown over the base.
 //! - `follow`: its live layers moved by the daemon when no agent works in it.
 //! - `nodes`: local id ↔ (parent, name) table.
 //! - `rebase`: moving the base to the branch tip.
@@ -81,7 +81,7 @@ pub enum Obj {
     LowerFile {
         file_id: u32,
         stamp: Option<Stamp>,
-        /// A layer's (see `lens`): not writable here.
+        /// A layer's (see `layers`): not writable here.
         mixed: bool,
     },
 }
@@ -111,7 +111,7 @@ pub struct Workspace {
     rebase_failed: AtomicBool,
     /// Content of the virtual `.git` file in the workspace root: the worktree
     /// registration, or while layers are shown, a message git prints (see
-    /// `lens`).
+    /// `layers`).
     gitfile: RwLock<Arc<Vec<u8>>>,
     /// Everything the merged view is computed from but upper; also the lock
     /// every mutation takes exclusively and every read shared.
@@ -137,19 +137,19 @@ pub struct Workspace {
     /// The files read, if recorded (see `reads`).
     reads: Mutex<Option<reads::Reads>>,
     /// Held by layer switches and the sync thread, so they never interleave
-    /// (see `lens`).
-    lens_lock: Mutex<()>,
+    /// (see `layers`).
+    layers_lock: Mutex<()>,
     /// The session's notifier and its slot, to tell the kernel what a switch
-    /// changed (see `lens`).
+    /// changed (see `layers`).
     kernel: std::sync::OnceLock<(fuser::Notifier, u32)>,
     /// The stored layers last refused (and when), retried by the sync thread
-    /// after a while (see `lens`).
-    lens_refused: Mutex<Option<(Vec<u8>, std::time::Instant)>>,
-    /// HEAD at a commit made on the lens commit that can't be extracted:
-    /// not tried again until HEAD moves (see `lens`).
-    lens_blocked: Mutex<Option<ObjectId>>,
+    /// after a while (see `layers`).
+    layers_refused: Mutex<Option<(Vec<u8>, std::time::Instant)>>,
+    /// HEAD at a commit made on the layers commit that can't be extracted:
+    /// not tried again until HEAD moves (see `layers`).
+    layers_blocked: Mutex<Option<ObjectId>>,
     /// The index's mtime when the layers' skip-worktree bits were last
-    /// checked (see `lens`).
+    /// checked (see `layers`).
     index_checked: Mutex<Option<std::time::SystemTime>>,
     /// Writes through the mount (see `follow`).
     activity: Arc<Activity>,
@@ -162,19 +162,19 @@ struct Layers {
     base: ObjectId,
     base_tree: u32,
     /// What lookups and listings show below upper: the base's tree, or with
-    /// layers shown, the view tree (see `lens`), with its id.
+    /// layers shown, the view tree (see `layers`), with its id.
     view_tree: u32,
     view: ObjectId,
-    /// The paths layers changed, with the layers' indexes (see `lens`).
+    /// The paths layers changed, with the layers' indexes (see `layers`).
     mixed: std::collections::HashMap<Vec<u8>, Vec<usize>>,
     /// Whether any layer is shown.
-    lens_on: bool,
+    layers_on: bool,
     /// H: the base's tree with the blended files blended (the base's tree
-    /// when none is), and the blended files (see `lens`).
+    /// when none is), and the blended files (see `layers`).
     hunk: ObjectId,
     blended: std::collections::HashMap<Vec<u8>, Vec<usize>>,
-    /// What was last applied of the layers (see `lens`).
-    applied: crate::state::layers::Applied,
+    /// What was last applied of the layers (see `layers`).
+    applied: crate::state::layers::ShownLayers,
     /// Whiteouts and opaque markers.
     markers: Markers,
     times: Times,
@@ -288,21 +288,21 @@ impl Workspace {
             view_tree: base_tree,
             view: base.tree,
             mixed: Default::default(),
-            lens_on: false,
+            layers_on: false,
             hunk: base.tree,
             blended: Default::default(),
             applied: Default::default(),
             markers: Markers::open(&state.markers())?,
             times: Times::open(&state.times())?,
         };
-        let lensed = layers::open_view(store, &state, &mut layers)?;
+        let showing = layers::open_view(store, &state, &mut layers)?;
         // Copy-ups a crash interrupted; their target was never replaced.
         let tmp = state.tmp();
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp)?;
         // The registration's directory name is deterministic, so the `.git`
         // file can be written before the workspace exists.
-        let gitfile = match &lensed {
+        let gitfile = match &showing {
             Some(message) => message.clone(),
             None => format!("gitdir: {}\n", state.admin.display()).into_bytes(),
         };
@@ -323,10 +323,10 @@ impl Workspace {
             removing: AtomicBool::new(false),
             touched: Mutex::new(HashSet::new()),
             reads: Mutex::new(None),
-            lens_lock: Mutex::new(()),
+            layers_lock: Mutex::new(()),
             kernel: std::sync::OnceLock::new(),
-            lens_refused: Mutex::new(None),
-            lens_blocked: Mutex::new(None),
+            layers_refused: Mutex::new(None),
+            layers_blocked: Mutex::new(None),
             index_checked: Mutex::new(None),
             activity: Default::default(),
             following: Default::default(),

@@ -1,8 +1,8 @@
 #!/bin/sh
-# gitfold's push guard: refuses to publish a lens commit, then runs the
+# gitfold's push guard: refuses to publish a layers commit, then runs the
 # user's own pre-push.
 . "${0%/*}/gitfold-lib.sh"
 gitfold_updates=$(cat)
-gitfold_check_lens "$gitfold_updates" || exit 1
+gitfold_check_layers "$gitfold_updates" || exit 1
 printf '%s' "$gitfold_updates${gitfold_updates:+
 }" | gitfold_user_hook pre-push "$@"

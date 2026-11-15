@@ -180,7 +180,7 @@ impl Workspace {
     /// `follow_layers` once due: what moved, if anything did.
     fn follow_now(&self, store: &Store, activities: &Activities) -> anyhow::Result<Option<String>> {
         // The cheap checks first.
-        if self.activity.quiet_for() < IDLE || self.lens_pending() {
+        if self.activity.quiet_for() < IDLE || self.layers_pending() {
             return Ok(None);
         }
         let backing_off = (self.following.lock().refused).is_some_and(|(at, writes)| {

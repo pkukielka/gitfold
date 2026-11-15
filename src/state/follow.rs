@@ -1,5 +1,5 @@
 //! Moving a workspace's live layers to their branches' latest work (see
-//! `lens`). Shared by the two that move them:
+//! `layers`). Shared by the two that move them:
 //! - a workspace with an agent: its `UserPromptSubmit` hook, at its turns'
 //!   starts (`cli::layer::layer_hook`), so what shows changes only between
 //!   turns;
@@ -17,7 +17,7 @@ use anyhow::Result;
 use gix::ObjectId;
 
 use super::StateDir;
-use super::layers::{Layer, LayersLock, Lens, Shows, Updates};
+use super::layers::{Layer, Layers, LayersLock, Shows, Updates};
 use super::snapshot;
 use crate::git;
 use crate::settings::Local;
@@ -55,10 +55,10 @@ pub fn follow_live(
     if super::moves::pending(state) {
         return Ok(None);
     }
-    let mut lens = Lens::read(state)?;
+    let mut layers = Layers::read(state)?;
     let (mut moved, mut stored, mut failed) = (Vec::new(), false, Vec::new());
     let local = Local::read(&state.common_dir);
-    for layer in &mut lens.layers {
+    for layer in &mut layers.layers {
         if layer.updates != Updates::Live {
             continue;
         }
@@ -86,7 +86,7 @@ pub fn follow_live(
         moved.push(format!("{} ({files} {what})", layer.branch));
     }
     let applied = match stored {
-        true => super::layers::store_and_show(state, &lens, show)?,
+        true => super::layers::store_and_show(state, &layers, show)?,
         false => String::new(),
     };
     Ok(Some(Followed {

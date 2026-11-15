@@ -82,7 +82,7 @@ impl Workspaces {
 
     /// `gitfold layer`: shows the layers stored for the workspace of `branch`
     /// (just changed) if it is open. Says what it did.
-    pub fn switch_lens(&self, store: &Store, branch: &str) -> anyhow::Result<String> {
+    pub fn switch_layers(&self, store: &Store, branch: &str) -> anyhow::Result<String> {
         match self.get_open(branch) {
             Some(ws) => ws.switch(store),
             None => Ok(format!(

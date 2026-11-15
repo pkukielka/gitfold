@@ -1,5 +1,5 @@
 //! A scratch repository for unit tests, driven with the git CLI in an
-//! isolated configuration (`lens` and `stack` tests).
+//! isolated configuration (`layers` and `stack` tests).
 
 use std::fs;
 use std::path::{Path, PathBuf};

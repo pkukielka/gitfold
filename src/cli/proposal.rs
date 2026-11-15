@@ -38,7 +38,7 @@ use crate::git::layers::{Change, Item};
 use crate::mount_table;
 use crate::refusal::Refusal;
 use crate::settings::{self, Local};
-use crate::state::layers::{Layer, Lens, Shows, Updates};
+use crate::state::layers::{Layer, Layers, Shows, Updates};
 use crate::state::markers::{Kind, Markers};
 use crate::state::retire::check_name;
 use crate::state::snapshot::IDENTITY;
@@ -266,10 +266,10 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     let local = Local::read(&common_dir);
     // Read, changed and stored with no other change in between.
     let _lock = state::layers::lock(&state)?;
-    let mut lens = Lens::read(&state)?;
+    let mut layers = Layers::read(&state)?;
     let layer = match args.layer {
         Some(layer) => layer,
-        None => default_layer(&state, &lens, &paths[0])?,
+        None => default_layer(&state, &layers, &paths[0])?,
     };
     // The layer, or this workspace's open proposal to change it, shown in
     // its place.
@@ -278,15 +278,15 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
             .proposal(b)
             .is_some_and(|(t, by)| t == layer && by == name)
     };
-    let Some(i) = lens
+    let Some(i) = layers
         .find(&layer)
-        .or_else(|| lens.layers.iter().position(|l| mine(&l.branch)))
+        .or_else(|| layers.layers.iter().position(|l| mine(&l.branch)))
     else {
         return Err(Refusal::NotFound.error(format!(
             "{layer} isn't a layer of {name}: a proposal changes a layer shown here"
         )));
     };
-    let shown = lens.layers[i].branch.clone();
+    let shown = layers.layers[i].branch.clone();
     // Proposing again with the proposal shown: it is the one to edit.
     let (target, proposal) = match local.proposal(&shown) {
         Some((target, by)) if by == name => (target, shown.clone()),
@@ -326,7 +326,7 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
     // The proposal in the layer's place, shown as now.
     let swapped = shown != proposal;
     if swapped || !copied.is_empty() {
-        let was = &lens.layers[i];
+        let was = &layers.layers[i];
         let mut shown =
             super::layer::layer_of(&store, &common_dir, &state, &proposal, false, false)?;
         // The layer as it was, put back when the proposal goes.
@@ -334,8 +334,8 @@ pub fn propose(repo: &Path, args: ProposeArgs) -> Result<()> {
             true => Some(Box::new(was.clone())),
             false => was.instead.clone(),
         };
-        lens.layers[i] = shown;
-        super::layer::store_and_apply(&common_dir, &state, &lens)?;
+        layers.layers[i] = shown;
+        super::layer::store_and_apply(&common_dir, &state, &layers)?;
     }
     if swapped {
         let _ = writeln!(out, "{name} shows {proposal} in place of {target} now");
@@ -435,14 +435,14 @@ fn workspace_paths(state: &StateDir, paths: &[PathBuf]) -> Result<Vec<BString>> 
 
 /// The layer whose file shows at `path` in the workspace in `state`, or the
 /// only layer.
-fn default_layer(state: &StateDir, lens: &Lens, path: &BString) -> Result<String> {
-    let applied = crate::state::layers::Applied::read(state)?.layers()?;
+fn default_layer(state: &StateDir, layers: &Layers, path: &BString) -> Result<String> {
+    let applied = crate::state::layers::ShownLayers::read(state)?.layers()?;
     match super::layer::owners(state, &applied, path)?[..] {
         [i] => return Ok(applied.layers[i].branch.clone()),
         [] => {}
         _ => bail!("{path} shows the merge of several layers: name one with --layer"),
     }
-    match &lens.layers[..] {
+    match &layers.layers[..] {
         [one] => Ok(one.branch.clone()),
         [] => Err(Refusal::NotFound.error(format!("{} shows no layers", state.branch))),
         _ => bail!("no layer shows {path} here: name the layer with --layer"),
@@ -599,7 +599,7 @@ fn write_stored(
         )));
     }
     ensure!(
-        !Lens::read(state)?.is_on(),
+        !Layers::read(state)?.is_on(),
         "{branch} shows layers: mount the repository to write into it"
     );
     let base = state.read_base()?;
@@ -789,8 +789,8 @@ fn followers(common_dir: &Path, local: &Local, p: &Proposal) -> Result<Vec<State
         if s.branch == p.layer || s.branch == p.name {
             continue;
         }
-        let lens = Lens::read(&s.state).unwrap_or_default();
-        if lens.layers.iter().any(|l| of_layer(local, p, &l.branch)) {
+        let layers = Layers::read(&s.state).unwrap_or_default();
+        if layers.layers.iter().any(|l| of_layer(local, p, &l.branch)) {
             out.push(s.state);
         }
     }
@@ -803,7 +803,7 @@ fn of_layer(local: &Local, p: &Proposal, branch: &str) -> bool {
     branch == p.layer || local.proposal(branch).is_some_and(|(l, _)| l == p.layer)
 }
 
-/// What the workspace in `state` (showing `lens`) would show with `accepted`
+/// What the workspace in `state` (showing `layers`) would show with `accepted`
 /// (`p` accepted) in place of `p`'s layer and its proposals: its view tree
 /// with its own work on top, as a commit on its base. Blended files show the
 /// workspace's own version, if it has one.
@@ -812,27 +812,27 @@ fn view_with(
     local: &Local,
     p: &Proposal,
     state: &StateDir,
-    mut lens: Lens,
+    mut layers: Layers,
     accepted: ObjectId,
 ) -> Result<ObjectId> {
     let common_dir = &state.common_dir;
     let base = state.read_base()?;
     let mut replaced = false;
-    let mut layers = Vec::new();
-    for l in lens.layers {
+    let mut kept = Vec::new();
+    for l in layers.layers {
         if !of_layer(local, p, &l.branch) {
-            layers.push(l);
+            kept.push(l);
         } else if !replaced {
             replaced = true;
-            layers.push(Layer {
+            kept.push(Layer {
                 branch: p.layer.clone(),
                 seal: accepted,
                 ..l
             });
         }
     }
-    lens.layers = layers;
-    let view = match state::layers::view(common_dir, &base.id, &lens)? {
+    layers.layers = kept;
+    let view = match state::layers::view(common_dir, &base.id, &layers)? {
         Some(view) => view.tree,
         None => base.tree,
     };
@@ -907,8 +907,8 @@ pub fn consent(repo: &Path, args: ConsentArgs) -> Result<i32> {
             let _ = writeln!(table, "{branch}\t{}\tyes\t-", read.word());
             continue;
         };
-        let lens = Lens::read(&state).unwrap_or_default();
-        let view = view_with(&store, &local, &p, &state, lens, accepted)?;
+        let layers = Layers::read(&state).unwrap_or_default();
+        let view = view_with(&store, &local, &p, &state, layers, accepted)?;
         let at = mount.join(format!("@{view}"));
         let ran = run_test(test, &at, branch, Duration::from_secs(args.timeout));
         // The snapshot's registration goes (it is made again if opened).
@@ -1098,14 +1098,17 @@ pub fn accept(repo: &Path, args: AcceptArgs) -> Result<()> {
         let branch = state.branch.clone();
         out += &show_layer_again(&store, &p, &state, true)?;
         if !paths.is_empty() && Read::of(&state, &paths)? != Read::No {
-            let lens = Lens::read(&state)?;
+            let layers = Layers::read(&state)?;
             let body = format!(
                 "contract {} changed: {}'s proposal {} was accepted into {}; {}.\n{diff}",
                 shown.join(", "),
                 p.by,
                 p.name,
                 p.layer,
-                super::layer::when_shown(lens.find(&p.layer).map(|i| &lens.layers[i]), &p.layer),
+                super::layer::when_shown(
+                    layers.find(&p.layer).map(|i| &layers.layers[i]),
+                    &p.layer
+                ),
             );
             super::inbox::deliver(
                 &common_dir,
@@ -1187,18 +1190,18 @@ fn show_layer_again(
     accepted: bool,
 ) -> Result<String> {
     let _lock = state::layers::lock(state)?;
-    let mut lens = Lens::read(state)?;
-    let Some(i) = lens.find(&p.name) else {
+    let mut layers = Layers::read(state)?;
+    let Some(i) = layers.find(&p.name) else {
         return Ok(String::new());
     };
     let common_dir = &state.common_dir;
     let again = |frozen: bool, commits: bool| {
         super::layer::layer_of(store, common_dir, state, &p.layer, frozen, commits)
     };
-    match lens.find(&p.layer) {
-        Some(_) => drop(lens.layers.remove(i)),
+    match layers.find(&p.layer) {
+        Some(_) => drop(layers.layers.remove(i)),
         None => {
-            lens.layers[i] = match lens.layers[i].instead.take().map(|was| *was) {
+            layers.layers[i] = match layers.layers[i].instead.take().map(|was| *was) {
                 None => again(false, false)?,
                 Some(was) if was.updates == Updates::Live => {
                     again(false, was.shows == Shows::CommitsOnly)?
@@ -1212,7 +1215,7 @@ fn show_layer_again(
     }
     // Stored even if the switch is refused now: the workspace switches to it
     // when it can.
-    lens.write(state)?;
+    layers.write(state)?;
     let branch = &state.branch;
     Ok(match super::layer::apply(common_dir, branch) {
         Ok(_) => format!("{branch} shows {} again\n", p.layer),

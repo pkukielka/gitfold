@@ -124,7 +124,7 @@ gitfold writes into the repository: worktree registrations under
 `.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
 [Cleaning up](#cleaning-up)), and `refs/gitfold-seal/*` and
-`refs/gitfold-lens/*` that keep snapshots of work and layers commits (see
+`refs/gitfold-layers/*` that keep snapshots of work and layers commits (see
 [Layers](#layers)).
 
 ## Requirements
@@ -490,7 +490,7 @@ or restored unchanged); `reads` the files read, if tracked; `base` is that commi
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
 and the layers files, if it has layers (see [Layers](#layers)). Snapshots of its work are kept by refs
 `refs/gitfold-seal/<id>/<n>`, a workspace's layers commit by
-`refs/gitfold-lens/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
+`refs/gitfold-layers/<id>`. Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
 **Limitations.**
@@ -778,7 +778,7 @@ its new commits as they come; it says when there is nothing to show yet.
   branch: build on it (`gitfold layer base agent/db`).
 - **The layers commit.** While any file is blended, HEAD is detached at a
   layers commit gitfold makes: the blends over the branch tip, its parents
-  the tip and the blended layers' snapshot commits, a `gitfold-lens` header, and the
+  the tip and the blended layers' snapshot commits, a `gitfold-layers` header, and the
   subject `gitfold layers: agent/client + agent/api (commits go to
   agent/client; never push this commit)`. The index has the blends too, so
   `git status` and `git diff` show only the workspace's own lines in a
@@ -800,7 +800,7 @@ its new commits as they come; it says when there is nothing to show yet.
 - **The push guard.** A layers commit holds other workspaces' uncommitted
   work, so the worktree gets its own `core.hooksPath` (per-worktree config)
   while one is HEAD, whose `pre-push` refuses a push that would publish a
-  commit with a `gitfold-lens` header (`git push origin HEAD:main`), then
+  commit with a `gitfold-layers` header (`git push origin HEAD:main`), then
   runs your own `pre-push`; every other hook runs yours. `git push origin
   <branch>` pushes the copied commits and is fine. `--no-verify` skips the
   guard. Turning the last blend off puts HEAD back on the branch and
@@ -869,7 +869,7 @@ its new commits as they come; it says when there is nothing to show yet.
   formats are in [ARCHITECTURE.md](ARCHITECTURE.md)). Layers files of
   earlier builds are read: their shown layers become live, all work; their
   hidden ones are dropped. While files are blended, the worktree's HEAD is
-  the layers commit (found again on a remount), and `refs/gitfold-lens/<id>`
+  the layers commit (found again on a remount), and `refs/gitfold-layers/<id>`
   keeps it and the view from `git gc`. A fork (`branch -w`) starts without
   layers.
 - **Limitations.** A file both the workspace and a layer changed shows the

@@ -151,7 +151,7 @@ impl Workspace {
         let _copying = self.copy_lock.lock();
         let file_id = match self.resolve_in(store, layers, path)? {
             Obj::Upper(_) => return Ok(false),
-            // A layer's file (see `lens`).
+            // A layer's file (see `layers`).
             Obj::LowerFile { mixed: true, .. } => return Err(Errno::EACCES),
             Obj::LowerFile { file_id, .. } => file_id,
             Obj::LowerDir => return self.ensure_upper_dir(path).map(|()| true),
@@ -293,7 +293,7 @@ impl Workspace {
             return Err(Errno::ENOTDIR);
         }
         let path = join(parent_path, name);
-        // A path a layer deleted is the layer's (see `lens`).
+        // A path a layer deleted is the layer's (see `layers`).
         if Self::is_mixed(layers, &path) {
             return Err(Errno::EACCES);
         }
@@ -578,7 +578,7 @@ impl Workspace {
         }
         let src_obj = self.resolve_in(store, &layers, &src)?;
         let src_has_lower = self.has_lower(store, &layers, &src);
-        // A layer's file, or a directory holding one (see `lens`), stays put:
+        // A layer's file, or a directory holding one (see `layers`), stays put:
         // renaming would copy the layer's content into the workspace's own.
         let layer_owned = |obj: &Obj, path: &[u8]| match obj {
             Obj::LowerFile { mixed: true, .. } => true,
