@@ -57,7 +57,7 @@ pub fn trunk(common_dir: &Path, local: &Local) -> Option<String> {
 }
 
 /// Whether `name` is the trunk: a parent never restacked onto at a turn
-/// boundary (following the trunk is `stack sync`'s, on request).
+/// boundary (following the trunk is `layer base`'s, on request).
 /// A local branch tracking it counts too (`main` for `origin/main`): a
 /// branch stacked on it would otherwise be restacked on every pull, and its
 /// own commits taken for landed once rebased onto the trunk.
@@ -194,8 +194,7 @@ fn how_code(how: How) -> &'static str {
     match how {
         How::Merged => "m",
         How::FastForward => "f",
-        // Declared landings aren't found, so never cached.
-        How::Squashed | How::Declared => "s",
+        How::Squashed => "s",
     }
 }
 

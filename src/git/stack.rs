@@ -233,7 +233,7 @@ pub fn move_refs(
 
 /// Points the stack ref of `branch` at `base`, whatever it held.
 pub fn set_base(common_dir: &Path, branch: &str, base: ObjectId) -> Result<()> {
-    let args = ["update-ref", "-m", "gitfold: stack on"];
+    let args = ["update-ref", "-m", "gitfold: base"];
     let name = stack_ref(branch);
     let base = base.to_string();
     cmd::output(common_dir, &[&args[..], &[&name, &base]].concat()).map(drop)
@@ -259,8 +259,6 @@ pub enum How {
     /// In the target's first-parent line, where it wasn't when recorded: a
     /// fast-forward.
     FastForward,
-    /// Said so (`gitfold stack merged`).
-    Declared,
 }
 
 /// Where a parent base landed: `at`, the first commit of the target that
@@ -333,7 +331,7 @@ pub fn landing(
     if walked < commits.len() {
         log::warn!(
             "checking whether {base} landed: only the newest {walked} of {} commits since \
-             {from} touching its files; `gitfold stack merged` says so if it landed earlier",
+             {from} touching its files; `gitfold layer base <TRUNK>` moves it if it landed earlier",
             commits.len()
         );
     }

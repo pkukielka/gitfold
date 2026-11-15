@@ -66,10 +66,12 @@ enum Command {
     /// List the workspaces and their changes.
     ///
     /// For each: how many files it changed and deleted (uncommitted), how many
-    /// ignored files it holds, its base commit, how long ago it last changed
-    /// (a file written, created or deleted, or a commit), its parent if it is
-    /// stacked (`gitfold stack`), and notes (branch deleted, base behind;
-    /// needs restack, restack blocked, needs force-push).
+    /// ignored files it holds, the commit it is on, how long ago it last
+    /// changed (a file written, created or deleted, or a commit), and notes
+    /// (branch deleted, commit behind; for a branch built on another, `gitfold
+    /// layer base`: needs update, blocked, the force-push to run). A branch
+    /// built on another is listed under it, indented with └─, as are such
+    /// branches without a workspace and their bases (`-` for the counts).
     List(cli::list::ListArgs),
     /// List a workspace's uncommitted changes (A/M/D per path), without git status.
     ///
@@ -197,26 +199,6 @@ enum Command {
     /// and branch are removed. Exit codes: 3 no such proposal (or not one of
     /// these workspaces'), 1 other errors.
     Reject(cli::proposal::RejectArgs),
-    /// Stacked branches: a branch built on a parent branch, its own commits
-    /// following the parent's new ones.
-    ///
-    /// `stack on <PARENT>` declares it; from then on, when the parent gets
-    /// new commits (review fixes, a rebase), the branch's own commits are
-    /// copied onto them (restacked) by `stack sync`, or at the start of its
-    /// agent's turn (the `UserPromptSubmit` hook), unless
-    /// branch.<BRANCH>.gitfoldRestack is `manual`. A workspace's files move
-    /// as in a checkout, keeping uncommitted work; one whose uncommitted
-    /// work is on a path the restack changes waits, and a conflict with the
-    /// parent's commits leaves the branch as it was, reported (`list` shows
-    /// both). When the parent lands on main (or on its own parent) by a
-    /// merge, squash, rebase merge or fast-forward, the branch moves onto
-    /// that commit with only its own commits and is stacked there; it
-    /// follows the trunk later only by `stack sync`. gitfold never pushes:
-    /// `stack sync` prints the force-pushes to run. Exit codes: 3 no such
-    /// branch, or not stacked, 4 a branch not restacked (a conflict,
-    /// uncommitted work in the way, git busy, layers shown), 1 other errors,
-    /// 2 usage errors.
-    Stack(cli::stack::StackArgs),
     /// Delete a workspace, or a snapshot's registration.
     ///
     /// A workspace: its registration, stored changes and base ref (its commits
@@ -325,7 +307,6 @@ fn run() -> Result<i32> {
         Command::Consent(args) => return cli::proposal::consent(&cli::repo()?, args),
         Command::Accept(args) => cli::proposal::accept(&cli::repo()?, args)?,
         Command::Reject(args) => cli::proposal::reject(&cli::repo()?, args)?,
-        Command::Stack(args) => cli::stack::stack(&cli::repo()?, args)?,
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,

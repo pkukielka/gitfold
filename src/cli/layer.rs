@@ -24,8 +24,8 @@ pub struct LayerArgs {
     pub op: Option<LayerOp>,
     /// As Claude Code's `UserPromptSubmit` hook (`user-prompt-submit`): move
     /// the layers of the workspace the session is in to their workspaces'
-    /// newest seals (made when their sessions stopped), restack it onto its
-    /// parent's new commits if stacked (`gitfold stack`), and say what changed.
+    /// newest seals (made when their sessions stopped), move it onto its
+    /// base's new commits if built on one (`gitfold layer base`), and say what changed.
     /// As `PreToolUse` on Edit, Write, MultiEdit and NotebookEdit
     /// (`pre-tool-use`): deny writing a layer's file, saying why.
     #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit", "pre-tool-use"])]
@@ -49,6 +49,38 @@ pub enum LayerOp {
     Update,
     /// List the layers, bottom first: shown or not, and their seal.
     List,
+    /// Build the branch on TARGET (stacked): its own commits move onto
+    /// TARGET now, and onto TARGET's new commits from then on.
+    ///
+    /// It says first what it moves, and refuses (exit 4) to move commits
+    /// already pushed (reachable from its upstream, or origin/<BRANCH>)
+    /// without --yes. From then on its agent's next turn moves it (the
+    /// `UserPromptSubmit` hook), unless --frozen; running it again moves it
+    /// now. A workspace's files move as in a checkout, keeping uncommitted
+    /// work; one whose uncommitted work is on a path the move changes waits,
+    /// and a conflict leaves the branch as it was, reported (`gitfold list`
+    /// shows both). When TARGET lands (a merge, squash, rebase merge or
+    /// fast-forward), the branch moves onto what it landed in, by itself.
+    /// The trunk (gitfold.trunk, else origin/HEAD's branch, else main or
+    /// master) as TARGET takes it off the stack, its own commits moved onto
+    /// the trunk's tip. gitfold never pushes: it prints the force-pushes to
+    /// run. Exit codes: 3 no such branch, 4 not moved (commits already
+    /// pushed, a conflict, uncommitted work in the way, git busy, layers
+    /// shown), 1 other errors, 2 usage errors.
+    Base {
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        target: Option<String>,
+        /// Build on TARGET as it is now, and don't follow its new commits
+        /// (running this again brings it up to date, still frozen).
+        #[arg(long)]
+        frozen: bool,
+        /// Move commits already pushed too.
+        #[arg(long)]
+        yes: bool,
+        /// Bring every branch built on another up to date, bases first.
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Args)]
@@ -62,6 +94,16 @@ pub struct LensArgs {
 
 /// `gitfold layer`.
 pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
+    if let Some(LayerOp::Base {
+        target,
+        frozen,
+        yes,
+        all,
+    }) = &args.op
+    {
+        let target = target.as_deref().unwrap_or_default();
+        return super::stack::base(repo, args.workspace, target, *frozen, *yes, *all);
+    }
     let name = super::branch_or_current(args.workspace, repo)?;
     check_name(&name)?;
     let common_dir = git::init(repo)?;
@@ -80,6 +122,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             .ok_or_else(|| Refusal::NotFound.error(format!("{branch} isn't a layer of {name}")))
     };
     match op {
+        LayerOp::Base { .. } => unreachable!("handled above"),
         LayerOp::List => {
             print!("{}", listing(&lens));
             return Ok(());
@@ -335,8 +378,8 @@ pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) 
     // A restack moves the base, which a switch builds the view on.
     if crate::state::restack::pending(state) {
         return Err(Refusal::Changes.error(format!(
-            "a restack of {} is under way (or was interrupted: `gitfold stack sync` \
-             finishes it); retry once it is done",
+            "{} is being moved onto its base (or that was interrupted: `gitfold layer base \
+             <BASE>` finishes it); retry once it is done",
             state.branch
         )));
     }

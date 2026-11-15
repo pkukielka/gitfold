@@ -8,7 +8,8 @@
 //! - `layer`: `layer`, `lens`: other workspaces' work shown in one.
 //! - `proposal`: `propose`, `proposals`, `consent`, `accept`, `reject`:
 //!   changes to a layer proposed from a workspace that shows it.
-//! - `stack`: `stack`: stacked branches, restacked onto their parents.
+//! - `stack`: `layer base` and `branch --base`: branches built on another
+//!   branch (stacked), moved onto its new commits.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
 //! - `claude`: Claude Code's hooks: its worktrees as workspaces (`branch` and

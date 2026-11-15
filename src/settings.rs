@@ -3,9 +3,9 @@
 //! - per branch, `branch.<branch>.<key>`, which git keeps with the branch
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
 //!   mode), `gitfoldTrackReads` (whether it records reads), and for a
-//!   stacked branch `gitfoldParent` (the branch it is built on),
-//!   `gitfoldRestack` (`manual`: restacked by `gitfold stack sync` only),
-//!   `gitfoldRestackBlocked` (the restack that conflicted),
+//!   stacked branch `gitfoldParent` (the branch it is built on: its base),
+//!   `gitfoldRestack` (`manual`: `layer base --frozen`, moved only when
+//!   asked), `gitfoldRestackBlocked` (the move onto it that conflicted),
 //!   `gitfoldLanding` (a move onto a parent's landing under way) and
 //!   `gitfoldBaseOnTarget` (whether its parent base was in the parent's
 //!   target when recorded; see `cli::stack`); for a proposal (`gitfold
@@ -209,8 +209,8 @@ impl Local {
         self.branch(branch, CONSENT)
     }
 
-    /// Whether `branch` is restacked only by `gitfold stack sync`
-    /// (`gitfoldRestack` is `manual`), not at its turn boundaries.
+    /// Whether `branch` follows its base only when asked (`layer base
+    /// --frozen`: `gitfoldRestack` is `manual`), not at its turn boundaries.
     pub fn restack_manual(&self, branch: &str) -> bool {
         self.branch(branch, RESTACK).as_deref() == Some("manual")
     }
