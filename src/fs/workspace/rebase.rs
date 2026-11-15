@@ -140,6 +140,21 @@ impl Workspace {
     }
 
     fn sync_with(&self, store: &Store, fetch: bool) -> Result<()> {
+        // A restack of the branch (`state::restack`), first: while one runs,
+        // or one a crash interrupted can't be told apart, neither the base
+        // nor the layers move. One that finishes moves the branch, which the
+        // rebase below then follows.
+        if restack::pending(&self.state) {
+            if !self.git_idle() {
+                self.limit_touched();
+                return Ok(());
+            }
+            match restack::recover(&self.state)? {
+                Recovery::Nothing | Recovery::Finished | Recovery::Undone => {}
+                Recovery::InProgress => return Ok(()),
+                Recovery::Stuck(why) => return Err(anyhow!("{why}")),
+            }
+        }
         // With layers shown, commits made on the lens commit go onto the
         // branch (see `lens`), but the base waits, and an upper file
         // identical to a layer's mustn't be dropped as unchanged.
@@ -150,14 +165,6 @@ impl Workspace {
         if !self.git_idle() {
             self.limit_touched();
             return Ok(());
-        }
-        // A restack of the branch (`state::restack`): while one runs, or one
-        // a crash interrupted can't be told apart, the base waits. One that
-        // finishes moves the branch, which the rebase below then follows.
-        match restack::recover(&self.state)? {
-            Recovery::Nothing | Recovery::Finished | Recovery::Undone => {}
-            Recovery::InProgress => return Ok(()),
-            Recovery::Stuck(why) => return Err(anyhow!("{why}")),
         }
         let tip = git::branch_tip(&self.state.branch)?;
         let rebased = if tip.id != self.layers.read().base {

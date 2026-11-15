@@ -14,8 +14,28 @@ use anyhow::{Result, bail};
 
 /// `git --git-dir <git_dir>`, to add arguments to.
 pub fn command(git_dir: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = git();
     command.arg("--git-dir").arg(git_dir);
+    command
+}
+
+/// The variables git sets for its hooks and aliases that would point a git
+/// run by gitfold at the caller's repository, worktree or index.
+const CALLER_ENV: [&str; 5] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+];
+
+/// `git` with the caller's repository variables cleared (gitfold may run
+/// from a git hook), to add arguments to.
+pub fn git() -> Command {
+    let mut command = Command::new("git");
+    for name in CALLER_ENV {
+        command.env_remove(name);
+    }
     command
 }
 

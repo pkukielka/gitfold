@@ -296,6 +296,14 @@ fn layer_of(store: &Store, common_dir: &Path, state: &StateDir, branch: &str) ->
 /// now, if mounted; says what happened. If the daemon refuses, the layers
 /// stored before are put back, so what is stored is what shows.
 fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
+    // A restack moves the base, which a switch builds the view on.
+    if crate::state::restack::pending(state) {
+        return Err(Refusal::Changes.error(format!(
+            "a restack of {} is under way (or was interrupted: `gitfold stack sync` \
+             finishes it); retry once it is done",
+            state.branch
+        )));
+    }
     let before = crate::state::lens::stored_bytes(state)?;
     lens.write(state)?;
     apply(common_dir, &state.branch).inspect_err(|_| {

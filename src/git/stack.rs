@@ -213,13 +213,17 @@ pub fn move_refs(
 ) -> Result<()> {
     let old_stack = stack.0.map_or(NO_REF.to_string(), |o| o.to_string());
     let mut script = String::new();
-    if tip.0 != tip.1 {
+    // Unmoved, the branch is still compared: the stack ref moves only with
+    // the branch where the caller saw it.
+    if tip.0 == tip.1 {
+        script += &format!("verify refs/heads/{branch} {}\n", tip.0);
+    } else {
         script += &format!("update refs/heads/{branch} {} {}\n", tip.1, tip.0);
     }
     if stack.0 != Some(stack.1) {
         script += &format!("update {} {} {old_stack}\n", stack_ref(branch), stack.1);
     }
-    if script.is_empty() {
+    if tip.0 == tip.1 && stack.0 == Some(stack.1) {
         return Ok(());
     }
     let args = ["update-ref", "-m", why, "--stdin"];
@@ -411,6 +415,12 @@ mod tests {
         assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), Some(p1));
         // Again from the old tip: refused.
         assert!(move_refs(&common, "p2", (p2, tip), (Some(p1), p1), "test").is_err());
+        // The stack ref alone, with the branch not where the caller saw it:
+        // refused too.
+        assert!(move_refs(&common, "p2", (p2, p2), (Some(p1), old_p1), "test").is_err());
+        assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), Some(p1));
+        move_refs(&common, "p2", (tip, tip), (Some(p1), old_p1), "test").unwrap();
+        assert_eq!(rev(&common, &stack_ref("p2")).unwrap(), Some(old_p1));
         let wt2 = r.dir.join("wt-p2");
         assert_eq!(
             r.git_in(&wt2, &["status", "--short"]),

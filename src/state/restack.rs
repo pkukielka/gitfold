@@ -4,8 +4,9 @@
 //!
 //! The intent is `<mode> <C> <C'> <A> <stack ref>`: the branch moves from C
 //! to C' onto parent tip A, its stack ref from what it held (`-`: none) to
-//! A. The command doing it holds the file locked (`flock`), so `recover`
-//! leaves a restack in progress alone. The steps, by mode:
+//! A. The command doing it holds the file locked (`flock`; locked before
+//! it is linked into place), so `recover` leaves a restack in progress
+//! alone. The steps, by mode:
 //!
 //! - `open` (a mounted workspace): `git read-tree -m -u C C'` in the
 //!   workspace (its index and files), then the refs.
@@ -20,7 +21,9 @@
 //! - tip at C, index at C': open, the files moved too, so the refs follow;
 //!   closed, they follow if the base moved, else the index goes back;
 //! - tip at C, index at C: nothing moved;
-//! - anything else is left as it is, and reported.
+//! - the branch moved on and the index describes it: forgotten;
+//! - anything else is left as it is, and reported (`forget`, for `gitfold
+//!   stack off`, deletes it).
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -59,20 +62,67 @@ pub struct Intent {
 }
 
 /// An intent recorded and locked by this process: the restack is in
-/// progress until `done`.
+/// progress until `done`. Dropped otherwise (an error before anything
+/// moved), the intent goes too, unless `keep` said something may have
+/// moved half-way: then it stays for `recover`.
 pub struct Held {
     _file: fs::File,
     path: PathBuf,
+    keep: bool,
 }
 
 impl Held {
     /// The restack is done (or undone): the intent goes.
-    pub fn done(self) -> Result<()> {
-        match fs::remove_file(&self.path) {
-            Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
+    pub fn done(mut self) -> Result<()> {
+        self.keep = true;
+        remove(&self.path)
+    }
+
+    /// Something may have moved half-way: the intent stays, for `recover`
+    /// to finish or undo once this process lets go of it.
+    pub fn keep(mut self) {
+        self.keep = true;
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if !self.keep
+            && let Err(e) = remove(&self.path)
+        {
+            log::warn!("removing {}: {e:#}", self.path.display());
         }
     }
+}
+
+fn remove(path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
+        _ => Ok(()),
+    }
+}
+
+/// Whether the workspace in `state` has an intent: a restack under way, or
+/// one a crash interrupted.
+pub fn pending(state: &StateDir) -> bool {
+    fs::symlink_metadata(state.dir.join(INTENT)).is_ok()
+}
+
+/// Deletes the intent of the workspace in `state` unless a restack holds
+/// it: for one `recover` can't tell apart (`Recovery::Stuck`), once the
+/// workspace is as wanted. Whether there was one to delete.
+pub fn forget(state: &StateDir) -> Result<bool> {
+    let path = state.dir.join(INTENT);
+    let file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+    };
+    if !crate::lock::flock(&file)? {
+        bail!("a restack of {} is running", state.branch);
+    }
+    remove(&path)?;
+    Ok(true)
 }
 
 impl Intent {
@@ -109,20 +159,41 @@ impl Intent {
     }
 
     /// Records it for the workspace in `state`, durably, locked until
-    /// `Held::done`. Fails if an intent is there (`recover` first).
+    /// `Held::done`. Fails if an intent is there (`recover` first). It is
+    /// written and locked under another name and linked into place, so
+    /// `recover` never finds it unlocked, or empty.
     pub fn begin(&self, state: &StateDir) -> Result<Held> {
         let path = state.dir.join(INTENT);
+        let tmp = state
+            .dir
+            .join(format!("{INTENT}.{}.tmp", std::process::id()));
+        let _ = fs::remove_file(&tmp);
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&path)
-            .with_context(|| format!("recording a restack in {}", path.display()))?;
-        if !crate::lock::flock(&file)? {
-            bail!("{} is locked", path.display());
-        }
-        file.write_all(self.encode().as_bytes())?;
-        file.sync_all()?;
-        Ok(Held { _file: file, path })
+            .open(&tmp)
+            .with_context(|| format!("recording a restack in {}", tmp.display()))?;
+        let written = (|| -> Result<()> {
+            anyhow::ensure!(crate::lock::flock(&file)?, "{} is locked", tmp.display());
+            file.write_all(self.encode().as_bytes())?;
+            file.sync_all()?;
+            fs::hard_link(&tmp, &path).with_context(|| {
+                format!(
+                    "recording a restack in {} (a restack of {} is under way)",
+                    path.display(),
+                    state.branch
+                )
+            })
+        })();
+        let _ = fs::remove_file(&tmp);
+        written?;
+        let held = Held {
+            _file: file,
+            path,
+            keep: false,
+        };
+        fs::File::open(&state.dir)?.sync_all()?;
+        Ok(held)
     }
 }
 
@@ -160,13 +231,30 @@ pub fn recover(state: &StateDir) -> Result<Recovery> {
     }
     let mut text = String::new();
     file.read_to_string(&mut text)?;
-    let held = Held { _file: file, path };
-    // Empty: the process died writing it, before anything moved.
-    if text.trim().is_empty() {
-        held.done()?;
-        return Ok(Recovery::Undone);
+    let held = Held {
+        _file: file,
+        path,
+        keep: false,
+    };
+    match decide(state, &text) {
+        Ok(Recovery::Stuck(why)) => {
+            held.keep();
+            Ok(Recovery::Stuck(why))
+        }
+        Ok(recovery) => {
+            held.done()?;
+            Ok(recovery)
+        }
+        Err(e) => {
+            held.keep();
+            Err(e)
+        }
     }
-    let intent = Intent::parse(&text)?;
+}
+
+/// `recover` for the intent `text`, held.
+fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
+    let intent = Intent::parse(text)?;
     let common = &state.common_dir;
     let tip = stack::rev(common, &format!("refs/heads/{}", state.branch))?;
     let recovery = if tip == Some(intent.to) {
@@ -193,21 +281,35 @@ pub fn recover(state: &StateDir) -> Result<Recovery> {
                 state.branch, intent.from, intent.to
             )),
         }
+    } else if let Some(tip) = tip
+        && index_matches(state, tip, &[])?
+    {
+        // The branch moved on and git's index describes it (a commit, a
+        // reset since): whatever the restack left is history now.
+        log::warn!(
+            "{}: forgetting an interrupted restack from {}: the branch moved on since",
+            state.branch,
+            intent.from
+        );
+        Recovery::Undone
     } else {
         Recovery::Stuck(format!(
-            "an interrupted restack of {} from {}: the branch moved since",
-            state.branch, intent.from
+            "an interrupted restack of {} from {}: the branch and its index moved since; \
+             once its workspace is as you want it, `gitfold stack off -w {}` forgets it",
+            state.branch, intent.from, state.branch
         ))
     };
-    if !matches!(recovery, Recovery::Stuck(_)) {
-        held.done()?;
-    }
     Ok(recovery)
 }
 
 /// Moves the branch from `tip` to the intent's C' (if not there) and its
 /// stack ref to A, unless the stack ref was moved past the intent meanwhile.
 fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
+    let stored = stack::rev(&state.common_dir, &stack::stack_ref(&state.branch))?;
+    // Both moved already (the restack itself got that far).
+    if tip == intent.to && stored == Some(intent.parent_tip) {
+        return Ok(());
+    }
     let moved = stack::move_refs(
         &state.common_dir,
         &state.branch,
@@ -215,8 +317,7 @@ fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
         (intent.stack_old, intent.parent_tip),
         "gitfold: restack (recovered)",
     );
-    let stored = stack::rev(&state.common_dir, &stack::stack_ref(&state.branch))?;
-    if moved.is_err() && stored != Some(intent.parent_tip) && tip == intent.to {
+    if moved.is_err() && tip == intent.to {
         // Another restack or `stack on` set it since: theirs stands.
         log::warn!(
             "{}: the stack ref moved during a restack; left at {stored:?}",
@@ -243,31 +344,38 @@ pub fn changed_paths(intent: &Intent) -> Result<Vec<BString>> {
 /// (`Some(false)`) on the paths the restack changes, or neither.
 fn index_at(state: &StateDir, intent: &Intent) -> Result<Option<bool>> {
     let paths = changed_paths(intent)?;
-    let matches = |commit: ObjectId| -> Result<bool> {
-        let status = cmd::command(&state.admin)
-            .env("GIT_LITERAL_PATHSPECS", "1")
-            .args([
-                "diff-index",
-                "--cached",
-                "--quiet",
-                &commit.to_string(),
-                "--",
-            ])
-            .args(paths.iter().map(|p| p.to_string()))
-            .status()?;
-        match status.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => bail!(
-                "git diff-index in {} failed ({status})",
-                state.admin.display()
-            ),
-        }
-    };
-    if matches(intent.to)? {
+    // C and C' have the same tree: the index is at both.
+    if paths.is_empty() {
         return Ok(Some(true));
     }
-    Ok(matches(intent.from)?.then_some(false))
+    if index_matches(state, intent.to, &paths)? {
+        return Ok(Some(true));
+    }
+    Ok(index_matches(state, intent.from, &paths)?.then_some(false))
+}
+
+/// Whether the workspace's index has `commit`'s entries at `paths` (none:
+/// the whole index).
+fn index_matches(state: &StateDir, commit: ObjectId, paths: &[BString]) -> Result<bool> {
+    let status = cmd::command(&state.admin)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .args([
+            "diff-index",
+            "--cached",
+            "--quiet",
+            &commit.to_string(),
+            "--",
+        ])
+        .args(paths.iter().map(|p| p.to_string()))
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => bail!(
+            "git diff-index in {} failed ({status})",
+            state.admin.display()
+        ),
+    }
 }
 
 /// Moves the index of the workspace in `state` from C to C' (`back`: from
@@ -285,6 +393,127 @@ pub fn move_index(state: &StateDir, intent: &Intent, back: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::test_repo::Repo;
+
+    /// `recover`, once no other thread's child (forked by a test running
+    /// alongside, before its exec) holds a copy of a released intent's lock.
+    fn settled(state: &StateDir) -> Recovery {
+        for _ in 0..100 {
+            match recover(state).unwrap() {
+                Recovery::InProgress => std::thread::sleep(std::time::Duration::from_millis(10)),
+                done => return done,
+            }
+        }
+        panic!("still held")
+    }
+
+    /// A repository with commits c1 < c2 < c3 on main, branch p2 checked
+    /// out in a linked worktree registered as gitfold's workspace of p2,
+    /// and that workspace's state directory.
+    fn workspace(name: &str) -> (Repo, StateDir, [ObjectId; 3]) {
+        let r = Repo::new(name);
+        let mut ids = [ObjectId::null(gix::hash::Kind::Sha1); 3];
+        for (i, id) in ids.iter_mut().enumerate() {
+            r.write("f.txt", &format!("{i}\n"));
+            *id = r.commit(&format!("c{i}"));
+        }
+        r.git(&["branch", "p2"]);
+        let wt = r.dir.join("gitfold-ws-p2");
+        r.git(&["worktree", "add", "-q", wt.to_str().unwrap(), "p2"]);
+        let state = StateDir::of(&r.common(), "p2");
+        fs::create_dir_all(&state.dir).unwrap();
+        (r, state, ids)
+    }
+
+    #[test]
+    fn a_finished_restack_is_recovered_as_finished() {
+        let (r, state, [c1, c2, c3]) = workspace("restack-finished");
+        let common = r.common();
+        // The branch and its stack ref both moved: the restack got that far.
+        stack::set_base(&common, "p2", c1).unwrap();
+        let intent = Intent {
+            mode: Mode::Open,
+            from: c2,
+            to: c3,
+            parent_tip: c1,
+            stack_old: Some(c2),
+        };
+        intent.begin(&state).unwrap().keep();
+        assert!(pending(&state));
+        assert_eq!(settled(&state), Recovery::Finished);
+        assert!(!pending(&state), "the intent goes");
+        assert_eq!(r.id("p2"), c3);
+        assert_eq!(
+            stack::rev(&common, &stack::stack_ref("p2")).unwrap(),
+            Some(c1)
+        );
+        // Only the stack ref left to move.
+        let intent = Intent {
+            stack_old: Some(c1),
+            parent_tip: c2,
+            ..intent
+        };
+        intent.begin(&state).unwrap().keep();
+        assert_eq!(settled(&state), Recovery::Finished);
+        assert_eq!(
+            stack::rev(&common, &stack::stack_ref("p2")).unwrap(),
+            Some(c2)
+        );
+    }
+
+    #[test]
+    fn held_intents_go_unless_kept() {
+        let (_r, state, [c1, c2, c3]) = workspace("restack-held");
+        let intent = Intent {
+            mode: Mode::Open,
+            from: c1,
+            to: c2,
+            parent_tip: c3,
+            stack_old: None,
+        };
+        let held = intent.begin(&state).unwrap();
+        assert!(intent.begin(&state).is_err(), "one at a time");
+        assert_eq!(recover(&state).unwrap(), Recovery::InProgress);
+        drop(held);
+        assert!(!pending(&state), "dropped: gone");
+        intent.begin(&state).unwrap().keep();
+        assert!(pending(&state), "kept");
+        // (Retried: see `settled`.)
+        let forgot = (0..100).find_map(|_| {
+            forget(&state).ok().or_else(|| {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                None
+            })
+        });
+        assert_eq!(forgot, Some(true));
+        assert!(!pending(&state));
+    }
+
+    #[test]
+    fn an_intent_the_branch_moved_past_is_forgotten() {
+        let (r, state, [c1, c2, _]) = workspace("restack-moved");
+        // The branch is at c3 and its index describes it: neither C nor C'.
+        let intent = Intent {
+            mode: Mode::Open,
+            from: c1,
+            to: c2,
+            parent_tip: c1,
+            stack_old: None,
+        };
+        intent.begin(&state).unwrap().keep();
+        assert_eq!(settled(&state), Recovery::Undone);
+        assert!(!pending(&state));
+        // With staged changes, it can't be told apart: left, saying how out.
+        let wt = r.dir.join("gitfold-ws-p2");
+        fs::write(wt.join("f.txt"), "staged\n").unwrap();
+        r.git_in(&wt, &["add", "f.txt"]);
+        intent.begin(&state).unwrap().keep();
+        let Recovery::Stuck(why) = settled(&state) else {
+            panic!("not stuck")
+        };
+        assert!(why.contains("gitfold stack off -w p2"), "{why}");
+        assert!(pending(&state));
+    }
 
     #[test]
     fn intents_read_back() {
