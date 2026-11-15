@@ -12,12 +12,10 @@
 //!    another move to finish, git busy, uncommitted work on a path the move
 //!    changes), so a move that waits doesn't switch the view off and on;
 //! 2. the marker written, and the switch to no layers made (by the daemon,
-//!    or unmounted, here): commits made on the layers commit go onto the
-//!    branch, HEAD goes back to it, git gets the layers' paths back, and
-//!    the view is the base again, so the move's `git read-tree` meets only
-//!    the workspace's own files;
-//! 3. the move, worked out again if the switch moved the branch (commits
-//!    made on the layers commit went onto it);
+//!    or unmounted, here): git gets the layers' paths back, and the view is
+//!    the base again, so the move's `git read-tree` meets only the
+//!    workspace's own files;
+//! 3. the move;
 //! 4. the marker removed (`state::layers::put_back`), the switch to the
 //!    layers asked for: its base first catches up with the moved branch,
 //!    then the layers show over it.
@@ -28,14 +26,14 @@
 //! (`state::moves`), then does step 4 (`resume`): either way the stored
 //! layers show again, over wherever the branch is. While a move can't be
 //! finished or undone, they stay off. A switch refused at step 2
-//! (git busy, a commit that can't go onto the branch, own lines that depend
+//! (git busy, own lines that depend
 //! on the layers) moves nothing: the marker goes and the layers stay.
 
 use anyhow::Result;
 use gix::bstr::BString;
 
 use super::Moved;
-use crate::git::{self, worktree};
+use crate::git;
 use crate::state::layers::{self, Layers, ShownLayers};
 use crate::state::moves::{self, Intent, Recovery};
 use crate::state::{StateDir, status, upper_path};
@@ -107,25 +105,14 @@ pub(super) fn resume(state: &StateDir) -> Result<()> {
 /// Why the move `intent` of the workspace in `state`, which shows layers,
 /// would wait anyway, checked before they are taken off: another move to
 /// finish first, git busy, or uncommitted work on a path the move changes
-/// (as `git read-tree` refuses it). Commits made on the layers commit that
-/// aren't on the branch yet go onto it as the layers come off: the
-/// uncommitted work is then judged by the move itself.
+/// (as `git read-tree` refuses it).
 fn waits(state: &StateDir, intent: &Intent) -> Result<Option<String>> {
     if let Err(why) = super::recovered(state)? {
         return Ok(Some(why));
     }
     let applied = ShownLayers::read(state)?;
-    let busy = match applied.head {
-        Some(_) => worktree::git_running(&state.common_dir, &state.admin, &state.branch),
-        None => state.git_busy(),
-    };
-    if let Some(why) = busy {
+    if let Some(why) = state.git_busy() {
         return Ok(Some(format!("{why} in its workspace")));
-    }
-    let head = std::fs::read_to_string(state.admin.join("HEAD")).unwrap_or_default();
-    let head = gix::ObjectId::from_hex(head.trim().as_bytes()).ok();
-    if applied.head.is_some_and(|l| head != Some(l)) {
-        return Ok(None);
     }
     let in_the_way = uncommitted_on(state, intent, &applied.union)?;
     Ok((!in_the_way.is_empty()).then(|| super::in_the_way(&in_the_way)))
@@ -179,7 +166,7 @@ fn uncommitted_on(
 /// Whether the workspace in `state` shows layers, as stored or as applied.
 fn shows_layers(state: &StateDir) -> Result<bool> {
     let applied = ShownLayers::read(state)?;
-    Ok(Layers::read(state)?.is_on() || applied.layers()?.is_on() || applied.head.is_some())
+    Ok(Layers::read(state)?.is_on() || applied.layers()?.is_on())
 }
 
 /// Step 4: the layers back, shown. A failure is logged: the marker is gone
@@ -220,9 +207,6 @@ fn switch_off(state: &StateDir) -> Result<()> {
         }
     }
     let applied = ShownLayers::read(state)?;
-    anyhow::ensure!(
-        !applied.layers()?.is_on() && applied.head.is_none(),
-        "they still show"
-    );
+    anyhow::ensure!(!applied.layers()?.is_on(), "they still show");
     Ok(())
 }

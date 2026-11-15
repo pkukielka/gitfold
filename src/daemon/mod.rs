@@ -2,9 +2,11 @@
 //! (fusermount), signals.
 //!
 //! - `control`: the control socket.
+//! - `filter`: the filter socket, answering git's filter in workspaces.
 //! - `serve`: the daemon in the foreground.
 
 pub mod control;
+pub mod filter;
 pub mod serve;
 
 use std::fs;

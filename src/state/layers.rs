@@ -286,7 +286,7 @@ impl Layers {
         !self.layers.is_empty()
     }
 
-    /// The subject of the layers commit of workspace `branch` showing them.
+    /// The subject of the view commit of workspace `branch` showing them.
     pub fn subject(&self, branch: &str) -> String {
         let names: Vec<&str> = self.layers.iter().map(|l| l.branch.as_str()).collect();
         git::layers::layers_subject(branch, &names)
@@ -384,8 +384,6 @@ pub struct View {
     /// The union files (see `union`), with the layers union-merged in: the
     /// workspace writes them, its own lines on top of theirs.
     pub union: HashMap<Vec<u8>, Vec<usize>>,
-    /// The snapshots of the layers union-merged in (L's parents after the base).
-    pub hunk_snapshots: Vec<ObjectId>,
     /// The paths where a layer's change conflicts with the base's or
     /// another layer's.
     pub conflicts: Vec<Conflict>,
@@ -436,7 +434,6 @@ pub fn view(
     let mut conflicts = Vec::new();
     let mut notes = Vec::new();
     let mut warnings = Vec::new();
-    let hunk_layers = view.hunk_layers();
     for note in view.notes {
         notes.push(match note {
             git::layers::Note::NotInUnion { layer, path } => format!(
@@ -494,9 +491,6 @@ pub fn view(
             .collect(),
         union: (view.union.iter())
             .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
-            .collect(),
-        hunk_snapshots: (hunk_layers.into_iter())
-            .map(|ix| layers.layers[ix].snapshot)
             .collect(),
         conflicts,
         notes,
@@ -600,20 +594,14 @@ pub const SHOWN_LAYERS: &str = "layers-shown";
 /// and git always describe the same layers: a workspace opens with these,
 /// and switches to the stored layers when they differ (a change made while
 /// it was closed, or a switch that failed half-way). Stored in `layers-shown`:
-/// `version 1`, `head <oid or ->`, `next <oid or ->` (the layers commit HEAD is
-/// being moved to, adopted if it got there), a line `layers <bytes>` giving the length of
-/// the layers file that follows, then NUL-terminated records: `S<path>` a
-/// path git was told to skip (skip-worktree), `B<path>` a union path whose
-/// index entry git was given the union for.
+/// `version 2`, a line `layers <bytes>` giving the length of the layers file
+/// that follows, then NUL-terminated records: `S<path>` a path git was told
+/// to skip (skip-worktree), `B<path>` a union path git was told to filter.
+/// (Version 1, of builds with a layers commit, isn't read.)
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ShownLayers {
     /// The layers file's content when applied (empty: none).
     pub layers: Vec<u8>,
-    /// The layers commit HEAD was detached at.
-    pub head: Option<ObjectId>,
-    /// The layers commit HEAD was being moved to (a switch or an extraction
-    /// writes it first): if HEAD is there, it got there.
-    pub next: Option<ObjectId>,
     pub skipped: std::collections::BTreeSet<Vec<u8>>,
     pub union: std::collections::BTreeSet<Vec<u8>>,
 }
@@ -632,19 +620,7 @@ impl ShownLayers {
     /// A `layers-shown` file's content.
     pub fn parse(data: &[u8]) -> Result<ShownLayers> {
         let bad = || anyhow::anyhow!("not a file this gitfold knows");
-        let mut rest = data.strip_prefix(b"version 1\n").ok_or_else(bad)?;
-        let mut oid = |key: &[u8]| -> Result<Option<ObjectId>> {
-            rest = rest.strip_prefix(key).ok_or_else(bad)?;
-            let nl = rest.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
-            let oid = match &rest[..nl] {
-                b"-" => None,
-                hex => Some(ObjectId::from_hex(hex)?),
-            };
-            rest = &rest[nl + 1..];
-            Ok(oid)
-        };
-        let head = oid(b"head ")?;
-        let next = oid(b"next ")?;
+        let mut rest = data.strip_prefix(b"version 2\n").ok_or_else(bad)?;
         rest = rest.strip_prefix(b"layers ").ok_or_else(bad)?;
         let nl = rest.iter().position(|&b| b == b'\n').ok_or_else(bad)?;
         let len: usize = std::str::from_utf8(&rest[..nl])?.parse()?;
@@ -652,8 +628,6 @@ impl ShownLayers {
         anyhow::ensure!(rest.len() >= len, bad());
         let mut applied = ShownLayers {
             layers: rest[..len].to_vec(),
-            head,
-            next,
             ..Default::default()
         };
         for record in rest[len..].split(|&b| b == 0).filter(|r| !r.is_empty()) {
@@ -667,13 +641,7 @@ impl ShownLayers {
     }
 
     pub fn write(&self, state: &StateDir) -> Result<()> {
-        let show = |o: Option<ObjectId>| o.map_or("-".to_string(), |o| o.to_string());
-        let (head, next) = (show(self.head), show(self.next));
-        let mut data = format!(
-            "version 1\nhead {head}\nnext {next}\nlayers {}\n",
-            self.layers.len()
-        )
-        .into_bytes();
+        let mut data = format!("version 2\nlayers {}\n", self.layers.len()).into_bytes();
         data.extend_from_slice(&self.layers);
         for (tag, set) in [(b'S', &self.skipped), (b'B', &self.union)] {
             for path in set {

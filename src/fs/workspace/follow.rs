@@ -19,8 +19,8 @@
 //! been quiet for `SOURCE_QUIET`. A closed one is snapshotted once per
 //! mount, then when its base or branch moves. One whose layer couldn't move
 //! is tried again after `BACK_OFF`; so is a move that failed as a whole (its
-//! switch refused: git busy, a commit made on the layers commit that can't
-//! go onto the branch), or sooner if the workspace is written to.
+//! switch refused: git busy, or own lines in a union file that depend on
+//! lines that would go), or sooner if the workspace is written to.
 //!
 //! The move is the hook's (`state::follow::follow_live`), under the layers'
 //! lock (`state::layers::try_lock`: a command holding it goes first, and the
@@ -37,7 +37,7 @@ use gix::ObjectId;
 use parking_lot::Mutex;
 
 use super::Workspace;
-use crate::git::{self, worktree};
+use crate::git;
 use crate::state::layers::Updates;
 use crate::state::{StateDir, follow, layers, snapshot};
 use crate::store::Store;
@@ -166,17 +166,6 @@ impl Workspace {
         }
     }
 
-    /// Whether git is idle in it as a switch wants it (`switch`): nothing
-    /// running, HEAD on its branch, or with union files, detached at the
-    /// layers commit.
-    fn git_quiet(&self) -> bool {
-        let state = &self.state;
-        match self.layers.read().applied.head.is_some() {
-            true => worktree::git_running(&state.common_dir, &state.admin, &state.branch).is_none(),
-            false => self.git_idle(),
-        }
-    }
-
     /// `follow_layers` once due: what moved, if anything did.
     fn follow_now(&self, store: &Store, activities: &Activities) -> anyhow::Result<Option<String>> {
         // The cheap checks first.
@@ -192,7 +181,7 @@ impl Workspace {
         let applied = self.layers.read().applied.layers()?;
         if !(applied.layers.iter()).any(|l| l.updates == Updates::Live)
             || snapshot::has_agent(&self.state)
-            || !self.git_quiet()
+            || !self.git_idle()
         {
             return Ok(None);
         }

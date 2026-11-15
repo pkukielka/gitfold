@@ -87,6 +87,20 @@ pub fn run(options: Options) -> Result<()> {
     let listener = control::bind(&common_dir)
         .inspect_err(|e| log::warn!("{e:#}; `gitfold remove` will need an unmount"))
         .ok();
+    // Before mounting too: git in a workspace with union files needs it.
+    match super::filter::bind(&common_dir) {
+        Ok(listener) => {
+            let workspaces = fs.workspaces();
+            super::filter::serve(listener, move |id, op, path, content| {
+                let branch = crate::state::workspace_branch(id);
+                match workspaces.get_open(&branch) {
+                    Some(ws) => ws.filter(op, path, content),
+                    None => anyhow::bail!("{branch} isn't open here"),
+                }
+            })?;
+        }
+        Err(e) => log::warn!("{e:#}; git will fail in workspaces with union files"),
+    }
     let removal = fs.removal();
     let workspaces = fs.workspaces();
     let store = fs.store();

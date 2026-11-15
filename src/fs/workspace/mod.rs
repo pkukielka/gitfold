@@ -145,9 +145,9 @@ pub struct Workspace {
     /// The stored layers last refused (and when), retried by the sync thread
     /// after a while (see `layers`).
     layers_refused: Mutex<Option<(Vec<u8>, std::time::Instant)>>,
-    /// HEAD at a commit made on the layers commit that can't be extracted:
-    /// not tried again until HEAD moves (see `layers`).
-    layers_blocked: Mutex<Option<ObjectId>>,
+    /// What git's filter was given to smudge, by the hash of what it gave
+    /// back (see `layers::filter`).
+    filter_memo: Mutex<HashMap<[u8; 20], Vec<u8>>>,
     /// The index's mtime when the layers' skip-worktree bits were last
     /// checked (see `layers`).
     index_checked: Mutex<Option<std::time::SystemTime>>,
@@ -326,7 +326,7 @@ impl Workspace {
             layers_lock: Mutex::new(()),
             kernel: std::sync::OnceLock::new(),
             layers_refused: Mutex::new(None),
-            layers_blocked: Mutex::new(None),
+            filter_memo: Mutex::new(HashMap::new()),
             index_checked: Mutex::new(None),
             activity: Default::default(),
             following: Default::default(),

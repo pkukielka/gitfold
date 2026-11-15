@@ -238,6 +238,18 @@ enum Command {
         #[arg(long)]
         threads: usize,
     },
+    /// git's filter in a workspace with union files (its
+    /// `filter.<driver>.process`): relays to the daemon.
+    #[command(hide = true)]
+    FilterProcess { common_dir: PathBuf, id: String },
+    /// The guard, run by a workspace's hooks: checks the ref updates or
+    /// pushes on stdin for layers' uncommitted lines.
+    #[command(hide = true)]
+    Guard {
+        #[arg(value_enum)]
+        hook: git::guard::Hook,
+        admin: PathBuf,
+    },
     /// Evaluate checkout attributes for every file of a revision.
     #[command(hide = true)]
     BenchAttrs { repo: PathBuf, rev: String },
@@ -320,6 +332,13 @@ fn run() -> Result<i32> {
             mode,
             threads,
         } => prewarm::run(root, mode, threads)?,
+        Command::FilterProcess { common_dir, id } => daemon::filter::relay(&common_dir, &id)?,
+        Command::Guard { hook, admin } => {
+            if let Err(e) = git::guard::run_hook(hook, &admin, std::io::stdin().lock()) {
+                eprintln!("{e:#}");
+                return Ok(1);
+            }
+        }
         Command::BenchAttrs { repo, rev } => {
             git::init(&repo)?;
             bench::attrs::run(&rev)?;
