@@ -1,11 +1,11 @@
-//! `gitfold seal` (a workspace's uncommitted work as a commit) and `gitfold
-//! mix` (several workspaces' work, uncommitted included, merged into one
-//! commit to open as a snapshot): the read-only form of layers. Nothing in a
-//! workspace, its index or its branch changes.
+//! `gitfold snapshot`: workspaces' work, uncommitted included, or branches'
+//! and revisions' commits, merged into one commit to open as a snapshot: the
+//! read-only form of layers. Nothing in a workspace, its index or its branch
+//! changes.
 
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args;
 use gix::ObjectId;
 
@@ -18,35 +18,32 @@ use crate::state::seal::{self, IDENTITY};
 use crate::store::Store;
 
 #[derive(Args)]
-pub struct SealArgs {
-    /// The workspace's branch (default: the workspace you are in).
-    pub branch: Option<String>,
-    /// As Claude Code's `Stop` hook (`stop`): seal the workspace the session
-    /// is in if another workspace shows it as a layer; print nothing.
-    #[arg(long, value_name = "EVENT", value_parser = ["stop"])]
-    pub claude_hook: Option<String>,
-}
-
-#[derive(Args)]
-pub struct MixArgs {
+pub struct SnapshotArgs {
+    /// Branches (their workspaces' work, uncommitted included, else their
+    /// tips) or revisions, merged in this order (default: the workspace you
+    /// are in).
+    #[arg(value_name = "BRANCH|REV")]
+    pub what: Vec<String>,
+    /// Branches contribute only their commits, not their workspaces'
+    /// uncommitted work.
+    #[arg(long)]
+    pub commits: bool,
     /// Start from this revision instead of the first one named (merging
     /// every one named onto it).
     #[arg(long, value_name = "REV")]
     pub onto: Option<String>,
-    /// Print the commit only, not the snapshot's path.
-    #[arg(long)]
-    pub commit: bool,
-    /// Branches (their workspaces' work, uncommitted included, else their
-    /// tips) or revisions, merged in this order.
-    #[arg(required = true, value_name = "BRANCH|REV")]
-    pub what: Vec<String>,
+    /// As Claude Code's `Stop` hook (`stop`): snapshot the workspace the
+    /// session is in if another workspace shows it as a layer; print nothing.
+    #[arg(long, value_name = "EVENT", value_parser = ["stop"],
+          conflicts_with_all = ["what", "commits", "onto"])]
+    pub claude_hook: Option<String>,
 }
 
-/// `gitfold seal --claude-hook stop`: when a session stops, seals its
+/// `gitfold snapshot --claude-hook stop`: when a session stops, seals its
 /// workspace if another workspace shows it as a layer, so layers move to the
 /// end of a turn, not into the middle of one (`gitfold layer --claude-hook`).
 /// Does nothing otherwise; errors are only logged.
-pub fn seal_hook() -> Result<()> {
+pub fn snapshot_hook() -> Result<()> {
     if let Err(e) = (|| -> Result<()> {
         let repo = super::repo()?;
         let name = super::branch_or_current(None, &repo)?;
@@ -57,73 +54,69 @@ pub fn seal_hook() -> Result<()> {
         seal::seal(&Store::default(), &StateDir::of(&common_dir, &name))?;
         Ok(())
     })() {
-        log::debug!("gitfold seal --claude-hook: {e:#}");
+        log::debug!("gitfold snapshot --claude-hook: {e:#}");
     }
     Ok(())
 }
 
-/// `gitfold seal`: seals the workspace and prints the commit.
-pub fn seal(repo: &Path, args: SealArgs) -> Result<()> {
-    let name = &super::branch_or_current(args.branch, repo)?;
-    check_name(name)?;
-    let common_dir = git::init(repo)?;
-    let state = StateDir::of(&common_dir, name);
-    if !state.opened() {
-        git::require_branch(name)?;
-        return Err(
-            Refusal::NotFound.error(format!("{name} has no workspace yet: nothing to seal"))
-        );
-    }
-    let s = seal::seal(&Store::default(), &state)?;
-    if s.same {
-        eprintln!("unchanged since its last seal");
-    }
-    println!("{}", s.commit);
-    Ok(())
-}
-
-/// `gitfold mix`: merges the work of each named workspace (sealed), or each
-/// revision, in order, onto the first (or `--onto`), with `git merge-tree`;
-/// prints the merge as a snapshot path (`<mountpoint>/@<sha>`, or `@<sha>`
-/// unmounted). Conflicts: exit 4, the paths listed. The same work gives the
-/// same commit, so a repeated mix reuses its snapshot.
-pub fn mix(repo: &Path, args: MixArgs) -> Result<()> {
+/// `gitfold snapshot`: merges the work of each named workspace (sealed), or
+/// each branch's or revision's commit, in order, onto the first (or
+/// `--onto`), with `git merge-tree`; prints the merge as a snapshot path
+/// (`<mountpoint>/@<sha>`; unmounted, the commit). One named is its work
+/// alone. Conflicts: exit 4, the paths listed. The same work gives the same
+/// commit, so a repeated snapshot reuses its folder.
+pub fn snapshot(repo: &Path, args: SnapshotArgs) -> Result<()> {
+    let what = match args.what.is_empty() {
+        true => vec![super::branch_or_current(None, repo)?],
+        false => args.what,
+    };
     let common_dir = git::init(repo)?;
     let store = Store::default();
     let mut commits = Vec::new();
-    for what in &args.what {
-        commits.push(work_of(&store, &common_dir, what)?);
+    for what in &what {
+        commits.push(work_of(&store, &common_dir, what, args.commits)?);
     }
     let (mut acc, rest) = match &args.onto {
         Some(rev) => (git::resolve(rev)?.id, &commits[..]),
         None => (commits[0].1, &commits[1..]),
     };
-    for (what, commit) in rest {
+    for (what, commit, _) in rest {
         acc = merge(&common_dir, &acc, commit, what)?;
     }
-    match args.commit {
-        true => println!("{acc}"),
-        false => match mount_table::mount_of(&common_dir)? {
-            Some(mount) => println!("{}", mount.join(format!("@{acc}")).display()),
-            None => println!("@{acc}"),
-        },
+    if let [(_, _, true)] = commits[..] {
+        eprintln!("unchanged since its last snapshot");
+    }
+    match mount_table::mount_of(&common_dir)? {
+        Some(mount) => println!("{}", mount.join(format!("@{acc}")).display()),
+        None => {
+            eprintln!("not mounted: printed its commit (mounted, it opens as <MOUNTPOINT>/@{acc})");
+            println!("{acc}");
+        }
     }
     Ok(())
 }
 
-/// What `what` contributes to a mix: its workspace's seal if it is a branch
-/// with one, else the revision.
-fn work_of(store: &Store, common_dir: &Path, what: &str) -> Result<(String, ObjectId)> {
-    if check_name(what).is_ok() && !what.starts_with('@') {
+/// What `what` contributes to a snapshot: its workspace's seal if it is a
+/// branch with one (and not `commits` only), else the revision; and whether
+/// that seal is unchanged since the last.
+fn work_of(
+    store: &Store,
+    common_dir: &Path,
+    what: &str,
+    commits: bool,
+) -> Result<(String, ObjectId, bool)> {
+    if !commits && check_name(what).is_ok() && !what.starts_with('@') {
         let state = StateDir::of(common_dir, what);
         if state.opened() {
-            return Ok((what.to_string(), seal::seal(store, &state)?.commit));
+            let s = seal::seal(store, &state)?;
+            return Ok((what.to_string(), s.commit, s.same));
         }
     }
     let rev = what.strip_prefix('@').unwrap_or(what);
-    let commit =
-        git::resolve(rev).with_context(|| format!("{what}: neither a workspace nor a revision"))?;
-    Ok((what.to_string(), commit.id))
+    let commit = git::resolve(rev).map_err(|_| {
+        Refusal::NotFound.error(format!("{what}: neither a workspace nor a revision"))
+    })?;
+    Ok((what.to_string(), commit.id, false))
 }
 
 /// The merge of `theirs` (named `what`) into `ours`, made with `IDENTITY`.
@@ -161,7 +154,7 @@ pub(super) fn merge(
             String::from_utf8_lossy(&out.stderr).trim()
         ),
     }
-    let message = format!("gitfold mix: {what}");
+    let message = format!("gitfold snapshot: {what}");
     let out = git::cmd::command(common_dir)
         .args([
             "commit-tree",
