@@ -6,7 +6,8 @@
 //!   stacked branch `gitfoldParent` (the branch it is built on: its base),
 //!   `gitfoldRestack` (`manual`: `layer base --frozen`, moved only when
 //!   asked), `gitfoldRestackBlocked` (the move onto it that conflicted),
-//!   `gitfoldLanding` (a move onto a parent's landing under way) and
+//!   `gitfoldLanding` (a move onto a new base under way: a parent's
+//!   landing, or another base) and
 //!   `gitfoldBaseOnTarget` (whether its parent base was in the parent's
 //!   target when recorded; see `cli::stack`); for a proposal (`gitfold
 //!   propose`), `gitfoldProposal` (the layer it would change),
@@ -49,9 +50,10 @@ const PROPOSED_BY: &str = "gitfoldProposedBy";
 /// seal checked> <the layer's seal checked> <summary>`, the last `gitfold
 /// consent` on a proposal.
 const CONSENT: &str = "gitfoldConsent";
-/// `branch.<branch>.gitfoldLanding`: `<target> <landing commit>`, set while
-/// the branch moves onto where its parent landed, until the target is its
-/// parent.
+/// `branch.<branch>.gitfoldLanding`: `<target> <commit> [frozen|live]`, set
+/// while the branch moves onto a new base, `<target>` at `<commit>` (where
+/// its parent landed, or another branch's tip: then whether it follows
+/// it), until the target is its parent.
 const LANDING: &str = "gitfoldLanding";
 /// `branch.<branch>.gitfoldBaseOnTarget`: `<parent base> <target> <yes|no>`,
 /// whether the parent base was in its parent's target (trunk, or the
@@ -221,8 +223,8 @@ impl Local {
         self.branch(branch, RESTACK_BLOCKED)
     }
 
-    /// The move of `branch` onto its parent's landing under way, if any
-    /// (see `LANDING`).
+    /// The move of `branch` onto a new base under way, if any (see
+    /// `LANDING`).
     pub fn landing(&self, branch: &str) -> Option<String> {
         self.branch(branch, LANDING)
     }
@@ -347,8 +349,8 @@ pub fn set_base_on_target(git_dir: &Path, branch: &str, record: Option<&str>) ->
     }
 }
 
-/// Records the move of `branch` onto its parent's landing under way, or
-/// forgets it.
+/// Records the move of `branch` onto a new base under way (see `LANDING`),
+/// or forgets it.
 pub fn set_landing(git_dir: &Path, branch: &str, landing: Option<&str>) -> Result<()> {
     match landing {
         Some(landing) => set_branch(git_dir, branch, LANDING, landing),

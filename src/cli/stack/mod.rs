@@ -9,7 +9,11 @@
 //! built on the trunk, as one never given a base). gitfold never pushes; it
 //! says what to force-push, and moves commits already pushed only when
 //! asked (`--yes`). A `layer base` that can't move the branch changes
-//! nothing: it is built on a new base only once moved there.
+//! nothing: it is built on a new base only once moved there. The new base
+//! is recorded as under way before the move (`gitfoldLanding`, as for a
+//! landing), so a move interrupted after the branch moved (a crash, Ctrl-C)
+//! is finished by the next `layer base` or turn start (`finish_landing`),
+//! never moved back onto the old base.
 //!
 //! A move is computed first, moving nothing (`git::stack::restack`).
 //! A conflict is recorded (`gitfoldRestackBlocked`) and reported, and the
@@ -130,19 +134,20 @@ pub fn base(
                 update(&common_dir, name, yes)
             })?;
         }
-        parent => rebase_onto(&common_dir, &name, parent.as_deref(), target, yes)?,
+        parent => rebase_onto(&common_dir, &name, parent.as_deref(), target, frozen, yes)?,
     }
     frozen_after(&common_dir, &name, target, frozen)
 }
 
 /// `layer base TARGET` for branch `name` built on `parent` (or on nothing),
 /// not `target`: its own commits moved onto `target`'s tip, then built on
-/// it; nothing changed if they can't be.
+/// it (following it unless `frozen`); nothing changed if they can't be.
 fn rebase_onto(
     common_dir: &Path,
     name: &str,
     parent: Option<&str>,
     target: &str,
+    frozen: bool,
     yes: bool,
 ) -> Result<()> {
     let local = Local::read(common_dir);
@@ -178,6 +183,11 @@ fn rebase_onto(
             return Ok(Outcome::Refused(why));
         }
         let new = stack::count(common_dir, base.commit, target_tip)?;
+        // Recorded first, as for a landing (`reparent`): a branch moved but
+        // still built on its old base would be moved back onto it.
+        let follows = if frozen { "frozen" } else { "live" };
+        let pending = format!("{target} {target_tip} {follows}");
+        settings::set_landing(common_dir, name, Some(&pending))?;
         let outcome = match copy_onto(
             common_dir,
             name,
@@ -198,9 +208,17 @@ fn rebase_onto(
         };
         match outcome.done() {
             // Built on it once moved there.
-            true => declare(common_dir, name, target, target_tip)?,
-            // A conflict with what it isn't built on: not its block.
-            false => settings::set_restack_blocked(common_dir, name, blocked.as_deref())?,
+            true => {
+                declare(common_dir, name, target, target_tip)?;
+                settings::set_landing(common_dir, name, None)?;
+            }
+            false => {
+                // Not moved: forgotten (unless an interrupted move may still
+                // finish it).
+                finish_landing(common_dir, name)?;
+                // A conflict with what it isn't built on: not its block.
+                settings::set_restack_blocked(common_dir, name, blocked.as_deref())?;
+            }
         }
         Ok(outcome)
     })
@@ -261,6 +279,11 @@ fn frozen_after(common_dir: &Path, name: &str, target: &str, frozen: bool) -> Re
 /// `gitfold layer base --all`: every branch with a base it follows brought
 /// up to date, bottom-up; frozen ones, and ones on the trunk, are left.
 fn base_all(common_dir: &Path, yes: bool) -> Result<()> {
+    // Moves onto a new base interrupted: finished first, so each is
+    // updated against the base it moved onto, frozen or not.
+    for (branch, _) in Local::read(common_dir).parents() {
+        finish_landing(common_dir, &branch)?;
+    }
     let local = Local::read(common_dir);
     let (mut branches, frozen): (Vec<String>, Vec<String>) = (local.parents().into_iter())
         .filter(|(_, parent)| !land::is_trunk(common_dir, &local, parent))
@@ -427,18 +450,22 @@ fn unstack(common_dir: &Path, name: &str, trunk: &str, yes: bool) -> Result<()> 
         }
         let new = stack::count(common_dir, base.commit, trunk_tip)?;
         let onto = (trunk, trunk_ref.as_str());
-        Ok(
-            match copy_onto(common_dir, name, onto, &base, tip, trunk_tip, false)? {
-                Copied::Moved { files, dropped } => Outcome::Restacked {
-                    new,
-                    dropped,
-                    files,
-                    guessed: base.guessed,
-                },
-                Copied::Dry => Outcome::UpToDate,
-                Copied::Stop(outcome) => outcome,
+        // Recorded first (see `rebase_onto`).
+        settings::set_landing(common_dir, name, Some(&format!("{trunk} {trunk_tip}")))?;
+        let outcome = match copy_onto(common_dir, name, onto, &base, tip, trunk_tip, false)? {
+            Copied::Moved { files, dropped } => Outcome::Restacked {
+                new,
+                dropped,
+                files,
+                guessed: base.guessed,
             },
-        )
+            Copied::Dry => Outcome::UpToDate,
+            Copied::Stop(outcome) => outcome,
+        };
+        if !outcome.done() {
+            finish_landing(common_dir, name)?;
+        }
+        Ok(outcome)
     })?;
     forget_base(common_dir, name)?;
     println!("{off}");
@@ -920,25 +947,41 @@ fn reparent(
     })
 }
 
-/// Finishes or forgets the move of branch `name` onto its parent's landing
-/// that `gitfoldLanding` records: its stack ref at the landing commit means
-/// the refs moved, so the target becomes its parent; else the move didn't
-/// happen, unless a workspace's restack intent may still finish it.
+/// Finishes or forgets the move of branch `name` onto a new base (its
+/// parent's landing, or another base) that `gitfoldLanding` records: its
+/// stack ref at the recorded commit means the refs moved, so the target
+/// becomes its parent (following it or not, as recorded); else the move
+/// didn't happen, unless a workspace's interrupted move (its intent) may
+/// still finish it: that is finished or undone first, if it can be.
 fn finish_landing(common_dir: &Path, name: &str) -> Result<()> {
     let Some(marker) = Local::read(common_dir).landing(name) else {
         return Ok(());
     };
-    let Some((target, at)) = marker.split_once(' ') else {
+    let words: Vec<&str> = marker.split(' ').collect();
+    let (&[target, at] | &[target, at, _]) = &words[..] else {
         return settings::set_landing(common_dir, name, None);
     };
+    let state = StateDir::of(common_dir, name);
+    if restack::pending(&state) && state.opened() {
+        // Ours, or another process's running: then left to it.
+        if let Err(e) = restack::recover(&state) {
+            log::warn!("{name}: finishing an interrupted move: {e:#}");
+        }
+    }
     if stack_base(common_dir, name)
         .map(|b| b.to_string())
         .as_deref()
         == Some(at)
         && let Ok(at) = ObjectId::from_hex(at.as_bytes())
     {
-        return built_on(common_dir, name, target, at);
-    } else if restack::pending(&StateDir::of(common_dir, name)) {
+        built_on(common_dir, name, target, at)?;
+        if let Some(&follows) = words.get(2)
+            && Local::read(common_dir).parent(name).is_some()
+        {
+            settings::set_restack_manual(common_dir, name, follows == "frozen")?;
+        }
+        return Ok(());
+    } else if restack::pending(&state) {
         return Ok(());
     }
     settings::set_landing(common_dir, name, None)
@@ -1344,6 +1387,9 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
 /// told before (a block per base tip, anything else while it says the same:
 /// `restack-told` in the state directory).
 pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
+    // A move onto a new base interrupted: finished first, so the base it is
+    // checked against is the one it moved onto.
+    finish_landing(common_dir, name)?;
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(name) else {
         return Ok(None);

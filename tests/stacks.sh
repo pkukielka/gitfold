@@ -484,7 +484,69 @@ commit_on main later.txt later
 eq "main moving on: the hook leaves it" "|$(R rev-parse h2)" "$(prompt_hook "$W")|$(R rev-parse h2)"
 }
 
+# `gitfold layer base $2 -w $1` (the rest its arguments), interrupted right
+# after it moved branch $1: a reference-transaction hook locks the config
+# once $1 moved, so nothing gitfold writes there after the move (the new
+# base) lands, as if it had died then. The hook removes itself; the lock is
+# removed after.
+interrupted_base() {
+    local hook=$COMMON/hooks/reference-transaction
+    mkdir -p "$COMMON/hooks"
+    printf '#!/bin/sh\n[ "$1" = committed ] || exit 0\ngrep -q " refs/heads/%s$" || exit 0\n: >"%s/config.lock"; rm -f "$0"\n' \
+        "$1" "$COMMON" >"$hook"
+    chmod +x "$hook"
+    base "$@" >/dev/null 2>&1
+    rm -f "$hook" "$COMMON/config.lock"
+}
+
+an_interrupted_move_onto_another_base() {
+R branch a2; commit_on a2 a2.txt a2
+R branch w2; commit_on w2 w2.txt w2
+"$BIN" -C "$REPO" branch z --base a2 >/dev/null; commit_on z z.txt z
+interrupted_base z w2
+eq "interrupted: on w2, still built on a2" "a2|$(R rev-parse w2)|$(R rev-parse w2)" \
+    "$(R config branch.z.gitfoldParent)|$(R rev-parse z^)|$(stack_ref z)"
+out=$("$BIN" -C "$REPO" layer base --all)
+eq "layer base --all finishes it: not moved back onto a2" "z: up to date with w2|$(R rev-parse w2)" "$out|$(R rev-parse z^)"
+eq "built on w2, following it, nothing under way" "w2|||$(R rev-parse w2)" \
+    "$(R config branch.z.gitfoldParent)|$(R config branch.z.gitfoldRestack)|$(R config branch.z.gitfoldLanding)|$(stack_ref z)"
+commit_on w2 w2b.txt more
+base z w2 >/dev/null
+check "and follows w2 from then on" parent_is z w2
+
+# Interrupted with --frozen: finished frozen.
+"$BIN" -C "$REPO" branch y --base a2 >/dev/null; commit_on y y.txt y
+interrupted_base y w2 --frozen
+eq "interrupted: on w2, still built on a2" "a2|$(R rev-parse w2)" "$(R config branch.y.gitfoldParent)|$(R rev-parse y^)"
+out=$("$BIN" -C "$REPO" layer base --all)
+eq "--frozen, interrupted: finished, frozen, left as it is" "w2|manual|$(R rev-parse w2)" \
+    "$(R config branch.y.gitfoldParent)|$(R config branch.y.gitfoldRestack)|$(R rev-parse y^)"
+
+# Recorded, then interrupted before anything moved: forgotten, still on a2.
+"$BIN" -C "$REPO" branch x --base a2 >/dev/null; commit_on x x.txt x
+R config branch.x.gitfoldLanding "w2 $(R rev-parse w2) live"
+commit_on a2 a2b.txt more
+out=$(base x a2)
+eq "nothing moved: the record forgotten, x follows a2 as before" "a2||$(R rev-parse a2)" \
+    "$(R config branch.x.gitfoldParent)|$(R config branch.x.gitfoldLanding)|$(R rev-parse x^)"
+
+# An open workspace: its next turn start finishes it.
+"$BIN" -C "$REPO" branch v --base a2 >/dev/null; commit_on v v.txt v
+mount_fs
+W=$MNT/v
+cat "$W/v.txt" >/dev/null
+interrupted_base v w2
+eq "interrupted: on w2, still built on a2" "a2|$(R rev-parse w2)" "$(R config branch.v.gitfoldParent)|$(R rev-parse v^)"
+for _ in $(seq 30); do [ "$(cat "$COMMON/gitfold/v/base")" = "$(R rev-parse v)" ] && break; sleep 0.1; done
+commit_on a2 a2c.txt more
+out=$(prompt_hook "$W")
+eq "the hook finishes it: not moved back onto a2" "|$(R rev-parse w2)|w2" "$out|$(R rev-parse v^)|$(R config branch.v.gitfoldParent)"
+check "w2's file shows" test -e "$W/w2b.txt"
+check "a2's later ones don't" test ! -e "$W/a2c.txt"
+}
+
 section "stacks: branches with no workspace" branches_with_no_workspace
+section "stacks: an interrupted move onto another base" an_interrupted_move_onto_another_base
 section "stacks: a parent that landed" a_parent_that_landed
 section "stacks: a branch on the local trunk" a_branch_on_the_local_trunk
 section "stacks: a landed parent, an open workspace" a_landed_parent_in_an_open_workspace
