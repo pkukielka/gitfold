@@ -5,8 +5,8 @@
 //! it makes since where it and the commit the view is built on diverged
 //! (their merge base). That is worked out each time a view is built
 //! (`view`), against that very commit, never stored: the workspace's base
-//! lags behind its branch while layers show (commits made meanwhile, a move
-//! onto its base), and a merge base taken against another commit would make
+//! lags behind its branch while layers show (commits made meanwhile), and
+//! a merge base taken against another commit would make
 //! the lines between the two look like the layer's own changes, which then
 //! conflict with the base's.
 //!

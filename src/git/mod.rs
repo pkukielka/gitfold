@@ -10,8 +10,9 @@
 //! - `layers`: layers' trees and commits, and extraction of commits made on them.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
-//! - `stack`: stacked branches: moving a branch onto its parent's new
-//!   commits, by plumbing, and moving it with its parent base.
+//! - `stack`: moves of a branch's own commits onto its editable layers'
+//!   commits (one, or a merge of several), by plumbing, its own ref with
+//!   it, and their landings.
 //! - `worktree_config`: a worktree's own excludes and hooks (layers).
 //! - `test_repo`: a scratch repository for unit tests.
 

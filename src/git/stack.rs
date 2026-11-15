@@ -310,20 +310,20 @@ pub fn drop_base(common_dir: &Path, branch: &str) -> Result<()> {
     }
 }
 
-/// How a parent base landed on its target (trunk, or the parent's own
-/// parent).
+/// How the commit of an editable layer a branch sits on landed on its
+/// target (main, or the one branch the layer builds on).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum How {
     /// In the target's history: a merge commit.
     Merged,
     /// Its content, as other commits: a squash or a rebase merge.
     Squashed,
-    /// In the target's first-parent line, where it wasn't when recorded: a
+    /// In the target's first-parent line, the layer's branch gone: a
     /// fast-forward.
     FastForward,
 }
 
-/// Where a parent base landed: `at`, the first commit of the target that
+/// Where such a commit landed: `at`, the first commit of the target that
 /// has all of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Landing {
@@ -335,18 +335,18 @@ pub struct Landing {
 /// the newest ones, where a landing not seen by an earlier call is.
 const MAX_WALK: usize = 2000;
 
-/// Whether parent base `base` (what the child's own commits sit on) landed
+/// Whether commit `base` (of an editable layer: what a branch's own commits sit on) landed
 /// on target tip `target`, and where; `since`, an older target tip it was
 /// found not to have landed on, limits the walk to what came after it. What
-/// matters is the base, not the parent: a fix the parent got after its
-/// merge is the parent's business.
+/// matters is that commit, not the layer: a fix the layer got after its
+/// merge is the layer's business.
 ///
 /// - `base` in the target's history, brought in by a merge (of it, or of a
-///   later parent tip): that merge, the first commit of the target's
+///   later tip of the layer): that merge, the first commit of the target's
 ///   first-parent line that has it. One on the first-parent line itself
-///   landed by a fast-forward if `was_on_target` (whether it was in the
-///   target when its parent base was recorded) is `Some(false)`; otherwise
-///   it looks like a fresh parent with no commits of its own, so isn't
+///   landed by a fast-forward if `was_on_target` is `Some(false)` (the
+///   layer's branch is gone); otherwise
+///   it looks like a fresh branch with no commits of its own, so isn't
 ///   taken.
 /// - Else, if the base has changes of its own since it and the target
 ///   diverged (MB): the first commit S of `MB..target` touching their paths
@@ -878,9 +878,9 @@ mod tests {
             ff,
             "the target's tip"
         );
-        // Nothing recorded (stacked before this was kept): not told apart.
+        // The branch still there: not told apart.
         assert_eq!(landing(&repo, base, main, None, None).unwrap(), None);
-        // A fresh parent: its base was on the target already.
+        // A fresh branch: its commit was on the target already.
         assert_eq!(landing(&repo, fresh, main, None, Some(true)).unwrap(), None);
         // The target moved back behind the base.
         assert_eq!(

@@ -5,12 +5,12 @@
 //! - `list`: `list`, `changes`.
 //! - `remove`: `remove`, `prune`.
 //! - `snapshot`: `snapshot`: workspaces' work, uncommitted included, merged.
-//! - `layer`: `layer` (`add`, `remove`, `base`): other branches' work shown
-//!   in a workspace, and its base.
+//! - `layer`: `layer` (`add`, `remove`): other branches' work shown in a
+//!   workspace, see-only or editable (`--edit`: the branch builds on it).
 //! - `proposal`: `propose`, `proposals`, `consent`, `accept`, `reject`:
 //!   changes to a layer proposed from a workspace that shows it.
-//! - `layer::moves`: `layer base` and `branch --base`: branches built on another
-//!   branch (stacked), moved onto its new commits.
+//! - `layer::moves`: a branch's own commits moved onto its editable layers'
+//!   commits and off them (`layer add --edit`, `branch --edit`, the hook).
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
 //! - `claude`: Claude Code's hooks: its worktrees as workspaces (`branch` and

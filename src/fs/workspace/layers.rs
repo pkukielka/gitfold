@@ -44,9 +44,9 @@
 //! Meanwhile the base doesn't follow the branch (`rebase`): moving it would
 //! copy the layers' files into the workspace's own. Commits still work; the
 //! base catches up once no layer shows, and before layers go on in a workspace
-//! showing none (`catch_up_before_layers`). A move of the branch onto its
-//! base takes the layers off for the move (`state::layers::OFF`: what shows is
-//! then none, whatever is stored) and puts them back after.
+//! showing none (`catch_up_before_layers`). A move of the branch (its own
+//! commits onto an editable layer's new ones, `moves`) moves the base with
+//! the view, layers shown or not.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -457,9 +457,8 @@ impl Workspace {
 
     /// Before layers go on in a workspace showing none: its base catches up
     /// with its branch first (`rebase`), as the sync thread would have
-    /// soon, since the base waits while layers show. After a move of the
-    /// branch onto its base (`cli::layer::moves`, which takes the layers off for
-    /// it), the files the move wrote are then the new base's, not the
+    /// soon, since the base waits while layers show: the files committed
+    /// meanwhile (copies in upper) are then the new base's, not the
     /// workspace's own, which would hide the layers' at those paths. Fails
     /// (the switch refused, retried) if it can't catch up now, and while a
     /// move of the branch is under way or was interrupted (`state::moves`):
@@ -477,7 +476,7 @@ impl Workspace {
         }
         if crate::state::moves::pending(&self.state) {
             return Err(Refusal::Changes.error(format!(
-                "{} is being moved onto its base; its layers show once the move is done",
+                "{} is being moved; its layers show once the move is done",
                 self.state.branch
             )));
         }

@@ -194,7 +194,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         let last = last_change(&w.state, &s, &task).map_or("-".into(), age);
         // What the agent says it is doing, then what gitfold notes. Open in
         // the mount, a base behind its branch catches up within seconds (a
-        // commit, a move onto its base): not worth a note.
+        // commit, a move): not worth a note.
         let note = match open.contains(&w.branch) && git::branch_exists(&w.branch) {
             true => "",
             false => base_note(&w.branch, &s.base),

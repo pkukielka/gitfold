@@ -31,7 +31,7 @@ const CACHED: usize = 512;
 
 /// Where a layer's work lands.
 pub struct Target {
-    /// As `gitfoldParent` names it: a branch, or the trunk as configured.
+    /// As a branch's layers name it: a branch, or the trunk as configured.
     pub name: String,
     pub tip: ObjectId,
     /// The branch a pull request onto it has as its base (`main` for
