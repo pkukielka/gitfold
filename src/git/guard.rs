@@ -17,7 +17,7 @@
 //! parents' versions does: a merge of the layer's branch, once it committed
 //! them, brings them from that parent and passes.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
@@ -160,15 +160,17 @@ impl Guard {
                     continue;
                 }
                 let data = repo.find_blob(item.oid)?.take_data();
-                let mut had: HashMap<&[u8], usize> = HashMap::new();
-                for line in before.iter().flat_map(|b| lines(b)) {
-                    *had.entry(key(line)).or_default() += 1;
-                }
+                let had: HashSet<Vec<u8>> = (before.iter())
+                    .flat_map(|b| lines(b))
+                    .map(normalized)
+                    .collect();
                 for line in lines(&data).map(key) {
-                    if had.get(line).is_some_and(|n| *n > 0) {
+                    let norm = normalized(line);
+                    if norm.is_empty() || had.contains(&norm) {
                         continue;
                     }
-                    if let Some((layer, _)) = guarded.iter().find(|(_, l)| l == line) {
+                    let found = guarded.iter().find(|(_, l)| normalized(l) == norm);
+                    if let Some((layer, _)) = found {
                         return Ok(Some(Violation {
                             commit: id,
                             path: path.clone(),
@@ -181,6 +183,22 @@ impl Guard {
         }
         Ok(None)
     }
+}
+
+/// A line as the guard compares it: its words, one space apart, so a
+/// formatter's change to a layer's line's spacing doesn't get it past.
+fn normalized(line: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for word in line
+        .split(|b| b.is_ascii_whitespace())
+        .filter(|w| !w.is_empty())
+    {
+        if !out.is_empty() {
+            out.push(b' ');
+        }
+        out.extend_from_slice(word);
+    }
+    out
 }
 
 /// A commit that would bring a layer's uncommitted line.
@@ -331,6 +349,8 @@ mod tests {
         r.write("reg.txt", "one\nmine\nfromA\n");
         r.git(&["commit", "-q", "-a", "--amend", "--no-edit"]);
         let merged = r.id("HEAD");
+        r.write("reg.txt", "one\nmine\nfromA\n  fromA \n");
+        let respaced = r.commit("respaced");
         let mut guard = Guard {
             branch: "main".into(),
             ..Default::default()
@@ -347,5 +367,13 @@ mod tests {
         );
         assert!(guard.violation(&repo, &[after]).unwrap().is_none());
         assert!(guard.violation(&repo, &[merged]).unwrap().is_none());
+        // A line the parent has (spacing aside) isn't brought by the commit;
+        // a respaced copy of a guarded line is.
+        assert!(guard.violation(&repo, &[respaced]).unwrap().is_none());
+        r.git(&["checkout", "-q", "--detach", "main~2"]);
+        r.write("reg.txt", "one\n fromA  \n");
+        let spaced = r.commit("spaced");
+        let v = guard.violation(&repo, &[spaced]).unwrap().unwrap();
+        assert_eq!(&v.line[..], b" fromA  ");
     }
 }

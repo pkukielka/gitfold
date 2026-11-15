@@ -508,6 +508,10 @@ G "$W" stash pop -q
 eq "stash pop: own lines back among the layers'" "one two fromA fromB fromMe amended stashed| M reg.txt" \
     "$(paste -sd' ' "$W/reg.txt")|$(git -C "$W" status --short)"
 G "$W" checkout -q reg.txt
+sed 's/^two$/TWO/' "$W/reg.txt" >"$W/.reg.tmp"
+check "an editor's save (a new file renamed over it)" mv "$W/.reg.tmp" "$W/reg.txt"
+eq "git sees only that change" "-two +TWO" "$(git -C "$W" diff | grep '^[-+][^-+]' | paste -sd' ')"
+G "$W" checkout -q reg.txt
 # The guard: commits made without the filter don't reach the branch.
 tip=$(R rev-parse me)
 blob=$(G "$W" hash-object -w --no-filters reg.txt)

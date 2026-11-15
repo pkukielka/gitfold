@@ -17,9 +17,8 @@
 //! union in the content it gets (a 3-way merge); where that conflicts (the
 //! workspace's lines sit next to the layers'), the layers' added lines are
 //! taken out, once each. Smudge applies the same change (a 3-way merge,
-//! both kept where both sides only add at one spot, the layers' lines first,
-//! as a switch places the workspace's own after them); where it can't, the
-//! content is left as it is, without the layers' lines.
+//! both sides kept where they touch, the layers' lines first, as a switch
+//! places the workspace's own after them: git's `merge=union`).
 //!
 //! git talks to the driver with its long-running filter protocol
 //! (`filter.<driver>.process`, gitprotocol-long-running-process(5)): one
@@ -32,7 +31,7 @@ use std::io::{BufRead, Read, Write};
 
 use anyhow::{Context, Result, bail};
 
-use super::layers::{added_lines, is_binary, keep_conflicts, merge3, only_adds, without_lines};
+use super::layers::{added_lines, is_binary, keep_conflicts, merge3, without_lines};
 
 /// The two versions of a union file a filter request is answered from.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -71,13 +70,14 @@ impl Versions {
         if let Some(merged) = merge3(base, union, own, keep_conflicts()) {
             return merged;
         }
-        if only_adds(base, own) && only_adds(base, union) {
-            let union_style = gix::merge::blob::builtin_driver::text::Conflict::ResolveWithUnion;
-            if let Some(merged) = merge3(base, union, own, union_style) {
-                return merged;
-            }
-        }
-        own.to_vec()
+        // Where they touch: both sides kept, the layers' first (git's own
+        // `merge=union`), if clean turns that back into `own` exactly (a
+        // union of the two sides can bring back a line `own` removed); else
+        // `own` as it is, without the layers' lines.
+        let union_style = gix::merge::blob::builtin_driver::text::Conflict::ResolveWithUnion;
+        merge3(base, union, own, union_style)
+            .filter(|merged| self.clean(merged) == own)
+            .unwrap_or_else(|| own.to_vec())
     }
 
     /// The lines of the union the layers added (each without its newline).
@@ -342,6 +342,8 @@ mod tests {
             "one\nmid\ntwo\nmine\n",
             "one\n",
             "one\ntwo\nm1\nm2\nm3\n",
+            "one\nTWO\nmine\n",
+            "ONE\nTWO\n",
         ] {
             let smudged = reg.smudge(own.as_bytes());
             assert_eq!(
@@ -375,6 +377,12 @@ mod tests {
     /// A layer's line in the middle of the base's lines.
     #[test]
     fn lines_inside() {
+        // Both append at the end and git's side changed a line too (a merge
+        // with a conflict resolved as merge=union): the layers' lines stay.
+        let end = v("b1\nb2\nb3\n", "b1\nb2\nb3\nA\n");
+        let own = b"b1\nX\nb3\nmine\n";
+        assert_eq!(end.smudge(own), b"b1\nX\nb3\nA\nmine\n");
+        assert_eq!(end.clean(&end.smudge(own)), own);
         let reg = v("a\nb\nc\nd\n", "a\nb\nfromA\nc\nd\n");
         assert_eq!(
             reg.smudge(b"a\nb\nc\nd\nmine\n"),

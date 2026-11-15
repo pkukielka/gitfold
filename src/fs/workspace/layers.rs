@@ -382,8 +382,9 @@ impl Workspace {
 
     /// The new content of the upper files at union paths (union before or
     /// now) when the unions change from tree `old_hunk` to `new_hunk`: the
-    /// workspace's own lines merged onto the new union. Refused if any
-    /// conflicts.
+    /// workspace's own lines merged onto the new union (a 3-way merge, the
+    /// line-set rule, or as git's filter sees them). Refused if none keeps
+    /// them.
     fn carry_over(
         &self,
         layers: &Layers,
@@ -395,6 +396,7 @@ impl Workspace {
         if old_hunk == new_hunk {
             return Ok(out);
         }
+        let base_tree = git::with_repo(|repo| git::layers::commit_tree(repo, layers.base))?;
         let paths: HashSet<&Vec<u8>> = layers.union.keys().chain(union.keys()).collect();
         for path in paths {
             let upper = self.upper_path(path);
@@ -410,7 +412,28 @@ impl Workspace {
             }
             let ours = fs::read(&upper)?;
             let merged = git::merge_file(&self.tmp, &old, &ours, &new)?;
-            match merged.or_else(|| git::layers::line_set(&old, &ours, &new)) {
+            // Else as git's filter sees it: the workspace's own lines (clean
+            // with the old union), with the new union's (smudge), if that
+            // keeps them all.
+            let refiltered = || -> Result<Option<Vec<u8>>> {
+                let base = content_at(base_tree, path)?;
+                let before = filter::Versions {
+                    base: base.clone(),
+                    union: old.clone(),
+                };
+                let after = filter::Versions {
+                    base,
+                    union: new.clone(),
+                };
+                let own = before.clean(&ours);
+                let merged = after.smudge(&own);
+                Ok((after.clean(&merged) == own).then_some(merged))
+            };
+            let merged = match merged.or_else(|| git::layers::line_set(&old, &ours, &new)) {
+                Some(merged) => Some(merged),
+                None => refiltered()?,
+            };
+            match merged {
                 Some(merged) if merged != ours => out.push((path.clone(), merged)),
                 Some(_) => {}
                 None => {
