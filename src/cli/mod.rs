@@ -5,7 +5,8 @@
 //! - `list`: `list`, `changes`.
 //! - `remove`: `remove`, `prune`.
 //! - `snapshot`: `snapshot`: workspaces' work, uncommitted included, merged.
-//! - `layer`: `layer`, `lens`: other workspaces' work shown in one.
+//! - `layer`: `layer` (`add`, `remove`, `base`): other branches' work shown
+//!   in a workspace, and its base.
 //! - `proposal`: `propose`, `proposals`, `consent`, `accept`, `reject`:
 //!   changes to a layer proposed from a workspace that shows it.
 //! - `stack`: `layer base` and `branch --base`: branches built on another

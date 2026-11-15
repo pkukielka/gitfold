@@ -1,7 +1,7 @@
 //! A workspace's uncommitted work as a commit: a seal. Its tree is what the
 //! workspace shows (its base's tree with the changed files and without the
 //! deleted ones, ignored files left out, as `gitfold changes` lists them), its
-//! parent the base. A seal can be opened as a snapshot (`@<sha>`), mixed with
+//! parent the base. A seal can be opened as a snapshot (`@<sha>`), merged with
 //! other workspaces' seals (`gitfold snapshot`), and is what a layer shows of
 //! another workspace (`layers`).
 //!
@@ -67,8 +67,8 @@ pub enum By {
     Other,
 }
 
-/// The identity and date seals (and mixes) are made with: the same trees and
-/// parents give the same commit.
+/// The identity and date seals (and snapshots' merges) are made with: the
+/// same trees and parents give the same commit.
 pub const IDENTITY: [(&str, &str); 6] = [
     ("GIT_AUTHOR_NAME", "gitfold"),
     ("GIT_AUTHOR_EMAIL", "gitfold@localhost"),

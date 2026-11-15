@@ -278,12 +278,13 @@ enum Merged {
     Unmergeable,
 }
 
-/// Builds the view of base commit `base` with `layers` (bottom to top),
-/// blending hunk paths and, for the others, taking the entry of the layer
-/// that changes them, or the 3-way merge (against B's entry) of the entries
-/// of the layers that do, conflicts reported (§2.1 steps 1-3). The paths a layer sets that B has and no layer deletes
-/// (a blend needs B's version, and a deletion is whole) are given to
-/// `hunk_paths`, once, which returns those that are hunk paths.
+/// Builds the view of base commit `base` with `layers` (in the order
+/// added), blending hunk paths and, for the others, taking the entry of the
+/// layer that changes them, or the 3-way merge (against B's entry) of the
+/// entries of the layers that do, conflicts reported (§2.1 steps 1-3). The
+/// paths a layer sets that B has and no layer deletes (a blend needs B's
+/// version, and a deletion is whole) are given to `hunk_paths`, once, which
+/// returns those that are hunk paths.
 pub fn build_view(
     repo: &gix::Repository,
     base: ObjectId,
@@ -446,7 +447,7 @@ fn conflicting(
     })
 }
 
-/// Merges the entries `sides` (bottom first, with the layers' names) of
+/// Merges the entries `sides` (in order, with the layers' names) of
 /// layers changing one whole-file path, each against `base` (B's entry), as
 /// `git merge-file` does.
 fn merge_layers(
