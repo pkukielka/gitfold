@@ -291,7 +291,7 @@ commit_on main m.txt moved-on
 # A squash merge, the base deleted after it.
 pair p1 p2
 s=$(squash p1)
-eq "list: the base looks landed" "p1 (p1 looks landed in main: needs update: gitfold layer base p1)" "$(listed p2)"
+eq "list: the base looks landed" "p1 (p1 looks landed in main: gitfold layer base p1 moves it onto main)" "$(listed p2)"
 R branch -q -D p1
 out=$(base p2 p1)
 eq "a squash merge: moved onto the landing commit, saying so first" "moves 1 commit of p2 onto main (p1 looks squash- or rebase-merged into main as ${s:0:12})
