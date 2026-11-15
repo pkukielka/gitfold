@@ -36,7 +36,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
         // A workspace to copy: `from`, or the one we are in.
         let source = super::branch_or_current(from, repo).map_err(|_| {
-            anyhow::anyhow!("not in a gitfold workspace: name the source with --from")
+            anyhow::anyhow!("not in a workspace: run it inside one, or name the source with --from")
         })?;
         check_name(&source)?;
         if !git::branch_exists(&source) {
@@ -53,7 +53,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             })
         })?;
         set_branch_settings(repo, name, prewarm, track_reads)?;
-        println!("{done}; open it as <mountpoint>/{name}");
+        println!("{done}; {}", open_at(&common_dir, name));
         return Ok(());
     }
     if let Some(parent) = base {
@@ -66,13 +66,31 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             let tip = git::branch_tip(&parent)?.id;
             super::stack::declare(&common_dir, name, &parent, tip)?;
         }
-        println!("created branch {name} on {parent}; open it as <mountpoint>/{name}");
+        println!(
+            "created branch {name} on {parent}; {}",
+            open_at(&common_dir, name)
+        );
         return Ok(());
     }
     create(repo, name, from.as_deref())?;
     set_branch_settings(repo, name, prewarm, track_reads)?;
-    println!("created branch {name}; open it as <mountpoint>/{name}");
+    println!("created branch {name}; {}", open_at(&common_dir, name));
     Ok(())
+}
+
+/// Where the workspace of new branch `name` opens: under the mount, or
+/// where the repository was last mounted, once mounted again.
+fn open_at(common_dir: &Path, name: &str) -> String {
+    if let Ok(Some(mount)) = crate::mount_table::mount_of(common_dir) {
+        return format!("open it as {}", mount.join(name).display());
+    }
+    match settings::Local::read(common_dir).mountpoint() {
+        Some(mount) => format!(
+            "open it as {} once mounted (gitfold mount)",
+            mount.join(name).display()
+        ),
+        None => format!("open it under the mount as {name} (gitfold mount)"),
+    }
 }
 
 /// Refuses branch name `name` for a new workspace in the repository of

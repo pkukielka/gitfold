@@ -199,6 +199,7 @@ check "UC15: the listing says frozen" has "$(listing "$U")" "Base: api, frozen"
 check "UC15: asked again, it moves once" "$BIN" -C "$U" layer base api --frozen
 eq "UC15: on api's tip" "$(R rev-parse api)" "$(R rev-parse ui^)"
 check "UC15: still frozen" has "$(listing "$U")" "Base: api, frozen"
+check "UC15: and what updates it" has "$(listing "$U")" "\`gitfold layer base api --frozen\` updates it"
 check "UC15: live again" "$BIN" -C "$U" layer base api
 check "UC15: the listing says live" has "$(listing "$U")" "Base: api, live"
 
@@ -216,17 +217,27 @@ check "UC16: never pushed" test "$(git -C "$T/remote.git" rev-parse ui)" != "$(R
 "$BIN" -C "$U" layer base api --yes >/dev/null
 
 # UC17: the base landed (squash-merged into main).
+R push -q -f origin ui 2>/dev/null
 R merge -q --squash api >/dev/null; R commit -qm "api (squash)"
+landing=$(R rev-parse main)
 out=$(turn_starts "$U")
 check "UC17: the turn says api looks landed in main" has "$out" "looks squash- or rebase-merged into main"
-check "UC17: and how to follow it" has "$out" "gitfold layer base api\` moves ui onto main"
+check "UC17: and how to follow it: layer base main" has "$out" "\`gitfold layer base main\` moves ui there with only its own commits"
 check "UC17: not moved unasked while api is still there" test "$(R rev-parse main)" != "$(R rev-parse ui^)"
-check "UC17: list says it too" has "$("$BIN" -C "$REPO" list)" "api looks landed in main"
-check "UC17: asked, it follows the landing" "$BIN" -C "$U" layer base api --yes
-eq "UC17: ui now on main" "$(R rev-parse main)" "$(R rev-parse ui^)"
-eq "UC17: with only its own commit" "ui.txt" "$(R diff --name-only main ui)"
+check "UC17: list says it too" has "$("$BIN" -C "$REPO" list)" "api looks landed in main: gitfold layer base main moves it there"
+commit_on main later.txt later
+out=$("$BIN" -C "$U" layer base main 2>&1); rc=$?
+eq "UC17: pushed commits: refused without --yes, exit 4" "4" "$rc"
+check "UC17: saying so" has "$out" "--yes moves them"
+eq "UC17: nothing changed" "api" "$(R config branch.ui.gitfoldParent)"
+check "UC17: with --yes, it follows the landing" "$BIN" -C "$U" layer base main --yes
+eq "UC17: ui now on the landing commit" "$landing" "$(R rev-parse ui^)"
+eq "UC17: with only its own commit" "ui.txt" "$(R diff --name-only "$landing" ui)"
+check "UC17: no base left" fails R config branch.ui.gitfoldParent
+eq "UC17: the listing: a plain Base: main" "Base: main" "$(listing "$U" | head -1)"
+check "UC17: list: ui not under main" fails has "$("$BIN" -C "$REPO" list)" "└─ ui"
 
-# UC18: off the stack.
+# UC18: on its own base again, then the base taken away.
 R branch top main; commit_on top t.txt t
 "$BIN" -C "$REPO" layer base top -w ui --yes >/dev/null
 check "UC18: layer base main takes it off the stack" "$BIN" -C "$REPO" layer base main -w ui --yes

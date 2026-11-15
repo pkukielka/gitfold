@@ -56,6 +56,45 @@ pub fn trunk(common_dir: &Path, local: &Local) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The trunk as users know it: its local branch's name (`main` for
+/// `origin/main`), if there is a trunk.
+pub fn trunk_name(common_dir: &Path, local: &Local) -> Option<String> {
+    let trunk = trunk(common_dir, local)?;
+    Some(local_of(common_dir, &trunk).unwrap_or(trunk))
+}
+
+/// The commit to move onto for the trunk named `name` (`main`, or as
+/// configured, `origin/main`): the newer of the local branch and the
+/// configured trunk, the configured one if they diverged, whichever exists
+/// if only one does. A local `main` may be stale, or missing, when the trunk
+/// is `origin/main`.
+pub fn trunk_tip(
+    common_dir: &Path,
+    local: &Local,
+    name: &str,
+) -> Result<Option<(String, ObjectId)>> {
+    let named = resolve(common_dir, name)?.map(|(_, tip)| (name.to_string(), tip));
+    let configured = match trunk(common_dir, local) {
+        Some(trunk) if trunk != name => resolve(common_dir, &trunk)?.map(|(_, tip)| (trunk, tip)),
+        _ => None,
+    };
+    Ok(match (named, configured) {
+        (Some(named), Some(configured)) => {
+            match stack::is_ancestor(common_dir, configured.1, named.1)? {
+                true => Some(named),
+                false => Some(configured),
+            }
+        }
+        (named, configured) => named.or(configured),
+    })
+}
+
+/// Whether `a` and `b` name the same target: equal, or both the trunk
+/// (`main` and `origin/main`).
+pub fn same(common_dir: &Path, local: &Local, a: &str, b: &str) -> bool {
+    a == b || (is_trunk(common_dir, local, a) && is_trunk(common_dir, local, b))
+}
+
 /// Whether `name` is the trunk: a parent never restacked onto at a turn
 /// boundary (following the trunk is `layer base`'s, on request).
 /// A local branch tracking it counts too (`main` for `origin/main`): a

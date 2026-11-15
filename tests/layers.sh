@@ -254,7 +254,7 @@ echo own >"$W/own.txt"; G "$W" add own.txt; G "$W" commit -qm own
 eq "built on a base: what follows it" "Base: api, live your 1 commit sits on api; it moves when api gets new commits" \
     "$(listing "$W" | head -1)"
 R config branch.me.gitfoldRestack manual
-eq "and when it doesn't" "Base: api, frozen your 1 commit sits on api; it moves when you run \`gitfold layer base api\`" \
+eq "and when it doesn't" "Base: api, frozen your 1 commit sits on api; \`gitfold layer base api --frozen\` updates it" \
     "$(listing "$W" | head -1)"
 }
 

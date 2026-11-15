@@ -127,7 +127,8 @@ impl Local {
         self.repository(MOUNTPOINT).map(PathBuf::from)
     }
 
-    /// Where the bottom of a stack lands (`gitfold.trunk`), if set.
+    /// The main branch, where a branch with a base lands in the end
+    /// (`gitfold.trunk`), if set.
     pub fn trunk(&self) -> Option<String> {
         self.repository(TRUNK)
     }

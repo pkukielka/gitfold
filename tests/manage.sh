@@ -48,7 +48,9 @@ eq "a committed workspace has none" "" "$("$BIN" -C "$REPO" changes two 2>&1)"
 check "an unknown workspace refused" fails "$BIN" -C "$REPO" changes nope
 eq "in a workspace, it's that one's" "$EXPECT" "$(cd "$W1" && "$BIN" changes 2>&1)"
 eq "from a subdirectory of it too" "$EXPECT" "$(cd "$W1/d" && "$BIN" changes 2>&1)"
-check "outside a workspace, the branch must be named" sh -c "cd '$REPO' && '$BIN' changes 2>&1 | grep -q 'not in a gitfold workspace'"
+check "outside a workspace, the branch must be named" sh -c "cd '$REPO' && '$BIN' changes 2>&1 | grep -q 'not in a workspace: run it inside one'"
+eq "list from the mount root: the repository's" "$("$BIN" -C "$REPO" list 2>&1 | awk '{ print $1 }')" \
+    "$(cd "$MNT" && "$BIN" list 2>&1 | awk '{ print $1 }')"
 mkdir -p "$T/mnt2"
 check "second mount of the repository refused" fails timeout 5 "$BIN" mount "$REPO" "$T/mnt2"
 check "second mount point not mounted" fails mountpoint -q "$T/mnt2"
@@ -128,7 +130,7 @@ mount_fs
 WF=$MNT/fk
 echo changed >>"$WF/a.txt"; rm "$WF/d/b.txt"; echo new >"$WF/new.txt"; echo staged >"$WF/staged.txt"
 G "$WF" add staged.txt
-eq "fork while mounted" "created branch fk2 at fk, with its uncommitted changes; open it as <mountpoint>/fk2" "$("$BIN" -C "$REPO" branch -w --from fk fk2 2>&1)"
+eq "fork while mounted" "created branch fk2 at fk, with its uncommitted changes; open it as $MNT/fk2" "$("$BIN" -C "$REPO" branch -w --from fk fk2 2>&1)"
 eq "the fork has the same changes" "$("$BIN" -C "$REPO" changes fk)" "$("$BIN" -C "$REPO" changes fk2 2>&1)"
 eq "and the same git status, staged file included" "$(git -C "$WF" status --porcelain)" "$(git -C "$MNT/fk2" status --porcelain 2>&1)"
 eq "the same content" "$(cat "$WF/a.txt")" "$(cat "$MNT/fk2/a.txt")"
@@ -141,10 +143,10 @@ out=$("$BIN" -C "$REPO" branch -w --from fk fk 2>&1)
 eq "a fork into itself refused" yes "$(grep -q "created from itself" <<<"$out" && echo yes)"
 check "a fork of an unknown branch refused" fails "$BIN" -C "$REPO" branch -w --from nope fk9
 check "a fork of a snapshot refused" fails "$BIN" -C "$REPO" branch -w --from @HEAD fk9
-eq "a branch never opened: just the branch" "created branch nv2 at nv (it had no workspace yet: no changes to copy); open it as <mountpoint>/nv2" "$("$BIN" -C "$REPO" branch -w --from nv nv2 2>&1)"
+eq "a branch never opened: just the branch" "created branch nv2 at nv (it had no workspace yet: no changes to copy); open it as $MNT/nv2" "$("$BIN" -C "$REPO" branch -w --from nv nv2 2>&1)"
 check "nv2 exists" git -C "$REPO" rev-parse -q --verify refs/heads/nv2
 echo s >>"$MNT/sl/x/a.txt"; chmod +x "$MNT/sl/x/d/c.txt"
-eq "names with slashes" "created branch sl/y at sl/x, with its uncommitted changes; open it as <mountpoint>/sl/y" "$("$BIN" -C "$REPO" branch -w --from sl/x sl/y 2>&1)"
+eq "names with slashes" "created branch sl/y at sl/x, with its uncommitted changes; open it as $MNT/sl/y" "$("$BIN" -C "$REPO" branch -w --from sl/x sl/y 2>&1)"
 eq "mode and mtime kept" "$(stat -c '%a %Y' "$MNT/sl/x/d/c.txt")" "$(stat -c '%a %Y' "$MNT/sl/y/d/c.txt" 2>&1)"
 eq "its git status" "$(git -C "$MNT/sl/x" status --porcelain)" "$(git -C "$MNT/sl/y" status --porcelain 2>&1)"
 touch "$COMMON/worktrees/gitfold-ws-fk/MERGE_HEAD"
@@ -166,12 +168,12 @@ check "no copied index left in a fork's state" test ! -e "$COMMON/gitfold/fk2/.i
 out=$("$BIN" -C "$REPO" branch -w --from nope fk9 2>&1); rc=$?
 eq "an unknown source: exit code 3" 3 "$rc"
 chmod 000 "$WF/new.txt"
-eq "a file its owner can't read is copied" "created branch fk4 at fk, with its uncommitted changes; open it as <mountpoint>/fk4" "$("$BIN" -C "$REPO" branch -w --from fk fk4 2>&1)"
+eq "a file its owner can't read is copied" "created branch fk4 at fk, with its uncommitted changes; open it as $MNT/fk4" "$("$BIN" -C "$REPO" branch -w --from fk fk4 2>&1)"
 eq "with its mode, in both" "0 0" "$(stat -c %a "$WF/new.txt") $(stat -c %a "$MNT/fk4/new.txt" 2>&1)"
 chmod 644 "$WF/new.txt" "$MNT/fk4/new.txt"
 eq "and its content" new "$(cat "$MNT/fk4/new.txt")"
 G "$WF" update-index --split-index
-eq "a split index: forked with its shared index" "created branch fk5 at fk, with its uncommitted changes; open it as <mountpoint>/fk5" "$("$BIN" -C "$REPO" branch -w --from fk fk5 2>&1)"
+eq "a split index: forked with its shared index" "created branch fk5 at fk, with its uncommitted changes; open it as $MNT/fk5" "$("$BIN" -C "$REPO" branch -w --from fk fk5 2>&1)"
 eq "git status works there" "$(git -C "$WF" status --porcelain)" "$(git -C "$MNT/fk5" status --porcelain 2>&1)"
 G "$WF" update-index --no-split-index
 check "a fork named HEAD refused" fails "$BIN" -C "$REPO" branch -w --from fk HEAD
@@ -180,10 +182,10 @@ out=$("$BIN" -C "$REPO" branch -w fk9 2>&1)
 eq "outside a workspace, -w asks for --from" yes "$(grep -q 'name the source with --from' <<<"$out" && echo yes)"
 unmount_fs
 R config branch.fk.gitfoldPrewarm none
-eq "fork unmounted" "created branch fk3 at fk, with its uncommitted changes; open it as <mountpoint>/fk3" "$("$BIN" -C "$REPO" branch -w --from fk fk3 2>&1)"
+eq "fork unmounted" "created branch fk3 at fk, with its uncommitted changes; open it as $MNT/fk3 once mounted (gitfold mount)" "$("$BIN" -C "$REPO" branch -w --from fk fk3 2>&1)"
 eq "the prewarm mode comes along" none "$(R config --get branch.fk3.gitfoldPrewarm)"
 eq "the same changes" "$("$BIN" -C "$REPO" changes fk)" "$("$BIN" -C "$REPO" changes fk3 2>&1)"
-eq "unmounted, names with slashes" "created branch sl/z at sl/x, with its uncommitted changes; open it as <mountpoint>/sl/z" "$("$BIN" -C "$REPO" branch -w --from sl/x sl/z 2>&1)"
+eq "unmounted, names with slashes" "created branch sl/z at sl/x, with its uncommitted changes; open it as $MNT/sl/z once mounted (gitfold mount)" "$("$BIN" -C "$REPO" branch -w --from sl/x sl/z 2>&1)"
 mount_fs
 eq "and once mounted, the same git status" "$(git -C "$WF" status --porcelain)" "$(git -C "$MNT/fk3" status --porcelain 2>&1)"
 eq "sl/z too (its registration found the mount from sl/x's)" "$(git -C "$MNT/sl/x" status --porcelain)" "$(git -C "$MNT/sl/z" status --porcelain 2>&1)"
@@ -191,7 +193,7 @@ unmount_fs
 R branch cw
 mount_fs
 echo here >"$MNT/cw/here.txt"
-eq "in a workspace, -w alone copies that one" "created branch cw2 at cw, with its uncommitted changes; open it as <mountpoint>/cw2" "$(cd "$MNT/cw" && "$BIN" branch -w cw2 2>&1)"
+eq "in a workspace, -w alone copies that one" "created branch cw2 at cw, with its uncommitted changes; open it as $MNT/cw2" "$(cd "$MNT/cw" && "$BIN" branch -w cw2 2>&1)"
 eq "with its changes" "A	here.txt" "$("$BIN" -C "$REPO" changes cw2 2>&1)"
 check "-w with --from a revision, not a branch, refused" fails "$BIN" -C "$REPO" branch -w --from HEAD cw3
 unmount_fs

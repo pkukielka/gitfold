@@ -66,7 +66,7 @@ pub enum LayerOp {
         #[arg(long, conflicts_with = "branch")]
         all: bool,
     },
-    /// Build the branch on TARGET (stacked): its own commits move onto
+    /// Build the branch on TARGET, its base: its own commits move onto
     /// TARGET now, and onto TARGET's new commits from then on.
     ///
     /// It says first what it moves, and refuses (exit 4) to move commits
@@ -76,16 +76,19 @@ pub enum LayerOp {
     /// now. A workspace's files move as in a checkout, keeping uncommitted
     /// work; one whose uncommitted work is on a path the move changes waits,
     /// and a conflict leaves the branch as it was, reported (`gitfold list`
-    /// shows both). When TARGET lands (a merge, squash, rebase merge or
-    /// fast-forward), the branch moves onto what it landed in, by itself.
-    /// The trunk (gitfold.trunk, else origin/HEAD's branch, else main or
-    /// master) as TARGET takes it off the stack, its own commits moved onto
-    /// the trunk's tip. gitfold never pushes: it prints the force-pushes to
-    /// run. Exit codes: 3 no such branch, 4 not moved (commits already
-    /// pushed, a conflict, uncommitted work in the way, git busy, layers
-    /// shown), 1 other errors, 2 usage errors.
+    /// shows both). A move that doesn't happen changes nothing, the base
+    /// included. Refused while the workspace shows layers (`gitfold layer
+    /// remove --all` first). When its base lands (a merge, squash, rebase
+    /// merge or fast-forward), the branch moves onto what it landed in, by
+    /// itself, or when you name that (`gitfold layer base main`): only its
+    /// own commits move. The main branch (main, master, or gitfold.trunk)
+    /// as TARGET takes the base away, its own commits moved onto main.
+    /// gitfold never pushes: it prints the force-pushes to run. Exit codes:
+    /// 3 no such branch, 4 not moved (commits already pushed, a conflict,
+    /// uncommitted work in the way, git busy, layers shown), 1 other
+    /// errors, 2 usage errors.
     Base {
-        /// The branch to build on (the trunk: none, off the stack).
+        /// The branch to build on (the main branch: no base, just main).
         #[arg(required_unless_present = "all", conflicts_with = "all")]
         target: Option<String>,
         /// Build on TARGET as it is now, and don't follow its new commits
@@ -95,7 +98,8 @@ pub enum LayerOp {
         /// Move commits already pushed too.
         #[arg(long)]
         yes: bool,
-        /// Bring every branch built on another up to date, bases first.
+        /// Bring every branch with a base it follows up to date, bases
+        /// first (frozen ones are left as they are).
         #[arg(long)]
         all: bool,
     },
@@ -117,11 +121,7 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     if let Some(LayerOp::Add { branch, .. }) = &args.op
         && *branch == name
     {
-        clap::Error::raw(
-            clap::error::ErrorKind::ValueValidation,
-            format!("{name} can't be a layer of its own workspace\n"),
-        )
-        .exit();
+        super::usage(format!("{name} can't be a layer of its own workspace"));
     }
     check_name(&name)?;
     let common_dir = git::init(repo)?;
@@ -146,6 +146,8 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
             frozen,
             commits,
         }) => {
+            // A move in progress first: it is what to wait for.
+            refuse_if_moving(&common_dir, &state)?;
             refuse_with_base(&common_dir, &local, &name)?;
             let mut layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
             let mut what = describe(&layer);
@@ -243,22 +245,12 @@ fn refuse_with_base(common_dir: &Path, local: &Local, name: &str) -> Result<()> 
     if super::stack::land::is_trunk(common_dir, local, &parent) {
         return Ok(());
     }
-    let trunk = trunk_name(common_dir, local).unwrap_or_else(|| "main".into());
+    let trunk = super::stack::land::trunk_name(common_dir, local).unwrap_or_else(|| "main".into());
     Err(Refusal::Changes.error(format!(
         "{name} is built on {parent}; layers on a branch with a base aren't supported yet: \
          show {parent}'s work with a snapshot (`gitfold snapshot {parent}`), or take {name} \
          off its base first (`gitfold layer base {trunk}`)"
     )))
-}
-
-/// The trunk's branch name, as the user knows it: `main` for `origin/main`.
-fn trunk_name(common_dir: &Path, local: &Local) -> Option<String> {
-    let trunk = super::stack::land::trunk(common_dir, local)?;
-    let remote = format!("refs/remotes/{trunk}");
-    match (trunk.split_once('/'), git::resolve(&remote)) {
-        (Some((_, branch)), Ok(_)) if !git::branch_exists(&trunk) => Some(branch.to_string()),
-        _ => Some(trunk),
-    }
 }
 
 /// What `layer` shows and how it updates, as the listing says it.
@@ -638,17 +630,7 @@ fn add_command(layer: &Layer) -> String {
 /// now, if mounted; says what happened. If the daemon refuses, the layers
 /// stored before are put back, so what is stored is what shows.
 pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
-    // A move onto its base moves the base a switch builds the view on.
-    if crate::state::restack::pending(state) {
-        let base = Local::read(common_dir)
-            .parent(&state.branch)
-            .unwrap_or_else(|| "<base>".into());
-        return Err(Refusal::Changes.error(format!(
-            "{} is being moved onto its base {base} (or that was interrupted: `gitfold layer base \
-             {base}` finishes it); retry once it is done",
-            state.branch
-        )));
-    }
+    refuse_if_moving(common_dir, state)?;
     let before = crate::state::lens::stored_bytes(state)?;
     lens.write(state)?;
     apply(common_dir, &state.branch).inspect_err(|_| {
@@ -656,6 +638,23 @@ pub(super) fn store_and_apply(common_dir: &Path, state: &StateDir, lens: &Lens) 
             log::warn!("putting the layers back: {e:#}");
         }
     })
+}
+
+/// Refuses changing the layers of the workspace in `state` while it is
+/// being moved onto its base: the move moves the base a switch builds the
+/// view on.
+fn refuse_if_moving(common_dir: &Path, state: &StateDir) -> Result<()> {
+    if !crate::state::restack::pending(state) {
+        return Ok(());
+    }
+    let base = Local::read(common_dir)
+        .parent(&state.branch)
+        .unwrap_or_else(|| "<base>".into());
+    Err(Refusal::Changes.error(format!(
+        "{} is being moved onto its base {base} (or that was interrupted: `gitfold layer base \
+         {base}` finishes it); retry once it is done",
+        state.branch
+    )))
 }
 
 /// Has the daemon show the stored layers now, if mounted; says what happened.
@@ -738,7 +737,7 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
     use super::stack::land;
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(branch) else {
-        let trunk = trunk_name(common_dir, &local).unwrap_or_else(|| "-".into());
+        let trunk = land::trunk_name(common_dir, &local).unwrap_or_else(|| "-".into());
         return Ok(format!("Base: {trunk}\n"));
     };
     let trunk = land::is_trunk(common_dir, &local, &parent);
@@ -752,17 +751,21 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
         }
         None => None,
     };
-    let (commits, they) = match own {
-        Some(1) => ("your 1 commit sits".to_string(), "it moves"),
-        Some(n) => (format!("your {n} commits sit"), "they move"),
-        None => ("your commits sit".to_string(), "they move"),
+    let commits = match own {
+        Some(0) => "no commits of your own yet".to_string(),
+        Some(1) => format!("your 1 commit sits on {parent}"),
+        Some(n) => format!("your {n} commits sit on {parent}"),
+        None => format!("your commits sit on {parent}"),
     };
-    let when = match frozen || trunk {
-        true => format!("when you run `gitfold layer base {parent}`"),
-        false => format!("when {parent} gets new commits"),
+    let again = if frozen { " --frozen" } else { "" };
+    let how = match (frozen || trunk, own) {
+        (true, _) => format!("`gitfold layer base {parent}{again}` updates it"),
+        (false, Some(0)) => format!("it follows {parent}"),
+        (false, Some(1)) => format!("it moves when {parent} gets new commits"),
+        (false, _) => format!("they move when {parent} gets new commits"),
     };
     let width = head.chars().count().max(15) + 6;
-    let mut out = format!("{head:<width$}{commits} on {parent}; {they} {when}\n");
+    let mut out = format!("{head:<width$}{commits}; {how}\n");
     // When the stack ref last moved, while git keeps it loose.
     let stack_ref = common_dir.join(git::stack::stack_ref(branch));
     if let Ok(at) = std::fs::metadata(stack_ref).and_then(|m| m.modified()) {
