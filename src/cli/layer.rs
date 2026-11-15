@@ -609,7 +609,15 @@ pub(super) fn layer_of(
             .map_err(|_| Refusal::NotFound.error(format!("no branch or revision {branch}")))?;
         (commit.id, Shows::Commits, Updates::Fixed)
     };
-    let merge_base = git::merge_base(state.read_base()?.id, seal)?;
+    // A layer shows its changes since it and the base diverged: without a
+    // commit in common there is no telling them apart.
+    let Some(merge_base) = git::merge_base_if_any(state.read_base()?.id, seal)? else {
+        return Err(Refusal::Changes.error(format!(
+            "{branch} shares no history with {}'s base, so its changes can't be told apart: \
+             a layer must start from a commit your branch also has",
+            state.branch
+        )));
+    };
     // A layer shows changes on top of the base: one that never moves and is
     // part of the base already would show nothing.
     if updates != Updates::Live && merge_base == seal {

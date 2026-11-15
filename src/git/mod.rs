@@ -274,11 +274,23 @@ pub fn require_branch(name: &str) -> Result<()> {
 /// The best common ancestor of commits `a` and `b`, as `git merge-base`
 /// picks it.
 pub fn merge_base(a: ObjectId, b: ObjectId) -> Result<ObjectId> {
+    merge_base_if_any(a, b)?.ok_or_else(|| anyhow::anyhow!("{a} and {b} share no history"))
+}
+
+/// `merge_base`, or `None` if `a` and `b` share no history (git exits 1
+/// and prints nothing then).
+pub fn merge_base_if_any(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
     let common_dir = with_repo(|repo| repo.common_dir().to_path_buf());
-    let out = cmd::output(&common_dir, &["merge-base", &a.to_string(), &b.to_string()])?;
-    Ok(ObjectId::from_hex(
+    let out = cmd::command(&common_dir)
+        .args(["merge-base", &a.to_string(), &b.to_string()])
+        .output()?;
+    if out.status.code() == Some(1) && out.stdout.is_empty() && out.stderr.is_empty() {
+        return Ok(None);
+    }
+    let out = cmd::checked(&["merge-base"], out)?;
+    Ok(Some(ObjectId::from_hex(
         String::from_utf8_lossy(&out).trim().as_bytes(),
-    )?)
+    )?))
 }
 
 /// The commit branch `name` points at.
