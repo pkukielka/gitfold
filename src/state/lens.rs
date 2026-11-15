@@ -11,10 +11,13 @@
 //! as taken, and a revision (a tag, a commit) is fixed.
 //!
 //! What the workspace shows is then the view tree: its base's tree with each
-//! layer's changes on top, and upper over all of it as before. Where several
-//! layers change one path, it shows their 3-way merge against the base's
-//! version, conflict markers kept (the base's version if they can't be
-//! merged at all), reported (`View::conflicts`). A path a layer changed is
+//! layer's changes on top, and upper over all of it as before. A layer
+//! brings only its own changes: at each path it changed, the view shows the
+//! 3-way merge of its version at the merge base, what the path is so far
+//! (the base's version, with the layers before it applied) and its version,
+//! as merging its branch would. Conflict markers are kept (the base's
+//! version if a change can't be merged at all), and the conflicts reported
+//! (`View::conflicts`). A path a layer changed is
 //! mixed: it is that layer's (or those layers'), so it can't be written
 //! here; the workspace's own file at that path, if it has one, wins and
 //! stays writable.
@@ -315,14 +318,44 @@ pub fn named_seals(common_dir: &std::path::Path) -> HashSet<ObjectId> {
         .collect()
 }
 
-/// A path several layers change whose changes conflict (see `view`).
+/// A path where a layer's change conflicts with the base's or with other
+/// layers' (see `view`).
 #[derive(Clone, Debug)]
 pub struct Conflict {
     pub path: BString,
-    /// The layers (indexes in `Lens::layers`).
+    /// The layers (indexes in `Lens::layers`): the one whose change
+    /// conflicts with the base's, or those whose changes conflict.
     pub layers: Vec<usize>,
+    /// With the base's change.
+    pub base: bool,
     /// It shows git's conflict markers; else the base's version.
     pub markers: bool,
+}
+
+impl Conflict {
+    /// In words, with the names of `lens`' layers: `<path>: <layer>'s change
+    /// conflicts with your base` or `<path> is changed by both <a> and <b>`,
+    /// and when it can't be merged, that it shows the base's version.
+    pub fn describe(&self, lens: &Lens) -> String {
+        let names = || self.layers.iter().map(|&i| lens.layers[i].branch.clone());
+        let mut out = match self.base {
+            true => format!(
+                "{}: {}'s change conflicts with your base",
+                self.path,
+                and_list(names())
+            ),
+            false => format!(
+                "{} is changed by {}{}",
+                self.path,
+                if self.layers.len() == 2 { "both " } else { "" },
+                and_list(names())
+            ),
+        };
+        if !self.markers {
+            out += " (the changes can't be merged: it shows your base's version)";
+        }
+        out
+    }
 }
 
 /// What a workspace with layers shows below its own changes.
@@ -340,7 +373,8 @@ pub struct View {
     pub blended: HashMap<Vec<u8>, Vec<usize>>,
     /// The seals of the layers blended in (L's parents after the base).
     pub hunk_seals: Vec<ObjectId>,
-    /// The paths several layers change whose changes conflict.
+    /// The paths where a layer's change conflicts with the base's or
+    /// another layer's.
     pub conflicts: Vec<Conflict>,
     /// What the agent should hear about it.
     pub notes: Vec<String>,
@@ -384,29 +418,27 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
                 "{path}: {}'s change conflicts with what is below it, so it isn't blended in",
                 name(layer)
             ),
-            git::lens::Note::HidesBase { layer, path } => format!(
-                "{path}: {0}'s version is older than your base's (it hides a change made \
-                 since); ask {0} to update",
-                name(layer)
-            ),
             git::lens::Note::Conflict {
                 layers,
+                base,
                 path,
                 markers,
             } => {
-                let note = format!(
-                    "{path}: {} change it and conflict: {}",
-                    and_list(layers.iter().map(|&ix| name(ix))),
-                    match markers {
-                        true => "it shows git's conflict markers",
-                        false => "it shows your base's version",
-                    }
-                );
-                conflicts.push(Conflict {
+                let conflict = Conflict {
                     path,
                     layers,
+                    base,
                     markers,
-                });
+                };
+                let note = format!(
+                    "Conflict: {}{}",
+                    conflict.describe(lens),
+                    match markers {
+                        true => " (it shows git's conflict markers)",
+                        false => "",
+                    }
+                );
+                conflicts.push(conflict);
                 note
             }
         });

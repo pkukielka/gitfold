@@ -10,10 +10,12 @@
 //!   delta is `diff(MB.tree, S.tree)`.
 //! - H, the hunk tree: B with every hunk path (a registry, a manifest, as the
 //!   caller says: those marked `merge=union`) blended across the layers.
-//! - M, the view tree: H with every other path a layer changed replaced by
-//!   that layer's entry ("whole-file" paths); where several layers change
-//!   one, the 3-way merge of their entries against B's, conflict markers
-//!   kept (or B's entry if they can't be merged at all).
+//! - M, the view tree: H with each layer's change to every other path
+//!   ("whole-file" paths) applied in turn, as a 3-way merge `merge(base =
+//!   MB[p], ours = what p is so far, starting from B[p], theirs = S[p])`, so
+//!   a layer brings only its own changes, not its stale copy of lines B
+//!   changed since; conflict markers kept (or B's entry if a change can't be
+//!   merged at all: binary, a deletion against a change, a type change).
 //! - L, the layers commit (the lens commit in the code): tree H, parents
 //!   `[B, S...]`, an extra header `gitfold-lens 1`. The worktree's HEAD
 //!   while hunk paths are mixed in, so `git diff` shows only my lines of a
@@ -230,9 +232,8 @@ pub struct Built {
     pub hunk_tree: ObjectId,
     /// M: H with the whole-file paths of the layers.
     pub view_tree: ObjectId,
-    /// Whole-file paths where M differs from H (or several layers' changes
-    /// don't merge), with the layers (indexes into the stack) whose changes
-    /// M has there: one, or those merged.
+    /// Whole-file paths where M differs from H (or a layer's change doesn't
+    /// merge), with the layers (indexes into the stack) that change them.
     pub mixed: BTreeMap<BString, Vec<usize>>,
     /// Hunk paths where H differs from B, with the layers whose changes are
     /// blended in.
@@ -255,21 +256,20 @@ pub enum Note {
     /// The layer's change to this hunk path conflicts with what is below it
     /// (B or the layers under it), so it is not blended in.
     NotBlended { layer: usize, path: BString },
-    /// B changed this whole-file path since the layer's merge base, and the
-    /// layer's version, shown in M, hides that change.
-    HidesBase { layer: usize, path: BString },
-    /// Several layers change this whole-file path and their changes
-    /// conflict: M has the merge with git's conflict markers (`markers`),
-    /// or, where that can't be (binary, a deletion against a change, a type
-    /// change), B's entry.
+    /// A layer's change to this whole-file path conflicts: with B's change
+    /// since the layer's merge base (`base`; `layers` is that one layer), or
+    /// with other layers' changes (`layers` are those layers). M has the
+    /// merge with git's conflict markers (`markers`), or, where that can't
+    /// be (binary, a deletion against a change, a type change), B's entry.
     Conflict {
         layers: Vec<usize>,
+        base: bool,
         path: BString,
         markers: bool,
     },
 }
 
-/// How the changes of several layers to one whole-file path merged.
+/// How layers' changes to a whole-file path merged.
 enum Merged {
     Clean(Option<Item>),
     /// With conflict markers.
@@ -279,9 +279,10 @@ enum Merged {
 }
 
 /// Builds the view of base commit `base` with `layers` (in the order
-/// added), blending hunk paths and, for the others, taking the entry of the
-/// layer that changes them, or the 3-way merge (against B's entry) of the
-/// entries of the layers that do, conflicts reported (§2.1 steps 1-3). The
+/// added), blending hunk paths and, for the others, applying the change of
+/// each layer that changes them in turn, starting from B's entry: the 3-way
+/// merge of the layer's merge base's entry, what is there so far and the
+/// layer's, so it brings only its own changes; conflicts reported. The
 /// paths a layer sets that B has and no layer deletes (a blend needs B's
 /// version, and a deletion is whole) are given to `hunk_paths`, once, which
 /// returns those that are hunk paths.
@@ -370,45 +371,64 @@ pub fn build_view(
     }
     let mut edits = Vec::with_capacity(order.len());
     let mut mixed = BTreeMap::new();
+    // What each whole-file path shows, as decided.
+    let mut shown: HashMap<&BStr, Option<Item>> = HashMap::new();
     for path in &order {
         let changes = &whole[path];
         let ixs: Vec<usize> = changes.iter().map(|(ix, _)| *ix).collect();
         let in_base = lookup(repo, base_tree, path.as_ref())?;
-        // Merged against B's entry when several change it: a layer's version
-        // from before a change B made since reverts it, as with one layer.
+        let mut sides = Vec::with_capacity(changes.len());
         for &(ix, change) in changes {
-            if change.item() != in_base && lookup(repo, layer_bases[ix], path.as_ref())? != in_base
-            {
-                notes.push(Note::HidesBase {
-                    layer: ix,
-                    path: path.clone(),
-                });
+            sides.push(Side {
+                layer: ix,
+                name: &layers[ix].name,
+                ancestor: lookup(repo, layer_bases[ix], path.as_ref())?,
+                theirs: change.item(),
+            });
+        }
+        let (merged, conflicted) = apply_layers(repo, in_base, &sides)?;
+        let mut found = Vec::new();
+        for &step in &conflicted {
+            let one = conflicting(repo, in_base, &sides, step)?;
+            if !found.contains(&one) {
+                found.push(one);
             }
         }
-        let (entry, conflict) = match changes[..] {
-            [(_, change)] => (change.item(), None),
-            _ => {
-                let sides: Vec<(Option<Item>, &str)> = (changes.iter())
-                    .map(|(ix, c)| (c.item(), layers[*ix].name.as_str()))
-                    .collect();
-                match merge_layers(repo, in_base, &sides)? {
-                    Merged::Clean(item) => (item, None),
-                    Merged::Markers(item) => (Some(item), Some(true)),
-                    Merged::Unmergeable => (in_base, Some(false)),
-                }
-            }
+        let (mut entry, markers) = match merged {
+            Merged::Clean(item) => (item, true),
+            Merged::Markers(item) => (Some(item), true),
+            Merged::Unmergeable => (in_base, false),
         };
-        edits.push((path.as_ref(), Change::from_item(entry)));
-        if let Some(markers) = conflict {
-            notes.push(Note::Conflict {
-                layers: conflicting(repo, in_base, changes, layers)?,
-                path: path.clone(),
-                markers,
-            });
-        } else if entry == in_base {
+        // A new path below a file that stays (the base's, or one whose
+        // layers' changes couldn't be merged) can't show without hiding it.
+        if entry.is_some()
+            && in_base.is_none()
+            && let Some(file) = file_above(repo, base_tree, &shown, path.as_ref())?
+        {
+            entry = None;
+            if !shown.contains_key(file.as_bstr()) {
+                found = vec![(ixs.clone(), true)];
+            }
+        }
+        shown.insert(path.as_ref(), entry);
+        if entry != in_base {
+            edits.push((path.as_ref(), Change::from_item(entry)));
+        } else if found.is_empty() {
+            // Its layers' changes are all on the base already.
             continue;
         }
-        mixed.insert(path.clone(), ixs);
+        for (layers, base) in found {
+            notes.push(Note::Conflict {
+                layers,
+                base,
+                path: path.clone(),
+                markers: markers && entry != in_base,
+            });
+        }
+        // A directory the base made of it stays the base's.
+        if !entry.is_some_and(|e| e.kind == EntryKind::Tree) {
+            mixed.insert(path.clone(), ixs);
+        }
     }
     let view_tree = edit_tree(repo, hunk_tree, edits)?;
     Ok(Built {
@@ -420,93 +440,160 @@ pub fn build_view(
     })
 }
 
-/// Of the layers whose `changes` to one whole-file path don't merge, those
-/// that conflict: the layers of each pair whose changes don't merge (against
-/// `base`, B's entry); all of them if no pair alone conflicts.
+/// One layer's change to a whole-file path: its entry at the layer's merge
+/// base and at its seal.
+#[derive(Clone, Copy)]
+struct Side<'a> {
+    layer: usize,
+    name: &'a str,
+    ancestor: Option<Item>,
+    theirs: Option<Item>,
+}
+
+/// Applies the layers' changes `sides` (in order) to one whole-file path,
+/// starting from `base` (the base's entry): each the 3-way merge of its
+/// merge base's entry, what is there so far and its own, as `git
+/// merge-file` does. With the steps (indexes into `sides`) that conflicted;
+/// stops at one that can't be merged at all.
+fn apply_layers(
+    repo: &gix::Repository,
+    base: Option<Item>,
+    sides: &[Side],
+) -> Result<(Merged, Vec<usize>)> {
+    let (mut acc, mut label) = (base, String::from("base"));
+    let mut markers = false;
+    let mut conflicted = Vec::new();
+    for (step, side) in sides.iter().enumerate() {
+        match merge_entries(repo, side.ancestor, acc, side.theirs, &label, side.name)? {
+            Merged::Clean(item) => acc = item,
+            Merged::Markers(item) => {
+                (acc, markers) = (Some(item), true);
+                conflicted.push(step);
+            }
+            Merged::Unmergeable => {
+                conflicted.push(step);
+                return Ok((Merged::Unmergeable, conflicted));
+            }
+        }
+        label = format!("{label} + {}", side.name);
+    }
+    let merged = match (markers, acc) {
+        (true, Some(item)) => Merged::Markers(item),
+        _ => Merged::Clean(acc),
+    };
+    Ok((merged, conflicted))
+}
+
+/// Who the change of `sides[step]`, applied after those before it
+/// (`apply_layers`), conflicts with: `(its layer, true)`, the base, if it
+/// alone conflicts with the base's entry `base`; else `(layers, false)`,
+/// it and each layer before it whose change alone conflicts with it (all
+/// before it if none alone does).
 fn conflicting(
     repo: &gix::Repository,
     base: Option<Item>,
-    changes: &[(usize, Change)],
-    layers: &[Pin],
-) -> Result<Vec<usize>> {
-    let side = |(ix, c): &(usize, Change)| (c.item(), layers[*ix].name.as_str());
-    let mut out = BTreeSet::new();
-    for (i, a) in changes.iter().enumerate() {
-        for b in &changes[i + 1..] {
-            if !matches!(
-                merge_layers(repo, base, &[side(a), side(b)])?,
-                Merged::Clean(_)
-            ) {
-                out.extend([a.0, b.0]);
-            }
+    sides: &[Side],
+    step: usize,
+) -> Result<(Vec<usize>, bool)> {
+    let side = sides[step];
+    if !apply_layers(repo, base, &[side])?.1.is_empty() {
+        return Ok((vec![side.layer], true));
+    }
+    let mut with = Vec::new();
+    for &before in &sides[..step] {
+        if apply_layers(repo, base, &[before, side])?.1.contains(&1) {
+            with.push(before.layer);
         }
     }
-    Ok(match out.is_empty() {
-        true => changes.iter().map(|(ix, _)| *ix).collect(),
-        false => out.into_iter().collect(),
-    })
+    if with.is_empty() {
+        with = sides[..step].iter().map(|s| s.layer).collect();
+    }
+    with.push(side.layer);
+    Ok((with, false))
 }
 
-/// Merges the entries `sides` (in order, with the layers' names) of
-/// layers changing one whole-file path, each against `base` (B's entry), as
-/// `git merge-file` does.
-fn merge_layers(
+/// The file (or symlink, submodule) above `path`, as shown so far (`shown`,
+/// else as in tree `tree`), if there is one.
+fn file_above(
     repo: &gix::Repository,
-    base: Option<Item>,
-    sides: &[(Option<Item>, &str)],
-) -> Result<Merged> {
-    let (mut acc, mut label) = (sides[0].0, sides[0].1.to_string());
-    let mut markers = false;
-    for &(theirs, name) in &sides[1..] {
-        if let Some(merged) = trivial_merge(base, acc, theirs) {
-            acc = merged;
-        } else {
-            let (Some(ours), Some(theirs)) = (acc, theirs) else {
-                return Ok(Merged::Unmergeable);
-            };
-            let Some(kind) = merged_kind(base, ours, theirs) else {
-                return Ok(Merged::Unmergeable);
-            };
-            let base_data = read_blob(repo, base)?;
-            let (ours_data, theirs_data) =
-                (read_blob(repo, Some(ours))?, read_blob(repo, Some(theirs))?);
-            if [&base_data, &ours_data, &theirs_data]
-                .iter()
-                .any(|d| is_binary(d))
-            {
-                return Ok(Merged::Unmergeable);
-            }
-            let labels = text::Labels {
-                ancestor: Some("base".into()),
-                current: Some(label.as_str().into()),
-                other: Some(name.into()),
-            };
-            let mut input = gix::diff::blob::InternedInput::default();
-            let mut out = Vec::new();
-            let options = text::Options {
-                conflict: keep_conflicts(),
-                ..Default::default()
-            };
-            let resolution = builtin_driver::text(
-                &mut out,
-                &mut input,
-                labels,
-                &ours_data,
-                &base_data,
-                &theirs_data,
-                options,
-            );
-            markers |= resolution == Resolution::Conflict;
-            acc = Some(Item {
-                kind,
-                oid: repo.write_blob(&out)?.detach(),
-            });
+    tree: ObjectId,
+    shown: &HashMap<&BStr, Option<Item>>,
+    path: &BStr,
+) -> Result<Option<BString>> {
+    let mut at = 0;
+    while let Some(slash) = path[at..].find_byte(b'/') {
+        let above = path[..at + slash].as_bstr();
+        let item = match shown.get(above) {
+            Some(item) => *item,
+            None => lookup(repo, tree, above)?,
+        };
+        match item {
+            None => return Ok(None),
+            Some(item) if item.kind != EntryKind::Tree => return Ok(Some(above.into())),
+            Some(_) => at += slash + 1,
         }
-        label = format!("{label} + {name}");
     }
-    Ok(match (markers, acc) {
-        (true, Some(item)) => Merged::Markers(item),
-        _ => Merged::Clean(acc),
+    Ok(None)
+}
+
+/// The 3-way merge of a path's entries `ours` and `theirs`, each changed
+/// from `ancestor`, as `git merge-file` does: conflict markers named
+/// `ours_label` and `theirs_label`.
+fn merge_entries(
+    repo: &gix::Repository,
+    ancestor: Option<Item>,
+    ours: Option<Item>,
+    theirs: Option<Item>,
+    ours_label: &str,
+    theirs_label: &str,
+) -> Result<Merged> {
+    if let Some(merged) = trivial_merge(ancestor, ours, theirs) {
+        return Ok(Merged::Clean(merged));
+    }
+    let (Some(ours), Some(theirs)) = (ours, theirs) else {
+        // Deleted on one side, changed on the other.
+        return Ok(Merged::Unmergeable);
+    };
+    let Some(kind) = merged_kind(ancestor, ours, theirs) else {
+        return Ok(Merged::Unmergeable);
+    };
+    let ancestor_data = read_blob(repo, ancestor)?;
+    let (ours_data, theirs_data) = (read_blob(repo, Some(ours))?, read_blob(repo, Some(theirs))?);
+    if [&ancestor_data, &ours_data, &theirs_data]
+        .iter()
+        .any(|d| is_binary(d))
+    {
+        return Ok(Merged::Unmergeable);
+    }
+    let labels = text::Labels {
+        ancestor: Some("merge base".into()),
+        current: Some(ours_label.into()),
+        other: Some(theirs_label.into()),
+    };
+    let mut input = gix::diff::blob::InternedInput::default();
+    let mut out = Vec::new();
+    let options = text::Options {
+        conflict: keep_conflicts(),
+        ..Default::default()
+    };
+    let resolution = builtin_driver::text(
+        &mut out,
+        &mut input,
+        labels,
+        &ours_data,
+        &ancestor_data,
+        &theirs_data,
+        options,
+    );
+    let item = Item {
+        kind,
+        oid: repo.write_blob(&out)?.detach(),
+    };
+    Ok(match resolution {
+        Resolution::Conflict => Merged::Markers(item),
+        Resolution::Complete | Resolution::CompleteWithAutoResolvedConflict => {
+            Merged::Clean(Some(item))
+        }
     })
 }
 
@@ -1297,8 +1384,9 @@ mod tests {
         r.git(&["fsck", "--strict", "--no-dangling"]);
     }
 
-    /// The base moved on since the layers' merge base: a whole-file layer
-    /// hides the base's newer change (reported), a blended path keeps both.
+    /// The base moved on since the layers' merge base: a whole-file path
+    /// shows the base's newer change and the layer's own, as does a blended
+    /// path.
     #[test]
     fn view_on_a_newer_base() {
         let r = Repo::new("newer");
@@ -1311,22 +1399,22 @@ mod tests {
         let new = r.commit("upstream");
         let repo = r.open();
         let view = build_view(&repo, new, &stack(&r, old, &["a"]), &registries).unwrap();
+        assert_eq!(view.notes, []);
         assert_eq!(
-            view.notes,
-            [Note::HidesBase {
-                layer: 0,
-                path: "src/util.c".into()
-            }]
+            r.show(view.view_tree, "src/util.c"),
+            lines(8, "util")
+                .replace("util3\n", "util3 A\n")
+                .replace("util8\n", "util8 UP")
         );
-        assert!(!r.show(view.view_tree, "src/util.c").contains("UP"));
+        assert_eq!(view.mixed.get(BStr::new("src/util.c")), Some(&vec![0]));
         assert_eq!(
             r.show(view.hunk_tree, "registry.txt"),
             "entry_base1\nentry_base2\nentry_base3\nentry_up\nentry_a"
         );
     }
 
-    /// The same with two layers changing the path, merged against the base:
-    /// the older one's version would revert the base's change, reported too.
+    /// The same with two layers changing the path, each pinned at a
+    /// different merge base, neither the base: every change is kept.
     #[test]
     fn view_on_a_newer_base_merged() {
         let r = Repo::new("newer-merged");
@@ -1337,7 +1425,7 @@ mod tests {
         r.commit("low");
         r.git(&["checkout", "-q", "main"]);
         r.write("src/util.c", &util.replace("util4\n", "util4 UP\n"));
-        let new = r.commit("upstream");
+        let mid = r.commit("upstream");
         r.git(&["checkout", "-q", "-b", "high", "main"]);
         r.write(
             "src/util.c",
@@ -1347,17 +1435,191 @@ mod tests {
         );
         r.commit("high");
         r.git(&["checkout", "-q", "main"]);
+        r.write(
+            "src/util.c",
+            &util
+                .replace("util4\n", "util4 UP\n")
+                .replace("util6\n", "util6 NEW\n"),
+        );
+        let new = r.commit("newer");
         let repo = r.open();
         let mut layers = stack(&r, old, &["low"]);
-        layers.extend(stack(&r, new, &["high"]));
+        layers.extend(stack(&r, mid, &["high"]));
+        let expected = util
+            .replace("util1\n", "util1 LOW\n")
+            .replace("util4\n", "util4 UP\n")
+            .replace("util6\n", "util6 NEW\n")
+            .replace("util8\n", "util8 HIGH");
         let view = build_view(&repo, new, &layers, &registries).unwrap();
+        assert_eq!(view.notes, []);
+        assert_eq!(r.show(view.view_tree, "src/util.c"), expected);
+        assert_eq!(view.mixed.get(BStr::new("src/util.c")), Some(&vec![0, 1]));
+        // In the other order too.
+        layers.reverse();
+        let view = build_view(&repo, new, &layers, &registries).unwrap();
+        assert_eq!(view.notes, []);
+        assert_eq!(r.show(view.view_tree, "src/util.c"), expected);
+    }
+
+    /// A layer brings only its own changes to a whole file: what the base
+    /// changed since stays; a change of the same lines conflicts with the
+    /// base (markers, reported); deletions, a mode change and binary files
+    /// merge as git would, and where they can't, the base's version shows.
+    #[test]
+    fn own_changes_only() {
+        let r = Repo::new("own");
+        let text = lines(60, "line");
+        r.write("x.rs", &text);
+        r.write("same.rs", &text);
+        r.write("gone.rs", "gone\n");
+        r.write("kept.rs", "kept\n");
+        r.write("edited.rs", "edited\n");
+        r.write("tool.sh", &text);
+        r.write("blob.bin", "bin\0one\n");
+        r.write("blob2.bin", "bin\0two\n");
+        let old = r.commit("old");
+        r.git(&["checkout", "-q", "-b", "b", "main"]);
+        r.write("x.rs", &text.replace("line50\n", "line50 B\n"));
+        r.write("same.rs", &text.replace("line10\n", "line10 B\n"));
+        r.git(&["rm", "-q", "gone.rs", "kept.rs"]);
+        r.write("edited.rs", "edited by B\n");
+        let tool = r.work().join("tool.sh");
+        fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).unwrap();
+        r.write("blob.bin", "bin\0one B\n");
+        r.write("blob2.bin", "bin\0two B\n");
+        r.commit("b");
+        r.git(&["checkout", "-q", "main"]);
+        r.write("x.rs", &text.replace("line10\n", "line10 FIX\n"));
+        r.write("same.rs", &text.replace("line10\n", "line10 FIX\n"));
+        r.write("kept.rs", "kept, changed\n");
+        r.git(&["rm", "-q", "edited.rs"]);
+        r.write("tool.sh", &text.replace("line1\n", "line1 FIX\n"));
+        r.write("blob.bin", "bin\0one FIX\n");
+        let new = r.commit("new");
+        let repo = r.open();
+        let view = build_view(&repo, new, &stack(&r, old, &["b"]), &registries).unwrap();
+
+        // Different lines: both.
+        assert_eq!(
+            r.show(view.view_tree, "x.rs"),
+            text.replace("line10\n", "line10 FIX\n")
+                .replace("line50\n", "line50 B\n")
+                .trim_end()
+        );
+        // The same line: git's conflict markers, the base's side first.
+        let same = r.show(view.view_tree, "same.rs");
+        assert!(
+            same.contains("<<<<<<< base\nline10 FIX\n=======\nline10 B\n>>>>>>> b\n"),
+            "{same}"
+        );
+        // Deleted, unchanged on the base: gone. Deleted, changed on the
+        // base, or changed, deleted on the base: the base's.
+        let at = |p: &str| lookup(&repo, view.view_tree, p.into()).unwrap();
+        assert_eq!(at("gone.rs"), None);
+        assert_eq!(r.show(view.view_tree, "kept.rs"), "kept, changed");
+        assert_eq!(at("edited.rs"), None);
+        // A mode change with a content change: both.
+        assert_eq!(at("tool.sh").unwrap().kind, EntryKind::BlobExecutable);
+        assert!(r.show(view.view_tree, "tool.sh").starts_with("line1 FIX\n"));
+        // Binary: the base's where both changed it, else the layer's.
+        assert_eq!(
+            at("blob.bin"),
+            lookup(&repo, tree_of(&r, new), "blob.bin".into()).unwrap()
+        );
+        assert_eq!(r.show(view.view_tree, "blob2.bin"), "bin\0two B");
+
+        let conflict = |path: &str, markers| Note::Conflict {
+            layers: vec![0],
+            base: true,
+            path: path.into(),
+            markers,
+        };
         assert_eq!(
             view.notes,
-            [Note::HidesBase {
-                layer: 0,
-                path: "src/util.c".into()
-            }]
+            [
+                conflict("blob.bin", false),
+                conflict("edited.rs", false),
+                conflict("kept.rs", false),
+                conflict("same.rs", true),
+            ]
         );
+        // Every path the layer changed is its own, read-only.
+        let mixed: Vec<_> = view.mixed.keys().map(|p| p.to_string()).collect();
+        assert_eq!(
+            mixed,
+            [
+                "blob.bin",
+                "blob2.bin",
+                "edited.rs",
+                "gone.rs",
+                "kept.rs",
+                "same.rs",
+                "tool.sh",
+                "x.rs"
+            ]
+        );
+    }
+
+    /// Files and directories: a layer's change to a file the base made a
+    /// directory of, or a new file below a file the base has, shows the
+    /// base's tree, reported; a file the layer made a directory of, which
+    /// the base didn't change, is the layer's directory.
+    #[test]
+    fn files_and_directories() {
+        let r = Repo::new("dirs");
+        r.write("d", "file\n");
+        r.write("e", "file\n");
+        let old = r.commit("old");
+        r.git(&["checkout", "-q", "-b", "b", "main"]);
+        r.write("d", "file B\n");
+        r.git(&["rm", "-q", "e"]);
+        r.write("e/inner", "inner B\n");
+        r.write("f/inner", "inner B\n");
+        r.commit("b");
+        r.git(&["checkout", "-q", "main"]);
+        r.git(&["rm", "-q", "d"]);
+        r.write("d/inner", "base's\n");
+        r.write("f", "base's file\n");
+        let new = r.commit("new");
+        let repo = r.open();
+        let view = build_view(&repo, new, &stack(&r, old, &["b"]), &registries).unwrap();
+        assert_eq!(r.show(view.view_tree, "d/inner"), "base's");
+        assert_eq!(r.show(view.view_tree, "e/inner"), "inner B");
+        assert_eq!(r.show(view.view_tree, "f"), "base's file");
+        let conflict = |path: &str| Note::Conflict {
+            layers: vec![0],
+            base: true,
+            path: path.into(),
+            markers: false,
+        };
+        assert_eq!(view.notes, [conflict("d"), conflict("f/inner")]);
+        let mixed: Vec<_> = view.mixed.keys().map(|p| p.to_string()).collect();
+        assert_eq!(mixed, ["e", "e/inner", "f/inner"]);
+    }
+
+    /// A layer's change the base already has: the path shows the base's,
+    /// isn't the layer's and isn't reported.
+    #[test]
+    fn change_already_on_the_base() {
+        let r = Repo::new("already");
+        r.write("x.rs", &lines(5, "x"));
+        let old = r.commit("old");
+        r.git(&["checkout", "-q", "-b", "b", "main"]);
+        r.write("x.rs", &lines(5, "x").replace("x2\n", "x2 B\n"));
+        r.commit("b");
+        r.git(&["checkout", "-q", "main"]);
+        r.write(
+            "x.rs",
+            &lines(5, "x")
+                .replace("x2\n", "x2 B\n")
+                .replace("x4\n", "x4 UP\n"),
+        );
+        let new = r.commit("new");
+        let repo = r.open();
+        let view = build_view(&repo, new, &stack(&r, old, &["b"]), &registries).unwrap();
+        assert_eq!(view.notes, []);
+        assert!(view.mixed.is_empty());
+        assert_eq!(view.view_tree, tree_of(&r, new));
     }
 
     /// Two layers append to the registry: a plain 3-way merge conflicts
@@ -1464,7 +1726,7 @@ mod tests {
         let names = ["top", "bottom", "other"];
         let view = build_view(&repo, base, &stack(&r, base, &names), &registries).unwrap();
         let shown = r.show(view.view_tree, "src/util.c");
-        assert!(shown.contains("<<<<<<< top + bottom\n"), "{shown}");
+        assert!(shown.contains("<<<<<<< base + top + bottom\n"), "{shown}");
         assert!(
             shown.contains("util8 BOTTOM\n=======\nutil8 OTHER\n"),
             "{shown}"
@@ -1476,6 +1738,7 @@ mod tests {
             [Note::Conflict {
                 layers: vec![1, 2],
                 path: "src/util.c".into(),
+                base: false,
                 markers: true
             }]
         );
@@ -1502,6 +1765,7 @@ mod tests {
             [Note::Conflict {
                 layers: vec![0, 1],
                 path: "src/main.c".into(),
+                base: false,
                 markers: false
             }]
         );

@@ -483,10 +483,14 @@ fn deny_hook() -> Result<()> {
                 there.display()
             )));
         }
+        let conflict: String = (view.conflicts.iter())
+            .filter(|c| c.path == path.as_bytes())
+            .map(|c| format!(" Conflict: {}.", c.describe(&lens)))
+            .collect();
         if let [_] = names[..] {
             return Ok(Some(format!(
                 "{path} shows {owner}'s work (a layer, read-only here): it can't be changed in \
-                 this workspace. To change it, run `gitfold propose {path}`: it makes a copy \
+                 this workspace.{conflict} To change it, run `gitfold propose {path}`: it makes a copy \
                  of {owner}'s work for you to edit (a proposal), shown here in its place, \
                  which {owner}'s agent tests against every workspace that read the file and \
                  accepts. Or leave it to {owner}'s agent (`gitfold send {owner} <text>` asks \
@@ -495,13 +499,6 @@ fn deny_hook() -> Result<()> {
             )));
         }
         let all = and_list(names.iter().map(|n| n.to_string()));
-        let conflict = match (view.conflicts.into_iter()).find(|c| c.path == path.as_bytes()) {
-            Some(c) => {
-                let names = c.layers.iter().map(|&i| lens.layers[i].branch.clone());
-                format!(" The changes of {} conflict there.", and_list(names))
-            }
-            None => String::new(),
-        };
         Ok(Some(format!(
             "{path} shows the merge of {all}'s work (layers, read-only here): it can't be \
              changed in this workspace.{conflict} To change it, run `gitfold propose {path} \
@@ -736,33 +733,15 @@ fn listing(common_dir: &Path, state: &StateDir, lens: &Lens) -> Result<String> {
     for [layer, shows, updates] in &rows {
         let _ = writeln!(out, "{layer:<w0$}{shows:<w1$}{updates}");
     }
-    let conflicts = match lens.layers.len() {
-        1 => Vec::new(),
-        _ => match crate::state::lens::view(common_dir, &state.read_base()?.id, lens)? {
-            Some(view) => view.conflicts,
-            None => Vec::new(),
-        },
+    let conflicts = match crate::state::lens::view(common_dir, &state.read_base()?.id, lens)? {
+        Some(view) => view.conflicts,
+        None => Vec::new(),
     };
     if !conflicts.is_empty() {
         out += "\n";
     }
     for c in conflicts.iter().take(SHOWN_CONFLICTS) {
-        let names: Vec<String> = c
-            .layers
-            .iter()
-            .map(|&i| lens.layers[i].branch.clone())
-            .collect();
-        let both = if names.len() == 2 { "both " } else { "" };
-        let shown = match c.markers {
-            true => "",
-            false => " (they can't be merged: it shows your base's version)",
-        };
-        let _ = writeln!(
-            out,
-            "Conflict: {} is changed by {both}{}{shown}",
-            c.path,
-            and_list(names)
-        );
+        let _ = writeln!(out, "Conflict: {}", c.describe(lens));
     }
     if conflicts.len() > SHOWN_CONFLICTS {
         let _ = writeln!(out, "and {} more", conflicts.len() - SHOWN_CONFLICTS);
