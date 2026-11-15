@@ -130,6 +130,9 @@ la
 again" "$(cat "$W/a.txt")"
 eq "and git still sees only own changes" " M d/c.txt
 ?? own.txt" "$(git -C "$W" status --short)"
+G "$W" update-index --no-skip-worktree a.txt
+for _ in $(seq 50); do G "$W" ls-files -v a.txt | grep -q '^S' && break; sleep 0.1; done
+eq "a skip-worktree bit git dropped is put back" "S a.txt" "$(G "$W" ls-files -v a.txt)"
 check "commit -a" G "$W" commit -qam own
 eq "it holds only own changes" "d/c.txt" "$(G "$W" show --name-only --format= HEAD)"
 eq "nothing left after it" "?? own.txt" "$(git -C "$W" status --short)"

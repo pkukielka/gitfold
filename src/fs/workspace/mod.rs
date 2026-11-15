@@ -141,6 +141,9 @@ pub struct Workspace {
     /// HEAD at a commit made on the lens commit that can't be extracted:
     /// not tried again until HEAD moves (see `lens`).
     lens_blocked: Mutex<Option<ObjectId>>,
+    /// The index's mtime when the layers' skip-worktree bits were last
+    /// checked (see `lens`).
+    index_checked: Mutex<Option<std::time::SystemTime>>,
 }
 
 /// The lower layer and how upper overrides it.
@@ -313,6 +316,7 @@ impl Workspace {
             kernel: std::sync::OnceLock::new(),
             lens_refused: Mutex::new(None),
             lens_blocked: Mutex::new(None),
+            index_checked: Mutex::new(None),
         })
     }
 

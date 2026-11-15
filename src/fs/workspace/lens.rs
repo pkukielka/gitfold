@@ -695,7 +695,56 @@ impl Workspace {
             }
         }
         let _lens = self.lens_lock.lock();
+        self.rehide()?;
         self.sync_lens_locked()
+    }
+
+    /// Puts back the skip-worktree bits git dropped from the layers' files
+    /// (`git read-tree`, `update-index --no-skip-worktree` drop them; then
+    /// `git commit -a` would commit those files as the workspace's own).
+    /// Looked at when the index changed since the last look, while git is
+    /// idle; a locked index waits for the next pass.
+    fn rehide(&self) -> Result<()> {
+        let skipped = self.layers.read().applied.skipped.clone();
+        if skipped.is_empty() {
+            return Ok(());
+        }
+        let (admin, branch) = (&self.state.admin, &self.state.branch);
+        if worktree::git_running(&self.state.common_dir, admin, branch).is_some() {
+            return Ok(());
+        }
+        let mtime = fs::metadata(self.state.index())
+            .and_then(|m| m.modified())
+            .ok();
+        let mut checked = self.index_checked.lock();
+        if mtime.is_none() || *checked == mtime {
+            return Ok(());
+        }
+        let edits = (skipped.into_iter())
+            .map(|p| {
+                let edit = Edit {
+                    skip_worktree: Some(true),
+                    ..Default::default()
+                };
+                (p, edit)
+            })
+            .collect();
+        match index_edit::edit(&self.state.index(), &edits) {
+            Ok(edited) => {
+                if edited.changed > 0 {
+                    log::warn!(
+                        "{branch}: git had dropped the skip-worktree bit of {} of the layers' files; put back",
+                        edited.changed
+                    );
+                }
+                *checked = fs::metadata(self.state.index())
+                    .and_then(|m| m.modified())
+                    .ok();
+            }
+            Err(e) if matches!(e.downcast_ref(), Some(index_edit::Refused::Locked(_))) => {}
+            Err(e) => return Err(e),
+        }
+        Ok(())
     }
 
     /// Commits made on the lens commit are extracted onto the branch
