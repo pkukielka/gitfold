@@ -452,13 +452,24 @@ pub(super) fn layer_of(
             .map_err(|_| Refusal::NotFound.error(format!("no branch or revision {branch}")))?;
         (commit.id, Shows::Commits, Updates::Fixed)
     };
+    let merge_base = git::merge_base(state.read_base()?.id, seal)?;
+    // A layer shows changes on top of the base: one that never moves and is
+    // part of the base already would show nothing.
+    if updates != Updates::Live && merge_base == seal {
+        return Err(Refusal::Changes.error(format!(
+            "{branch} is part of {}'s base already, so as a layer it shows nothing (a layer \
+             shows changes on top of the base). To look at {branch} as it was: `gitfold \
+             snapshot {branch}`",
+            state.branch
+        )));
+    }
     Ok(Layer {
         branch: branch.to_string(),
         shows,
         updates,
         moved: now(),
         seal,
-        merge_base: git::merge_base(state.read_base()?.id, seal)?,
+        merge_base,
     })
 }
 

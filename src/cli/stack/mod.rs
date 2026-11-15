@@ -507,10 +507,12 @@ fn describe(outcome: &Outcome, name: &str, parent: &str) -> String {
             line
         }
         Outcome::LooksLanded(landed) => format!(
-            "{}, but {} is still there; `gitfold layer base {}` moves it there",
+            "{}, but {} is still there; `gitfold layer base {}` moves {name} onto {} \
+             with only its own commits",
             landed.said(),
             landed.parent,
-            landed.parent
+            landed.parent,
+            landed.target
         ),
         Outcome::Blocked {
             commit,
@@ -1113,7 +1115,10 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
             stack::How::Squashed | stack::How::FastForward => "looks landed",
             _ => "landed",
         };
-        notes.push(format!("{parent} {landed} in {}: {update}", target.name));
+        notes.push(format!(
+            "{parent} {landed} in {}: gitfold layer base {parent} moves it onto {}",
+            target.name, target.name
+        ));
     } else if let Some(blocked) = local.restack_blocked(name) {
         // `<onto> <commit> <paths>`.
         let paths: Vec<&str> = blocked.split(' ').skip(2).collect();
