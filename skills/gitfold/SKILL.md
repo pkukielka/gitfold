@@ -451,40 +451,48 @@ came mid-turn: the layer moves at your next prompt), and adapts its work.
 ## Stacked branches
 
 For stacked pull requests (`main <- p1 <- p2`), build the child on the
-parent's commits and let gitfold carry it along when the parent changes:
+parent's commits (p1 is p2's **base**) and let gitfold carry it along when
+the base changes:
 
 ```
-gitfold branch p2 --on p1         # p2 at p1's tip, stacked on it
-gitfold stack on p1 -w p2         # or stack an existing branch
-gitfold stack sync                # your workspace onto its parent's new commits
-gitfold stack sync --all          # every stacked branch, parents first
-gitfold stack list                # the stacks, with what each needs
+gitfold branch p2 --base p1       # p2 at p1's tip, built on it
+gitfold layer base p1 -w p2       # or: an existing branch, its own commits moved onto p1
+gitfold layer base p1             # again, in your workspace: onto p1's new commits now
+gitfold layer base p1 --frozen    # built on p1 as it is now; not followed by itself
+gitfold layer base main           # the trunk: off the stack, own commits onto main
+gitfold list                      # the stacks as a tree, with what each needs
 ```
 
+- `layer base` says first what it moves (`moves 3 commits of p2 onto p1`).
+  It refuses (exit 4) to move commits already pushed; `--yes` moves them.
+  Ask the user before adding `--yes`: it rewrites published history.
 - When p1 gets new commits (review fixes, a rebase), p2's own commits are
   copied onto them: at the start of p2's agent's next turn (the plugin's
   `UserPromptSubmit` hook, which tells you which files changed under you),
-  or by `gitfold stack sync`. Your uncommitted work stays; never mid-turn.
-- A commit that conflicts with the parent's new ones leaves your branch as
-  it was, and you are told once (`list`: `restack blocked`). Rebase by hand
-  in your workspace, `git rebase --onto p1 <base>` (the line names it), then
-  `gitfold stack sync`.
-- Uncommitted changes to a file the restack changes: it waits, and tells
-  you which; commit or stash them, and it happens at the next turn.
-- It is refused while layers are shown (`gitfold lens off` first).
-- When the parent is merged into main (a merge, squash, rebase merge or
+  or by `gitfold layer base p1` again. Your uncommitted work stays; never
+  mid-turn. With `--frozen`, only `gitfold layer base p1 --frozen` moves it;
+  `gitfold layer base p1` makes it follow again.
+- A commit that conflicts with the base's new ones leaves your branch as
+  it was, and you are told once (`list`: `blocked: conflicts on <paths>`).
+  Rebase by hand in your workspace, `git rebase --onto p1 <start>` (the line
+  names it), then `gitfold layer base p1`.
+- Uncommitted changes to a file the move changes: it waits, and tells you
+  which; commit or stash them, and it happens at the next turn.
+- It is refused while layers are shown (`gitfold layer remove --all`
+  first).
+- When the base is merged into main (a merge, squash, rebase merge or
   fast-forward), your branch moves onto that merge with only its own
-  commits and is stacked on main from then on; you are told. Suggest the
+  commits and is built on main from then on; you are told. Suggest the
   push and then `gh pr edit <BRANCH> --base main` to the user; don't run
   them yourself. A squash (or fast-forward) is a guess, so while the
-  parent's branch still exists you are only told it looks merged: suggest
-  `gitfold stack sync` to the user. It doesn't follow main's later commits
-  by itself: `gitfold stack sync` does, when wanted. A merge gitfold can't recognise (a squash
-  rewritten when merged): `gitfold stack merged <PARENT>`.
-- gitfold never pushes. After a restack your branch's history is rewritten:
-  push with `--force-with-lease` (`stack sync` prints the command).
-- `git config branch.<BRANCH>.gitfoldRestack manual`: only `stack sync`
-  restacks it.
+  base's branch still exists you are only told it looks merged: suggest
+  `gitfold layer base p1` to the user. It doesn't follow main's later
+  commits by itself: `gitfold layer base main` does, when wanted (and
+  takes it off the stack). A merge gitfold can't recognise (a squash
+  rewritten when merged): `gitfold layer base main` too.
+- gitfold never pushes. After a move your branch's history is rewritten:
+  push with `--force-with-lease` (`layer base` prints the command, `list`
+  notes it).
 
 ## When something fails
 

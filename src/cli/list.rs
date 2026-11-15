@@ -1,6 +1,7 @@
 //! `gitfold list` (the workspaces, their changes and activity) and `gitfold
 //! changes` (one workspace's changed paths).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -109,30 +110,57 @@ fn last_change(state: &StateDir, s: &status::Status, task: &TaskDir) -> Option<S
     .max()
 }
 
-/// `gitfold list`: the repository's workspaces and their uncommitted changes.
+/// `gitfold list`: the repository's workspaces and their uncommitted
+/// changes, a branch built on another (`layer base`) under it, indented.
 pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     let ListArgs { stat } = args;
     let common_dir = git::init(repo)?;
     let list = state::list(&common_dir)?;
-    if list.is_empty() {
+    let local = settings::Local::read(&common_dir);
+    let rows = rows(&list, &local);
+    if rows.is_empty() {
         println!("no workspaces");
         return Ok(());
     }
     let store = Store::default();
-    let local = settings::Local::read(&common_dir);
     let lines = match stat {
         true => format!(" {:>8} {:>8}", "+lines", "-lines"),
         false => String::new(),
     };
     println!(
         "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {:<16} status",
-        "branch", "changed", "deleted", "ignored", "base", "last", "parent"
+        "branch", "changed", "deleted", "ignored", "commit", "last", "base"
     );
-    for w in list {
+    for (branch, depth) in rows {
+        let shown = match depth {
+            0 => branch.clone(),
+            d => format!("{}└─ {branch}", "   ".repeat(d - 1)),
+        };
+        let parent = local.parent(&branch).unwrap_or_else(|| "-".into());
+        let mut notes = super::stack::notes(&common_dir, &local, &branch);
+        if local.parent(&branch).is_some() && local.restack_manual(&branch) {
+            notes.insert(0, "frozen".into());
+        }
+        // A base or a branch built on one, without a workspace.
+        let Some(w) = list.iter().find(|w| w.branch == branch) else {
+            let dashes = match stat {
+                true => format!(" {:>8} {:>8}", "-", "-"),
+                false => String::new(),
+            };
+            let status = match notes.is_empty() {
+                true => String::new(),
+                false => format!("({})", notes.join("; ")),
+            };
+            println!(
+                "{shown:<40} {:>8} {:>8} {:>8}{dashes}  {:<12} {:>6}  {parent:<16} {status}",
+                "-", "-", "-", "-", "-"
+            );
+            continue;
+        };
         let s = match status::status(&store, &w.state) {
             Ok(s) => s,
             Err(e) => {
-                println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.state.id);
+                println!("{shown:<40} unreadable ({e:#}); id {}", w.state.id);
                 continue;
             }
         };
@@ -154,7 +182,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         let notes: Vec<String> = (Some(base_note(&w.branch, &s.base)).filter(|n| !n.is_empty()))
             .map(str::to_string)
             .into_iter()
-            .chain(super::stack::notes(&common_dir, &local, &w.branch))
+            .chain(notes)
             .collect();
         let status = match (task.status(), notes.join("; ")) {
             (Some(status), notes) if notes.is_empty() => status,
@@ -162,20 +190,60 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             (None, notes) if notes.is_empty() => String::new(),
             (None, notes) => format!("({notes})"),
         };
-        let parent = local.parent(&w.branch).unwrap_or_else(|| "-".into());
         println!(
-            "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {:<16} {}",
-            w.branch,
+            "{shown:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {parent:<16} {}",
             s.changed.len(),
             s.deleted.len(),
             s.ignored,
             s.base.to_hex_with_len(12).to_string(),
             last,
-            parent,
             status
         );
     }
     Ok(())
+}
+
+/// The branches `list` shows, in order, each with how deep it is in its
+/// stack: the workspaces, the branches built on another and their bases,
+/// each base followed by the branches built on it.
+fn rows(list: &[state::Stored], local: &settings::Local) -> Vec<(String, usize)> {
+    let edges = local.parents();
+    let names: BTreeSet<&str> = (list.iter().map(|w| w.branch.as_str()))
+        .chain(edges.iter().flat_map(|(b, p)| [b.as_str(), p.as_str()]))
+        .collect();
+    let mut rows = Vec::new();
+    let mut seen = BTreeSet::new();
+    fn walk<'a>(
+        name: &'a str,
+        depth: usize,
+        edges: &'a [(String, String)],
+        seen: &mut BTreeSet<&'a str>,
+        rows: &mut Vec<(String, usize)>,
+    ) {
+        // A cycle written into the config by hand.
+        if !seen.insert(name) {
+            return;
+        }
+        rows.push((name.to_string(), depth));
+        let mut children: Vec<&str> = (edges.iter())
+            .filter(|(_, p)| p == name)
+            .map(|(b, _)| b.as_str())
+            .collect();
+        children.sort();
+        for child in children {
+            walk(child, depth + 1, edges, seen, rows);
+        }
+    }
+    for &name in &names {
+        if local.parent(name).is_none() {
+            walk(name, 0, &edges, &mut seen, &mut rows);
+        }
+    }
+    // Only in a cycle: listed anyway.
+    for &name in &names {
+        walk(name, 0, &edges, &mut seen, &mut rows);
+    }
+    rows
 }
 
 /// The arguments of `gitfold list`.

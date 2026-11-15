@@ -23,7 +23,7 @@
 //! - tip at C, index at C: nothing moved;
 //! - the branch moved on and the index describes it: forgotten;
 //! - anything else is left as it is, and reported (`forget`, for `gitfold
-//!   stack off`, deletes it).
+//!   layer base <TRUNK>`, deletes it).
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -119,7 +119,7 @@ pub fn forget(state: &StateDir) -> Result<bool> {
         Err(e) => return Err(e.into()),
     };
     if !crate::lock::flock(&file)? {
-        bail!("a restack of {} is running", state.branch);
+        bail!("a move of {} onto its base is running", state.branch);
     }
     remove(&path)?;
     Ok(true)
@@ -172,14 +172,14 @@ impl Intent {
             .write(true)
             .create_new(true)
             .open(&tmp)
-            .with_context(|| format!("recording a restack in {}", tmp.display()))?;
+            .with_context(|| format!("recording a move onto its base in {}", tmp.display()))?;
         let written = (|| -> Result<()> {
             anyhow::ensure!(crate::lock::flock(&file)?, "{} is locked", tmp.display());
             file.write_all(self.encode().as_bytes())?;
             file.sync_all()?;
             fs::hard_link(&tmp, &path).with_context(|| {
                 format!(
-                    "recording a restack in {} (a restack of {} is under way)",
+                    "recording a move in {} (a move of {} onto its base is under way)",
                     path.display(),
                     state.branch
                 )
@@ -277,7 +277,7 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
             }
             (Some(false), _) => Recovery::Undone,
             (None, _) => Recovery::Stuck(format!(
-                "an interrupted restack of {} left its index neither at {} nor at {}",
+                "an interrupted move of {} onto its base left its index neither at {} nor at {}",
                 state.branch, intent.from, intent.to
             )),
         }
@@ -287,15 +287,16 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
         // The branch moved on and git's index describes it (a commit, a
         // reset since): whatever the restack left is history now.
         log::warn!(
-            "{}: forgetting an interrupted restack from {}: the branch moved on since",
+            "{}: forgetting an interrupted move onto its base from {}: the branch moved on since",
             state.branch,
             intent.from
         );
         Recovery::Undone
     } else {
         Recovery::Stuck(format!(
-            "an interrupted restack of {} from {}: the branch and its index moved since; \
-             once its workspace is as you want it, `gitfold stack off -w {}` forgets it",
+            "an interrupted move of {} onto its base, from {}: the branch and its index moved \
+             since; once its workspace is as you want it, `gitfold layer base <TRUNK> -w {}` \
+             takes it off the stack and forgets it",
             state.branch, intent.from, state.branch
         ))
     };
@@ -315,12 +316,12 @@ fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
         &state.branch,
         (tip, intent.to),
         (intent.stack_old, intent.parent_tip),
-        "gitfold: restack (recovered)",
+        "gitfold: move onto base (recovered)",
     );
     if moved.is_err() && tip == intent.to {
-        // Another restack or `stack on` set it since: theirs stands.
+        // Another move or `layer base` set it since: theirs stands.
         log::warn!(
-            "{}: the stack ref moved during a restack; left at {stored:?}",
+            "{}: the stack ref moved during a move onto its base; left at {stored:?}",
             state.branch
         );
         return Ok(());
@@ -511,7 +512,7 @@ mod tests {
         let Recovery::Stuck(why) = settled(&state) else {
             panic!("not stuck")
         };
-        assert!(why.contains("gitfold stack off -w p2"), "{why}");
+        assert!(why.contains("gitfold layer base <TRUNK> -w p2"), "{why}");
         assert!(pending(&state));
     }
 
