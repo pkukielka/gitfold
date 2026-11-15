@@ -534,6 +534,15 @@ impl Workspaces {
         if let Some(notifier) = self.notifier.get() {
             ws.set_kernel(notifier.clone(), slot);
         }
+        // Layers stored and not shown yet (a branch made with `--edit`, a
+        // change made while it was closed): shown before its first look,
+        // not by the sync thread a moment later.
+        if ws.layers_pending() {
+            match ws.switch(store) {
+                Ok(done) => info!("{done}"),
+                Err(e) => warn!("workspace {branch}: its layers not shown yet: {e:#}"),
+            }
+        }
         (self.activities.lock()).insert(branch.to_string(), ws.activity());
         let activities = self.activities.clone();
         watch(

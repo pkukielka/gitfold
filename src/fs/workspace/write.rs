@@ -401,6 +401,13 @@ impl Workspace {
         if let Obj::LowerFile { mixed: true, .. } = obj {
             return Err(Errno::EACCES);
         }
+        // A file only editable layers have: their uncommitted work, which
+        // git doesn't see, and which nothing would bring back. (One of the
+        // base's they changed may go: git sees the deletion, the guard
+        // refuses committing it, and `git checkout` brings it back.)
+        if !dir && layers.edited_new.contains(&path) {
+            return Err(Errno::EACCES);
+        }
         // Checked under the same exclusive lock as the removal, so nothing can be
         // created in between.
         if dir && !self.entries(store, &layers, &path)?.is_empty() {
@@ -588,7 +595,10 @@ impl Workspace {
             Obj::Upper(m) if !m.is_dir() => layers.union.contains_key(path),
             _ => Self::has_mixed_below(&layers, path),
         };
-        if layer_owned(&src_obj, &src) {
+        // Nor does a file editable layers changed: elsewhere, git would see
+        // their uncommitted lines as the workspace's.
+        let edited = |path: &[u8]| layers.edited.contains(path) || layers.edited_new.contains(path);
+        if layer_owned(&src_obj, &src) || (!src_obj.is_dir() && edited(&src)) {
             return Err(Errno::EACCES);
         }
         // A union file may be replaced, as it may be written (an editor's or

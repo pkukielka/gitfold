@@ -306,11 +306,11 @@ fn refuse_waiting(state: &StateDir, off: &[String]) -> Result<()> {
     let on: Vec<String> = (waiting.iter())
         .filter(|w| w.layers.iter().any(|l| off.contains(l)))
         .map(|w| {
-            format!(
-                "{} ({})",
-                String::from_utf8_lossy(&w.path),
-                super::plural(w.edits, "waiting edit", "waiting edits")
-            )
+            let what = match w.deleted {
+                true => "deleted".to_string(),
+                false => super::plural(w.edits, "waiting edit", "waiting edits"),
+            };
+            format!("{} ({what})", String::from_utf8_lossy(&w.path))
         })
         .collect();
     if on.is_empty() {
@@ -319,8 +319,8 @@ fn refuse_waiting(state: &StateDir, off: &[String]) -> Result<()> {
     let off = and_list(off.iter().cloned());
     Err(Refusal::Changes.error(format!(
         "{} has waiting edits of {off}'s uncommitted lines in {}: they can't stand without \
-         {off}. Undo them, or keep {off} editable until it commits those lines (they then \
-         become yours to commit)",
+         {off}. Undo them (edit them back, or `rm` the file and `git checkout -- <file>`), or \
+         keep {off} editable until it commits those lines (they then become yours to commit)",
         state.branch,
         on.join(", ")
     )))
@@ -727,10 +727,14 @@ fn turn_notes() -> Result<()> {
     }
     let waiting = crate::state::waiting::of_workspace(&state)?;
     for w in &waiting {
-        hook_say(&format!(
-            "gitfold: {} (git doesn't see them: `git commit -a` leaves them waiting).",
-            w.describe()
-        ));
+        match w.deleted {
+            true => hook_say(&format!("gitfold: {}.", w.describe())),
+            false => hook_say(&format!(
+                "gitfold: {} (git doesn't see them: `git commit -a` leaves them waiting; to drop \
+                 them, edit them back, or `rm` the file and `git checkout -- <file>`).",
+                w.describe()
+            )),
+        }
     }
     for w in waiting.iter().filter(|w| w.conflict) {
         hook_say(&format!("gitfold: Conflict: {}.", w.describe_conflict()));
@@ -824,10 +828,11 @@ fn deny_hook() -> Result<()> {
         )))
     })();
     match denied {
-        Ok(Some(reason)) => println!(
+        // Whoever reads it may be gone (a closed pipe isn't an error).
+        Ok(Some(reason)) => hook_say(&format!(
             "{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":{}}}}}",
             super::inbox::json_str(&reason)
-        ),
+        )),
         Ok(None) => {}
         Err(e) => log::warn!("gitfold layer --claude-hook pre-tool-use: {e:#}"),
     }
