@@ -2,22 +2,18 @@
 //!
 //! - per branch, `branch.<branch>.<key>`, which git keeps with the branch
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
-//!   mode), `gitfoldTrackReads` (whether it records reads), and for a
-//!   stacked branch `gitfoldParent` (the branch it is built on: its base),
-//!   `gitfoldRestack` (`manual`: `layer base --frozen`, moved only when
-//!   asked), `gitfoldRestackBlocked` (the move onto it that conflicted),
-//!   `gitfoldLanding` (a move onto a new base under way: a parent's
-//!   landing, or another base) and
-//!   `gitfoldBaseOnTarget` (whether its parent base was in the parent's
-//!   target when recorded; see `cli::layer::moves`), `gitfoldMoved` (when it
-//!   was last moved onto its base); for a proposal (`gitfold
-//!   propose`), `gitfoldProposal` (the layer it would change),
+//!   mode), `gitfoldTrackReads` (whether it records reads); for a proposal
+//!   (`gitfold propose`), `gitfoldProposal` (the layer it would change),
 //!   `gitfoldProposedBy` (the workspace that proposed it) and
 //!   `gitfoldConsent` (the last `gitfold consent`);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again),
-//!   and `trunk` (where stacked branches' parents land: `origin/main`, say).
+//!   and `trunk` (the main branch, where editable layers land:
+//!   `origin/main`, say).
+//!
+//! What a branch builds on (its editable layers) isn't here: it is stored
+//! with its layers (`state::layers`).
 //!
 //! They are read from the repository's own config file, where `git config`
 //! writes them (not included files), at the moment they are needed: the
@@ -36,13 +32,6 @@ use crate::prewarm::Prewarm;
 const PREWARM: &str = "gitfoldPrewarm";
 /// `branch.<branch>.gitfoldTrackReads`: a boolean.
 const TRACK_READS: &str = "gitfoldTrackReads";
-/// `branch.<branch>.gitfoldParent`: the branch it is stacked on.
-const PARENT: &str = "gitfoldParent";
-/// `branch.<branch>.gitfoldRestack`: `manual`, or (unset) at turn boundaries.
-const MOVE: &str = "gitfoldRestack";
-/// `branch.<branch>.gitfoldRestackBlocked`: `<parent tip> <commit> <paths>`,
-/// the move onto that parent tip that conflicted.
-const MOVE_BLOCKED: &str = "gitfoldRestackBlocked";
 /// `branch.<branch>.gitfoldProposal`: the layer a proposal would change.
 const PROPOSAL: &str = "gitfoldProposal";
 /// `branch.<branch>.gitfoldProposedBy`: the workspace that proposed it.
@@ -51,19 +40,6 @@ const PROPOSED_BY: &str = "gitfoldProposedBy";
 /// snapshot checked> <the layer's snapshot checked> <summary>`, the last `gitfold
 /// consent` on a proposal.
 const CONSENT: &str = "gitfoldConsent";
-/// `branch.<branch>.gitfoldLanding`: `<target> <commit> [frozen|live]`, set
-/// while the branch moves onto a new base, `<target>` at `<commit>` (where
-/// its parent landed, or another branch's tip: then whether it follows
-/// it), until the target is its parent.
-const LANDING: &str = "gitfoldLanding";
-/// `branch.<branch>.gitfoldBaseOnTarget`: `<parent base> <target> <yes|no>`,
-/// whether the parent base was in its parent's target (trunk, or the
-/// parent's own parent) when it was set, to tell a fast-forward landing
-/// from a fresh parent.
-const BASE_ON_TARGET: &str = "gitfoldBaseOnTarget";
-/// `branch.<branch>.gitfoldMoved`: when it was last moved onto its base (or
-/// its own commits last said to start there), in seconds since the epoch.
-const MOVED: &str = "gitfoldMoved";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -171,25 +147,6 @@ impl Local {
         self.branch_bool(branch, TRACK_READS)
     }
 
-    /// The branch `branch` is stacked on, if any.
-    pub fn parent(&self, branch: &str) -> Option<String> {
-        self.branch(branch, PARENT)
-    }
-
-    /// Every stacked branch with its parent, in config order.
-    pub fn parents(&self) -> Vec<(String, String)> {
-        let Some(sections) = self.0.as_ref().and_then(|c| c.sections_by_name("branch")) else {
-            return Vec::new();
-        };
-        sections
-            .filter_map(|s| {
-                let branch = s.header().subsection_name()?.to_string();
-                let parent = non_empty(s.value(PARENT)?.to_string())?;
-                Some((branch, parent))
-            })
-            .collect()
-    }
-
     /// The layer proposal `branch` would change and the workspace that
     /// proposed it, if it is a proposal.
     pub fn proposal(&self, branch: &str) -> Option<(String, String)> {
@@ -214,34 +171,6 @@ impl Local {
     /// The last consent check of proposal `branch` (see `CONSENT`).
     pub fn consent(&self, branch: &str) -> Option<String> {
         self.branch(branch, CONSENT)
-    }
-
-    /// Whether `branch` follows its base only when asked (`layer base
-    /// --frozen`: `gitfoldRestack` is `manual`), not at its turn boundaries.
-    pub fn move_manual(&self, branch: &str) -> bool {
-        self.branch(branch, MOVE).as_deref() == Some("manual")
-    }
-
-    /// The move of `branch` that conflicted, if any (see `MOVE_BLOCKED`).
-    pub fn move_blocked(&self, branch: &str) -> Option<String> {
-        self.branch(branch, MOVE_BLOCKED)
-    }
-
-    /// The move of `branch` onto a new base under way, if any (see
-    /// `LANDING`).
-    pub fn landing(&self, branch: &str) -> Option<String> {
-        self.branch(branch, LANDING)
-    }
-
-    /// Whether the parent base of `branch` was in its parent's target when
-    /// it was set, if recorded (see `BASE_ON_TARGET`).
-    pub fn base_on_target(&self, branch: &str) -> Option<String> {
-        self.branch(branch, BASE_ON_TARGET)
-    }
-
-    /// When `branch` was last moved onto its base, if recorded (see `MOVED`).
-    pub fn moved(&self, branch: &str) -> Option<i64> {
-        self.branch(branch, MOVED)?.parse().ok()
     }
 
     /// The remote `branch` pushes to and its branch there, from git's own
@@ -305,30 +234,6 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
-/// Stores `parent` as the branch `branch` is stacked on, or forgets it.
-pub fn set_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
-    match parent {
-        Some(parent) => set_branch(git_dir, branch, PARENT, parent),
-        None => unset_branch(git_dir, branch, PARENT),
-    }
-}
-
-/// Stores the move mode of `branch`: `manual` or not (unset).
-pub fn set_move_manual(git_dir: &Path, branch: &str, manual: bool) -> Result<()> {
-    match manual {
-        true => set_branch(git_dir, branch, MOVE, "manual"),
-        false => unset_branch(git_dir, branch, MOVE),
-    }
-}
-
-/// Records the move of `branch` that conflicted, or forgets it.
-pub fn set_move_blocked(git_dir: &Path, branch: &str, blocked: Option<&str>) -> Result<()> {
-    match blocked {
-        Some(blocked) => set_branch(git_dir, branch, MOVE_BLOCKED, blocked),
-        None => unset_branch(git_dir, branch, MOVE_BLOCKED),
-    }
-}
-
 /// Records branch `branch` as workspace `by`'s proposal to change layer
 /// `layer`.
 pub fn set_proposal(git_dir: &Path, branch: &str, layer: &str, by: &str) -> Result<()> {
@@ -347,32 +252,6 @@ pub fn clear_proposal(git_dir: &Path, branch: &str) -> Result<()> {
 /// Records the last consent check of proposal `branch` (see `CONSENT`).
 pub fn set_consent(git_dir: &Path, branch: &str, consent: &str) -> Result<()> {
     set_branch(git_dir, branch, CONSENT, consent)
-}
-
-/// Records whether the parent base of `branch` was in its parent's target
-/// (see `BASE_ON_TARGET`), or forgets it.
-pub fn set_base_on_target(git_dir: &Path, branch: &str, record: Option<&str>) -> Result<()> {
-    match record {
-        Some(record) => set_branch(git_dir, branch, BASE_ON_TARGET, record),
-        None => unset_branch(git_dir, branch, BASE_ON_TARGET),
-    }
-}
-
-/// Records when `branch` was moved onto its base (see `MOVED`), or forgets it.
-pub fn set_moved(git_dir: &Path, branch: &str, at: Option<i64>) -> Result<()> {
-    match at {
-        Some(at) => set_branch(git_dir, branch, MOVED, &at.to_string()),
-        None => unset_branch(git_dir, branch, MOVED),
-    }
-}
-
-/// Records the move of `branch` onto a new base under way (see `LANDING`),
-/// or forgets it.
-pub fn set_landing(git_dir: &Path, branch: &str, landing: Option<&str>) -> Result<()> {
-    match landing {
-        Some(landing) => set_branch(git_dir, branch, LANDING, landing),
-        None => unset_branch(git_dir, branch, LANDING),
-    }
 }
 
 /// Records `mountpoint` as where the repository is mounted
@@ -425,48 +304,10 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
                 .track_reads(from)
                 .map(|on| set_track_reads(common_dir, to, on)),
         ),
-        // A fork of a stacked branch is built on the same parent.
-        (
-            PARENT,
-            local
-                .parent(from)
-                .map(|parent| set_parent(common_dir, to, Some(&parent))),
-        ),
-        (
-            MOVE,
-            (local.move_manual(from)).then(|| set_move_manual(common_dir, to, true)),
-        ),
-        // Names the base it is about: stale on the fork if its base differs.
-        (
-            BASE_ON_TARGET,
-            (local.base_on_target(from)).map(|r| set_base_on_target(common_dir, to, Some(&r))),
-        ),
     ];
     for (key, result) in copied {
         if let Some(Err(e)) = result {
             warn!("copying {} to {to}: {e:#}", branch_key(from, key));
         }
     }
-    // And the parent base, if it is in the fork's history (not a ref, but
-    // what makes its own commits known rather than guessed).
-    if local.parent(from).is_some()
-        && let Err(e) = copy_stack_base(common_dir, from, to)
-    {
-        warn!("copying the parent base of {from} to {to}: {e:#}");
-    }
-}
-
-/// Points `to`'s own ref where `from`'s is, if that is in `to`'s history.
-fn copy_stack_base(common_dir: &Path, from: &str, to: &str) -> Result<()> {
-    use git::stack;
-    let (Some(base), Some(tip)) = (
-        stack::rev(common_dir, &stack::own_ref(from))?,
-        stack::rev(common_dir, &format!("refs/heads/{to}"))?,
-    ) else {
-        return Ok(());
-    };
-    if stack::is_ancestor(common_dir, base, tip)? {
-        stack::set_base(common_dir, to, base)?;
-    }
-    Ok(())
 }

@@ -1,461 +1,472 @@
-//! Bases (stacked branches): `gitfold layer base` and `gitfold branch
-//! --base`. A branch built on another branch, its base (`settings`:
-//! `branch.<b>.gitfoldParent`, where its own commits start kept by
-//! `refs/gitfold-own/<b>`, see `git::stack`), has its own commits copied
-//! onto the base's new ones: by `gitfold layer base <BASE>` again, or at the
-//! start of its agent's turn (`layer --claude-hook user-prompt-submit` calls
-//! `hook_context`), unless `branch.<b>.gitfoldRestack` is `manual` (`layer
-//! base --frozen`). `layer base <TRUNK>` takes the base away (the branch is
-//! built on the trunk, as one never given a base). gitfold never pushes; it
-//! says what to force-push, and moves commits already pushed only when
-//! asked (`--yes`). A `layer base` that can't move the branch changes
-//! nothing: it is built on a new base only once moved there. The new base
-//! is recorded as under way before the move (`gitfoldLanding`, as for a
-//! landing), so a move interrupted after the branch moved (a crash, Ctrl-C)
-//! is finished by the next `layer base` or turn start (`finish_landing`),
-//! never moved back onto the old base.
+//! Moves of a branch's own commits: what an editable layer means for its
+//! history. A branch built on editable layers (`state::layers`, `layer add
+//! --edit`) has its own commits sitting on their commits: on one layer's
+//! commit, or with several, on a merge of theirs gitfold makes and keeps
+//! (`git::stack::merge_parts`, a fixed identity), rebuilt whenever one of
+//! them moves. Where its own commits start is kept by `refs/gitfold-own/<b>`.
 //!
-//! A move is computed first, moving nothing (`git::stack::compute_move`).
-//! A conflict is recorded (`gitfoldRestackBlocked`) and reported, and the
-//! branch stays on the old base. Otherwise where the branch lives decides
-//! how it moves:
+//! One path moves them, whatever asked (`move_onto`):
 //!
-//! - no workspace: its ref, with its own ref, in one transaction (refused
-//!   if a git worktree has it checked out);
-//! - a workspace, mounted: `git read-tree -m -u C C'` in it (through the
-//!   mount, so the kernel sees the files change; it keeps unstaged, staged
-//!   and untracked work and refuses if any is on a path the move changes),
-//!   then the refs; the sync thread's ordinary rebase then drops the files
-//!   the read-tree copied up;
-//! - a workspace, unmounted: only without uncommitted changes, under the
-//!   repository lock: its index, its base (`fs::workspace::move_closed`),
-//!   the refs.
+//! - `layer add A --edit` (A becomes editable, or is brought up to date);
+//! - `layer add A` on an editable A (it becomes see-only), `layer remove A`
+//!   (it goes): the commits come off A, onto the other editable layers or
+//!   main; refused, listing them, if some change A's lines (they can't
+//!   stand without A);
+//! - `branch NEW --edit A` (no move: it starts at A's tip);
+//! - the start of its agent's turn (`hook_context`): onto its live editable
+//!   layers' new commits, and onto where one landed once its branch is gone.
 //!
-//! Both workspace cases record an intent first (`state::moves`), so a
-//! crash half-way is finished or undone. A workspace showing layers is moved
-//! with them taken off and put back after, over its new commits (`layers`).
+//! It says first what it moves; commits already pushed move only with
+//! `--yes` when asked (the hook isn't asked, and says what to force-push).
+//! A move is computed first, moving nothing (`git::stack::compute_move`): a
+//! conflict, or editable layers conflicting with each other, leaves
+//! everything as it was, and is said. Otherwise where the branch lives
+//! decides who moves it: its ref alone with no workspace; its workspace,
+//! mounted (the daemon) or not (here, under the repository lock), through
+//! `fs::workspace::moves`, which moves its files and base with the refs,
+//! layers shown or not.
 //!
-//! A base that landed (merged, squashed or rebased onto its own base or the
-//! trunk, `land`) has its children moved the same way onto the landing
-//! commit, with only their own commits (`reparent`): by `layer base
-//! <TARGET>`, naming where it landed (then commits already pushed need
-//! `--yes`), or once the base's branch is gone, by the hook unasked or by
-//! `layer base <BASE>` and `--all`; until then those keep following the
-//! base, and the landing is only said. They are built on its target from
-//! then on, or, landed in the trunk, have no base any more (`built_on`). A
-//! branch on the trunk isn't moved at turn boundaries: following the trunk
-//! is on request.
+//! A move that changes what the branch builds on records the layers it
+//! will have as `layers.next` first (`state::layers::settle`): they become
+//! its layers once its own ref is where the move puts it, so a crash
+//! half-way never leaves it built on what it was moved off.
 //!
-//! - `land`: a base's target, whether a parent base landed there (cached),
-//!   the trunk.
-//! - `layers`: moving a workspace that shows layers.
+//! Landings (`land`): an editable layer A whose commits the branch sits on
+//! landed in its target (main, or the one branch A builds on) by a merge,
+//! squash, rebase or fast-forward. Followed by itself only once A's branch
+//! is gone; until then it is said, and `layer remove A` follows it: only
+//! the branch's own commits move, onto the landing commit (or a merge of it
+//! and the other editable layers).
 
 use std::fmt::Write as _;
 use std::path::Path;
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::Result;
 use gix::ObjectId;
 use gix::bstr::BString;
 
 use super::land;
 use crate::cli::plural;
+use crate::fs::workspace::Moved;
 use crate::git::{self, stack};
 use crate::refusal::Refusal;
-use crate::settings::{self, Local};
+use crate::settings::Local;
 use crate::state::StateDir;
-use crate::state::moves::{self, Intent, Mode, Recovery};
-use crate::state::retire::{check_name, index_matches_head};
+use crate::state::layers::{self, Layer, Layers, Updates};
+use crate::state::moves::{self, Intent};
 use crate::store::Store;
-
-mod layers;
 
 /// How many paths a line of output names before "and N more".
 const SHOWN_PATHS: usize = 5;
 
-/// `gitfold layer base TARGET`: builds branch `workspace` (default: the
-/// workspace you are in) on `target` and moves its own commits onto it now,
-/// or, on it already, onto its new commits; `frozen`: it doesn't follow
-/// `target` by itself after that. Where its base landed (`target` named as
-/// the landing's target) it follows the landing; the trunk as `target`
-/// takes its base away (`unstack`). Commits already pushed move only with
-/// `yes`. Refused before anything changes: a move that doesn't happen
-/// leaves its base as it was. `all`: every branch following its base is
-/// brought up to date, bottom-up (`target` unused).
-pub fn base(
-    repo: &Path,
-    workspace: Option<String>,
-    target: &str,
-    frozen: bool,
-    yes: bool,
-    all: bool,
-) -> Result<()> {
-    if all && (frozen || workspace.is_some()) {
-        crate::cli::usage(
-            "--all updates every branch with a base: it takes neither --frozen nor -w",
-        );
-    }
-    let common_dir = git::init(repo)?;
-    if all {
-        return base_all(&common_dir, yes);
-    }
-    let name = crate::cli::workspace_or_current(workspace, repo)?;
-    check_name(&name)?;
-    check_name(target)?;
-    git::require_branch(&name)?;
-    if name == target {
-        crate::cli::usage(format!("{name} can't be built on itself"));
-    }
-    // First, so what is said is about where it is now: a move interrupted
-    // finished, its workspace's layers back.
-    layers::resume(&StateDir::of(&common_dir, &name))?;
-    finish_landing(&common_dir, &name)?;
-    let local = Local::read(&common_dir);
-    let trunk = land::is_trunk(&common_dir, &local, target);
-    let parent = local.parent(&name);
-    if trunk && parent.is_none() {
-        println!("{name}'s base is {target} already; nothing to do");
-        return Ok(());
-    }
-    // Where its base landed: the landing followed, only its own commits
-    // moved (onto the landing commit, as the hook does).
-    if let Some(parent) = &parent
-        && !land::same(&common_dir, &local, parent, target)
-        && let Some((landed_in, _)) = landing_of(&common_dir, &local, &name, parent)?
-        && land::same(&common_dir, &local, &landed_in.name, target)
-    {
-        update_one(&common_dir, &name, yes, true)?;
-        return frozen_after(&common_dir, &name, target, frozen && !trunk);
-    }
-    if trunk {
-        return unstack(&common_dir, &name, target, yes);
-    }
-    match parent {
-        // Again: brought up to date (onto where it landed, if it is gone).
-        Some(parent) if parent == target => update_one(&common_dir, &name, yes, false)?,
-        parent => rebase_onto(&common_dir, &name, parent.as_deref(), target, frozen, yes)?,
-    }
-    frozen_after(&common_dir, &name, target, frozen)
+/// A part of what a branch builds on: an editable layer's name (or the
+/// main branch's, where one landed) and the commit of it the branch sits on.
+pub type Part = (String, ObjectId);
+
+/// The hook's last message about why a workspace wasn't moved, in its
+/// state directory: said once while it stays the same.
+const TOLD: &str = "move-told";
+
+/// The move of a branch that conflicted, in its state directory: `<onto>
+/// <commit> <paths...>`, so the hook says it once per commit it conflicts
+/// with, and `list` notes it.
+const BLOCKED: &str = "move-blocked";
+
+/// What a move did.
+pub enum Outcome {
+    /// Nothing new to move onto.
+    UpToDate,
+    /// It has what it would move onto already (rebased by hand): where its
+    /// own commits start was moved there.
+    BaseMoved,
+    /// Moved: how many of its own commits were dropped (made empty), the
+    /// paths changed in its workspace (`None`: no workspace).
+    Moved {
+        dropped: usize,
+        files: Option<Vec<BString>>,
+    },
+    /// One of its commits conflicts with what it would move onto (`onto`,
+    /// named); `told` if that had blocked it already.
+    Blocked {
+        commit: ObjectId,
+        paths: Vec<BString>,
+        told: bool,
+        onto: String,
+    },
+    /// Its editable layers conflict with each other on `paths`.
+    Conflicting(Vec<BString>),
+    /// Not now: why (uncommitted work in the way, git busy).
+    Waits(String),
+    /// Not at all as it stands: why (commits already pushed, commits that
+    /// can't stand without a layer, a merge in its commits).
+    Refused(String),
 }
 
-/// `layer base TARGET` for branch `name` built on `parent` (or on nothing),
-/// not `target`: its own commits moved onto `target`'s tip, then built on
-/// it (following it unless `frozen`); nothing changed if they can't be.
-fn rebase_onto(
-    common_dir: &Path,
-    name: &str,
-    parent: Option<&str>,
-    target: &str,
-    frozen: bool,
-    yes: bool,
-) -> Result<()> {
-    let local = Local::read(common_dir);
-    git::require_branch(target)?;
-    check_cycle(&local, name, target)?;
-    let (tip, target_tip) = (tip_of(common_dir, name)?, tip_of(common_dir, target)?);
-    // Its own commits: those after its current base's, else those since it
-    // and `target` met.
-    let base = match parent {
-        Some(parent) => {
-            let resolved = land::resolve(common_dir, parent)?;
-            own_base(common_dir, name, resolved.as_ref(), tip)?.ok_or_else(|| {
-                anyhow!(
-                    "{parent} is gone, and with it where {name}'s own commits start: rebase it \
-                     onto {target} by hand"
-                )
-            })?
-        }
-        None => stack::Base {
-            commit: git::merge_base(target_tip, tip)?,
-            stored: stack_base(common_dir, name),
-            guessed: false,
-        },
-    };
-    if on_parent(common_dir, base.commit, target_tip, tip)? {
-        declare(common_dir, name, target, base.commit)?;
-        return update_one(common_dir, name, yes, false);
+impl Outcome {
+    pub fn done(&self) -> bool {
+        matches!(
+            self,
+            Outcome::UpToDate | Outcome::BaseMoved | Outcome::Moved { .. }
+        )
     }
-    let blocked = local.move_blocked(name);
-    each(common_dir, &[name.to_string()], Some(target), |name| {
-        if let Some(why) = ask(common_dir, name, base.commit, target, yes)? {
+
+    /// What it did, in a line (after `<branch>: `).
+    pub fn said(&self) -> String {
+        match self {
+            Outcome::UpToDate => "up to date".into(),
+            Outcome::BaseMoved => "has it all already; its own commits now start there".into(),
+            Outcome::Moved { dropped, files } => {
+                let mut line = "moved".to_string();
+                if *dropped > 0 {
+                    let _ = write!(line, "; {dropped} of its commits made empty, dropped");
+                }
+                if let Some(files) = files {
+                    let _ = write!(
+                        line,
+                        "; {} in its workspace",
+                        plural(files.len(), "file changed", "files changed")
+                    );
+                }
+                line
+            }
+            Outcome::Blocked {
+                commit,
+                paths,
+                onto,
+                ..
+            } => format!(
+                "blocked: commit {} conflicts on {} with {onto}; nothing moved. Rebase it by \
+                 hand, then retry",
+                short(*commit),
+                shown(paths)
+            ),
+            Outcome::Conflicting(paths) => format!(
+                "not moved: its editable layers conflict with each other on {}; nothing moved",
+                shown(paths)
+            ),
+            Outcome::Waits(why) => format!("waits: {why}"),
+            Outcome::Refused(why) => format!("not moved: {why}"),
+        }
+    }
+}
+
+/// What a branch builds on, read: its layers and where its own commits
+/// start (`None`: no own ref).
+pub struct Built {
+    pub layers: Layers,
+    pub own: Option<ObjectId>,
+    /// The parts its own commits sit on now (`current_parts`).
+    pub parts: Vec<Part>,
+}
+
+impl Built {
+    /// What branch `name` builds on now; a move under way first settled.
+    /// `lock` held (`state::layers::lock`).
+    pub fn read(common_dir: &Path, name: &str) -> Result<Built> {
+        let state = StateDir::of(common_dir, name);
+        if state.opened() && moves::pending(&state) {
+            let _ = moves::recover(&state);
+        }
+        layers::settle(&state)?;
+        let layers = Layers::read(&state)?;
+        let own = stack::rev(common_dir, &stack::own_ref(name))?;
+        let parts = current_parts(own, &layers)?;
+        Ok(Built { layers, own, parts })
+    }
+
+    /// The commit of editable layer `name` the branch sits on, if known.
+    pub fn on(&self, name: &str) -> Option<ObjectId> {
+        self.parts.iter().find(|(n, _)| n == name).map(|(_, c)| *c)
+    }
+}
+
+/// The parts a branch's own commits sit on, from its own ref `own`: the
+/// merge's (`git::stack::parts_of`), or with one editable layer, the ref
+/// itself.
+fn current_parts(own: Option<ObjectId>, layers: &Layers) -> Result<Vec<Part>> {
+    let Some(own) = own else {
+        return Ok(Vec::new());
+    };
+    if let Some(parts) = git::with_repo(|repo| stack::parts_of(repo, own))? {
+        return Ok(parts);
+    }
+    let editable = layers.editable_names();
+    Ok(match &editable[..] {
+        [one] => vec![(one.clone(), own)],
+        _ => Vec::new(),
+    })
+}
+
+/// The parts branch `built`'s own commits should sit on: each editable
+/// layer's tip if it is live (or named in `refresh`), else the commit it
+/// sits on now; then what a landing left (the main branch at its landing
+/// commit), while other editable layers remain.
+pub fn wanted_parts(built: &Built, refresh: &[&str]) -> Result<Vec<Part>> {
+    let mut parts = Vec::new();
+    for l in built.layers.editable() {
+        let now = built.on(&l.branch);
+        let follow = l.updates == Updates::Live || refresh.contains(&l.branch.as_str());
+        let commit = match (follow || now.is_none(), git::branch_exists(&l.branch)) {
+            (true, true) => git::branch_tip(&l.branch)?.id,
+            _ => match now {
+                Some(now) => now,
+                None => continue,
+            },
+        };
+        parts.push((l.branch.clone(), commit));
+    }
+    if !parts.is_empty() {
+        let names = built.layers.editable_names();
+        parts.extend(
+            (built.parts.iter())
+                .filter(|(n, _)| !names.contains(n))
+                .cloned(),
+        );
+    }
+    Ok(parts)
+}
+
+/// Where a move needs to go.
+pub struct Plan<'a> {
+    pub name: &'a str,
+    /// What the own commits go onto: the merge of these (none: main's tip).
+    pub parts: Vec<Part>,
+    /// The layers it will have once moved, if they change.
+    pub next: Option<Layers>,
+    /// Asked for (a command): commits already pushed need `yes`, and
+    /// what it moves is said first.
+    pub asked: bool,
+    pub yes: bool,
+    /// A layer the own commits come off: they mustn't change its lines.
+    pub off: Option<&'a str>,
+    /// What it moves onto, as said (`onto api`, `off api, onto main`).
+    pub said: String,
+    /// Said before what it moves (`api becomes see-only: `).
+    pub prefix: String,
+}
+
+/// The commit the parts merge to (none: main's tip), or the paths they
+/// conflict on.
+pub fn onto_of(
+    common_dir: &Path,
+    parts: &[Part],
+) -> Result<std::result::Result<ObjectId, Vec<BString>>> {
+    if parts.is_empty() {
+        let local = Local::read(common_dir);
+        let main = land::main_name(common_dir, &local);
+        return match land::trunk_tip(common_dir, &local, &main)? {
+            Some((_, tip)) => Ok(Ok(tip)),
+            None => Err(Refusal::NotFound.error(format!("no main branch {main}"))),
+        };
+    }
+    git::with_repo(|repo| stack::merge_parts(repo, parts))
+}
+
+/// Moves the own commits of `plan.name` onto `plan.parts` (see the module
+/// doc); with `plan.next`, the layers it will have once moved, stored only
+/// if it moves. `lock` held on its layers.
+pub fn move_onto(common_dir: &Path, plan: &Plan) -> Result<Outcome> {
+    let name = plan.name;
+    let state = StateDir::of(common_dir, name);
+    let tip = tip_of(common_dir, name)?;
+    let own = stack::rev(common_dir, &stack::own_ref(name))?;
+    let onto = match onto_of(common_dir, &plan.parts)? {
+        Ok(onto) => onto,
+        Err(paths) => return Ok(Outcome::Conflicting(paths)),
+    };
+    // Where its own commits start: its own ref, else where it and what it
+    // moves onto met.
+    let base = match own {
+        Some(own) if stack::is_ancestor(common_dir, own, tip)? => own,
+        _ => git::merge_base(onto, tip)?,
+    };
+    let store_next = |plan: &Plan| -> Result<()> {
+        if let Some(next) = &plan.next {
+            next.write(&state)?;
+            if next.editable().next().is_none() {
+                stack::drop_base(common_dir, name)?;
+            }
+        }
+        Ok(())
+    };
+    if base == onto
+        || (stack::is_ancestor(common_dir, base, onto)?
+            && stack::is_ancestor(common_dir, onto, tip)?)
+    {
+        // Nothing to copy: at most where its own commits start moves.
+        let up_to_date = own == Some(onto);
+        if !up_to_date {
+            stack::move_refs(
+                common_dir,
+                name,
+                (tip, tip),
+                (own, onto),
+                "gitfold: own commits",
+            )?;
+        }
+        store_next(plan)?;
+        clear_blocked(&state);
+        return Ok(match up_to_date || base == onto {
+            true => Outcome::UpToDate,
+            false => Outcome::BaseMoved,
+        });
+    }
+    if let Some(off) = plan.off {
+        let dependent = git::with_repo(|repo| stack::dependent(repo, base, onto, tip))?;
+        if !dependent.is_empty() {
+            return Ok(Outcome::Refused(depends_on(common_dir, off, &dependent)?));
+        }
+    }
+    let computed = git::with_repo(|repo| stack::compute_move(repo, base, onto, tip))?;
+    let (new_tip, dropped) = match computed {
+        stack::Move::Merge(commit) => {
+            return Ok(Outcome::Refused(format!(
+                "its commit {} is a merge, which isn't moved; rebase by hand",
+                short(commit)
+            )));
+        }
+        stack::Move::Conflict { commit, paths } => {
+            let told = blocked(&state).is_some_and(|b| b.starts_with(&format!("{onto} {commit}")));
+            if plan.asked || !told {
+                record_blocked(&state, onto, commit, &paths);
+            }
+            return Ok(Outcome::Blocked {
+                commit,
+                paths,
+                told,
+                onto: plan.said.trim_start_matches("onto ").to_string(),
+            });
+        }
+        stack::Move::Done { tip, dropped, .. } => (tip, dropped.len()),
+    };
+    let own_count = stack::count(common_dir, base, tip)?;
+    if plan.asked {
+        println!(
+            "{}moves {} of {name} {}",
+            plan.prefix,
+            plural(own_count, "commit", "commits"),
+            plan.said
+        );
+        if !plan.yes
+            && let Some(why) = pushed(common_dir, name, base, tip)?
+        {
             return Ok(Outcome::Refused(why));
         }
-        let new = stack::count(common_dir, base.commit, target_tip)?;
-        // Recorded first, as for a landing (`reparent`): a branch moved but
-        // still built on its old base would be moved back onto it.
-        let follows = if frozen { "frozen" } else { "live" };
-        let pending = format!("{target} {target_tip} {follows}");
-        settings::set_landing(common_dir, name, Some(&pending))?;
-        let outcome = copy_onto(
+    }
+    if let Some(other) = git::worktree::checked_out_elsewhere(common_dir, name, &state.admin) {
+        return Ok(Outcome::Refused(format!(
+            "it is checked out in {other}; move it there (`git rebase --onto {onto} {}`)",
+            short(base)
+        )));
+    }
+    if let Some(next) = &plan.next {
+        layers::write_next(&state, onto, next)?;
+    }
+    let intent = Intent {
+        from: tip,
+        to: new_tip,
+        own_to: onto,
+        own_from: own,
+    };
+    let moved = move_branch(&state, intent);
+    let moved = match moved {
+        Ok(moved) => moved,
+        Err(e) => {
+            // Maybe half-way: settled by whoever comes next.
+            return Err(e);
+        }
+    };
+    layers::settle(&state)?;
+    Ok(match moved {
+        Moved::Done(files) => {
+            clear_blocked(&state);
+            Outcome::Moved {
+                dropped,
+                files: state.opened().then_some(files),
+            }
+        }
+        Moved::Already => Outcome::UpToDate,
+        Moved::Waits(why) => Outcome::Waits(why),
+    })
+}
+
+/// Why commits `dependent` (each with the paths it conflicts on) can't
+/// come off layer `off`.
+fn depends_on(
+    common_dir: &Path,
+    off: &str,
+    dependent: &[(ObjectId, Vec<BString>)],
+) -> Result<String> {
+    let mut lines = Vec::new();
+    for (commit, paths) in dependent {
+        let subject = git::cmd::output(
+            common_dir,
+            &["log", "-1", "--format=%s", &commit.to_string()],
+        )?;
+        let subject = String::from_utf8_lossy(&subject).trim().to_string();
+        let paths = match paths.is_empty() {
+            true => "a merge".to_string(),
+            false => shown(paths),
+        };
+        lines.push(format!("{} {subject} ({paths})", short(*commit)));
+    }
+    Ok(format!(
+        "{} change {off}'s lines, so they can't stand without {off}: {}. Keep {off} \
+         editable, or change them not to depend on its lines",
+        plural(dependent.len(), "commit", "commits"),
+        lines.join("; ")
+    ))
+}
+
+/// Moves the branch of `state` as `intent` says, where it lives: its
+/// workspace mounted (the daemon), unmounted (here, under the repository
+/// lock), or only its refs if it has none.
+fn move_branch(state: &StateDir, intent: Intent) -> Result<Moved> {
+    let (common_dir, name) = (&state.common_dir, &state.branch);
+    if !state.opened() {
+        let refs = stack::move_refs(
             common_dir,
             name,
-            (target, target),
-            &base,
-            tip,
-            target_tip,
-            false,
-        )?
-        .outcome(new, base.guessed);
-        match outcome.done() {
-            // Built on it once moved there.
-            true => {
-                declare(common_dir, name, target, target_tip)?;
-                settings::set_landing(common_dir, name, None)?;
+            (intent.from, intent.to),
+            (intent.own_from, intent.own_to),
+            "gitfold: move",
+        );
+        return match refs {
+            Ok(()) => Ok(Moved::Done(Vec::new())),
+            Err(_) if stack::rev(common_dir, &format!("refs/heads/{name}"))? == Some(intent.to) => {
+                Ok(Moved::Already)
             }
-            false => {
-                // Not moved: forgotten (unless an interrupted move may still
-                // finish it).
-                finish_landing(common_dir, name)?;
-                // A conflict with what it isn't built on: not its block.
-                settings::set_move_blocked(common_dir, name, blocked.as_deref())?;
-            }
+            Err(e) => Err(e),
+        };
+    }
+    if let Some(mount) = crate::mount_table::mount_of(common_dir)? {
+        // Opened first: the daemon moves only open workspaces.
+        std::fs::metadata(mount.join(name))?;
+        let request = crate::daemon::control::Request::Move {
+            branch: name.clone(),
+            intent,
+        };
+        // No answer: unmounted meanwhile.
+        if let Some(answer) = crate::daemon::control::request(common_dir, &request, None)? {
+            return Moved::decode(&answer);
         }
-        Ok(outcome)
-    })
-}
-
-/// Where base `parent` of branch `name` landed, if it did: its target and
-/// the landing.
-fn landing_of(
-    common_dir: &Path,
-    local: &Local,
-    name: &str,
-    parent: &str,
-) -> Result<Option<(land::Target, stack::Landing)>> {
-    let tip = tip_of(common_dir, name)?;
-    let resolved = land::resolve(common_dir, parent)?;
-    match own_base(common_dir, name, resolved.as_ref(), tip)? {
-        Some(base) => landed(common_dir, local, name, parent, base.commit),
-        None => Ok(None),
     }
-}
-
-/// Where base `parent` of branch `name`, its own commits starting after
-/// `base`, landed, if it did: its target and the landing. A base that is
-/// the trunk lands nowhere.
-fn landed(
-    common_dir: &Path,
-    local: &Local,
-    name: &str,
-    parent: &str,
-    base: ObjectId,
-) -> Result<Option<(land::Target, stack::Landing)>> {
-    if land::is_trunk(common_dir, local, parent) {
-        return Ok(None);
-    }
-    let Some(target) = land::target(common_dir, local, parent)? else {
-        return Ok(None);
+    let Some(_lock) = crate::lock::lock(common_dir)? else {
+        return Ok(Moved::Waits(
+            "the repository is being mounted or unmounted; retry".into(),
+        ));
     };
-    let was_on = land::was_on_target(local, name, base, &target.name);
-    Ok(land::landed(common_dir, base, &target, was_on)?.map(|landing| (target, landing)))
+    let store = Store::default();
+    let ws = crate::fs::workspace::Workspace::open(&store, state.clone(), None)?;
+    let layers = layers::next_or_stored(state)?;
+    ws.move_branch(&store, intent, layers)
 }
 
-/// After a move asked for: whether `name`, if it still has a base, follows
-/// `target` by itself from now on (not if `frozen`), said if not.
-fn frozen_after(common_dir: &Path, name: &str, target: &str, frozen: bool) -> Result<()> {
-    if Local::read(common_dir).parent(name).is_none() {
-        return Ok(());
-    }
-    settings::set_move_manual(common_dir, name, frozen)?;
-    if frozen {
-        println!(
-            "frozen: {name} doesn't follow {target}'s new commits; `gitfold layer base \
-             {target} --frozen` brings it up to date again"
-        );
-    }
-    Ok(())
-}
-
-/// `gitfold layer base --all`: every branch with a base it follows brought
-/// up to date, bottom-up; frozen ones, and ones on the trunk, are left.
-fn base_all(common_dir: &Path, yes: bool) -> Result<()> {
-    // Moves onto a new base interrupted: finished first, so each is
-    // updated against the base it moved onto, frozen or not.
-    for (branch, _) in Local::read(common_dir).parents() {
-        finish_landing(common_dir, &branch)?;
-    }
-    let local = Local::read(common_dir);
-    let (mut branches, frozen): (Vec<String>, Vec<String>) = (local.parents().into_iter())
-        .filter(|(_, parent)| !land::is_trunk(common_dir, &local, parent))
-        .map(|(b, _)| b)
-        .partition(|b| !local.move_manual(b));
-    if !frozen.is_empty() {
-        println!(
-            "left as they are (frozen): {}; `gitfold layer base <BASE> --frozen -w <BRANCH>` \
-             updates one",
-            frozen.join(", ")
-        );
-    }
-    if branches.is_empty() {
-        println!("no branch with a base to update");
-        return Ok(());
-    }
-    // Bottom-up: a branch moves onto its base's moved commits.
-    branches.sort_by_cached_key(|b| (depth(&local, b), b.clone()));
-    each(common_dir, &branches, None, |name| {
-        update(common_dir, name, yes, false)
-    })
-}
-
-/// `gitfold layer base TARGET`, with `--frozen` if `frozen`; `tick`: in
-/// backticks.
-pub(super) fn base_command(target: &str, frozen: bool, tick: bool) -> String {
-    let again = if frozen { " --frozen" } else { "" };
-    let q = if tick { "`" } else { "" };
-    format!("{q}gitfold layer base {target}{again}{q}")
-}
-
-/// Whether a move of branch `name` onto `target` is asked for with
-/// `--frozen`: its base is frozen, and `target` isn't the trunk (which takes
-/// the base away).
-fn frozen_onto(common_dir: &Path, local: &Local, name: &str, target: &str) -> bool {
-    local.move_manual(name) && !land::is_trunk(common_dir, local, target)
-}
-
-/// What to run to bring branch `name` onto `target` (as users name it):
-/// `gitfold layer base TARGET`, with `--frozen` for a frozen base (unless
-/// `target` is the trunk, which takes the base away), so following it
-/// doesn't unfreeze it. `tick`: in backticks.
-fn advice(common_dir: &Path, local: &Local, name: &str, target: &str, tick: bool) -> String {
-    base_command(target, frozen_onto(common_dir, local, name, target), tick)
-}
-
-/// Whether `name` is the trunk (see `land`): a branch on it has no base.
-pub fn is_trunk(common_dir: &Path, name: &str) -> bool {
-    land::is_trunk(common_dir, &Local::read(common_dir), name)
-}
-
-/// Refuses building `name` on `parent` if `parent` is built on `name`.
-fn check_cycle(local: &Local, name: &str, parent: &str) -> Result<()> {
-    let mut above = parent.to_string();
-    while let Some(next) = local.parent(&above) {
-        ensure!(
-            next != name,
-            "{parent} is built on {name} (through {above}): that would be a cycle"
-        );
-        above = next;
-    }
-    Ok(())
-}
-
-/// Builds `name` on `parent`, its own commits starting after `base`,
-/// moving nothing.
-pub fn declare(common_dir: &Path, name: &str, parent: &str, base: ObjectId) -> Result<()> {
-    check_name(name)?;
-    check_name(parent)?;
-    git::require_branch(name)?;
-    git::require_branch(parent)?;
-    ensure!(name != parent, "a branch can't be built on itself");
-    check_cycle(&Local::read(common_dir), name, parent)?;
-    let tip = tip_of(common_dir, name)?;
-    ensure!(
-        stack::is_ancestor(common_dir, base, tip)?,
-        "the base {base} isn't in {name}'s history"
-    );
-    settings::set_parent(common_dir, name, Some(parent))?;
-    settings::set_move_blocked(common_dir, name, None)?;
-    stack::set_base(common_dir, name, base)?;
-    moved_now(common_dir, name)?;
-    land::record(common_dir, name, parent, base)
-}
-
-/// Records that `name` was moved onto its base now (the listing's "last
-/// moved"): in config, since a ref file's time goes when refs are packed.
-fn moved_now(common_dir: &Path, name: &str) -> Result<()> {
-    let now = crate::fsutil::epoch_secs(std::time::SystemTime::now());
-    settings::set_moved(common_dir, name, Some(now))
-}
-
-/// Forgets that `name` is built on another branch: its base, how it
-/// follows it, a blocked move and a landing under way.
-fn forget_base(common_dir: &Path, name: &str) -> Result<()> {
-    settings::set_parent(common_dir, name, None)?;
-    settings::set_move_manual(common_dir, name, false)?;
-    settings::set_move_blocked(common_dir, name, None)?;
-    settings::set_landing(common_dir, name, None)?;
-    settings::set_base_on_target(common_dir, name, None)?;
-    settings::set_moved(common_dir, name, None)?;
-    let _ = std::fs::remove_file(StateDir::of(common_dir, name).dir.join(TOLD));
-    stack::drop_base(common_dir, name)
-}
-
-/// `gitfold layer base <TRUNK>` on a branch with a base: the base is taken
-/// away, its own commits moved onto the trunk (named `trunk`; which commit:
-/// `land::trunk_tip`).
-fn unstack(common_dir: &Path, name: &str, trunk: &str, yes: bool) -> Result<()> {
-    let local = Local::read(common_dir);
-    let Some(parent) = local.parent(name) else {
-        println!("{name}'s base is {trunk} already; nothing to do");
-        return Ok(());
-    };
-    let off = format!("{name} is now built on {trunk} (was {parent})");
-    // An interrupted move nobody can finish: the way out, as it was.
-    let state = StateDir::of(common_dir, name);
-    if state.opened()
-        && matches!(moves::recover(&state), Ok(Recovery::Stuck(_)) | Err(_))
-        && moves::forget(&state)?
-    {
-        forget_base(common_dir, name)?;
-        println!("{off}; nothing moved, and an interrupted move's intent is forgotten");
-        return Ok(());
-    }
-    let tip = tip_of(common_dir, name)?;
-    let resolved = land::resolve(common_dir, &parent)?;
-    let Some(base) = own_base(common_dir, name, resolved.as_ref(), tip)? else {
-        forget_base(common_dir, name)?;
-        println!(
-            "{off}; nothing moved: {parent} is gone, and with it where {name}'s own commits \
-             start (rebase it onto {trunk} by hand if it needs it)"
-        );
-        return Ok(());
-    };
-    let Some((trunk_ref, trunk_tip)) = land::trunk_tip(common_dir, &local, trunk)? else {
-        return Err(Refusal::NotFound.error(format!("no branch {trunk}")));
-    };
-    if on_parent(common_dir, base.commit, trunk_tip, tip)? {
-        forget_base(common_dir, name)?;
-        println!("{off}; it has {trunk}'s tip already, nothing moved");
-        return Ok(());
-    }
-    each(common_dir, &[name.to_string()], Some(trunk), |name| {
-        if let Some(why) = ask(common_dir, name, base.commit, trunk, yes)? {
-            return Ok(Outcome::Refused(why));
-        }
-        let new = stack::count(common_dir, base.commit, trunk_tip)?;
-        let onto = (trunk, trunk_ref.as_str());
-        // Recorded first (see `rebase_onto`).
-        settings::set_landing(common_dir, name, Some(&format!("{trunk} {trunk_tip}")))?;
-        let outcome = copy_onto(common_dir, name, onto, &base, tip, trunk_tip, false)?
-            .outcome(new, base.guessed);
-        if !outcome.done() {
-            finish_landing(common_dir, name)?;
-        }
-        Ok(outcome)
-    })?;
-    forget_base(common_dir, name)?;
-    println!("{off}");
-    Ok(())
-}
-
-/// Says what moving the own commits of `name` (`base..` its tip) onto
-/// `onto` does; why not, if some of them are pushed already (reachable from
-/// its upstream, else `origin/<name>`) and `yes` doesn't say to.
-fn ask(
-    common_dir: &Path,
-    name: &str,
-    base: ObjectId,
-    onto: &str,
-    yes: bool,
-) -> Result<Option<String>> {
-    let tip = tip_of(common_dir, name)?;
-    let own = stack::count(common_dir, base, tip)?;
-    match own {
-        0 => println!("moves {name} onto {onto} (it has no commits of its own)"),
-        n => println!(
-            "moves {} of {name} onto {onto}",
-            plural(n, "commit", "commits")
-        ),
-    }
-    let Some((remote, theirs, at)) = upstream(common_dir, name)?.filter(|_| !yes && own > 0) else {
+/// Why a move of the own commits of `name` (`base..tip`) needs `--yes`:
+/// some are pushed already (reachable from its upstream, else
+/// `origin/<name>`).
+fn pushed(common_dir: &Path, name: &str, base: ObjectId, tip: ObjectId) -> Result<Option<String>> {
+    let Some((remote, theirs, at)) = upstream(common_dir, name)? else {
         return Ok(None);
     };
     let Ok(meet) = git::merge_base(at, tip) else {
@@ -471,892 +482,10 @@ fn ask(
     }))
 }
 
-/// Brings `name` up to date with its base, asked for: says what moves
-/// first, and moves commits already pushed only with `yes`. `to_landing`:
-/// where its base landed was named, so the landing is followed even while
-/// the base's branch is still there (see `move_onto_base`).
-fn update(common_dir: &Path, name: &str, yes: bool, to_landing: bool) -> Result<Outcome> {
-    // First, so what is said is about where it is now.
-    finish_landing(common_dir, name)?;
-    if let Outcome::Would { onto, base } = move_onto_base(common_dir, name, true, to_landing)?
-        && let Some(why) = ask(common_dir, name, base, &onto, yes)?
-    {
-        return Ok(Outcome::Refused(why));
-    }
-    move_onto_base(common_dir, name, false, to_landing)
-}
-
-/// `update` for `name` alone, said as `each` says it.
-fn update_one(common_dir: &Path, name: &str, yes: bool, to_landing: bool) -> Result<()> {
-    each(common_dir, &[name.to_string()], None, |name| {
-        update(common_dir, name, yes, to_landing)
-    })
-}
-
-/// What one branch's move did.
-enum Outcome {
-    /// Its base has no new commits.
-    UpToDate,
-    /// It has the base's tip already (rebased by hand): where its own
-    /// commits start was moved there.
-    BaseMoved,
-    /// Moved onto its base: onto how many new commits of the base, how
-    /// many of its own were dropped (made empty), the paths changed in its
-    /// workspace (`None`: no workspace).
-    Moved {
-        new: usize,
-        dropped: usize,
-        files: Option<Vec<BString>>,
-        /// Where its own commits start was guessed (no own ref, or a
-        /// stale one).
-        guessed: bool,
-    },
-    /// Only asked what it would do: its own commits (after `base`) would
-    /// move onto `onto` (named).
-    Would { onto: String, base: ObjectId },
-    /// Its base landed: it moved onto the landing commit with its `own`
-    /// commits (`dropped` made empty), now built on the target.
-    Landed {
-        landed: Landed,
-        own: usize,
-        dropped: usize,
-        files: Option<Vec<BString>>,
-    },
-    /// At a turn boundary: its base looks squash-merged, but its branch
-    /// is still there, so it is only said (`layer base` moves it).
-    LooksLanded(Landed),
-    /// A commit conflicts with what it would move onto (`onto`, named);
-    /// `told` if that commit had blocked it already; `rebase` the command
-    /// that does it by hand.
-    Blocked {
-        commit: ObjectId,
-        paths: Vec<BString>,
-        told: bool,
-        onto: String,
-        rebase: String,
-    },
-    /// Not now: why (uncommitted work in the way, git busy).
-    Waits(String),
-    /// Not at all as it stands: why (a merge in its commits, no base,
-    /// commits already pushed).
-    Refused(String),
-}
-
-/// A base that landed on its target.
-struct Landed {
-    parent: String,
-    /// The target's name as users know it, and as a pull request's base
-    /// (`main` for `origin/main`).
-    target: String,
-    landing: stack::Landing,
-}
-
-impl Landed {
-    /// `p1 looks squash- or rebase-merged into main as 1a2b3c4d5e6f`: a
-    /// squash is found by content, so main making the same change on its
-    /// own looks the same.
-    fn said(&self) -> String {
-        let (parent, target, at) = (&self.parent, &self.target, short(self.landing.at));
-        match self.landing.how {
-            stack::How::Merged => format!("{parent} was merged into {target} by {at}"),
-            stack::How::Squashed => {
-                format!("{parent} looks squash- or rebase-merged into {target} as {at}")
-            }
-            stack::How::FastForward => {
-                format!("{parent} looks fast-forwarded into {target} up to {at}")
-            }
-        }
-    }
-}
-
-impl Outcome {
-    fn done(&self) -> bool {
-        !matches!(
-            self,
-            Outcome::Blocked { .. } | Outcome::Waits(_) | Outcome::Refused(_)
-        )
-    }
-}
-
-/// Runs `move_one` for each of `branches`, says what it did, one line each,
-/// then the force-pushes to run; fails (exit 4) if any wasn't brought up to
-/// date. `onto` names what they move onto in what is said (default: each
-/// one's base).
-fn each(
-    common_dir: &Path,
-    branches: &[String],
-    onto: Option<&str>,
-    move_one: impl Fn(&str) -> Result<Outcome>,
-) -> Result<()> {
-    let mut failed = 0;
-    let mut pushes = Vec::new();
-    for name in branches {
-        let outcome = move_one(name).unwrap_or_else(|e| Outcome::Refused(format!("{e:#}")));
-        // As now: finishing an interrupted move onto a landing changes it.
-        let parent = (onto.map(str::to_string))
-            .unwrap_or_else(|| Local::read(common_dir).parent(name).unwrap_or_default());
-        failed += usize::from(!outcome.done());
-        println!("{name}: {}", describe(common_dir, &outcome, name, &parent));
-        if matches!(outcome, Outcome::Moved { .. } | Outcome::Landed { .. })
-            && let Some(push) = force_push(common_dir, name)?
-        {
-            pushes.push(push);
-        }
-    }
-    if !pushes.is_empty() {
-        println!("to push (rewritten since last push):");
-        for push in pushes {
-            println!("  {push}");
-        }
-    }
-    if failed > 0 {
-        let what = match branches {
-            [one] => format!("{one} not moved"),
-            _ => format!("{failed} of {} not moved", branches.len()),
-        };
-        return Err(Refusal::Changes.error(format!("{what} (see above)")));
-    }
-    Ok(())
-}
-
-/// How many stacked branches are below `branch` in its stack.
-fn depth(local: &Local, branch: &str) -> usize {
-    let mut at = branch.to_string();
-    let mut depth = 0;
-    while let Some(parent) = local.parent(&at) {
-        depth += 1;
-        // A cycle someone wrote into the config by hand.
-        if depth > 1000 {
-            break;
-        }
-        at = parent;
-    }
-    depth
-}
-
-/// One line of `layer base` for `name` (built on `parent`).
-fn describe(common_dir: &Path, outcome: &Outcome, name: &str, parent: &str) -> String {
-    match outcome {
-        Outcome::UpToDate => format!("up to date with {parent}"),
-        Outcome::BaseMoved => {
-            format!("has {parent}'s tip already; its own commits now start there")
-        }
-        Outcome::Moved {
-            new,
-            dropped,
-            files,
-            guessed,
-        } => {
-            let mut line = format!("moved onto {parent}");
-            if *new > 0 {
-                let _ = write!(line, " ({})", commits(*new));
-            }
-            if *guessed {
-                line += "; where its own commits start was guessed (from the base's reflog)";
-            }
-            line + &moved_details(*dropped, files)
-        }
-        Outcome::Would { onto, .. } => format!("would move onto {onto}"),
-        Outcome::Landed {
-            landed,
-            own,
-            dropped,
-            files,
-        } => {
-            let mut line = format!(
-                "{}; moved there with its own {} and now built on {}",
-                landed.said(),
-                plural(*own, "commit", "commits"),
-                landed.target
-            );
-            line += &moved_details(*dropped, files);
-            let _ = write!(
-                line,
-                ". Its pull request's base should now be {}: push it, then `gh pr edit {name} --base {}`",
-                landed.target, landed.target
-            );
-            line
-        }
-        Outcome::LooksLanded(landed) => format!(
-            "{}, but {} is still there; {} moves {name} there with only its own commits",
-            landed.said(),
-            landed.parent,
-            advice(
-                common_dir,
-                &Local::read(common_dir),
-                name,
-                &landed.target,
-                true
-            ),
-        ),
-        Outcome::Blocked {
-            commit,
-            paths,
-            onto,
-            rebase,
-            ..
-        } => format!(
-            "blocked: commit {} conflicts on {} with {onto}; nothing moved. Rebase by hand in \
-             its workspace (`{rebase}`), then {}",
-            short(*commit),
-            shown(paths),
-            advice(common_dir, &Local::read(common_dir), name, parent, true),
-        ),
-        Outcome::Waits(why) => format!("waits: {why}"),
-        Outcome::Refused(why) => format!("not moved: {why}"),
-    }
-}
-
-/// The end of a line of `describe` for a move: how many of its own commits
-/// were made empty and dropped, how many files changed in its workspace.
-fn moved_details(dropped: usize, files: &Option<Vec<BString>>) -> String {
-    let mut out = String::new();
-    if dropped > 0 {
-        let _ = write!(out, "; {dropped} of its commits made empty, dropped");
-    }
-    if let Some(files) = files {
-        let _ = write!(
-            out,
-            "; {} in its workspace",
-            plural(files.len(), "file changed", "files changed")
-        );
-    }
-    out
-}
-
-/// The paths a move changed in the session's workspace, for the hook.
-fn under_you(files: Option<Vec<BString>>) -> String {
-    match files.unwrap_or_default() {
-        files if files.is_empty() => "no files changed under you".to_string(),
-        files => format!("files changed under you: {}", shown(&files)),
-    }
-}
-
-/// The parent base stored for `name`, if any.
-fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
-    stack::rev(common_dir, &stack::own_ref(name)).ok().flatten()
-}
-
-/// Moves branch `name` onto its base's tip, if it moved, or onto where its
-/// parent base landed, if its base was merged (see the module doc); with
-/// `dry_run`, only says what it would do. A landing (of any kind) is
-/// followed when `to_landing` (`layer base` named where it landed), else only
-/// once the base's branch is gone, here or on its remote (the hook, `layer
-/// base <BASE>`, `--all`); until then the branch keeps following its base as
-/// before, and the landing is only said (`LooksLanded`, when nothing else is
-/// to be said). Its callers finish an interrupted move first
-/// (`finish_landing`).
-fn move_onto_base(
-    common_dir: &Path,
-    name: &str,
-    dry_run: bool,
-    to_landing: bool,
-) -> Result<Outcome> {
-    let local = Local::read(common_dir);
-    let Some(parent) = local.parent(name) else {
-        return Err(Refusal::NotFound.error(format!("{name} isn't built on another branch")));
-    };
-    let tip = tip_of(common_dir, name)?;
-    let resolved = land::resolve(common_dir, &parent)?;
-    let base = own_base(common_dir, name, resolved.as_ref(), tip)?;
-    let mut looks = None;
-    if let Some(base) = &base
-        && let Some((target, landing)) = landed(common_dir, &local, name, &parent, base.commit)?
-    {
-        // A merge into main may be one of several (the base goes on), and
-        // a squash is found by content, so main making the same change on
-        // its own looks the same: followed unasked only once the base is
-        // gone.
-        if to_landing || land::gone(common_dir, &local, &parent)? {
-            return reparent(
-                common_dir, name, &parent, &target, landing, base, tip, dry_run,
-            );
-        }
-        looks = Some(Landed {
-            parent: parent.clone(),
-            target: target.pr_base.clone(),
-            landing,
-        });
-    }
-    let outcome = onto_parent(
-        common_dir, &local, name, &parent, tip, resolved, base, dry_run,
-    )?;
-    Ok(match (looks, outcome) {
-        (Some(landed), Outcome::UpToDate | Outcome::BaseMoved) => Outcome::LooksLanded(landed),
-        (_, outcome) => outcome,
-    })
-}
-
-/// `move_onto_base` onto the tip of base `parent` (`resolved`), its own
-/// commits starting after `base`.
-#[allow(clippy::too_many_arguments)]
-fn onto_parent(
-    common_dir: &Path,
-    local: &Local,
-    name: &str,
-    parent: &str,
-    tip: ObjectId,
-    resolved: Option<(String, ObjectId)>,
-    base: Option<stack::Base>,
-    dry_run: bool,
-) -> Result<Outcome> {
-    let parent = parent.to_string();
-    let (Some((_, parent_tip)), Some(base)) = (resolved, base) else {
-        let trunk = land::main_name(common_dir, local);
-        return Ok(Outcome::Refused(format!(
-            "its base {parent} is missing: `gitfold layer base <BRANCH>` builds it on another, \
-             `gitfold layer base {trunk}` on {trunk} with no other base"
-        )));
-    };
-    if on_parent(common_dir, base.commit, parent_tip, tip)? {
-        if dry_run || base.stored == Some(parent_tip) {
-            return Ok(Outcome::UpToDate);
-        }
-        stack::move_refs(
-            common_dir,
-            name,
-            (tip, tip),
-            (base.stored, parent_tip),
-            "gitfold: base",
-        )?;
-        settings::set_move_blocked(common_dir, name, None)?;
-        moved_now(common_dir, name)?;
-        land::record(common_dir, name, &parent, parent_tip)?;
-        return Ok(match base.commit == parent_tip {
-            true => Outcome::UpToDate,
-            false => Outcome::BaseMoved,
-        });
-    }
-    let new = stack::count(common_dir, base.commit, parent_tip)?;
-    let onto = (parent.as_str(), parent.as_str());
-    let copied = copy_onto(common_dir, name, onto, &base, tip, parent_tip, dry_run)?;
-    match copied {
-        Copied::Moved { .. } => land::record(common_dir, name, &parent, parent_tip)?,
-        Copied::Dry => {
-            return Ok(Outcome::Would {
-                onto: parent,
-                base: base.commit,
-            });
-        }
-        Copied::Stop(_) => {}
-    }
-    Ok(copied.outcome(new, base.guessed))
-}
-
-/// Where the own commits of branch `name` (at `tip`) start, on its parent
-/// (`resolved`: its full ref name and tip, if it exists). A merged parent is
-/// often deleted: then its own ref, if it is in the branch's history.
-fn own_base(
-    common_dir: &Path,
-    name: &str,
-    resolved: Option<&(String, ObjectId)>,
-    tip: ObjectId,
-) -> Result<Option<stack::Base>> {
-    if let Some((full, parent_tip)) = resolved {
-        return Ok(Some(stack::parent_base(
-            common_dir,
-            name,
-            full,
-            tip,
-            *parent_tip,
-        )?));
-    }
-    Ok(match stack_base(common_dir, name) {
-        Some(commit) if stack::is_ancestor(common_dir, commit, tip)? => Some(stack::Base {
-            commit,
-            stored: Some(commit),
-            guessed: false,
-        }),
-        _ => None,
-    })
-}
-
-/// Moves branch `name`, whose parent `parent` landed on `target`, onto
-/// the landing commit with only its own commits, and makes `target` its
-/// parent.
-///
-/// Onto the landing commit S, not the target's tip: it is the smallest
-/// rewrite (only the branch's own commits move, onto exactly what its
-/// parent became), so nothing unrelated the target got since appears in
-/// an agent's workspace mid-task, and a conflict can only be with the
-/// parent's landed form, not with whatever else main did. The branch's
-/// pull request shows the same diff either way (against the merge base).
-/// Following the target's tip is a later, separate `layer base`.
-#[allow(clippy::too_many_arguments)]
-fn reparent(
-    common_dir: &Path,
-    name: &str,
-    parent: &str,
-    target: &land::Target,
-    landing: stack::Landing,
-    base: &stack::Base,
-    tip: ObjectId,
-    dry_run: bool,
-) -> Result<Outcome> {
-    let landed = Landed {
-        parent: parent.to_string(),
-        target: target.pr_base.clone(),
-        landing,
-    };
-    let onto = format!("{} at {}", target.pr_base, short(landing.at));
-    let at = short(landing.at);
-    // Recorded first: the parent can't join the ref transaction, and a
-    // branch moved but still stacked on its old parent would be moved
-    // back onto the parent's commits (`finish_landing`).
-    let marker = format!("{} {}", target.name, landing.at);
-    if !dry_run {
-        settings::set_landing(common_dir, name, Some(&marker))?;
-    }
-    let copied = copy_onto(
-        common_dir,
-        name,
-        (&onto, &at),
-        base,
-        tip,
-        landing.at,
-        dry_run,
-    );
-    let (files, dropped) = match copied {
-        Ok(Copied::Moved { files, dropped }) => (files, dropped),
-        Ok(Copied::Dry) => {
-            return Ok(Outcome::Would {
-                onto: format!("{} ({})", target.pr_base, landed.said()),
-                base: base.commit,
-            });
-        }
-        // Not moved, or moved there by another sync first (up to date).
-        Ok(Copied::Stop(outcome)) => {
-            finish_landing(common_dir, name)?;
-            return Ok(outcome);
-        }
-        // Maybe half-way: `finish_landing` sorts it out next time.
-        Err(e) => return Err(e),
-    };
-    built_on(common_dir, name, &target.name, landing.at)?;
-    let own = stack::count(common_dir, landing.at, tip_of(common_dir, name)?)?;
-    Ok(Outcome::Landed {
-        landed,
-        own,
-        dropped,
-        files,
-    })
-}
-
-/// Finishes or forgets the move of branch `name` onto a new base (its
-/// parent's landing, or another base) that `gitfoldLanding` records: its
-/// own ref at the recorded commit means the refs moved, so the target
-/// becomes its parent (following it or not, as recorded); else the move
-/// didn't happen, unless a workspace's interrupted move (its intent) may
-/// still finish it: that is finished or undone first, if it can be.
-fn finish_landing(common_dir: &Path, name: &str) -> Result<()> {
-    let Some(marker) = Local::read(common_dir).landing(name) else {
-        return Ok(());
-    };
-    let words: Vec<&str> = marker.split(' ').collect();
-    let (&[target, at] | &[target, at, _]) = &words[..] else {
-        return settings::set_landing(common_dir, name, None);
-    };
-    let state = StateDir::of(common_dir, name);
-    if moves::pending(&state) && state.opened() {
-        // Ours, or another process's running: then left to it.
-        if let Err(e) = moves::recover(&state) {
-            log::warn!("{name}: finishing an interrupted move: {e:#}");
-        }
-    }
-    if stack_base(common_dir, name)
-        .map(|b| b.to_string())
-        .as_deref()
-        == Some(at)
-        && let Ok(at) = ObjectId::from_hex(at.as_bytes())
-    {
-        built_on(common_dir, name, target, at)?;
-        if let Some(&follows) = words.get(2)
-            && Local::read(common_dir).parent(name).is_some()
-        {
-            settings::set_move_manual(common_dir, name, follows == "frozen")?;
-        }
-        return Ok(());
-    } else if moves::pending(&state) {
-        return Ok(());
-    }
-    settings::set_landing(common_dir, name, None)
-}
-
-/// Branch `name`, moved onto where its base landed (`at`, on `target`),
-/// is built on `target` from now on: but a branch that landed in the trunk
-/// has no base any more, as one never stacked.
-fn built_on(common_dir: &Path, name: &str, target: &str, at: ObjectId) -> Result<()> {
-    if land::is_trunk(common_dir, &Local::read(common_dir), target) {
-        return forget_base(common_dir, name);
-    }
-    settings::set_parent(common_dir, name, Some(target))?;
-    land::record(common_dir, name, target, at)?;
-    settings::set_landing(common_dir, name, None)
-}
-
-/// What `copy_onto` did.
-enum Copied {
-    /// Moved: the paths changed in its workspace (`None`: no workspace),
-    /// how many of its commits were made empty and dropped.
-    Moved {
-        files: Option<Vec<BString>>,
-        dropped: usize,
-    },
-    /// `dry_run`: it would move.
-    Dry,
-    /// It didn't move: why.
-    Stop(Outcome),
-}
-
-impl Copied {
-    /// As a move onto `new` new commits of the base did (`guessed`: where
-    /// its own commits start was guessed).
-    fn outcome(self, new: usize, guessed: bool) -> Outcome {
-        match self {
-            Copied::Moved { files, dropped } => Outcome::Moved {
-                new,
-                dropped,
-                files,
-                guessed,
-            },
-            Copied::Dry => Outcome::UpToDate,
-            Copied::Stop(outcome) => outcome,
-        }
-    }
-}
-
-/// Copies the own commits of branch `name` (at `tip`, from `base`) onto
-/// `onto` (named `onto_name` in messages, `onto_rev` in commands), and
-/// moves the branch, its
-/// own ref (to `onto`) and its workspace's files there.
-fn copy_onto(
-    common_dir: &Path,
-    name: &str,
-    (onto_name, onto_rev): (&str, &str),
-    base: &stack::Base,
-    tip: ObjectId,
-    onto: ObjectId,
-    dry_run: bool,
-) -> Result<Copied> {
-    let local = Local::read(common_dir);
-    let state = StateDir::of(common_dir, name);
-    let computed = git::with_repo(|repo| stack::compute_move(repo, base.commit, onto, tip))?;
-    let (new_tip, dropped) = match computed {
-        stack::Move::Merge(commit) => {
-            return Ok(Copied::Stop(Outcome::Refused(format!(
-                "its commit {} is a merge, which isn't moved; rebase by hand",
-                short(commit)
-            ))));
-        }
-        stack::Move::Conflict { commit, paths } => {
-            let record = format!("{onto} {commit} {}", lossy(&paths).join(" "));
-            let told = local
-                .move_blocked(name)
-                .is_some_and(|b| b.starts_with(&onto.to_string()));
-            if !dry_run && !told {
-                settings::set_move_blocked(common_dir, name, Some(&record))?;
-            }
-            return Ok(Copied::Stop(Outcome::Blocked {
-                commit,
-                paths,
-                told,
-                onto: onto_name.to_string(),
-                rebase: format!("git rebase --onto {onto_rev} {}", short(base.commit)),
-            }));
-        }
-        stack::Move::Done { tip, dropped, .. } => (tip, dropped.len()),
-    };
-    if dry_run {
-        return Ok(Copied::Dry);
-    }
-    if let Some(other) = git::worktree::checked_out_elsewhere(common_dir, name, &state.admin) {
-        return Ok(Copied::Stop(Outcome::Refused(format!(
-            "it is checked out in {other}; move it there (`git rebase --onto {onto_rev} {}`)",
-            short(base.commit)
-        ))));
-    }
-    let intent = Intent {
-        mode: Mode::Open,
-        from: tip,
-        to: new_tip,
-        parent_tip: onto,
-        stack_old: base.stored,
-    };
-    let mut dropped = dropped;
-    let moved = layers::with_layers_off(&state, &intent, || {
-        // Taking the layers off moved commits made on the layers commit
-        // onto the branch: they move too.
-        let now = tip_of(common_dir, name)?;
-        if now == tip || now == new_tip || !stack::is_ancestor(common_dir, tip, now)? {
-            return move_branch(&state, intent);
-        }
-        match git::with_repo(|repo| stack::compute_move(repo, base.commit, onto, now))? {
-            stack::Move::Done {
-                tip: to,
-                dropped: d,
-                ..
-            } => {
-                dropped = d.len();
-                move_branch(
-                    &state,
-                    Intent {
-                        from: now,
-                        to,
-                        ..intent
-                    },
-                )
-            }
-            // Said by the next try, worked out from the start.
-            _ => Ok(Moved::Waits(
-                "the branch moved meanwhile; retried next time".into(),
-            )),
-        }
-    })?;
-    let files = match moved {
-        Moved::Done(files) => files,
-        Moved::Already => return Ok(Copied::Stop(Outcome::UpToDate)),
-        Moved::Waits(why) => return Ok(Copied::Stop(Outcome::Waits(why))),
-    };
-    settings::set_move_blocked(common_dir, name, None)?;
-    moved_now(common_dir, name)?;
-    Ok(Copied::Moved { files, dropped })
-}
-
-/// Moves the branch of `state` as `intent` says, where it lives: its
-/// workspace mounted (`apply_open`), unmounted (`apply_closed`), or only its
-/// refs if it has none.
-fn move_branch(state: &StateDir, intent: Intent) -> Result<Moved> {
-    let (common_dir, name) = (&state.common_dir, &state.branch);
-    if !state.opened() {
-        return match move_refs(state, &intent) {
-            Ok(()) => Ok(Moved::Done(None)),
-            Err(_) if stack::rev(common_dir, &format!("refs/heads/{name}"))? == Some(intent.to) => {
-                Ok(Moved::Already)
-            }
-            Err(e) => Err(e),
-        };
-    }
-    match crate::mount_table::mount_of(common_dir)? {
-        Some(mount) => apply_open(state, &mount.join(name), &intent),
-        None => match crate::lock::lock(common_dir)? {
-            Some(_lock) => apply_closed(
-                state,
-                &Intent {
-                    mode: Mode::Closed,
-                    ..intent
-                },
-            ),
-            None => Ok(Moved::Waits(
-                "the repository is being mounted or unmounted; retry".into(),
-            )),
-        },
-    }
-}
-
-/// Whether a branch at `tip` with parent base `base` needs no move onto
-/// parent tip `parent_tip`: it is the base, or it is past the base and in
-/// the branch already (rebased by hand). Not a parent rewound behind the
-/// base: the commits it dropped go from the branch too, as `git rebase
-/// --onto` drops them.
-fn on_parent(
-    common_dir: &Path,
-    base: ObjectId,
-    parent_tip: ObjectId,
-    tip: ObjectId,
-) -> Result<bool> {
-    Ok(base == parent_tip
-        || (stack::is_ancestor(common_dir, base, parent_tip)?
-            && stack::is_ancestor(common_dir, parent_tip, tip)?))
-}
-
-/// An interrupted move of the workspace in `state` finished or undone
-/// first (`state::moves`); why not, if it can't be.
-fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
-    Ok(match moves::recover(state)? {
-        Recovery::Nothing | Recovery::Finished | Recovery::Undone => Ok(()),
-        Recovery::InProgress => Err("another move of it is running".into()),
-        Recovery::Stuck(why) => Err(why),
-    })
-}
-
-/// How moving a branch for a move ended.
-enum Moved {
-    /// Moved: the paths changed in its workspace (`None`: no workspace).
-    Done(Option<Vec<BString>>),
-    /// Another move (the hook and `layer base` at once) got there first.
-    Already,
-    /// Not now: why.
-    Waits(String),
-}
-
-/// With the intent held: whether the branch and its own ref are still
-/// where `intent` starts from (`None`), else how it ended. A move
-/// computed before another one finished would otherwise run its read-tree
-/// against the other's result.
-fn moved_meanwhile(state: &StateDir, intent: &Intent) -> Result<Option<Moved>> {
-    let tip = stack::rev(&state.common_dir, &format!("refs/heads/{}", state.branch))?;
-    let stored = stack::rev(&state.common_dir, &stack::own_ref(&state.branch))?;
-    Ok(if tip == Some(intent.from) && stored == intent.stack_old {
-        None
-    } else if tip == Some(intent.to) {
-        Some(Moved::Already)
-    } else {
-        Some(Moved::Waits(
-            "the branch moved meanwhile; retried next time".into(),
-        ))
-    })
-}
-
-/// `git read-tree -m -u <from> <to>` in the workspace at `dir`.
-fn read_tree(dir: &Path, from: ObjectId, to: ObjectId) -> Result<std::process::Output> {
-    let (from, to) = (from.to_string(), to.to_string());
-    // The index's stat data refreshed first: `read-tree -m` doesn't, and
-    // files whose time changed (layers taken off: restamped) would look
-    // changed. Changes it finds are for `read-tree` to judge.
-    git::cmd::git()
-        .arg("-C")
-        .arg(dir)
-        .args(["update-index", "-q", "--refresh"])
-        .output()?;
-    Ok(git::cmd::git()
-        .arg("-C")
-        .arg(dir)
-        .args(["read-tree", "-m", "-u", &from, &to])
-        .output()?)
-}
-
-/// Moves the mounted workspace in `state`, at `dir`, as `intent` says:
-/// its files and index by `git read-tree -m -u`, then the refs.
-fn apply_open(state: &StateDir, dir: &Path, intent: &Intent) -> Result<Moved> {
-    if let Err(why) = recovered(state)? {
-        return Ok(Moved::Waits(why));
-    }
-    if let Some(why) = state.git_busy() {
-        return Ok(Moved::Waits(format!("{why} in its workspace")));
-    }
-    let paths = moves::changed_paths(intent)?;
-    let held = intent.begin(state)?;
-    if let Some(moved) = moved_meanwhile(state, intent)? {
-        return Ok(moved);
-    }
-    let out = read_tree(dir, intent.from, intent.to)?;
-    if !out.status.success() {
-        return Ok(Moved::Waits(refused(&String::from_utf8_lossy(&out.stderr))));
-    }
-    if let Err(e) = move_refs(state, intent) {
-        let tip = stack::rev(&state.common_dir, &format!("refs/heads/{}", state.branch))?;
-        if tip == Some(intent.to) {
-            held.done()?;
-            return Ok(Moved::Already);
-        }
-        // Moved by git meanwhile: the files go back, as before, if the
-        // branch is where they were taken from.
-        if tip == Some(intent.from) && read_tree(dir, intent.to, intent.from)?.status.success() {
-            held.done()?;
-        } else {
-            held.keep();
-        }
-        return Ok(Moved::Waits(format!("the branch moved meanwhile ({e:#})")));
-    }
-    held.done()?;
-    Ok(Moved::Done(Some(paths)))
-}
-
-/// Why `git read-tree -m -u` refused, from what it said: the uncommitted
-/// (or untracked) files in the way, else its own words (a lock, say).
-fn refused(said: &str) -> String {
-    let in_the_way: Vec<&str> = (said.lines())
-        .filter(|l| l.contains("not uptodate") || l.contains("would be overwritten"))
-        .filter_map(|l| l.split('\'').nth(1))
-        .collect();
-    match in_the_way.is_empty() {
-        true => format!("git read-tree refused: {}", said.trim()),
-        false => self::in_the_way(&in_the_way),
-    }
-}
-
-/// Why a move waits for uncommitted work on `paths`.
-fn in_the_way<S: AsRef<str>>(paths: &[S]) -> String {
-    let paths: Vec<&str> = paths.iter().map(AsRef::as_ref).collect();
-    format!(
-        "uncommitted changes to {} overlap the move; commit or stash them",
-        shown_str(&paths)
-    )
-}
-
-/// Moves the unmounted workspace in `state` (the repository lock held),
-/// only if it has no uncommitted changes: its index, its base, then the
-/// refs.
-fn apply_closed(state: &StateDir, intent: &Intent) -> Result<Moved> {
-    if let Err(why) = recovered(state)? {
-        return Ok(Moved::Waits(why));
-    }
-    if let Some(why) = state.git_busy() {
-        return Ok(Moved::Waits(format!("{why} in its workspace")));
-    }
-    let store = Store::default();
-    let base = state.read_base()?.id;
-    if base != intent.from {
-        // The branch moved while unmounted: catch up as opening it would.
-        crate::fs::workspace::catch_up(&store, &state.common_dir, &state.branch)?;
-    }
-    let s = crate::state::status::status(&store, state)?;
-    if !s.changed.is_empty() || !s.deleted.is_empty() || !index_matches_head(&state.admin)? {
-        return Ok(Moved::Waits(
-            "its workspace has uncommitted changes; moved once it is mounted".into(),
-        ));
-    }
-    let (from, to) = (
-        git::resolve(&intent.from.to_string())?,
-        git::resolve(&intent.to.to_string())?,
-    );
-    let paths = moves::changed_paths(intent)?;
-    let held = intent.begin(state)?;
-    if let Some(moved) = moved_meanwhile(state, intent)? {
-        return Ok(moved);
-    }
-    let moved = crate::fs::workspace::move_closed(&store, state.clone(), &from, &to, || {
-        moves::move_index(state, intent, false)
-    });
-    let moved = match moved {
-        Ok(moved) => moved,
-        // The index or the base may have moved: `recover` sees to it.
-        Err(e) => {
-            held.keep();
-            return Err(e);
-        }
-    };
-    if let Err(in_the_way) = moved {
-        held.done()?;
-        let in_the_way: Vec<BString> = in_the_way.into_iter().map(BString::from).collect();
-        return Ok(Moved::Waits(format!(
-            "its workspace has files of its own (ignored ones) at {}",
-            shown(&in_the_way)
-        )));
-    }
-    if let Err(e) = move_refs(state, intent) {
-        held.keep();
-        return Err(e);
-    }
-    held.done()?;
-    Ok(Moved::Done(Some(paths)))
-}
-
-/// The branch from C to C' and its own ref to A, as `intent` says.
-fn move_refs(state: &StateDir, intent: &Intent) -> Result<()> {
-    stack::move_refs(
-        &state.common_dir,
-        &state.branch,
-        (intent.from, intent.to),
-        (intent.stack_old, intent.parent_tip),
-        "gitfold: move onto base",
-    )
-}
-
 /// What to run to push `name` after a move, if it has a remote-tracking
 /// branch the move left behind: a push with a lease on that tip, so a
 /// push someone else made meanwhile is refused.
-fn force_push(common_dir: &Path, name: &str) -> Result<Option<String>> {
+pub fn force_push(common_dir: &Path, name: &str) -> Result<Option<String>> {
     let Some((remote, theirs, at)) = upstream(common_dir, name)? else {
         return Ok(None);
     };
@@ -1382,46 +511,328 @@ fn upstream(common_dir: &Path, name: &str) -> Result<Option<(String, String, Obj
     Ok(stack::rev(common_dir, &tracking)?.map(|at| ("origin".into(), name.into(), at)))
 }
 
-/// The notes `gitfold list` shows for stacked branch `name`: its base's
-/// state (landed, missing), and whether it needs an update or a
-/// force-push. A branch on the trunk isn't said to need one each time the
-/// trunk moves: following it is `layer base`'s, on request.
-pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
-    let Some(parent) = local.parent(name) else {
-        return Vec::new();
-    };
-    let Ok(tip) = tip_of(common_dir, name) else {
-        return Vec::new();
-    };
-    let resolved = land::resolve(common_dir, &parent).ok().flatten();
-    let base = own_base(common_dir, name, resolved.as_ref(), tip)
-        .ok()
-        .flatten();
-    let trunk = land::is_trunk(common_dir, local, &parent);
-    let mut notes = Vec::new();
-    if let Some(base) = &base
-        && let Ok(Some((target, landing))) = landed(common_dir, local, name, &parent, base.commit)
+/// Says `outcome` for `name` (`<name>: ...`) and, if it moved, the
+/// force-push to run; fails (exit 4) if it didn't move.
+pub fn say(common_dir: &Path, name: &str, outcome: &Outcome) -> Result<()> {
+    if !matches!(outcome, Outcome::UpToDate) {
+        println!("{name}: {}", outcome.said());
+    }
+    if matches!(outcome, Outcome::Moved { .. })
+        && let Some(push) = force_push(common_dir, name)?
     {
-        let landed = match landing.how {
-            stack::How::Squashed | stack::How::FastForward => "looks landed",
-            _ => "landed",
+        println!("to push (rewritten since last push):\n  {push}");
+    }
+    if !outcome.done() {
+        return Err(Refusal::Changes.error(format!("{name} not moved (see above)")));
+    }
+    Ok(())
+}
+
+/// Says what parts a branch sits on: `api`, `api and db`, `main`.
+pub fn onto_words(common_dir: &Path, parts: &[Part]) -> String {
+    match parts.is_empty() {
+        true => land::main_name(common_dir, &Local::read(common_dir)),
+        false => layers::and_list(parts.iter().map(|(n, _)| n.clone())),
+    }
+}
+
+/// A landing of an editable layer: where it landed, said.
+pub struct Landed {
+    pub layer: String,
+    /// Its target as users know it (`main` for `origin/main`).
+    pub target: String,
+    /// The target's name as configured (a branch, or the trunk).
+    pub target_name: String,
+    pub landing: stack::Landing,
+    /// Whether the layer's branch is gone (deleted here, or on its remote).
+    pub gone: bool,
+}
+
+impl Landed {
+    /// `api looks merged into main as 1a2b3c4d5e6f`: a squash is found by
+    /// content, so main making the same change on its own looks the same.
+    pub fn said(&self) -> String {
+        let (layer, target, at) = (&self.layer, &self.target, short(self.landing.at));
+        match self.landing.how {
+            stack::How::Merged => format!("{layer} was merged into {target} by {at}"),
+            stack::How::Squashed => format!("{layer} looks merged into {target} as {at}"),
+            stack::How::FastForward => {
+                format!("{layer} looks fast-forwarded into {target} up to {at}")
+            }
+        }
+    }
+}
+
+/// Where editable layer `layer` (the branch sits on its commit `on`)
+/// landed, if it did: in its target, the one branch it builds on itself,
+/// else main.
+pub fn landed(common_dir: &Path, layer: &str, on: ObjectId) -> Result<Option<Landed>> {
+    let local = Local::read(common_dir);
+    if land::is_trunk(common_dir, &local, layer) {
+        return Ok(None);
+    }
+    let Some(target) = land::target(common_dir, &local, layer)? else {
+        return Ok(None);
+    };
+    let gone = land::gone(common_dir, &local, layer)?;
+    // On main's first-parent line: fast-forwarded, once the branch is gone
+    // (while it is there, a fresh branch looks the same).
+    let was_on = gone.then_some(false);
+    Ok(
+        land::landed(common_dir, on, &target, was_on)?.map(|landing| Landed {
+            layer: layer.to_string(),
+            target: target.pr_base.clone(),
+            target_name: target.name.clone(),
+            landing,
+            gone,
+        }),
+    )
+}
+
+/// The landings of the editable layers of `built`.
+pub fn landings(common_dir: &Path, built: &Built) -> Vec<Landed> {
+    (built.layers.editable())
+        .filter_map(|l| {
+            let on = built.on(&l.branch)?;
+            landed(common_dir, &l.branch, on).ok().flatten()
+        })
+        .collect()
+}
+
+/// The layers and parts after following `landing` (of one of `built`'s
+/// editable layers): the layer goes; its target becomes editable if it is
+/// a branch the branch doesn't build on yet; its part becomes the landing
+/// commit, under the target's name.
+pub fn after_landing(
+    common_dir: &Path,
+    built: &Built,
+    landing: &Landed,
+    parts: &[Part],
+) -> Result<(Layers, Vec<Part>)> {
+    let mut next = built.layers.clone();
+    next.layers.retain(|l| l.branch != landing.layer);
+    let local = Local::read(common_dir);
+    let trunk = land::is_trunk(common_dir, &local, &landing.target_name);
+    if !trunk
+        && next
+            .find(&landing.target_name)
+            .is_none_or(|i| !next.layers[i].edit)
+    {
+        let theirs = editable_layer(common_dir, &landing.target_name)?;
+        match next.find(&landing.target_name) {
+            Some(i) => next.layers[i] = theirs,
+            None => next.layers.push(theirs),
+        }
+    }
+    let mut out: Vec<Part> = parts
+        .iter()
+        .filter(|(n, _)| *n != landing.layer && *n != landing.target_name)
+        .cloned()
+        .collect();
+    let name = match trunk {
+        true => land::main_name(common_dir, &local),
+        false => landing.target_name.clone(),
+    };
+    // With nothing else to build on, the landing commit alone.
+    if trunk && next.editable().next().is_none() {
+        out.clear();
+    }
+    out.insert(0, (name, landing.landing.at));
+    Ok((next, out))
+}
+
+/// Editable layer `branch` as a branch's own layer: its work if it has a
+/// workspace, else its commits, live.
+fn editable_layer(common_dir: &Path, branch: &str) -> Result<Layer> {
+    let theirs = StateDir::of(common_dir, branch);
+    let local = Local::read(common_dir);
+    let (snapshot, shows) = match theirs.opened() {
+        true => match crate::state::follow::latest_work(&Store::default(), &theirs)? {
+            Some(work) => (work, layers::Shows::Work),
+            None => (git::branch_tip(branch)?.id, layers::Shows::Work),
+        },
+        false => (
+            git::branch_tip(branch)?.id,
+            crate::state::follow::tip_shows(&local, branch, false),
+        ),
+    };
+    Ok(Layer {
+        branch: branch.to_string(),
+        shows,
+        updates: Updates::Live,
+        moved: crate::fsutil::epoch_secs(std::time::SystemTime::now()),
+        snapshot,
+        edit: true,
+        instead: None,
+    })
+}
+
+/// Follows what branch `name` builds on, unasked (the turn's hook): onto
+/// its live editable layers' new commits, onto where one landed once its
+/// branch is gone. `lock` held. With the landings said (those followed and
+/// those only noticed).
+pub fn follow(common_dir: &Path, name: &str) -> Result<(Outcome, Vec<Landed>, Vec<Part>)> {
+    let built = Built::read(common_dir, name)?;
+    if built.layers.editable().next().is_none() {
+        return Ok((Outcome::UpToDate, Vec::new(), Vec::new()));
+    }
+    let mut parts = wanted_parts(&built, &[])?;
+    let mut next = None;
+    let mut seen = Vec::new();
+    let mut working = Built {
+        layers: built.layers.clone(),
+        own: built.own,
+        parts: built.parts.clone(),
+    };
+    for landing in landings(common_dir, &built) {
+        if landing.gone {
+            let (layers, p) = after_landing(common_dir, &working, &landing, &parts)?;
+            parts = p;
+            working.layers = layers.clone();
+            next = Some(layers);
+        }
+        seen.push(landing);
+    }
+    // A landing in main with nothing else to build on: onto the landing
+    // commit, as a branch built on nothing (no own ref).
+    let plan = Plan {
+        name,
+        said: format!("onto {}", onto_words(common_dir, &parts)),
+        parts: parts.clone(),
+        next,
+        asked: false,
+        yes: true,
+        off: None,
+        prefix: String::new(),
+    };
+    let outcome = move_onto(common_dir, &plan)?;
+    Ok((outcome, seen, parts))
+}
+
+/// `gitfold layer --claude-hook user-prompt-submit`'s part for editable
+/// layers: at the start of a turn, the session's workspace follows them
+/// (`follow`), and what happened is said as context. Nothing when nothing
+/// happened, or when what keeps it from happening was told before (a block
+/// per commit, anything else while it says the same: `move-told`).
+pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
+    let state = StateDir::of(common_dir, name);
+    let _lock = layers::lock(&state)?;
+    let before = stack::rev(common_dir, &stack::own_ref(name))?;
+    let (outcome, landings, parts) = follow(common_dir, name)?;
+    let told_file = state.dir.join(TOLD);
+    let say_once = |text: String| -> Result<Option<String>> {
+        if std::fs::read_to_string(&told_file).is_ok_and(|told| told == text) {
+            return Ok(None);
+        }
+        if state.dir.exists() {
+            crate::fsutil::write_atomic(&told_file, text.as_bytes())?;
+        }
+        Ok(Some(text))
+    };
+    let mut out = Vec::new();
+    let onto = onto_words(common_dir, &parts);
+    match &outcome {
+        Outcome::UpToDate | Outcome::BaseMoved => {}
+        Outcome::Blocked { told: true, .. } => {}
+        Outcome::Moved { files, .. } => {
+            let _ = std::fs::remove_file(&told_file);
+            let followed: Vec<&Landed> = landings.iter().filter(|l| l.gone).collect();
+            let what = match followed.is_empty() {
+                true => {
+                    let after = stack::rev(common_dir, &stack::own_ref(name))?;
+                    let subjects = match (before, after) {
+                        (Some(b), Some(a)) => subjects(common_dir, b, a)?,
+                        _ => Vec::new(),
+                    };
+                    let subjects = match subjects.is_empty() {
+                        true => String::new(),
+                        false => format!(" ({})", subjects.join("; ")),
+                    };
+                    format!("was moved onto {onto}'s new commits{subjects}")
+                }
+                false => {
+                    let said: Vec<String> = followed.iter().map(|l| l.said()).collect();
+                    format!(
+                        "{}; it was moved there with only its own commits, and now sits on \
+                         {onto}. Its pull request's base should be {}: suggest `gh pr edit \
+                         {name} --base {}` to the user after the push below rather than \
+                         running it yourself",
+                        said.join("; "),
+                        followed[0].target,
+                        followed[0].target
+                    )
+                }
+            };
+            let push = match force_push(common_dir, name)? {
+                Some(push) => format!(" Push it with: {push}"),
+                None => " Push it with --force-with-lease when you push.".into(),
+            };
+            out.push(format!(
+                "gitfold: this branch, {name}, {what}; {}. Its history was rewritten.{push}",
+                under_you(files.clone())
+            ));
+        }
+        other => {
+            if let Some(text) = say_once(format!(
+                "gitfold: {name} builds on {onto}; {}",
+                other.said()
+            ))? {
+                out.push(text);
+            }
+        }
+    }
+    for landing in landings.iter().filter(|l| !l.gone) {
+        let text = format!(
+            "gitfold: {}, but {} is still there: `gitfold layer remove {}` moves {name} onto \
+             {} with only its own commits. Suggest it to the user rather than running it \
+             yourself: it rewrites {name}'s history.",
+            landing.said(),
+            landing.layer,
+            landing.layer,
+            landing.target
+        );
+        if let Some(text) = say_once(text)? {
+            out.push(text);
+        }
+    }
+    Ok((!out.is_empty()).then(|| out.join("\n")))
+}
+
+/// The paths a move changed in the session's workspace, for the hook.
+fn under_you(files: Option<Vec<BString>>) -> String {
+    match files.unwrap_or_default() {
+        files if files.is_empty() => "no files changed under you".to_string(),
+        files => format!("files changed under you: {}", shown(&files)),
+    }
+}
+
+/// The notes `gitfold list` and the listing show for branch `name`: an
+/// editable layer that landed, a blocked move, one needed, a force-push.
+pub fn notes(common_dir: &Path, name: &str) -> Vec<String> {
+    let Ok(built) = Built::read_quiet(common_dir, name) else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    for landing in landings(common_dir, &built) {
+        let how = match landing.landing.how {
+            stack::How::Merged => "merged",
+            _ => "looks merged",
         };
-        let advice = advice(common_dir, local, name, &target.pr_base, false);
         notes.push(format!(
-            "{parent} {landed} in {}: {advice} moves it there",
-            target.pr_base
+            "{} {how} into {}: `gitfold layer remove {}` moves it there",
+            landing.layer, landing.target, landing.layer
         ));
-    } else if let Some(blocked) = local.move_blocked(name) {
-        // `<onto> <commit> <paths>`.
+    }
+    let state = StateDir::of(common_dir, name);
+    if let Some(blocked) = blocked(&state) {
         let paths: Vec<&str> = blocked.split(' ').skip(2).collect();
         notes.push(format!("blocked: conflicts on {}", shown_str(&paths)));
-    } else if let (Some((_, parent_tip)), Some(base)) = (&resolved, &base) {
-        if !trunk && !on_parent(common_dir, base.commit, *parent_tip, tip).unwrap_or(true) {
-            let advice = advice(common_dir, local, name, &parent, false);
-            notes.push(format!("needs update: {advice}"));
-        }
-    } else if resolved.is_none() {
-        notes.push(format!("base {parent} missing"));
+    } else if notes.is_empty()
+        && let Ok(wanted) = wanted_parts(&built, &[])
+        && !wanted.is_empty()
+        && wanted != built.parts
+    {
+        notes.push("needs update: its next turn, or `gitfold layer add <LAYER> --edit`".into());
     }
     if let Ok(Some(push)) = force_push(common_dir, name) {
         notes.push(format!("push with: {push}"));
@@ -1429,107 +840,63 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
     notes
 }
 
-/// `gitfold layer --claude-hook user-prompt-submit`'s part for bases: at
-/// the start of a turn, the session's workspace is moved onto its base's
-/// new commits (unless it is frozen), and what happened is said as context.
-/// Nothing when nothing happened, or when what keeps it from happening was
-/// told before (a block per base tip, anything else while it says the same:
-/// `move-told` in the state directory).
-pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
-    layers::resume(&StateDir::of(common_dir, name))?;
-    // A move onto a new base interrupted: finished first, so the base it is
-    // checked against is the one it moved onto.
-    finish_landing(common_dir, name)?;
-    let local = Local::read(common_dir);
-    let Some(parent) = local.parent(name) else {
-        return Ok(None);
-    };
-    // Not onto the trunk's every move: that is `layer base`'s, on request.
-    if local.move_manual(name) || land::is_trunk(common_dir, &local, &parent) {
-        return Ok(None);
+impl Built {
+    /// `read` without settling anything (no lock): for listings.
+    pub fn read_quiet(common_dir: &Path, name: &str) -> Result<Built> {
+        let state = StateDir::of(common_dir, name);
+        let layers = match layers::read_next(&state)? {
+            Some(next) if stack::rev(common_dir, &stack::own_ref(name))? == Some(next.onto) => {
+                Layers::parse(&next.layers)?
+            }
+            _ => Layers::read(&state)?,
+        };
+        let own = stack::rev(common_dir, &stack::own_ref(name))?;
+        let parts = current_parts(own, &layers)?;
+        Ok(Built { layers, own, parts })
     }
-    let told_file = StateDir::of(common_dir, name).dir.join(TOLD);
-    let before = stack_base(common_dir, name);
-    let outcome = move_onto_base(common_dir, name, false, false)?;
-    let say = |text: String| -> Result<Option<String>> {
-        if std::fs::read_to_string(&told_file).is_ok_and(|told| told == text) {
-            return Ok(None);
-        }
-        if told_file.parent().is_some_and(Path::exists) {
-            crate::fsutil::write_atomic(&told_file, text.as_bytes())?;
-        }
-        Ok(Some(text))
-    };
-    if outcome.done() && !matches!(outcome, Outcome::LooksLanded(_)) {
-        let _ = std::fs::remove_file(&told_file);
-    }
-    Ok(match outcome {
-        Outcome::UpToDate | Outcome::BaseMoved | Outcome::Would { .. } => None,
-        Outcome::Blocked { told: true, .. } => None,
-        Outcome::Landed {
-            landed, own, files, ..
-        } => {
-            let files = under_you(files);
-            Some(format!(
-                "gitfold: this branch's base {}; {name} is now built on {} with only its own \
-                 {}; {files}. Its history was rewritten, so it needs a push with \
-                 --force-with-lease, and then its pull request's base should be {}: suggest \
-                 `gh pr edit {name} --base {}` to the user after that push rather than running \
-                 it yourself.",
-                landed.said(),
-                landed.target,
-                plural(own, "commit", "commits"),
-                landed.target,
-                landed.target
-            ))
-        }
-        Outcome::Moved {
-            new,
-            files,
-            guessed,
-            ..
-        } => {
-            let guessed = match guessed {
-                true => {
-                    " Where its own commits start wasn't recorded, so it was guessed from the \
-                     base's reflog: check that only its own commits were moved."
-                }
-                false => "",
-            };
-            let parent_tip = tip_of(common_dir, &parent)?;
-            let subjects =
-                before.map_or(Ok(Vec::new()), |b| subjects(common_dir, b, parent_tip))?;
-            let what = match subjects.is_empty() {
-                true => String::new(),
-                false => format!(" ({})", subjects.join("; ")),
-            };
-            let files = under_you(files);
-            Some(format!(
-                "gitfold: this branch, {name}, was moved onto its base {parent}'s {}{what}; \
-                 {files}. Its history was rewritten: push it with --force-with-lease when you \
-                 push.{guessed}",
-                commits(new)
-            ))
-        }
-        Outcome::Blocked { .. } => Some(format!(
-            "gitfold: {name} is built on {parent}, which has new commits; {}",
-            describe(common_dir, &outcome, name, &parent)
-        )),
-        Outcome::LooksLanded(_) => say(format!(
-            "gitfold: {name}'s base {}; suggest it to the user rather than running it \
-             yourself: it rewrites {name}'s history.",
-            describe(common_dir, &outcome, name, &parent)
-        ))?,
-        other => say(format!(
-            "gitfold: {name} is built on {parent}, which has new commits; {}",
-            describe(common_dir, &other, name, &parent)
-        ))?,
-    })
 }
 
-/// The hook's last message about why a workspace wasn't moved, in its
-/// state directory: said once while it stays the same.
-const TOLD: &str = "move-told";
+/// Refuses building `name` on `layer` if `layer` builds on `name`, through
+/// its editable layers.
+pub fn check_cycle(common_dir: &Path, name: &str, layer: &str) -> Result<()> {
+    let mut todo = vec![layer.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(at) = todo.pop() {
+        if !seen.insert(at.clone()) {
+            continue;
+        }
+        let theirs = Layers::read(&StateDir::of(common_dir, &at)).unwrap_or_default();
+        for next in theirs.editable_names() {
+            if next == name {
+                crate::cli::usage(format!(
+                    "{layer} builds on {name} (through {at}): that would be a cycle"
+                ));
+            }
+            todo.push(next);
+        }
+    }
+    Ok(())
+}
+
+/// The recorded block of the branch of `state`, if any (see `BLOCKED`).
+fn blocked(state: &StateDir) -> Option<String> {
+    std::fs::read_to_string(state.dir.join(BLOCKED))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+fn record_blocked(state: &StateDir, onto: ObjectId, commit: ObjectId, paths: &[BString]) {
+    let record = format!("{onto} {commit} {}", lossy(paths).join(" "));
+    let written = std::fs::create_dir_all(&state.dir)
+        .and_then(|()| crate::fsutil::write_atomic(&state.dir.join(BLOCKED), record.as_bytes()));
+    if let Err(e) = written {
+        log::warn!("{}: recording a blocked move: {e}", state.branch);
+    }
+}
+
+fn clear_blocked(state: &StateDir) {
+    let _ = std::fs::remove_file(state.dir.join(BLOCKED));
+}
 
 /// The subjects of `from..to`, oldest first, at most three.
 fn subjects(common_dir: &Path, from: ObjectId, to: ObjectId) -> Result<Vec<String>> {
@@ -1543,19 +910,32 @@ fn subjects(common_dir: &Path, from: ObjectId, to: ObjectId) -> Result<Vec<Strin
 }
 
 /// The commit branch `name` points at.
-fn tip_of(common_dir: &Path, name: &str) -> Result<ObjectId> {
+pub fn tip_of(common_dir: &Path, name: &str) -> Result<ObjectId> {
     match stack::rev(common_dir, &format!("refs/heads/{name}"))? {
         Some(tip) => Ok(tip),
         None => Err(Refusal::NotFound.error(format!("no branch {name}"))),
     }
 }
 
-fn short(id: ObjectId) -> String {
-    id.to_hex_with_len(12).to_string()
+/// How many own commits branch `name` has on top of what it builds on.
+pub fn own_count(common_dir: &Path, name: &str) -> Result<Option<usize>> {
+    let tip = tip_of(common_dir, name)?;
+    let Some(own) = stack::rev(common_dir, &stack::own_ref(name))? else {
+        return Ok(None);
+    };
+    if !stack::is_ancestor(common_dir, own, tip)? {
+        return Ok(None);
+    }
+    Ok(Some(stack::count(common_dir, own, tip)?))
 }
 
-fn commits(n: usize) -> String {
-    plural(n, "new commit", "new commits")
+/// Whether `name` is the main branch (see `land`).
+pub fn is_trunk(common_dir: &Path, name: &str) -> bool {
+    land::is_trunk(common_dir, &Local::read(common_dir), name)
+}
+
+pub fn short(id: ObjectId) -> String {
+    id.to_hex_with_len(12).to_string()
 }
 
 fn lossy(paths: &[BString]) -> Vec<String> {
@@ -1563,7 +943,7 @@ fn lossy(paths: &[BString]) -> Vec<String> {
 }
 
 /// Paths for a line of output: the first few, and how many more.
-fn shown(paths: &[BString]) -> String {
+pub fn shown(paths: &[BString]) -> String {
     let paths = lossy(paths);
     shown_str(&paths.iter().map(String::as_str).collect::<Vec<_>>())
 }
@@ -1590,14 +970,14 @@ mod tests {
     }
 
     #[test]
-    fn read_tree_refusals_name_the_files_in_the_way() {
-        let said = "error: Entry 'd/c.txt' not uptodate. Cannot merge.\n\
-                    error: Untracked working tree file 'n.txt' would be overwritten by merge.\n";
-        assert_eq!(
-            refused(said),
-            "uncommitted changes to d/c.txt, n.txt overlap the move; commit or stash them"
-        );
-        let locked = "fatal: Unable to create '/x/index.lock': File exists.";
-        assert_eq!(refused(locked), format!("git read-tree refused: {locked}"));
+    fn answers_read_back() {
+        for moved in [
+            Moved::Done(vec!["a".into(), "d/b c".into()]),
+            Moved::Done(Vec::new()),
+            Moved::Already,
+            Moved::Waits("why\nnot".into()),
+        ] {
+            assert_eq!(Moved::decode(&moved.encode()).unwrap(), moved);
+        }
     }
 }

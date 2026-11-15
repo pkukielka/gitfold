@@ -1,29 +1,30 @@
-//! A move under way in a workspace (`cli::layer::moves`): its intent file,
-//! `move` in the state directory, and finishing or undoing one a crash
-//! interrupted.
+//! A move under way in a workspace (`cli::layer::moves`, done by
+//! `fs::workspace::moves`): its intent file, `move` in the state directory,
+//! and finishing or undoing one a crash interrupted.
 //!
-//! The intent is `<mode> <C> <C'> <A> <own ref>`: the branch moves from C
-//! to C' onto parent tip A, its own ref from what it held (`-`: none) to
-//! A. The command doing it holds the file locked (`flock`; locked before
-//! it is linked into place), so `recover` leaves a move in progress
-//! alone. The steps, by mode:
+//! The intent is `<C> <C'> <A> <own ref>`: the branch moves from C to C',
+//! its own commits then starting from A, its own ref from what it held
+//! (`-`: none) to A. The process doing it holds the file locked (`flock`;
+//! locked before it is linked into place), so `recover` leaves a move in
+//! progress alone. The steps, mounted or not, layers shown or not:
 //!
-//! - `open` (a mounted workspace): `git read-tree -m -u C C'` in the
-//!   workspace (its index and files), then the refs.
-//! - `closed` (unmounted): the index (`read-tree -m -i C C'`), then the base
-//!   and the stamps of the changed files (`fs::workspace::move_closed`),
-//!   then the refs.
+//! 1. the index, on the paths the move changes (`move_index`; union files'
+//!    entries are the layers' to set, and left out);
+//! 2. the workspace's base, durably, with the view built over C' (its files
+//!    show C', its layers over it), and the copies of committed files the
+//!    move changes dropped from upper (`stale_copies`);
+//! 3. the refs, in one transaction.
 //!
 //! What a crash left is told by the branch tip, the index on the paths the
-//! move changes, and (closed) the base:
+//! move changes, and the base:
 //!
 //! - tip at C': the refs moved; the own ref is set if it isn't yet;
-//! - tip at C, index at C': open, the files moved too, so the refs follow;
-//!   closed, they follow if the base moved, else the index goes back;
+//! - tip at C, index at C': the refs follow if the base moved, else the
+//!   index goes back;
 //! - tip at C, index at C: nothing moved;
 //! - the branch moved on and the index describes it: forgotten;
 //! - anything else is left as it is, and reported (`forget`, for `gitfold
-//!   layer base main`, deletes it).
+//!   layer remove --all`, deletes it).
 
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
@@ -40,25 +41,17 @@ use crate::git::{self, cmd, stack};
 /// The intent file's name in a workspace's state directory.
 pub const INTENT: &str = "move";
 
-/// Where the move moves the workspace's files (see the module doc).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Open,
-    Closed,
-}
-
 /// A move to do, as its intent file records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Intent {
-    pub mode: Mode,
     /// C: the branch tip before.
     pub from: ObjectId,
     /// C': the branch tip after.
     pub to: ObjectId,
-    /// A: the parent's tip, the own ref's new value.
-    pub parent_tip: ObjectId,
+    /// A: where its own commits start after, the own ref's new value.
+    pub own_to: ObjectId,
     /// What the own ref held (`None`: no ref).
-    pub stack_old: Option<ObjectId>,
+    pub own_from: Option<ObjectId>,
 }
 
 /// An intent recorded and locked by this process: the move is in
@@ -119,7 +112,7 @@ pub fn forget(state: &StateDir) -> Result<bool> {
         Err(e) => return Err(e.into()),
     };
     if !crate::lock::flock(&file)? {
-        bail!("a move of {} onto its base is running", state.branch);
+        bail!("a move of {} is running", state.branch);
     }
     remove(&path)?;
     Ok(true)
@@ -127,31 +120,22 @@ pub fn forget(state: &StateDir) -> Result<bool> {
 
 impl Intent {
     fn encode(&self) -> String {
-        let mode = match self.mode {
-            Mode::Open => "open",
-            Mode::Closed => "closed",
-        };
-        let stack = self.stack_old.map_or("-".to_string(), |o| o.to_string());
-        let (from, to, a) = (self.from, self.to, self.parent_tip);
-        format!("{mode} {from} {to} {a} {stack}\n")
+        let own = self.own_from.map_or("-".to_string(), |o| o.to_string());
+        let (from, to, a) = (self.from, self.to, self.own_to);
+        format!("{from} {to} {a} {own}\n")
     }
 
     fn parse(text: &str) -> Result<Intent> {
         let words: Vec<&str> = text.split_whitespace().collect();
-        let [mode, from, to, a, stack] = words[..] else {
+        let [from, to, a, own] = words[..] else {
             bail!("not a move intent: {text:?}");
         };
         let id = |hex: &str| ObjectId::from_hex(hex.as_bytes());
         Ok(Intent {
-            mode: match mode {
-                "open" => Mode::Open,
-                "closed" => Mode::Closed,
-                _ => bail!("not a move intent: {text:?}"),
-            },
             from: id(from)?,
             to: id(to)?,
-            parent_tip: id(a)?,
-            stack_old: match stack {
+            own_to: id(a)?,
+            own_from: match own {
                 "-" => None,
                 hex => Some(id(hex)?),
             },
@@ -172,14 +156,14 @@ impl Intent {
             .write(true)
             .create_new(true)
             .open(&tmp)
-            .with_context(|| format!("recording a move onto its base in {}", tmp.display()))?;
+            .with_context(|| format!("recording a move in {}", tmp.display()))?;
         let written = (|| -> Result<()> {
             anyhow::ensure!(crate::lock::flock(&file)?, "{} is locked", tmp.display());
             file.write_all(self.encode().as_bytes())?;
             file.sync_all()?;
             fs::hard_link(&tmp, &path).with_context(|| {
                 format!(
-                    "recording a move in {} (a move of {} onto its base is under way)",
+                    "recording a move in {} (a move of {} is under way)",
                     path.display(),
                     state.branch
                 )
@@ -262,22 +246,18 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
         Recovery::Finished
     } else if tip == Some(intent.from) {
         let base = state.read_base()?.id;
-        match (index_at(state, &intent)?, intent.mode) {
-            (Some(true), Mode::Open) => {
+        match index_at(state, &intent)? {
+            Some(true) if base == intent.to => {
                 finish(state, &intent, intent.from)?;
                 Recovery::Finished
             }
-            (Some(true), Mode::Closed) if base == intent.to => {
-                finish(state, &intent, intent.from)?;
-                Recovery::Finished
-            }
-            (Some(true), Mode::Closed) => {
+            Some(true) => {
                 move_index(state, &intent, true)?;
                 Recovery::Undone
             }
-            (Some(false), _) => Recovery::Undone,
-            (None, _) => Recovery::Stuck(format!(
-                "an interrupted move of {} onto its base left its index neither at {} nor at {}",
+            Some(false) => Recovery::Undone,
+            None => Recovery::Stuck(format!(
+                "an interrupted move of {} left its index neither at {} nor at {}",
                 state.branch, intent.from, intent.to
             )),
         }
@@ -287,18 +267,16 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
         // The branch moved on and git's index describes it (a commit, a
         // reset since): whatever the move left is history now.
         log::warn!(
-            "{}: forgetting an interrupted move onto its base from {}: the branch moved on since",
+            "{}: forgetting an interrupted move from {}: the branch moved on since",
             state.branch,
             intent.from
         );
         Recovery::Undone
     } else {
-        let main =
-            crate::cli::layer::land::main_name(common, &crate::settings::Local::read(common));
         Recovery::Stuck(format!(
-            "an interrupted move of {} onto its base, from {}: the branch and its index moved \
-             since; once its workspace is as you want it, `gitfold layer base {main} -w {}` \
-             builds it on {main} and forgets the interrupted move",
+            "an interrupted move of {}, from {}: the branch and its index moved since; once \
+             its workspace is as you want it, `gitfold layer remove --all -w {}` forgets the \
+             interrupted move (and its layers)",
             state.branch, intent.from, state.branch
         ))
     };
@@ -306,24 +284,26 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
 }
 
 /// Moves the branch from `tip` to the intent's C' (if not there) and its
-/// own ref to A, unless the own ref was moved past the intent meanwhile.
+/// own ref to A, unless the own ref was moved past the intent meanwhile;
+/// then drops the copies of committed files the move left (`stale_copies`).
 fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
+    drop_stale_copies(state, intent)?;
     let stored = stack::rev(&state.common_dir, &stack::own_ref(&state.branch))?;
     // Both moved already (the move itself got that far).
-    if tip == intent.to && stored == Some(intent.parent_tip) {
+    if tip == intent.to && stored == Some(intent.own_to) {
         return Ok(());
     }
     let moved = stack::move_refs(
         &state.common_dir,
         &state.branch,
         (tip, intent.to),
-        (intent.stack_old, intent.parent_tip),
-        "gitfold: move onto base (recovered)",
+        (intent.own_from, intent.own_to),
+        "gitfold: move (recovered)",
     );
     if moved.is_err() && tip == intent.to {
-        // Another move or `layer base` set it since: theirs stands.
+        // Another move set it since: theirs stands.
         log::warn!(
-            "{}: the own ref moved during a move onto its base; left at {stored:?}",
+            "{}: the own ref moved during a move; left at {stored:?}",
             state.branch
         );
         return Ok(());
@@ -343,11 +323,75 @@ pub fn changed_paths(intent: &Intent) -> Result<Vec<BString>> {
     })
 }
 
+/// The paths the move changes in the index: `changed_paths` but the union
+/// files shown in the workspace in `state`, whose entries the layers set.
+pub fn index_paths(state: &StateDir, intent: &Intent) -> Result<Vec<BString>> {
+    let union = super::layers::ShownLayers::read(state)?.union;
+    let mut paths: Vec<BString> = (changed_paths(intent)?.into_iter())
+        .filter(|p| !union.contains(p.as_slice()))
+        .collect();
+    paths.dedup();
+    Ok(paths)
+}
+
+/// The upper files of the workspace in `state` at paths the move changes
+/// that are copies of the branch's committed files (as C has them: content
+/// and executable bit), but union files: left by commits made while layers
+/// showed (its base waited), they would hide C'.
+pub fn stale_copies(state: &StateDir, intent: &Intent) -> Result<Vec<BString>> {
+    use std::os::unix::fs::PermissionsExt;
+    let from = git::resolve(&intent.from.to_string())?.tree;
+    let mut out = Vec::new();
+    for path in index_paths(state, intent)? {
+        let file = super::upper_path(&state.upper(), &path);
+        let Ok(meta) = fs::symlink_metadata(&file) else {
+            continue;
+        };
+        let Some(item) = git::with_repo(|repo| git::layers::lookup(repo, from, path.as_ref()))?
+        else {
+            continue;
+        };
+        use gix::objs::tree::EntryKind;
+        let same = match item.kind {
+            EntryKind::Link if meta.is_symlink() => {
+                let target = fs::read_link(&file)?;
+                std::os::unix::ffi::OsStrExt::as_bytes(target.as_os_str())
+                    == git::read_blob(item.oid)?.as_slice()
+            }
+            EntryKind::Blob | EntryKind::BlobExecutable if meta.is_file() => {
+                let exec = meta.permissions().mode() & 0o100 != 0;
+                exec == (item.kind == EntryKind::BlobExecutable)
+                    && meta.len() == git::object_size(item.oid)?.unwrap_or(u64::MAX)
+                    && fs::read(&file)? == git::read_blob(item.oid)?
+            }
+            _ => false,
+        };
+        if same {
+            out.push(path);
+        }
+    }
+    Ok(out)
+}
+
+/// Drops `stale_copies` from upper, for a recovered move whose base moved.
+fn drop_stale_copies(state: &StateDir, intent: &Intent) -> Result<()> {
+    if state.read_base().map(|b| b.id).ok() != Some(intent.to) {
+        return Ok(());
+    }
+    for path in stale_copies(state, intent)? {
+        match fs::remove_file(super::upper_path(&state.upper(), &path)) {
+            Err(e) if e.kind() != ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Whether the workspace's index is at C' (`Some(true)`) or at C
 /// (`Some(false)`) on the paths the move changes, or neither.
 fn index_at(state: &StateDir, intent: &Intent) -> Result<Option<bool>> {
-    let paths = changed_paths(intent)?;
-    // C and C' have the same tree: the index is at both.
+    let paths = index_paths(state, intent)?;
+    // C and C' have the same tree there: the index is at both.
     if paths.is_empty() {
         return Ok(Some(true));
     }
@@ -359,7 +403,7 @@ fn index_at(state: &StateDir, intent: &Intent) -> Result<Option<bool>> {
 
 /// Whether the workspace's index has `commit`'s entries at `paths` (none:
 /// the whole index).
-fn index_matches(state: &StateDir, commit: ObjectId, paths: &[BString]) -> Result<bool> {
+pub fn index_matches(state: &StateDir, commit: ObjectId, paths: &[BString]) -> Result<bool> {
     let status = cmd::command(&state.admin)
         .env("GIT_LITERAL_PATHSPECS", "1")
         .args([
@@ -382,15 +426,36 @@ fn index_matches(state: &StateDir, commit: ObjectId, paths: &[BString]) -> Resul
 }
 
 /// Moves the index of the workspace in `state` from C to C' (`back`: from
-/// C' to C), without its files: entries git has staged changes in are
-/// refused.
+/// C' to C) on `index_paths`, without its files: each entry C' has there
+/// (none: removed), as `git update-index --index-info` sets them.
 pub fn move_index(state: &StateDir, intent: &Intent, back: bool) -> Result<()> {
-    let (from, to) = match back {
-        false => (intent.from, intent.to),
-        true => (intent.to, intent.from),
+    let to = match back {
+        false => intent.to,
+        true => intent.from,
     };
-    let (from, to) = (from.to_string(), to.to_string());
-    cmd::output(&state.admin, &["read-tree", "-m", "-i", &from, &to]).map(drop)
+    let tree = git::resolve(&to.to_string())?.tree;
+    let mut input = Vec::new();
+    for path in index_paths(state, intent)? {
+        let item = git::with_repo(|repo| git::layers::lookup(repo, tree, path.as_ref()))?;
+        match item {
+            Some(item) => {
+                let mode = match item.kind {
+                    gix::objs::tree::EntryKind::BlobExecutable => "100755",
+                    gix::objs::tree::EntryKind::Link => "120000",
+                    gix::objs::tree::EntryKind::Commit => "160000",
+                    _ => "100644",
+                };
+                input.extend_from_slice(format!("{mode} {}\t", item.oid).as_bytes());
+            }
+            None => input.extend_from_slice(b"0 0000000000000000000000000000000000000000\t"),
+        }
+        input.extend_from_slice(&path);
+        input.push(0);
+    }
+    if input.is_empty() {
+        return Ok(());
+    }
+    cmd::output_with_input(&state.admin, &["update-index", "-z", "--index-info"], input).map(drop)
 }
 
 #[cfg(test)]
@@ -435,11 +500,10 @@ mod tests {
         // The branch and its own ref both moved: the move got that far.
         stack::set_base(&common, "p2", c1).unwrap();
         let intent = Intent {
-            mode: Mode::Open,
             from: c2,
             to: c3,
-            parent_tip: c1,
-            stack_old: Some(c2),
+            own_to: c1,
+            own_from: Some(c2),
         };
         intent.begin(&state).unwrap().keep();
         assert!(pending(&state));
@@ -452,8 +516,8 @@ mod tests {
         );
         // Only the own ref left to move.
         let intent = Intent {
-            stack_old: Some(c1),
-            parent_tip: c2,
+            own_from: Some(c1),
+            own_to: c2,
             ..intent
         };
         intent.begin(&state).unwrap().keep();
@@ -468,11 +532,10 @@ mod tests {
     fn held_intents_go_unless_kept() {
         let (_r, state, [c1, c2, c3]) = workspace("move-held");
         let intent = Intent {
-            mode: Mode::Open,
             from: c1,
             to: c2,
-            parent_tip: c3,
-            stack_old: None,
+            own_to: c3,
+            own_from: None,
         };
         let held = intent.begin(&state).unwrap();
         assert!(intent.begin(&state).is_err(), "one at a time");
@@ -497,11 +560,10 @@ mod tests {
         let (r, state, [c1, c2, _]) = workspace("move-moved");
         // The branch is at c3 and its index describes it: neither C nor C'.
         let intent = Intent {
-            mode: Mode::Open,
             from: c1,
             to: c2,
-            parent_tip: c1,
-            stack_old: None,
+            own_to: c1,
+            own_from: None,
         };
         intent.begin(&state).unwrap().keep();
         assert_eq!(settled(&state), Recovery::Undone);
@@ -515,7 +577,7 @@ mod tests {
             panic!("not stuck")
         };
         assert!(
-            why.contains("`gitfold layer base main -w p2` builds it on main"),
+            why.contains("`gitfold layer remove --all -w p2` forgets"),
             "{why}"
         );
         assert!(pending(&state));
@@ -526,18 +588,16 @@ mod tests {
         let id = |n: u8| ObjectId::from_bytes_or_panic(&[n; 20]);
         for intent in [
             Intent {
-                mode: Mode::Open,
                 from: id(1),
                 to: id(2),
-                parent_tip: id(3),
-                stack_old: Some(id(4)),
+                own_to: id(3),
+                own_from: Some(id(4)),
             },
             Intent {
-                mode: Mode::Closed,
                 from: id(1),
                 to: id(2),
-                parent_tip: id(3),
-                stack_old: None,
+                own_to: id(3),
+                own_from: None,
             },
         ] {
             assert_eq!(Intent::parse(&intent.encode()).unwrap(), intent);

@@ -155,9 +155,13 @@ impl Workspace {
                 Recovery::Stuck(why) => return Err(anyhow!("{why}")),
             }
         }
-        // Layers taken off for a move that was interrupted: put back (the
-        // switch below shows them).
-        crate::state::layers::put_back_if_left(&self.state)?;
+        // A move that changed what the branch builds on, interrupted: its
+        // layers settled (unless a command is at it), shown below.
+        if self.state.dir.join(crate::state::layers::NEXT).exists()
+            && let Some(_lock) = crate::state::layers::try_lock(&self.state)?
+        {
+            crate::state::layers::settle(&self.state)?;
+        }
         // With layers shown, commits made on the layers commit go onto the
         // branch (see `layers`), but the base waits, and an upper file
         // identical to a layer's mustn't be dropped as unchanged.

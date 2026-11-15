@@ -1,11 +1,13 @@
-//! Stacked branches on the git side. Branch b is built on a parent branch a
-//! (`settings`: `branch.<b>.gitfoldParent`); its **parent base** B is the
-//! commit of a that b's own commits sit on, kept by `refs/gitfold-own/<b>`.
-//! b's own commits are `B..b`, whatever happens to a later (amends, force
-//! pushes): with only `merge-base(a, b)`, a rewritten parent would have its
-//! old commits replayed too.
+//! Moves of a branch's own commits, on the git side. Branch b builds on its
+//! editable layers (`state::layers`); the commit its own commits sit on,
+//! B, is kept by `refs/gitfold-own/<b>`: one layer's commit, or with
+//! several, a merge of theirs gitfold makes (`merge_parts`). b's own
+//! commits are `B..b`, whatever happens to a layer's branch later (amends,
+//! force pushes): with only `merge-base(a, b)`, a rewritten branch would
+//! have its old commits replayed too.
 //!
-//! Moving b onto a's tip A copies each commit C of `B..b`, oldest first,
+//! Moving b onto A (a layer's new tip, or a new merge) copies each commit C
+//! of `B..b`, oldest first,
 //! onto the copy of its parent: `merge_trees(base = C^, ours = the copy so
 //! far, theirs = C)`, with C's author, committer and message
 //! (`layers::copy_commit`). These are the commits `git rebase --onto A B b`
@@ -17,80 +19,23 @@
 
 use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use gix::ObjectId;
 use gix::bstr::BString;
 
 use super::cmd;
 use super::layers::{commit_tree, copy_commit, merge_trees};
 
-/// The own refs: `refs/gitfold-own/<branch>` keeps a stacked branch's
-/// parent base.
+/// The own refs: `refs/gitfold-own/<branch>` keeps where a branch.s own
+/// commits start.
 pub const OWN_REFS: &str = "refs/gitfold-own/";
 
 /// No object: in an `update-ref` transaction, "the ref must not exist".
 const NO_REF: &str = "0000000000000000000000000000000000000000";
 
-/// The ref keeping the parent base of `branch`.
+/// The ref keeping where the own commits of `branch` start.
 pub fn own_ref(branch: &str) -> String {
     format!("{OWN_REFS}{branch}")
-}
-
-/// A stacked branch's parent base.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Base {
-    /// B: the commit the branch's own commits sit on.
-    pub commit: ObjectId,
-    /// What its own ref holds now (`None`: no ref), for the transaction's
-    /// compare-and-swap.
-    pub stored: Option<ObjectId>,
-    /// The ref was missing or not an ancestor of the branch (a `git branch
-    /// -m` doesn't rename it), so B was guessed.
-    pub guessed: bool,
-}
-
-/// The parent base of `branch` (at `tip`) on the parent with full ref name
-/// `parent_ref` (at `parent_tip`): its own ref, if that is an ancestor of
-/// `tip`; else guessed by git's `--fork-point` rule (the newest entry of the
-/// parent's reflog that is an ancestor of the branch), else their merge
-/// base.
-pub fn parent_base(
-    common_dir: &Path,
-    branch: &str,
-    parent_ref: &str,
-    tip: ObjectId,
-    parent_tip: ObjectId,
-) -> Result<Base> {
-    let stored = rev(common_dir, &own_ref(branch))?;
-    if let Some(commit) = stored
-        && is_ancestor(common_dir, commit, tip)?
-    {
-        return Ok(Base {
-            commit,
-            stored,
-            guessed: false,
-        });
-    }
-    let tip_hex = tip.to_string();
-    let fork_point = cmd::command(common_dir)
-        .args(["merge-base", "--fork-point", parent_ref, &tip_hex])
-        .output()?;
-    let commit = match fork_point.status.success() {
-        true => parse_id(&fork_point.stdout)?,
-        false => merge_base_of(common_dir, parent_tip, tip)?,
-    };
-    Ok(Base {
-        commit,
-        stored,
-        guessed: true,
-    })
-}
-
-/// `git merge-base a b`.
-fn merge_base_of(common_dir: &Path, a: ObjectId, b: ObjectId) -> Result<ObjectId> {
-    let out = cmd::output(common_dir, &["merge-base", &a.to_string(), &b.to_string()])
-        .with_context(|| format!("{a} and {b} have no common ancestor"))?;
-    parse_id(&out)
 }
 
 /// The commit `spec` names, if it names one.
@@ -197,6 +142,123 @@ pub fn compute_move(
         copied,
         dropped,
     })
+}
+
+/// The own commits of `base..tip` that don't apply onto `onto` (each tried
+/// onto the copies of those before it that do), with the paths where they
+/// conflict: the commits that can't stand without what `base` has and
+/// `onto` doesn't (an editable layer's lines). A merge in the range is
+/// listed as it is, with no paths.
+pub fn dependent(
+    repo: &gix::Repository,
+    base: ObjectId,
+    onto: ObjectId,
+    tip: ObjectId,
+) -> Result<Vec<(ObjectId, Vec<BString>)>> {
+    let range = format!("{base}..{tip}");
+    let args = ["rev-list", "--reverse", "--topo-order", "--parents", &range];
+    let out = cmd::output(repo.common_dir(), &args)?;
+    let mut at = commit_tree(repo, onto)?;
+    let mut found = Vec::new();
+    for line in String::from_utf8_lossy(&out).lines() {
+        let ids = line
+            .split(' ')
+            .map(|hex| ObjectId::from_hex(hex.as_bytes()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let [commit, parent] = ids[..] else {
+            found.push((ids[0], Vec::new()));
+            continue;
+        };
+        let (parent_tree, tree) = (commit_tree(repo, parent)?, commit_tree(repo, commit)?);
+        match merge_trees(repo, parent_tree, at, tree)? {
+            Ok(merged) => at = merged,
+            Err(paths) => found.push((commit, paths)),
+        }
+    }
+    Ok(found)
+}
+
+/// The subject of the merge commit a branch's own commits sit on when it
+/// builds on several editable layers (`merge_parts`).
+const MERGE_SUBJECT: &str = "gitfold: built on";
+
+/// What a branch with several editable layers builds on: one commit, the
+/// merge of `parts` (the layers' names and the commits of theirs it builds
+/// on, in order), made with a fixed identity and date (as snapshots), so
+/// the same parts make the same commit; a single part is that commit
+/// itself. Its message names the parts (`parts_of` reads them back). If
+/// they conflict, the paths.
+pub fn merge_parts(
+    repo: &gix::Repository,
+    parts: &[(String, ObjectId)],
+) -> Result<std::result::Result<ObjectId, Vec<BString>>> {
+    let Some((_, first)) = parts.first() else {
+        bail!("nothing to merge");
+    };
+    if parts.len() == 1 {
+        return Ok(Ok(*first));
+    }
+    let common_dir = repo.common_dir();
+    let mut tree = commit_tree(repo, *first)?;
+    for (i, (_, commit)) in parts.iter().enumerate().skip(1) {
+        let mut args = vec!["merge-base".to_string(), commit.to_string()];
+        args.extend(parts[..i].iter().map(|(_, c)| c.to_string()));
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let base = match cmd::output(common_dir, &args) {
+            Ok(out) => commit_tree(repo, parse_id(&out)?)?,
+            Err(_) => bail!("{} shares no history with the others", parts[i].0),
+        };
+        match merge_trees(repo, base, tree, commit_tree(repo, *commit)?)? {
+            Ok(merged) => tree = merged,
+            Err(paths) => return Ok(Err(paths)),
+        }
+    }
+    let me = gix::actor::Signature {
+        name: "gitfold".into(),
+        email: "gitfold@localhost".into(),
+        // 2020-01-01T00:00:00Z, as snapshots.
+        time: gix::date::Time {
+            seconds: 1_577_836_800,
+            offset: 0,
+        },
+    };
+    let names: Vec<&str> = parts.iter().map(|(n, _)| n.as_str()).collect();
+    let mut message = format!("{MERGE_SUBJECT} {}\n\n", names.join(" + "));
+    for name in &names {
+        message += &format!("on {name}\n");
+    }
+    let commit = gix::objs::Commit {
+        tree,
+        parents: parts.iter().map(|(_, c)| *c).collect(),
+        author: me.clone(),
+        committer: me,
+        encoding: None,
+        message: message.into(),
+        extra_headers: Vec::new(),
+    };
+    Ok(Ok(repo.write_object(&commit)?.detach()))
+}
+
+/// The parts of `commit` if it is a merge `merge_parts` made: the names and
+/// commits it merges.
+pub fn parts_of(
+    repo: &gix::Repository,
+    commit: ObjectId,
+) -> Result<Option<Vec<(String, ObjectId)>>> {
+    let commit = repo.find_commit(commit)?;
+    let parents: Vec<ObjectId> = commit.parent_ids().map(|p| p.detach()).collect();
+    let message = commit.message_raw()?.to_string();
+    if parents.len() < 2 || !message.starts_with(MERGE_SUBJECT) {
+        return Ok(None);
+    }
+    let names: Vec<String> = (message.lines())
+        .filter_map(|l| l.strip_prefix("on "))
+        .map(str::to_string)
+        .collect();
+    if names.len() != parents.len() {
+        return Ok(None);
+    }
+    Ok(Some(names.into_iter().zip(parents).collect()))
 }
 
 /// Moves `branch` from `tip.0` to `tip.1` and its own ref from
@@ -329,12 +391,10 @@ pub fn landing(
     let commits = touching(common_dir, from, target, &paths)?;
     let walked = commits.len().min(MAX_WALK);
     if walked < commits.len() {
-        let local = crate::settings::Local::read(common_dir);
-        let main = crate::cli::layer::land::main_name(common_dir, &local);
         log::warn!(
             "checking whether {base} landed: only the newest {walked} of {} commits since \
-             {from} touching its files; `gitfold layer base {main}` builds it on {main} if it \
-             landed earlier",
+             {from} touching its files; `gitfold layer remove <LAYER>` takes a branch's \
+             commits off a layer that landed earlier",
             commits.len()
         );
     }
@@ -627,33 +687,61 @@ mod tests {
     }
 
     #[test]
-    fn the_parent_base_is_guessed_without_its_ref() {
-        let r = stack("stack-base");
+    fn several_layers_merge_into_one_commit() {
+        let r = stack("stack-parts");
         let common = r.common();
-        let old_p1 = r.id("p1");
-        let base =
-            |r: &Repo| parent_base(&common, "p2", "refs/heads/p1", r.id("p2"), r.id("p1")).unwrap();
-        let guessed = base(&r);
-        assert_eq!((guessed.commit, guessed.guessed), (old_p1, true));
-        set_base(&common, "p2", old_p1).unwrap();
-        fix_p1(&r, "6", "6 fix");
-        let stored = base(&r);
+        r.git(&["switch", "-q", "-c", "q", "main"]);
+        r.write("q.txt", "q\n");
+        r.commit("q");
+        let repo = r.open();
+        let parts = vec![("p1".to_string(), r.id("p1")), ("q".to_string(), r.id("q"))];
+        let merge = merge_parts(&repo, &parts).unwrap().unwrap();
         assert_eq!(
-            stored,
-            Base {
-                commit: old_p1,
-                stored: Some(old_p1),
-                guessed: false
-            }
+            merge_parts(&repo, &parts).unwrap().unwrap(),
+            merge,
+            "the same parts, the same commit"
         );
-        // A ref that isn't an ancestor of the branch (a renamed branch's
-        // leftover, say): the fork point instead.
+        assert_eq!(parts_of(&repo, merge).unwrap(), Some(parts.clone()));
+        assert_eq!(
+            r.git(&[
+                "show",
+                "--format=",
+                "--name-only",
+                "-m",
+                "--first-parent",
+                &merge.to_string()
+            ]),
+            "q.txt"
+        );
+        assert_eq!(merge_parts(&repo, &parts[..1]).unwrap(), Ok(r.id("p1")));
+        assert_eq!(parts_of(&repo, r.id("p1")).unwrap(), None);
+        r.git(&["switch", "-q", "-c", "other", "main"]);
+        edit(&r, "5", "5 other");
+        r.commit("other");
+        let both = [
+            ("p1".to_string(), r.id("p1")),
+            ("other".to_string(), r.id("other")),
+        ];
+        assert_eq!(
+            merge_parts(&r.open(), &both).unwrap(),
+            Err(vec![BString::from("f.txt")]),
+            "a conflict names the paths"
+        );
         set_base(&common, "p2", r.id("p1")).unwrap();
-        let fork_point = base(&r);
-        assert_eq!((fork_point.commit, fork_point.guessed), (old_p1, true));
+        assert_eq!(rev(&common, &own_ref("p2")).unwrap(), Some(r.id("p1")));
         drop_base(&common, "p2").unwrap();
         assert_eq!(rev(&common, &own_ref("p2")).unwrap(), None);
-        assert_eq!(count(&common, old_p1, r.id("p1")).unwrap(), 1);
+        assert_eq!(count(&common, r.id("main"), r.id("p1")).unwrap(), 2);
+    }
+
+    #[test]
+    fn commits_changing_a_layers_lines_are_listed() {
+        let r = stack("stack-dependent");
+        r.git(&["switch", "-q", "p2"]);
+        edit(&r, "5 p1", "5 p1 and p2");
+        let dependent_one = r.commit("p2 changes p1's line");
+        let found = dependent(&r.open(), r.id("p1"), r.id("main"), r.id("p2")).unwrap();
+        assert_eq!(found, vec![(dependent_one, vec![BString::from("f.txt")])]);
     }
 
     /// `stack` with main moved on (another file), checked out on main.

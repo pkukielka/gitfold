@@ -9,8 +9,8 @@
 //! - `snapshot`: a workspace's uncommitted work as a commit (`gitfold snapshot`).
 //! - `layers`: other workspaces' work shown in one, and its storage.
 //! - `follow`: moving a workspace's live layers to their latest work.
-//! - `moves`: a stacked branch's move under way in a workspace (its
-//!   intent file), and recovering one a crash interrupted.
+//! - `moves`: a move of a branch's own commits under way in its workspace
+//!   (its intent file), and recovering one a crash interrupted.
 //! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //!
 //! The state of the workspace of branch `b` is `.git/gitfold/<id>/`, `<id>`
@@ -238,10 +238,13 @@ pub fn list(common_dir: &Path) -> Result<Vec<Stored>> {
             continue;
         }
         let branch = read_branch(&entry.path()).unwrap_or_else(|| workspace_branch(&id));
-        list.push(Stored {
-            state: StateDir::of_id(common_dir, &id, &branch),
-            branch,
-        });
+        let state = StateDir::of_id(common_dir, &id, &branch);
+        // A branch without a workspace, its editable layers stored here
+        // (`layers`): not a workspace.
+        if !state.opened() && !state.upper().exists() {
+            continue;
+        }
+        list.push(Stored { state, branch });
     }
     list.sort_by(|a, b| a.branch.cmp(&b.branch));
     Ok(list)

@@ -85,6 +85,12 @@ pub enum Request {
     /// Show the layers stored for the workspace of `branch` (just changed),
     /// if it is open.
     Layers { branch: String },
+    /// Move the branch of the open workspace `branch` as `intent` says,
+    /// showing the layers it will have then (`fs::workspace::moves`).
+    Move {
+        branch: String,
+        intent: crate::state::moves::Intent,
+    },
     /// The branches whose workspaces are open, one per line.
     Open,
 }
@@ -93,7 +99,7 @@ impl Request {
     /// Whether answering may take long (copying or reading a workspace's
     /// changes): such requests are answered on threads of their own.
     fn is_long(&self) -> bool {
-        matches!(self, Request::Fork { .. })
+        matches!(self, Request::Fork { .. } | Request::Move { .. })
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -109,6 +115,11 @@ impl Request {
             Request::TrackReads { branch } => format!("track-reads\n{branch}\n"),
             Request::Fork { from, to } => format!("fork\n{from}\n{to}\n"),
             Request::Layers { branch } => format!("layers\n{branch}\n"),
+            Request::Move { branch, intent } => {
+                let own = intent.own_from.map_or("-".into(), |o| o.to_string());
+                let (from, to, a) = (intent.from, intent.to, intent.own_to);
+                format!("move\n{branch}\n{from}\n{to}\n{a}\n{own}\n")
+            }
             Request::Version => "version\n".to_string(),
             Request::Open => "open\n".to_string(),
             // NUL-separated: a path may hold a newline.
@@ -148,6 +159,21 @@ impl Request {
             ["layers", branch, ""] => Ok(Request::Layers {
                 branch: branch.to_string(),
             }),
+            ["move", branch, from, to, a, own, ""] => {
+                let id = |hex: &str| gix::ObjectId::from_hex(hex.as_bytes());
+                Ok(Request::Move {
+                    branch: branch.to_string(),
+                    intent: crate::state::moves::Intent {
+                        from: id(from)?,
+                        to: id(to)?,
+                        own_to: id(a)?,
+                        own_from: match own {
+                            "-" => None,
+                            hex => Some(id(hex)?),
+                        },
+                    },
+                })
+            }
             _ => bail!(UNKNOWN),
         }
     }
@@ -336,6 +362,18 @@ mod tests {
             requests.push(Request::Layers {
                 branch: n.to_string(),
             });
+            let id = |n: u8| gix::ObjectId::from_bytes_or_panic(&[n; 20]);
+            for own_from in [None, Some(id(4))] {
+                requests.push(Request::Move {
+                    branch: n.to_string(),
+                    intent: crate::state::moves::Intent {
+                        from: id(1),
+                        to: id(2),
+                        own_to: id(3),
+                        own_from,
+                    },
+                });
+            }
             requests.push(Request::Fork {
                 from: n.to_string(),
                 to: format!("{n}-2"),

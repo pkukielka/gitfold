@@ -19,7 +19,7 @@
 //! - `follow`: its live layers moved by the daemon when no agent works in it.
 //! - `nodes`: local id ↔ (parent, name) table.
 //! - `rebase`: moving the base to the branch tip.
-//! - `moves`: a closed workspace's base moved for a move, visibly.
+//! - `moves`: a move of its branch, its base moved with it, visibly.
 //! - `reads`: recording the files read in it (`gitfold overlaps`).
 //! - `times`: timestamps of files dropped from upper (only the mount uses them).
 //! - `write`: mutations and copy-up.
@@ -37,7 +37,7 @@ mod times;
 mod write;
 
 pub use follow::{Activities, Activity};
-pub use moves::move_closed;
+pub use moves::Moved;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
@@ -167,6 +167,8 @@ struct Layers {
     view: ObjectId,
     /// The paths layers changed, with the layers' indexes (see `layers`).
     mixed: std::collections::HashMap<Vec<u8>, Vec<usize>>,
+    /// The paths of `mixed` only editable layers changed: writable.
+    writable: HashSet<Vec<u8>>,
     /// Whether any layer is shown.
     layers_on: bool,
     /// H: the base's tree with the union files union-merged (the base's tree
@@ -288,6 +290,7 @@ impl Workspace {
             view_tree: base_tree,
             view: base.tree,
             mixed: Default::default(),
+            writable: Default::default(),
             layers_on: false,
             hunk: base.tree,
             union: Default::default(),

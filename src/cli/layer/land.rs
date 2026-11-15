@@ -1,18 +1,20 @@
-//! A stacked branch's parent that landed: where its work lands (its
-//! target), whether the branch's parent base landed there
-//! (`git::stack::landing`, cached), and the trunk.
+//! An editable layer that landed: where its work lands (its target),
+//! whether the commit of it a branch sits on landed there
+//! (`git::stack::landing`, cached), and the trunk (the main branch).
 //!
-//! A parent's target is its own parent if it is stacked (p1 merged into
-//! p0, a stacked pull request's base), else the trunk: `gitfold.trunk`, else
-//! the branch `origin/HEAD` names (`origin/main`), else a local `main` or
-//! `master`. The trunk may be a remote-tracking branch, so a parent is
-//! resolved as a local branch first, then a remote-tracking one.
+//! A layer's target is the one branch it builds on itself (its one
+//! editable layer: p1 merged into p0, a stacked pull request's base), else
+//! the trunk: `gitfold.trunk`, else the branch `origin/HEAD` names
+//! (`origin/main`), else a local `main` or `master`. The trunk may be a
+//! remote-tracking branch, so a name is resolved as a local branch first,
+//! then a remote-tracking one.
 //!
-//! The answer for a (parent base, target tip) pair never changes, so it is
-//! kept in `<common>/gitfold/.landings`, one line per pair: `list`
-//! and the hook ask on every call, and a walk of a busy trunk costs a merge
-//! per commit touching the parent's paths. The key includes what was
-//! recorded about the base (`record`), which tells a fast-forward apart.
+//! The answer for a (commit, target tip) pair never changes, so it is kept
+//! in `<common>/gitfold/.landings`, one line per pair: `list` and the hook
+//! ask on every call, and a walk of a busy trunk costs a merge per commit
+//! touching the layer's paths. The key includes whether the layer's branch
+//! is gone: only then is a commit on the target's first-parent line taken
+//! for a fast-forward (while it is there, a fresh branch looks the same).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +29,7 @@ use crate::settings::Local;
 /// How many answers the cache keeps (the newest).
 const CACHED: usize = 512;
 
-/// Where a parent's work lands.
+/// Where a layer's work lands.
 pub struct Target {
     /// As `gitfoldParent` names it: a branch, or the trunk as configured.
     pub name: String,
@@ -100,14 +102,8 @@ pub fn trunk_tip(
     })
 }
 
-/// Whether `a` and `b` name the same target: equal, or both the trunk
-/// (`main` and `origin/main`).
-pub fn same(common_dir: &Path, local: &Local, a: &str, b: &str) -> bool {
-    a == b || (is_trunk(common_dir, local, a) && is_trunk(common_dir, local, b))
-}
-
-/// Whether `name` is the trunk: a parent never moved onto at a turn
-/// boundary (following the trunk is `layer base`'s, on request).
+/// Whether `name` is the trunk: never an editable layer (every branch
+/// sits on it already).
 /// A local branch tracking it counts too (`main` for `origin/main`): a
 /// branch stacked on it would otherwise be moved on every pull, and its
 /// own commits taken for landed once rebased onto the trunk.
@@ -128,7 +124,7 @@ fn local_of(common_dir: &Path, trunk: &str) -> Option<String> {
         .map(|_| branch.to_string())
 }
 
-/// The full ref name and commit of parent `name`: a local branch, else a
+/// The full ref name and commit of branch `name`: a local branch, else a
 /// remote-tracking branch (a trunk such as `origin/main`).
 pub fn resolve(common_dir: &Path, name: &str) -> Result<Option<(String, ObjectId)>> {
     for full in [format!("refs/heads/{name}"), format!("refs/remotes/{name}")] {
@@ -153,13 +149,17 @@ pub fn gone(common_dir: &Path, local: &Local, parent: &str) -> Result<bool> {
     Ok(stack::rev(common_dir, &format!("refs/remotes/{remote}/{theirs}"))?.is_none())
 }
 
-/// Where the work of `parent` lands: its own parent, else the trunk (`None`
-/// if there is none, or `parent` is it).
-pub fn target(common_dir: &Path, local: &Local, parent: &str) -> Result<Option<Target>> {
-    let name = match local.parent(parent) {
-        Some(above) => above,
-        None => match trunk(common_dir, local) {
-            Some(trunk) if !is_trunk(common_dir, local, parent) => trunk,
+/// Where the work of branch `layer` lands: the one branch it builds on
+/// itself (its one editable layer: a stacked pull request's base), else
+/// the trunk (`None` if there is none, or `layer` is it).
+pub fn target(common_dir: &Path, local: &Local, layer: &str) -> Result<Option<Target>> {
+    let theirs = crate::state::layers::Layers::read(&crate::state::StateDir::of(common_dir, layer))
+        .unwrap_or_default()
+        .editable_names();
+    let name = match &theirs[..] {
+        [above] => above.clone(),
+        _ => match trunk(common_dir, local) {
+            Some(trunk) if !is_trunk(common_dir, local, layer) => trunk,
             _ => return Ok(None),
         },
     };
@@ -180,7 +180,7 @@ pub fn named(common_dir: &Path, name: String) -> Result<Option<Target>> {
     Ok(Some(Target { name, tip, pr_base }))
 }
 
-/// Whether parent base `base` landed on `target`, and where
+/// Whether commit `base` (of an editable layer) landed on `target`, and where
 /// (`git::stack::landing`), remembered: a landing while the target still
 /// has it, "not landed up to tip T" as a starting point, so after a fetch
 /// only the target's new commits are walked.
@@ -247,45 +247,6 @@ fn how_code(how: How) -> &'static str {
         How::Squashed => "s",
     }
 }
-
-/// Whether the parent base `base` of `branch` was in `target` (named) when
-/// it was recorded, if that is what was recorded (`gitfoldBaseOnTarget`).
-pub fn was_on_target(local: &Local, branch: &str, base: ObjectId, target: &str) -> Option<bool> {
-    let record = local.base_on_target(branch)?;
-    let mut words = record.split(' ');
-    let (Some(at), Some(on), Some(answer)) = (words.next(), words.next(), words.next()) else {
-        return None;
-    };
-    if ObjectId::from_hex(at.as_bytes()).ok() != Some(base) || on != target {
-        return None;
-    }
-    match answer {
-        "yes" => Some(true),
-        "no" => Some(false),
-        _ => None,
-    }
-}
-
-/// Records whether parent base `base` of `branch`, stacked on `parent`, is
-/// in the parent's target now (`gitfoldBaseOnTarget`): a later fast-forward
-/// of the parent into it is then told apart from a fresh parent, whose base
-/// was there all along. Forgotten where the parent has no target.
-pub fn record(common_dir: &Path, branch: &str, parent: &str, base: ObjectId) -> Result<()> {
-    let local = Local::read(common_dir);
-    let record = match target(common_dir, &local, parent)? {
-        Some(target) => {
-            let on = stack::is_ancestor(common_dir, base, target.tip)?;
-            Some(format!(
-                "{base} {} {}",
-                target.name,
-                if on { "yes" } else { "no" }
-            ))
-        }
-        None => None,
-    };
-    crate::settings::set_base_on_target(common_dir, branch, record.as_deref())
-}
-
 /// A cached answer, after its key: the target tip it was found at, then
 /// `-` (not landed up to it) or `<at> m|s`; `None` if unreadable.
 fn parse(answer: &str) -> Option<(ObjectId, Option<Landing>)> {

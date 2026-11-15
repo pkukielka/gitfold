@@ -1,7 +1,8 @@
-//! `gitfold layer`: other branches' work shown in a workspace, read-only,
-//! over its base (see `state::layers`), and the base itself (`layer base`,
-//! see `moves`). The layers are stored with the workspace; while mounted,
-//! the daemon shows them at once.
+//! `gitfold layer`: other branches' work shown in a workspace (see
+//! `state::layers`), see-only (read-only) or editable (`--edit`: the branch
+//! builds on it, its commits sitting on the layer's; see `moves`). The
+//! layers are stored with the workspace (or, for a branch without one, its
+//! editable layers alone); while mounted, the daemon shows them at once.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -30,107 +31,84 @@ const SHOWN_CONFLICTS: usize = 5;
 pub struct LayerArgs {
     #[command(subcommand)]
     pub op: Option<LayerOp>,
-    /// As Claude Code's `UserPromptSubmit` hook (`user-prompt-submit`): bring
-    /// the live layers of the workspace the session is in up to date (an
-    /// agent's workspace as it was when its last turn ended, one without an
-    /// agent as it is now, or a branch's tip), move it onto its base's new
-    /// commits if it is built on one (`gitfold layer base`), and say what
-    /// changed; from then on, only its turns move its layers. As
-    /// `PreToolUse` on
-    /// Edit, Write, MultiEdit and NotebookEdit (`pre-tool-use`): deny
-    /// writing a layer's file, saying why and what to do instead (build on
-    /// its branch, propose a change, ask its agent, remove the layer; for
-    /// an edit that only adds lines, mark the file `merge=union`).
+    /// As Claude Code's `UserPromptSubmit` hook (`user-prompt-submit`):
+    /// move the workspace the session is in onto its editable layers' new
+    /// commits (and onto where one landed, once its branch is gone), bring
+    /// its live layers up to date (an agent's workspace as it was when its
+    /// last turn ended, one without an agent as it is now, or a branch's
+    /// tip), and say what changed; from then on, only its turns move its
+    /// layers. As `PreToolUse` on Edit, Write, MultiEdit and NotebookEdit
+    /// (`pre-tool-use`): deny writing a see-only layer's file, saying why
+    /// and what to do instead (build on its branch, propose a change, ask
+    /// its agent, remove the layer; for an edit that only adds lines, mark
+    /// the file `merge=union`).
     #[arg(long, value_name = "EVENT", value_parser = ["user-prompt-submit", "pre-tool-use"])]
     pub claude_hook: Option<String>,
-    /// The workspace (default: the one you are in).
+    /// The workspace (default: the one you are in); with `--edit`, any
+    /// branch.
     #[arg(short = 'w', long, global = true, value_name = "BRANCH")]
     pub workspace: Option<String>,
 }
 
 #[derive(Subcommand)]
 pub enum LayerOp {
-    /// Show BRANCH's work in the workspace, read-only, kept up to date.
+    /// Show BRANCH's work in the workspace, kept up to date; with --edit,
+    /// build on it.
     ///
     /// A branch with a workspace shows its work, uncommitted included;
-    /// one without, its commits. A tag or a commit shows as it is. Adding
-    /// it again replaces it (and brings it up to date). Kept up to date at
-    /// the start of each of your agent's turns (the `UserPromptSubmit`
-    /// hook), or, in a workspace without an agent, while mounted, once
-    /// nothing has written to it for 3 seconds.
+    /// one without, its commits. A tag or a commit shows as it is. Its
+    /// files are read-only here. Adding it again replaces it (and brings
+    /// it up to date). Kept up to date at the start of each of your
+    /// agent's turns (the `UserPromptSubmit` hook), or, in a workspace
+    /// without an agent, while mounted, once nothing has written to it for
+    /// 3 seconds.
+    ///
+    /// With --edit, your commits sit on BRANCH's commits (they move there
+    /// now, and onto its new commits at your turns), and what it committed
+    /// is yours to edit; what it hasn't committed yet shows on top. A pull
+    /// request for your branch then includes BRANCH's commits until BRANCH
+    /// lands. Several editable layers: your commits sit on a merge of
+    /// theirs. Adding an editable layer without --edit makes it see-only
+    /// again, taking your commits off it. It says first what it moves;
+    /// commits already pushed move only with --yes, and commits that change
+    /// the layer's lines can't come off it (listed, nothing moved). gitfold
+    /// never pushes: it prints the force-push to run. Exit codes: 3 no such
+    /// branch, 4 not moved (commits already pushed, a conflict, uncommitted
+    /// work in the way, git busy), 2 usage errors (--edit on a tag or a
+    /// commit, or on the main branch).
     Add {
         /// A branch, or any revision.
         branch: String,
+        /// Build on it: your commits sit on its commits.
+        #[arg(long)]
+        edit: bool,
         /// As it is now: it never updates.
         #[arg(long)]
         frozen: bool,
         /// Only what the branch has committed.
         #[arg(long)]
         commits: bool,
+        /// Move commits already pushed too.
+        #[arg(long)]
+        yes: bool,
     },
-    /// Stop showing a layer.
+    /// Stop showing a layer. An editable one: your commits come off it,
+    /// onto your other editable layers or main (or where it landed); see
+    /// `add`.
     Remove {
         #[arg(required_unless_present = "all")]
         branch: Option<String>,
         /// Every layer.
         #[arg(long, conflicts_with = "branch")]
         all: bool,
-    },
-    /// Build the branch on TARGET, its base: its own commits move onto
-    /// TARGET now, and onto TARGET's new commits from then on.
-    ///
-    /// It says first what it moves, and refuses (exit 4) to move commits
-    /// already pushed (reachable from its upstream, or origin/<BRANCH>)
-    /// without --yes. From then on its agent's next turn moves it (the
-    /// `UserPromptSubmit` hook), unless --frozen; running it again moves it
-    /// now. A workspace's files move as in a checkout, keeping uncommitted
-    /// work; one whose uncommitted work is on a path the move changes waits,
-    /// and a conflict leaves the branch as it was, reported (`gitfold list`
-    /// shows both). A move that doesn't happen changes nothing, the base
-    /// included. Layers the workspace shows stay shown: they are taken off
-    /// for the move and put back on the new commits. When its base lands
-    /// (a merge, squash, rebase merge or fast-forward), the branch moves
-    /// onto what it landed in when you name that (`gitfold layer base
-    /// main`), or once the base's branch is gone (by itself, or with
-    /// `gitfold layer base <BASE>` or --all); until then it follows the base
-    /// as before, `gitfold layer base <BASE>` and --all included, and the
-    /// landing is reported. Only its own commits move. The main branch
-    /// (main, master, or gitfold.trunk)
-    /// as TARGET takes the base away, its own commits moved onto main.
-    /// gitfold never pushes: it prints the force-pushes to run. Exit codes:
-    /// 3 no such branch, 4 not moved (commits already pushed, a conflict,
-    /// uncommitted work in the way, git busy), 1 other errors, 2 usage
-    /// errors.
-    Base {
-        /// The branch to build on (the main branch: no base, just main).
-        #[arg(required_unless_present = "all", conflicts_with = "all")]
-        target: Option<String>,
-        /// Build on TARGET as it is now, and don't follow its new commits
-        /// (running this again brings it up to date, still frozen).
-        #[arg(long)]
-        frozen: bool,
         /// Move commits already pushed too.
         #[arg(long)]
         yes: bool,
-        /// Bring every branch with a base it follows up to date, bases
-        /// first (frozen ones are left as they are).
-        #[arg(long)]
-        all: bool,
     },
 }
 
 /// `gitfold layer`.
 pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
-    if let Some(LayerOp::Base {
-        target,
-        frozen,
-        yes,
-        all,
-    }) = &args.op
-    {
-        let target = target.as_deref().unwrap_or_default();
-        return moves::base(repo, args.workspace, target, *frozen, *yes, *all);
-    }
     let name = super::workspace_or_current(args.workspace, repo)?;
     if let Some(LayerOp::Add { branch, .. }) = &args.op
         && *branch == name
@@ -139,40 +117,350 @@ pub fn layer(repo: &Path, args: LayerArgs) -> Result<()> {
     }
     check_name(&name)?;
     let common_dir = git::init(repo)?;
-    let state = super::opened_workspace(&common_dir, &name)?;
+    // Building on a branch, or taking a branch's commits off one, works
+    // without a workspace too.
+    let edits = match &args.op {
+        Some(LayerOp::Add { edit, .. }) => *edit,
+        Some(LayerOp::Remove { branch, .. }) => {
+            let stored = Layers::read(&StateDir::of(&common_dir, &name)).unwrap_or_default();
+            branch
+                .as_ref()
+                .map_or(stored.editable().next().is_some(), |b| {
+                    stored.find(b).is_some_and(|i| stored.layers[i].edit)
+                })
+        }
+        None => false,
+    };
+    let state = match edits {
+        true => {
+            git::require_branch(&name)?;
+            StateDir::of(&common_dir, &name)
+        }
+        false => super::opened_workspace(&common_dir, &name)?,
+    };
     if args.op.is_none() {
         print!("{}", listing(&common_dir, &state, &Layers::read(&state)?)?);
         return Ok(());
     }
     let local = Local::read(&common_dir);
+    std::fs::create_dir_all(&state.dir)?;
     // Read, changed and stored with no other change in between.
     let _lock = crate::state::layers::lock(&state)?;
-    let mut layers = Layers::read(&state)?;
+    let built = moves::Built::read(&common_dir, &name)?;
+    let mut layers = built.layers.clone();
     let done = match args.op {
-        None | Some(LayerOp::Base { .. }) => unreachable!("handled above"),
+        None => unreachable!("handled above"),
+        Some(LayerOp::Add {
+            branch,
+            edit: true,
+            frozen,
+            commits,
+            yes,
+        }) => return add_edit(&common_dir, &state, &built, &branch, frozen, commits, yes),
         Some(LayerOp::Add {
             branch,
             frozen,
             commits,
+            yes,
+            ..
         }) => {
             // A move in progress first: it is what to wait for.
-            refuse_if_moving(&common_dir, &state)?;
+            refuse_if_moving(&state)?;
             let store = Store::default();
             let layer = layer_of(&store, &common_dir, &state, &branch, frozen, commits)?;
             let in_base = in_base(&state, layer.snapshot)?;
+            if layers.find(&branch).is_some_and(|i| layers.layers[i].edit) {
+                return see_only(&common_dir, &state, &built, layer, yes);
+            }
             add(&local, &mut layers, &name, layer, in_base)
         }
-        Some(LayerOp::Remove { branch: None, .. }) => {
+        Some(LayerOp::Remove {
+            branch: None, yes, ..
+        }) => {
+            if built.layers.editable().next().is_some() {
+                return remove_all_edit(&common_dir, &state, &built, yes);
+            }
             layers.layers.clear();
             format!("{name}: every layer removed")
         }
         Some(LayerOp::Remove {
             branch: Some(branch),
+            yes,
             ..
-        }) => remove(&local, &mut layers, &name, &branch)?,
+        }) => {
+            if layers.find(&branch).is_some_and(|i| layers.layers[i].edit) {
+                return remove_edit(&common_dir, &state, &built, &branch, yes);
+            }
+            remove(&local, &mut layers, &name, &branch)?
+        }
     };
     let applied = store_and_apply(&common_dir, &state, &layers)?;
     println!("{done}\n{applied}");
+    Ok(())
+}
+
+/// The warning for a branch built on more than one editable layer: a pull
+/// request for it shows all of their commits.
+fn several_warning(name: &str, editable: &[String]) -> String {
+    let all = and_list(editable.iter().cloned());
+    let theirs = and_list(editable.iter().map(|n| format!("{n}'s")));
+    let both = if editable.len() == 2 { "both" } else { "all" };
+    format!(
+        "{name} will be built on {all}. A pull request for {name} shows {theirs} commits as \
+         part of {name}'s until {both} land: open it after they land, or build on one of them."
+    )
+}
+
+/// `gitfold layer add BRANCH --edit`: branch `state.branch` (`built`) builds
+/// on BRANCH: its own commits move onto BRANCH's commits (with other
+/// editable layers, a merge of theirs), BRANCH an editable layer from then
+/// on. Nothing changes if they can't move.
+fn add_edit(
+    common_dir: &Path,
+    state: &StateDir,
+    built: &moves::Built,
+    branch: &str,
+    frozen: bool,
+    commits: bool,
+    yes: bool,
+) -> Result<()> {
+    let name = &state.branch;
+    if !git::branch_exists(branch) {
+        // A revision: refused as one, if it is one.
+        git::resolve(branch)
+            .map_err(|_| Refusal::NotFound.error(format!("no branch or revision {branch}")))?;
+        super::usage(format!(
+            "{branch} isn't a branch: a tag or a commit can't be edited on (it never moves); \
+             use --edit with a branch, or show it with `gitfold layer add {branch}`"
+        ));
+    }
+    if moves::is_trunk(common_dir, branch) {
+        super::usage(format!(
+            "{branch} is the main branch: every branch sits on it already"
+        ));
+    }
+    check_name(branch)?;
+    moves::check_cycle(common_dir, name, branch)?;
+    refuse_if_moving(state)?;
+    let store = Store::default();
+    // Taken as a live one (a frozen layer of what the branch has already
+    // would be refused), then frozen.
+    let mut layer = layer_of(&store, common_dir, state, branch, false, commits)?;
+    if frozen {
+        layer.updates = Updates::Frozen;
+    }
+    layer.edit = true;
+    let was = built
+        .layers
+        .find(branch)
+        .map(|i| built.layers.layers[i].clone());
+    let mut next = built.layers.clone();
+    match next.find(branch) {
+        Some(i) => {
+            if next.layers[i].snapshot == layer.snapshot {
+                layer.moved = next.layers[i].moved;
+            }
+            next.layers[i] = layer.clone();
+        }
+        None => next.layers.push(layer.clone()),
+    }
+    let editable = next.editable_names();
+    if editable.len() > 1 && !was.as_ref().is_some_and(|l| l.edit) {
+        println!("{}", several_warning(name, &editable));
+    }
+    let after = moves::Built {
+        layers: next.clone(),
+        own: built.own,
+        parts: built.parts.clone(),
+    };
+    let parts = moves::wanted_parts(&after, &[branch])?;
+    let plan = moves::Plan {
+        name,
+        said: format!("onto {}", moves::onto_words(common_dir, &parts)),
+        parts,
+        next: Some(next),
+        asked: true,
+        yes,
+        off: None,
+        prefix: String::new(),
+    };
+    let outcome = moves::move_onto(common_dir, &plan)?;
+    moves::say(common_dir, name, &outcome)?;
+    let what = match was {
+        Some(_) => "updated",
+        None => "added",
+    };
+    println!("layer {branch} {what}: {}, built on", describe(&layer));
+    show_after_move(common_dir, state)
+}
+
+/// `gitfold layer add BRANCH` on editable layer BRANCH (`layer`, as it is
+/// now): it becomes see-only, the branch's own commits taken off it.
+fn see_only(
+    common_dir: &Path,
+    state: &StateDir,
+    built: &moves::Built,
+    mut layer: Layer,
+    yes: bool,
+) -> Result<()> {
+    let name = &state.branch;
+    let branch = layer.branch.clone();
+    let mut next = built.layers.clone();
+    let i = next.find(&branch).expect("an editable layer");
+    if next.layers[i].snapshot == layer.snapshot {
+        layer.moved = next.layers[i].moved;
+    }
+    next.layers[i] = layer.clone();
+    let after = moves::Built {
+        layers: next.clone(),
+        own: built.own,
+        parts: built.parts.clone(),
+    };
+    let parts = moves::wanted_parts(&after, &[])?;
+    let onto = moves::onto_words(common_dir, &parts);
+    let plan = moves::Plan {
+        name,
+        said: format!("off {branch}, onto {onto} ({branch} stays shown, read-only)"),
+        parts,
+        next: Some(next),
+        asked: true,
+        yes,
+        off: Some(&branch),
+        prefix: format!("{branch} becomes see-only: "),
+    };
+    let outcome = moves::move_onto(common_dir, &plan)?;
+    moves::say(common_dir, name, &outcome)?;
+    println!("layer {branch} updated: {}, see-only", describe(&layer));
+    show_after_move(common_dir, state)
+}
+
+/// `gitfold layer remove BRANCH` on editable layer BRANCH: the branch's own
+/// commits come off it (onto where it landed, if it did), and it goes.
+fn remove_edit(
+    common_dir: &Path,
+    state: &StateDir,
+    built: &moves::Built,
+    branch: &str,
+    yes: bool,
+) -> Result<()> {
+    let name = &state.branch;
+    let mut next = built.layers.clone();
+    next.layers.retain(|l| l.branch != branch);
+    let after = moves::Built {
+        layers: next.clone(),
+        own: built.own,
+        parts: built.parts.clone(),
+    };
+    let wanted = moves::wanted_parts(&after, &[])?;
+    let landed = match built.on(branch) {
+        Some(on) => moves::landed(common_dir, branch, on)?,
+        None => None,
+    };
+    let plan = match &landed {
+        // Where it landed: only the own commits move, onto the landing.
+        Some(landing) => {
+            let parts = moves::wanted_parts(built, &[])?;
+            let (layers, parts) = moves::after_landing(common_dir, built, landing, &parts)?;
+            println!("{}", landing.said());
+            moves::Plan {
+                name,
+                said: format!(
+                    "off {branch}, onto {} at {}",
+                    landing.target,
+                    moves::short(landing.landing.at)
+                ),
+                parts,
+                next: Some(layers),
+                asked: true,
+                yes,
+                off: None,
+                prefix: String::new(),
+            }
+        }
+        None => moves::Plan {
+            name,
+            said: format!(
+                "off {branch}, onto {}",
+                moves::onto_words(common_dir, &wanted)
+            ),
+            parts: wanted,
+            next: Some(next),
+            asked: true,
+            yes,
+            off: Some(branch),
+            prefix: String::new(),
+        },
+    };
+    let outcome = moves::move_onto(common_dir, &plan)?;
+    moves::say(common_dir, name, &outcome)?;
+    println!("layer {branch} removed");
+    show_after_move(common_dir, state)
+}
+
+/// `gitfold layer remove --all` on a branch with editable layers: its own
+/// commits come off them, onto main, and every layer goes. An interrupted
+/// move that can't be finished or undone is forgotten instead, moving
+/// nothing more.
+fn remove_all_edit(
+    common_dir: &Path,
+    state: &StateDir,
+    built: &moves::Built,
+    yes: bool,
+) -> Result<()> {
+    let name = &state.branch;
+    if state.opened()
+        && matches!(
+            crate::state::moves::recover(state),
+            Ok(crate::state::moves::Recovery::Stuck(_)) | Err(_)
+        )
+        && crate::state::moves::forget(state)?
+    {
+        crate::state::layers::drop_next(state)?;
+        Layers::default().write(state)?;
+        git::stack::drop_base(common_dir, name)?;
+        println!(
+            "{name}: every layer removed; nothing moved, and an interrupted move's intent is \
+             forgotten"
+        );
+        return show_after_move(common_dir, state);
+    }
+    let editable = built.layers.editable_names();
+    let off = and_list(editable.iter().cloned());
+    let plan = moves::Plan {
+        name,
+        said: format!("off {off}, onto {}", moves::onto_words(common_dir, &[])),
+        parts: Vec::new(),
+        next: Some(Layers::default()),
+        asked: true,
+        yes,
+        off: Some(&off),
+        prefix: String::new(),
+    };
+    let outcome = moves::move_onto(common_dir, &plan)?;
+    moves::say(common_dir, name, &outcome)?;
+    println!("{name}: every layer removed");
+    show_after_move(common_dir, state)
+}
+
+/// `gitfold branch NEW --edit LAYER`: new branch `name`, at `layer`'s tip,
+/// builds on it: its editable layer stored, its own commits starting there.
+pub fn built_on_new(common_dir: &Path, name: &str, layer: &str) -> Result<()> {
+    let state = StateDir::of(common_dir, name);
+    std::fs::create_dir_all(&state.dir)?;
+    let _lock = crate::state::layers::lock(&state)?;
+    let mut edit = layer_of(&Store::default(), common_dir, &state, layer, false, false)?;
+    edit.edit = true;
+    Layers { layers: vec![edit] }.write(&state)?;
+    git::stack::set_base(common_dir, name, git::branch_tip(name)?.id)
+}
+
+/// After a move asked for: the layers it stored shown, if the branch has a
+/// workspace (the move showed them already when it moved files; this says
+/// so, or shows them when it didn't need to).
+fn show_after_move(common_dir: &Path, state: &StateDir) -> Result<()> {
+    if state.opened() {
+        println!("{}", apply(common_dir, &state.branch)?);
+    }
     Ok(())
 }
 
@@ -288,15 +576,15 @@ fn updates(layer: &Layer) -> String {
 }
 
 /// `gitfold layer --claude-hook user-prompt-submit`: at the start of a turn,
-/// the live layers of the workspace the session is in move to their latest
-/// work (`state::follow`: an agent's workspace as `gitfold snapshot
+/// the workspace the session is in follows its editable layers' new commits
+/// (`moves::hook_context`), then its live layers move to their latest work
+/// (`state::follow`: an agent's workspace as `gitfold snapshot
 /// --claude-hook stop` took it when its last turn ended, one without an
 /// agent as it is now), so what shows changes only between turns, never
-/// half-way through another's; a branch built on a base is moved onto its
-/// new commits first (`moves::hook_context`). Records that the workspace
-/// has an agent (`snapshot::turn_started`): the daemon leaves its layers to its
-/// turns. What changed is printed, which becomes context. Does nothing
-/// outside a workspace with layers or a base; errors are only logged.
+/// half-way through another's. Records that the workspace has an agent
+/// (`snapshot::turn_started`): the daemon leaves its layers to its turns.
+/// What changed is printed, which becomes context. Does nothing outside a
+/// workspace with layers; errors are only logged.
 pub fn layer_hook(event: &str) -> Result<()> {
     if event == "pre-tool-use" {
         return deny_hook();
@@ -305,14 +593,15 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let repo = super::repo()?;
         let name = super::branch_or_current(None, &repo)?;
         let common_dir = git::init(&repo)?;
-        // A branch built on a base first follows its new commits, at the
-        // same boundary (see `moves`).
-        match moves::hook_context(&common_dir, &name) {
-            Ok(Some(context)) => println!("{context}"),
-            Ok(None) => {}
-            Err(e) => log::debug!("gitfold layer --claude-hook: moving {name}: {e:#}"),
-        }
         let state = StateDir::of(&common_dir, &name);
+        // Its editable layers' new commits first, at the same boundary.
+        if Layers::read(&state)?.editable().next().is_some() {
+            match moves::hook_context(&common_dir, &name) {
+                Ok(Some(context)) => println!("{context}"),
+                Ok(None) => {}
+                Err(e) => log::debug!("gitfold layer --claude-hook: moving {name}: {e:#}"),
+            }
+        }
         if state.opened()
             && let Err(e) = snapshot::turn_started(&state)
         {
@@ -404,11 +693,15 @@ fn deny_hook() -> Result<()> {
             }
             false => "",
         };
-        if let [ix] = owners[..] {
-            let (build_on, propose) = match base_offer(&state, &local, &layers.layers[ix], &path)? {
-                Some(offer) => (offer, "Or run"),
-                None => (String::new(), "To change it, run"),
-            };
+        let see_only: Vec<&Layer> = (owners.iter())
+            .map(|&i| &layers.layers[i])
+            .filter(|l| !l.edit)
+            .collect();
+        let (build_on, propose) = match edit_offer(&state, &local, &see_only, &path)? {
+            Some(offer) => (offer, "Or run"),
+            None => (String::new(), "To change it, run"),
+        };
+        if let [_] = owners[..] {
             return Ok(Some(format!(
                 "{path} shows {owner}'s work (a layer, read-only here): it can't be changed in \
                  this workspace.{conflict}{build_on} {propose} `gitfold propose {path}`: it \
@@ -422,7 +715,7 @@ fn deny_hook() -> Result<()> {
         let all = and_list(names.iter().map(|n| n.to_string()));
         Ok(Some(format!(
             "{path} shows the merge of {all}'s work (layers, read-only here): it can't be \
-             changed in this workspace.{conflict} To change it, run `gitfold propose {path} \
+             changed in this workspace.{conflict}{build_on} {propose} `gitfold propose {path} \
              --layer <one of them>`: it makes a copy of that layer's work for you to edit \
              (a proposal), shown here in its place, which its agent tests and accepts. Or \
              leave it to their agents (`gitfold send {owner} <text>` asks {owner}'s), or \
@@ -441,53 +734,72 @@ fn deny_hook() -> Result<()> {
     Ok(())
 }
 
-/// The deny hook's offer to build the workspace in `state` on the branch of
-/// `layer`, whose file `path` it denied: its commits then sit on that
-/// branch's, whose committed code becomes theirs to edit. `None` for a
-/// revision, a proposal, or the branch it is built on already.
-fn base_offer(
+/// The deny hook's offer to make file `path` of the workspace in `state`
+/// writable: build on the branches of `see_only`, the see-only layers whose
+/// changes show there (with them editable, only editable layers changed
+/// it), saying what that means. `None` if one of them can't be built on (a
+/// revision, a proposal, the main branch).
+fn edit_offer(
     state: &StateDir,
     local: &Local,
-    layer: &Layer,
+    see_only: &[&Layer],
     path: &str,
 ) -> Result<Option<String>> {
-    let owner = &layer.branch;
-    if layer.updates == Updates::Fixed
-        || !git::branch_exists(owner)
-        || local.proposal(owner).is_some()
-    {
+    if see_only.is_empty() {
         return Ok(None);
     }
     let common_dir = &state.common_dir;
-    let parent = local.parent(&state.branch);
-    let replaces = match &parent {
-        Some(p) if p == owner => return Ok(None),
-        None if land::is_trunk(common_dir, local, owner) => return Ok(None),
-        Some(p) if !land::is_trunk(common_dir, local, p) => {
-            format!(" (it replaces your base {p}: a branch has one base)")
+    for l in see_only {
+        if l.updates == Updates::Fixed
+            || !git::branch_exists(&l.branch)
+            || local.proposal(&l.branch).is_some()
+            || land::is_trunk(common_dir, local, &l.branch)
+        {
+            return Ok(None);
         }
-        _ => String::new(),
+    }
+    let commands = and_list(
+        see_only
+            .iter()
+            .map(|l| format!("`gitfold layer add {} --edit`", l.branch)),
+    );
+    let mut out = match see_only {
+        [one] => {
+            let owner = &one.branch;
+            format!(
+                " To make it yours to edit, build on {owner}: {commands}: your commits will sit \
+                 on {owner}'s (a pull request for your branch then includes {owner}'s commits \
+                 until {owner} lands)."
+            )
+        }
+        _ => {
+            let theirs = and_list(see_only.iter().map(|l| format!("{}'s", l.branch)));
+            format!(
+                " To make it yours to edit, build on all of them: {commands} (one alone leaves \
+                 the others' lines read-only): your commits will sit on {theirs} (a pull \
+                 request for your branch then includes their commits until they land)."
+            )
+        }
     };
-    let tip = git::branch_tip(owner)?.id;
-    let committed = git::with_repo(|repo| -> Result<bool> {
-        let at = |commit: ObjectId| -> Result<_> {
-            let tree = git::layers::commit_tree(repo, commit)?;
-            git::layers::lookup(repo, tree, path.into())
-        };
-        Ok(at(layer.snapshot)? == at(tip)?)
-    })?;
-    let uncommitted = match committed {
-        true => String::new(),
-        false => format!(
-            " {owner} hasn't committed its change to this file yet: after `layer base {owner}` \
-             it stays {owner}'s (read-only) until {owner} commits it."
-        ),
-    };
-    Ok(Some(format!(
-        " To make it yours to edit, build on {owner}: `gitfold layer base {owner}`{replaces}: \
-         your commits will sit on {owner}'s, and {owner}'s committed code becomes yours to \
-         edit.{uncommitted}"
-    )))
+    for l in see_only {
+        let owner = &l.branch;
+        let tip = git::branch_tip(owner)?.id;
+        let committed = git::with_repo(|repo| -> Result<bool> {
+            let at = |commit: ObjectId| -> Result<_> {
+                let tree = git::layers::commit_tree(repo, commit)?;
+                git::layers::lookup(repo, tree, path.into())
+            };
+            Ok(at(l.snapshot)? == at(tip)?)
+        })?;
+        if !committed {
+            let _ = write!(
+                out,
+                " {owner} hasn't committed its change to this file yet: your edits to \
+                 {owner}'s lines wait until {owner} commits them."
+            );
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Whether the edit tool call in hook input `input`, of file `file`, only
@@ -560,7 +872,10 @@ fn owners_in_view(
         return Ok(None);
     }
     let view = crate::state::layers::view(&state.common_dir, &base.id, layers)?;
-    Ok(view.map(|view| (view.mixed.get(path).cloned().unwrap_or_default(), view)))
+    // Only editable layers changed it: writable.
+    Ok(view
+        .filter(|view| !view.writable.contains(path))
+        .map(|view| (view.mixed.get(path).cloned().unwrap_or_default(), view)))
 }
 
 /// Whether a layer of `layers` has another entry at `path` than base tree
@@ -582,8 +897,17 @@ fn differs_from_base(layers: &Layers, base: ObjectId, path: &[u8]) -> Result<boo
 /// Whether commit `snapshot` is in the base of the workspace in `state`: as a
 /// layer it shows nothing (yet).
 fn in_base(state: &StateDir, snapshot: ObjectId) -> Result<bool> {
-    let base = state.read_base()?.id;
+    let base = view_base(state)?;
     Ok(git::merge_base_if_any(base, snapshot)? == Some(snapshot))
+}
+
+/// The commit the view of the branch of `state` is built on: its
+/// workspace's base, or without a workspace, its tip.
+fn view_base(state: &StateDir) -> Result<ObjectId> {
+    match state.opened() {
+        true => Ok(state.read_base()?.id),
+        false => Ok(git::branch_tip(&state.branch)?.id),
+    }
 }
 
 /// The layer of `branch` (a branch, or any revision) as it is now, for the
@@ -629,7 +953,7 @@ pub(super) fn layer_of(
     };
     // A layer shows its changes since it and the base diverged: without a
     // commit in common there is no telling them apart.
-    let Some(merge_base) = git::merge_base_if_any(state.read_base()?.id, snapshot)? else {
+    let Some(merge_base) = git::merge_base_if_any(view_base(state)?, snapshot)? else {
         return Err(Refusal::Changes.error(format!(
             "{branch} shares no history with {}'s base, so its changes can't be told apart: \
              a layer must start from a commit your branch also has",
@@ -652,6 +976,7 @@ pub(super) fn layer_of(
         updates,
         moved: now(),
         snapshot,
+        edit: false,
         instead: None,
     })
 }
@@ -695,23 +1020,20 @@ pub(super) fn store_and_apply(
     state: &StateDir,
     layers: &Layers,
 ) -> Result<String> {
-    refuse_if_moving(common_dir, state)?;
+    refuse_if_moving(state)?;
     crate::state::layers::store_and_show(state, layers, || apply(common_dir, &state.branch))
 }
 
-/// Refuses changing the layers of the workspace in `state` while it is
-/// being moved onto its base: the move moves the base a switch builds the
-/// view on.
-fn refuse_if_moving(common_dir: &Path, state: &StateDir) -> Result<()> {
+/// Refuses changing the layers of the workspace in `state` while its
+/// branch is being moved: the move moves the base a switch builds the view
+/// on.
+fn refuse_if_moving(state: &StateDir) -> Result<()> {
     if !crate::state::moves::pending(state) {
         return Ok(());
     }
-    let base = Local::read(common_dir)
-        .parent(&state.branch)
-        .unwrap_or_else(|| "<base>".into());
     Err(Refusal::Changes.error(format!(
-        "{} is being moved onto its base {base} (or that was interrupted: `gitfold layer base \
-         {base}` finishes it); retry once it is done",
+        "{} is being moved (or a move of it was interrupted: its next turn, or the mount, \
+         finishes it); retry once it is done",
         state.branch
     )))
 }
@@ -729,45 +1051,69 @@ pub(super) fn apply(common_dir: &Path, name: &str) -> Result<String> {
     }
 }
 
-/// `gitfold layer`: the base line, then the layers and their conflicts.
+/// `gitfold layer`: the layers, what your commits sit on, the conflicts and
+/// notes.
 fn listing(common_dir: &Path, state: &StateDir, layers: &Layers) -> Result<String> {
-    let mut out = base_line(common_dir, &state.branch)?;
+    let mut out = String::new();
+    let own = moves::own_count(common_dir, &state.branch).ok().flatten();
+    let editable = layers.editable_names();
+    let sits = |n: Option<usize>, on: &str| match n {
+        Some(0) => format!("built on: no commits of your own yet on {on}"),
+        Some(1) => format!("built on: your 1 commit sits on {on}"),
+        Some(n) => format!("built on: your {n} commits sit on {on}"),
+        None => format!("built on: your commits sit on {on}"),
+    };
     if layers.layers.is_empty() {
         out += "No layers.\n";
-        return Ok(out);
-    }
-    out += "\n";
-    let rows: Vec<[String; 3]> =
-        std::iter::once(["LAYER".into(), "SHOWS".into(), "UPDATES".into()])
-            .chain(
-                layers
-                    .layers
-                    .iter()
-                    .map(|l| [l.branch.clone(), shows(l.shows).into(), updates(l)]),
-            )
+    } else {
+        let header = ["LAYER", "SHOWS", "UPDATES", "YOUR COMMITS"].map(String::from);
+        let rows: Vec<[String; 4]> = std::iter::once(header)
+            .chain(layers.layers.iter().map(|l| {
+                let commits = match (l.edit, editable.first() == Some(&l.branch)) {
+                    (false, _) => String::new(),
+                    (true, true) if editable.len() == 1 => sits(own, "it"),
+                    (true, true) => sits(own, "a merge of them"),
+                    (true, false) => "built on".into(),
+                };
+                [l.branch.clone(), shows(l.shows).into(), updates(l), commits]
+            }))
             .collect();
-    let width = |col: usize| {
-        rows.iter()
-            .map(|r| r[col].chars().count())
-            .max()
-            .unwrap_or(0)
-            + 3
-    };
-    let (w0, w1) = (width(0), width(1));
-    for [layer, shows, updates] in &rows {
-        let _ = writeln!(out, "{layer:<w0$}{shows:<w1$}{updates}");
-    }
-    let base = state.read_base()?;
-    let (conflicts, mut warnings) = match crate::state::layers::view(common_dir, &base.id, layers)?
-    {
-        Some(view) => {
-            let own = crate::state::layers::own_among(state, &base, layers, &view)?;
-            (view.conflicts, [view.warnings, own].concat())
+        let width = |col: usize| {
+            rows.iter()
+                .map(|r| r[col].chars().count())
+                .max()
+                .unwrap_or(0)
+                + 3
+        };
+        let (w0, w1, w2) = (width(0), width(1), width(2));
+        for [layer, shows, updates, commits] in &rows {
+            let line = format!("{layer:<w0$}{shows:<w1$}{updates:<w2$}{commits}");
+            let _ = writeln!(out, "{}", line.trim_end());
         }
-        None => (Vec::new(), Vec::new()),
+    }
+    if editable.is_empty() {
+        let main = land::main_name(common_dir, &Local::read(common_dir));
+        let _ = writeln!(out, "Your commits sit on {main}.");
+    }
+    let notes = moves::notes(common_dir, &state.branch);
+    let (conflicts, mut warnings) = match state.opened() {
+        true => {
+            let base = state.read_base()?;
+            match crate::state::layers::view(common_dir, &base.id, layers)? {
+                Some(view) => {
+                    let own = crate::state::layers::own_among(state, &base, layers, &view)?;
+                    (view.conflicts, [view.warnings, own].concat())
+                }
+                None => (Vec::new(), Vec::new()),
+            }
+        }
+        false => (Vec::new(), Vec::new()),
     };
-    if !conflicts.is_empty() || !warnings.is_empty() {
+    if !conflicts.is_empty() || !warnings.is_empty() || !notes.is_empty() {
         out += "\n";
+    }
+    for note in &notes {
+        let _ = writeln!(out, "Note: {note}");
     }
     for c in conflicts.iter().take(SHOWN_CONFLICTS) {
         let _ = writeln!(out, "Conflict: {}", c.describe(layers));
@@ -778,48 +1124,6 @@ fn listing(common_dir: &Path, state: &StateDir, layers: &Layers) -> Result<Strin
     warnings.dedup();
     for w in &warnings {
         let _ = writeln!(out, "{w}");
-    }
-    Ok(out)
-}
-
-/// The listing's base line (and the lines below it): what `branch` is built
-/// on, whether it follows it, and its notes (see `moves::notes`).
-fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
-    let local = Local::read(common_dir);
-    let Some(parent) = local.parent(branch) else {
-        let trunk = land::trunk_name(common_dir, &local).unwrap_or_else(|| "-".into());
-        return Ok(format!("Base: {trunk}\n"));
-    };
-    let trunk = land::is_trunk(common_dir, &local, &parent);
-    let frozen = local.move_manual(branch);
-    let head = format!("Base: {parent}, {}", if frozen { "frozen" } else { "live" });
-    let tip = git::branch_tip(branch)?.id;
-    let own = match land::resolve(common_dir, &parent)? {
-        Some((parent_ref, parent_tip)) => {
-            let base = git::stack::parent_base(common_dir, branch, &parent_ref, tip, parent_tip)?;
-            Some(git::stack::count(common_dir, base.commit, tip)?)
-        }
-        None => None,
-    };
-    let commits = match own {
-        Some(0) => "no commits of your own yet".to_string(),
-        Some(1) => format!("your 1 commit sits on {parent}"),
-        Some(n) => format!("your {n} commits sit on {parent}"),
-        None => format!("your commits sit on {parent}"),
-    };
-    let how = match (frozen || trunk, own) {
-        (true, _) => format!("{} updates it", moves::base_command(&parent, frozen, true)),
-        (false, Some(0)) => format!("it follows {parent}"),
-        (false, Some(1)) => format!("it moves when {parent} gets new commits"),
-        (false, _) => format!("they move when {parent} gets new commits"),
-    };
-    let width = head.chars().count().max(15) + 6;
-    let mut out = format!("{head:<width$}{commits}; {how}\n");
-    if let Some(at) = local.moved(branch) {
-        let _ = writeln!(out, "{:width$}last moved {}", "", clock(at));
-    }
-    for note in moves::notes(common_dir, &local, branch) {
-        let _ = writeln!(out, "{:width$}{note}", "");
     }
     Ok(out)
 }

@@ -111,13 +111,19 @@ fn last_change(state: &StateDir, s: &status::Status, task: &TaskDir) -> Option<S
 }
 
 /// `gitfold list`: the repository's workspaces and their uncommitted
-/// changes, a branch built on another (`layer base`) under it, indented.
+/// changes, a branch built on another (`layer add --edit`) under it,
+/// indented.
 pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     let ListArgs { stat } = args;
     let common_dir = git::init(repo)?;
     let list = state::list(&common_dir)?;
     let local = settings::Local::read(&common_dir);
-    let rows = rows(&list, &local);
+    // Who builds on whom: (branch, editable layer), of existing branches.
+    let edges: Vec<(String, String)> = (state::layers::every_branch(&common_dir).into_iter())
+        .filter(|(b, _)| git::branch_exists(b))
+        .flat_map(|(b, layers)| (layers.editable_names().into_iter()).map(move |l| (b.clone(), l)))
+        .collect();
+    let rows = rows(&list, &edges);
     if rows.is_empty() {
         println!("no workspaces");
         return Ok(());
@@ -137,12 +143,18 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             0 => branch.clone(),
             d => format!("{}└─ {branch}", "   ".repeat(d - 1)),
         };
-        let parent = local.parent(&branch);
-        let mut notes = super::layer::moves::notes(&common_dir, &local, &branch);
-        if parent.is_some() && local.move_manual(&branch) {
-            notes.insert(0, "frozen".into());
-        }
-        let parent = parent.unwrap_or_else(|| "-".into());
+        let built_on: Vec<&str> = (edges.iter())
+            .filter(|(b, _)| *b == branch)
+            .map(|(_, p)| p.as_str())
+            .collect();
+        let notes = match built_on.is_empty() {
+            true => Vec::new(),
+            false => super::layer::moves::notes(&common_dir, &branch),
+        };
+        let parent = match built_on.is_empty() {
+            true => "-".to_string(),
+            false => built_on.join("+"),
+        };
         // A base or a branch built on one, without a workspace.
         let Some(w) = list.iter().find(|w| w.branch == branch) else {
             let dashes = match stat {
@@ -227,8 +239,7 @@ fn open_workspaces(common_dir: &Path) -> std::collections::HashSet<String> {
 /// The branches `list` shows, in order, each with how deep it is in its
 /// stack: the workspaces, the branches built on another and their bases,
 /// each base followed by the branches built on it.
-fn rows(list: &[state::Stored], local: &settings::Local) -> Vec<(String, usize)> {
-    let edges = local.parents();
+fn rows(list: &[state::Stored], edges: &[(String, String)]) -> Vec<(String, usize)> {
     let names: BTreeSet<&str> = (list.iter().map(|w| w.branch.as_str()))
         .chain(edges.iter().flat_map(|(b, p)| [b.as_str(), p.as_str()]))
         .collect();
@@ -241,7 +252,7 @@ fn rows(list: &[state::Stored], local: &settings::Local) -> Vec<(String, usize)>
         seen: &mut BTreeSet<&'a str>,
         rows: &mut Vec<(String, usize)>,
     ) {
-        // A cycle written into the config by hand.
+        // A cycle written by hand.
         if !seen.insert(name) {
             return;
         }
@@ -256,13 +267,13 @@ fn rows(list: &[state::Stored], local: &settings::Local) -> Vec<(String, usize)>
         }
     }
     for &name in &names {
-        if local.parent(name).is_none() {
-            walk(name, 0, &edges, &mut seen, &mut rows);
+        if !edges.iter().any(|(b, _)| b == name) {
+            walk(name, 0, edges, &mut seen, &mut rows);
         }
     }
     // Only in a cycle: listed anyway.
     for &name in &names {
-        walk(name, 0, &edges, &mut seen, &mut rows);
+        walk(name, 0, edges, &mut seen, &mut rows);
     }
     rows
 }

@@ -1,4 +1,4 @@
-//! `gitfold branch` (a fork with `-w`, a stacked branch with `--base`), and a
+//! `gitfold branch` (a fork with `-w`, a branch built on another with `--edit`), and a
 //! workspace's settings: `gitfold prewarm`, `gitfold track-reads`.
 
 use std::path::Path;
@@ -23,7 +23,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         from,
         prewarm,
         track_reads,
-        base,
+        edit,
         claude_hook: _,
     } = args;
     let name = name.as_deref().context("name the branch")?;
@@ -54,18 +54,18 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         println!("{done}; {}", open_at(&common_dir, name));
         return Ok(());
     }
-    if let Some(parent) = base {
-        check_name(&parent)?;
-        git::require_branch(&parent)?;
-        create(repo, name, Some(&parent))?;
+    if let Some(layer) = edit {
+        check_name(&layer)?;
+        git::require_branch(&layer)?;
+        // On main, it is an ordinary branch.
+        let main = super::layer::moves::is_trunk(&common_dir, &layer);
+        create(repo, name, Some(&layer))?;
         set_branch_settings(repo, name, prewarm, track_reads)?;
-        // On the trunk, it is an ordinary branch.
-        if !super::layer::moves::is_trunk(&common_dir, &parent) {
-            let tip = git::branch_tip(&parent)?.id;
-            super::layer::moves::declare(&common_dir, name, &parent, tip)?;
+        if !main {
+            super::layer::built_on_new(&common_dir, name, &layer)?;
         }
         println!(
-            "created branch {name} on {parent}; {}",
+            "created branch {name} built on {layer}; {}",
             open_at(&common_dir, name)
         );
         return Ok(());
@@ -211,9 +211,10 @@ pub struct BranchArgs {
     #[arg(long, value_name = "on|off", value_parser = BoolishValueParser::new())]
     pub track_reads: Option<bool>,
     /// Start at BRANCH's tip and build the branch on it (as `gitfold layer
-    /// base BRANCH`): its commits then follow BRANCH's new ones.
+    /// add BRANCH --edit`): its commits sit on BRANCH's, and follow its new
+    /// ones.
     #[arg(long, value_name = "BRANCH", conflicts_with_all = ["from", "with_changes"])]
-    pub base: Option<String>,
+    pub edit: Option<String>,
     /// As Claude Code's `WorktreeCreate` hook (`worktree-create`): its
     /// worktree a workspace of branch `worktree-<name>`, the path printed; a
     /// git worktree in a repository not used with gitfold. See

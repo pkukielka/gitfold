@@ -91,6 +91,23 @@ impl Workspaces {
         }
     }
 
+    /// A move of the branch of open workspace `branch` (`cli::layer::moves`),
+    /// showing the layers it will have then: a move that changes what it
+    /// builds on records them as `layers.next`, else its layers.
+    pub fn move_branch(
+        &self,
+        store: &Store,
+        branch: &str,
+        intent: crate::state::moves::Intent,
+    ) -> anyhow::Result<crate::fs::workspace::Moved> {
+        let Some(ws) = self.get_open(branch) else {
+            anyhow::bail!("{branch} isn't open");
+        };
+        let state = crate::state::StateDir::of(&self.common_dir, branch);
+        let layers = crate::state::layers::next_or_stored(&state)?;
+        ws.move_branch(store, intent, layers)
+    }
+
     /// `gitfold track-reads`: starts or stops recording reads in the workspace
     /// of `branch` as its setting (just set) says, if it is open. Says what it
     /// did.

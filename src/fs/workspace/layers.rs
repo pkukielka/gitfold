@@ -85,6 +85,21 @@ const RETRY_AFTER: Duration = Duration::from_secs(10);
 /// How far back from HEAD commits made on a layers commit are looked for.
 const CHAIN_LIMIT: usize = 10_000;
 
+/// A move of the branch made with a switch (`moves`).
+pub(super) struct MoveStep {
+    pub intent: crate::state::moves::Intent,
+    /// The layers to show over its new tip (a layers file's content).
+    pub layers: Vec<u8>,
+}
+
+/// What a switch did.
+pub(super) enum Switched {
+    /// Switched: what it says it did.
+    Done(String),
+    /// The move it was to make can't be made now: why. Nothing changed.
+    Waits(String),
+}
+
 /// What the kernel must be told after a switch (local ids of the workspace).
 #[derive(Default)]
 struct Stale {
@@ -188,6 +203,7 @@ pub(super) fn open_view(
     layers.view = view.tree;
     layers.hunk = view.hunk_tree;
     layers.mixed = view.mixed;
+    layers.writable = view.writable;
     layers.union = view.union;
     layers.layers_on = true;
     Ok(off)
@@ -242,6 +258,17 @@ impl Workspace {
     /// yet, or if its own lines in a union file depend on lines that would
     /// go; then nothing changed.
     pub fn switch(&self, store: &Store) -> Result<String> {
+        match self.switch_with(store, None)? {
+            Switched::Done(done) => Ok(done),
+            Switched::Waits(why) => Err(Refusal::Changes.error(why)),
+        }
+    }
+
+    /// `switch`, with the branch moved as `mv` says (`moves`): the view is
+    /// then built over its new tip with `mv`'s layers, its base moved there
+    /// with it. A move that can't be made now changes nothing
+    /// (`Switched::Waits`).
+    pub(super) fn switch_with(&self, store: &Store, mv: Option<&MoveStep>) -> Result<Switched> {
         let _layers = self.layers_lock.lock();
         let branch = &self.state.branch;
         if let Some(busy) = worktree::git_running(&self.state.common_dir, &self.state.admin, branch)
@@ -263,16 +290,39 @@ impl Workspace {
                 "{branch}: git is busy ({busy}); switch its layers when it is done"
             )));
         }
-        let (stored, stored_bytes) = layers::to_show(&self.state)?;
-        self.catch_up_before_layers(store, &stored)?;
-        let base = self.layers.read().base;
+        let (stored, stored_bytes) = match mv {
+            Some(mv) => (layers::Layers::parse(&mv.layers)?, mv.layers.clone()),
+            None => layers::to_show(&self.state)?,
+        };
+        let new_base = match mv {
+            Some(mv) => {
+                if let Some(why) = self.move_waits(store, &mv.intent)? {
+                    return Ok(Switched::Waits(why));
+                }
+                Some(git::resolve(&mv.intent.to.to_string())?)
+            }
+            None => {
+                self.catch_up_before_layers(store, &stored)?;
+                None
+            }
+        };
+        let base = new_base.as_ref().map_or(self.layers.read().base, |c| c.id);
         let base_tree = git::resolve(&base.to_string())?.tree;
+        let new_base_tree = match &new_base {
+            Some(c) => Some(store.load_tree(c.tree)?),
+            None => None,
+        };
         let view = layers::view(&self.state.common_dir, &base, &stored)?;
         let (new_view, new_hunk, mixed, union) = match &view {
             Some(v) => (v.tree, v.hunk_tree, v.mixed.clone(), v.union.clone()),
             None => (base_tree, base_tree, Default::default(), Default::default()),
         };
+        let writable = view
+            .as_ref()
+            .map(|v| v.writable.clone())
+            .unwrap_or_default();
         let new_tree = store.load_tree(new_view)?;
+        let mut held = None;
         let (stale, mut failed, plan, applied, changed) = {
             let mut layers = self.layers.write();
             // Under the write lock: no write to a union file can land
@@ -280,10 +330,35 @@ impl Workspace {
             let carried = self.carry_over(&layers, layers.hunk, new_hunk, &union)?;
             let changes = git::with_repo(|repo| git::layers::delta(repo, layers.view, new_view))
                 .context("comparing the views")?;
+            // The move's steps 1 and 2 (`state::moves`): the index, then
+            // the base, the copies of committed files it changes dropped.
+            let mut dropped = Vec::new();
+            if let (Some(mv), Some(new_base), Some(new_base_tree)) = (mv, &new_base, new_base_tree)
+            {
+                let begun = mv.intent.begin(&self.state)?;
+                // Nothing moved if it fails: the index is written whole.
+                crate::state::moves::move_index(&self.state, &mv.intent, false)?;
+                // Past here, a failure leaves the intent for `recover`.
+                if let Err(e) = self.state.write_base(&new_base.id) {
+                    begun.keep();
+                    return Err(e.into());
+                }
+                layers.base = new_base.id;
+                layers.base_tree = new_base_tree;
+                match self.drop_for_move(&mut layers, &mv.intent) {
+                    Ok(d) => dropped = d,
+                    Err(e) => {
+                        begun.keep();
+                        return Err(e);
+                    }
+                }
+                held = Some(begun);
+            }
             // Past here the view changes: every failure is reported after the
             // kernel is told what changed.
             let old_tree = layers.view_tree;
             layers.mixed = mixed;
+            layers.writable = writable;
             layers.union = union;
             layers.view_tree = new_tree;
             layers.view = new_view;
@@ -293,6 +368,18 @@ impl Workspace {
             let mut failed: Option<anyhow::Error> = None;
             {
                 let nodes = self.nodes.lock();
+                // What the move dropped shows the new base's file now.
+                let now = SystemTime::now();
+                for path in &dropped {
+                    let stamp = Stamp {
+                        mtime: now,
+                        ctime: now,
+                    };
+                    layers.times.set(path, Some(stamp));
+                    if let Some(local) = nodes.held(path) {
+                        stale.inodes.push(local);
+                    }
+                }
                 for (path, data) in &carried {
                     if let Err(e) = self.rewrite_upper(path, data) {
                         failed.get_or_insert(e);
@@ -310,6 +397,25 @@ impl Workspace {
             (stale, failed, plan, layers.applied.clone(), changes.len())
         };
         self.invalidate(&stale);
+        // The move's step 3: the refs.
+        if let (Some(mv), Some(held)) = (mv, held) {
+            let i = &mv.intent;
+            let refs = git::stack::move_refs(
+                &self.state.common_dir,
+                branch,
+                (i.from, i.to),
+                (i.own_from, i.own_to),
+                "gitfold: move",
+            );
+            if let Err(e) = refs {
+                held.keep();
+                return Err(e);
+            }
+            held.done()?;
+            if let Err(e) = self.pin_base() {
+                log::warn!("{branch}: pinning its base: {e:#}");
+            }
+        }
         // Git is told with the workspace usable meanwhile: the plan is the
         // view just installed, and `layers_lock` keeps other switches away.
         let mut applied = applied;
@@ -339,7 +445,13 @@ impl Workspace {
         let notes = view.iter().flat_map(|v| &v.notes);
         match failed {
             Some(e) => Err(e),
-            None => Ok(switched(branch, plan.layers_on, changed, git_off, notes)),
+            None => Ok(Switched::Done(switched(
+                branch,
+                plan.layers_on,
+                changed,
+                git_off,
+                notes,
+            ))),
         }
     }
 
@@ -965,9 +1077,10 @@ impl Workspace {
             }
     }
 
-    /// Whether `path` is a layer's whole file (or its deletion).
+    /// Whether `path` is a see-only layer's whole file (or its deletion):
+    /// read-only. One only editable layers changed is writable.
     pub(super) fn is_mixed(layers: &Layers, path: &[u8]) -> bool {
-        layers.mixed.contains_key(path)
+        layers.mixed.contains_key(path) && !layers.writable.contains(path)
     }
 
     /// Whether any path below directory `path` is a layer's: a whole file or

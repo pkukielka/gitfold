@@ -143,6 +143,10 @@ pub fn fork(
         return Err(e);
     }
     settings::copy_branch(&local, common_dir, from, to);
+    // Built on what the source is built on.
+    if let Err(e) = super::layers::copy_editable(common_dir, from, to) {
+        log::warn!("copying the editable layers of {from} to {to}: {e:#}");
+    }
     let done = match copied {
         true => format!("created branch {to} at {from}, with its uncommitted changes"),
         false => {

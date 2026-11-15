@@ -27,22 +27,31 @@
 //! here; the workspace's own file at that path, if it has one, wins and
 //! stays writable.
 //!
-//! Stored in `layers` in the state directory, rewritten whole: `version 3`,
+//! A layer is see-only or editable (`Layer::edit`, `layer add --edit`). An
+//! editable layer is one the branch builds on: its commits sit on that
+//! layer's commits (`cli::layer::moves`), so what the layer committed is the
+//! branch's own; what it hasn't committed yet shows as any layer's work does.
+//! A path only editable layers changed is writable (`View::writable`); one a
+//! see-only layer changed is read-only.
+//!
+//! Stored in `layers` in the state directory, rewritten whole: `version 1`,
 //! then one line per layer, in the order added: `layer <name> TAB <shows>
-//! TAB <updates> TAB <moved> TAB <snapshot>`, with `<shows>`
+//! TAB <updates> TAB <moved> TAB <snapshot> TAB <see|edit>`, with `<shows>`
 //! `work`, `commits-only` or `commits` (`Shows`), `<updates>` `live`,
 //! `frozen` or `fixed` (`Updates`) and `<moved>` when it last moved, in
 //! seconds since the epoch (names hold no control characters). A layer line
 //! may be followed by an `instead` line with the same fields: the layer it
 //! stands in for, as it was (a proposal shown in its layer's place, see
 //! `cli::proposal`), put back when the proposal goes. Read and written under
-//! `lock`, so concurrent changes don't undo each other.
+//! `lock`, so concurrent changes don't undo each other. A branch without a
+//! workspace has the same file for its editable layers (its state directory
+//! then holds little else), so what a branch builds on is always here.
 //!
-//! Earlier versions are read too, their stored merge bases ignored:
-//! version 2, the same with a sixth field, the merge base; version 1 (from
-//! builds before `layer add --frozen/--commits`), `layer <name> TAB <on|off>
-//! TAB <snapshot> TAB <merge base>`, a layer `on` live and showing all work, one
-//! `off` (hidden) dropped.
+//! While a move changes what the branch builds on (an editable layer added,
+//! removed or made see-only, a landing followed), the layers it will have
+//! once moved are kept in `layers.next` (`NEXT`), with the commit its own
+//! commits will start from then: they become its layers once its own ref is
+//! there (`settle`), and are dropped if the move didn't happen.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -151,6 +160,8 @@ pub struct Layer {
     /// since the epoch.
     pub moved: i64,
     pub snapshot: ObjectId,
+    /// Editable (`layer add --edit`): the branch builds on it.
+    pub edit: bool,
     /// For a proposal shown in its layer's place: that layer as it was, put
     /// back (its way of updating kept) when the proposal goes.
     pub instead: Option<Box<Layer>>,
@@ -160,31 +171,33 @@ impl Layer {
     /// Its fields as stored (see the module doc), from the name on.
     fn fields(&self) -> String {
         format!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             self.branch,
             self.shows.word(),
             self.updates.word(),
             self.moved,
             self.snapshot,
+            if self.edit { "edit" } else { "see" },
         )
     }
 
-    /// A layer from its stored fields (see `fields`), of `line`, in a
-    /// file of `version` (2: a merge base after them, ignored).
-    fn from_fields(line: &str, fields: &str, version: u8) -> Result<Layer> {
+    /// A layer from its stored fields (see `fields`), of `line`.
+    fn from_fields(line: &str, fields: &str) -> Result<Layer> {
         let fields: Vec<&str> = fields.split('\t').collect();
-        let ([branch, shows, updates, moved, snapshot]
-        | [branch, shows, updates, moved, snapshot, _]) = fields[..]
-        else {
+        let [branch, shows, updates, moved, snapshot, edit] = fields[..] else {
             bail!("bad line {line:?}");
         };
-        anyhow::ensure!(fields.len() == 5 || version == 2, "bad line {line:?}");
         Ok(Layer {
             branch: branch.to_string(),
             shows: Shows::parse(shows)?,
             updates: Updates::parse(updates)?,
             moved: moved.parse()?,
             snapshot: ObjectId::from_hex(snapshot.as_bytes())?,
+            edit: match edit {
+                "edit" => true,
+                "see" => false,
+                _ => bail!("bad line {line:?}"),
+            },
             instead: None,
         })
     }
@@ -200,19 +213,7 @@ impl Layers {
     /// The layers stored for the workspace in `state` (none if it has no file).
     pub fn read(state: &StateDir) -> Result<Layers> {
         let path = state.dir.join(LAYERS);
-        let mut layers = Layers::parse(&stored_bytes(state)?)
-            .with_context(|| format!("reading {}", path.display()))?;
-        // A version 1 file doesn't say when its layers moved: when it was
-        // last written, then.
-        if layers.layers.iter().any(|l| l.moved == 0)
-            && let Ok(at) = fs::metadata(&path).and_then(|m| m.modified())
-        {
-            let secs = crate::fsutil::epoch_secs(at);
-            for l in layers.layers.iter_mut().filter(|l| l.moved == 0) {
-                l.moved = secs;
-            }
-        }
-        Ok(layers)
+        Layers::parse(&stored_bytes(state)?).with_context(|| format!("reading {}", path.display()))
     }
 
     /// A layers file's content (empty: no layers).
@@ -222,55 +223,29 @@ impl Layers {
         }
         let text = std::str::from_utf8(data)?;
         let mut lines = text.lines();
-        let version = lines.next();
-        let mut layers: Vec<Layer> = Vec::new();
-        if version == Some("version 1") {
-            for line in lines {
-                let fields: Vec<&str> = (line.strip_prefix("layer ").unwrap_or(""))
-                    .split('\t')
-                    .collect();
-                let [branch, on, snapshot, _] = fields[..] else {
-                    bail!("bad line {line:?}");
-                };
-                // Hidden: there are no hidden layers now.
-                if on != "on" {
-                    continue;
-                }
-                layers.push(Layer {
-                    branch: branch.to_string(),
-                    shows: Shows::Work,
-                    updates: Updates::Live,
-                    moved: 0,
-                    snapshot: ObjectId::from_hex(snapshot.as_bytes())?,
-                    instead: None,
-                });
-            }
-            return Ok(Layers { layers });
+        if lines.next() != Some("version 1") {
+            bail!("not a layers file this gitfold knows");
         }
-        let version = match version {
-            Some("version 2") => 2,
-            Some("version 3") => 3,
-            _ => bail!("not a layers file this gitfold knows"),
-        };
+        let mut layers: Vec<Layer> = Vec::new();
         for line in lines {
             if let Some(fields) = line.strip_prefix("instead ") {
                 let Some(last) = layers.last_mut() else {
                     bail!("bad line {line:?}");
                 };
-                last.instead = Some(Box::new(Layer::from_fields(line, fields, version)?));
+                last.instead = Some(Box::new(Layer::from_fields(line, fields)?));
                 continue;
             }
             let fields = line.strip_prefix("layer ").unwrap_or("");
-            layers.push(Layer::from_fields(line, fields, version)?);
+            layers.push(Layer::from_fields(line, fields)?);
         }
         Ok(Layers { layers })
     }
 
-    /// Stores them (no file when there are none).
-    pub fn write(&self, state: &StateDir) -> Result<()> {
+    /// Its content as stored (empty: no layers).
+    pub fn to_bytes(&self) -> Vec<u8> {
         let mut text = String::new();
         if !self.layers.is_empty() {
-            text += "version 3\n";
+            text += "version 1\n";
         }
         for l in &self.layers {
             text += &format!("layer {}\n", l.fields());
@@ -278,7 +253,22 @@ impl Layers {
                 text += &format!("instead {}\n", instead.fields());
             }
         }
-        store_bytes(state, text.as_bytes())
+        text.into_bytes()
+    }
+
+    /// Stores them (no file when there are none).
+    pub fn write(&self, state: &StateDir) -> Result<()> {
+        store_bytes(state, &self.to_bytes())
+    }
+
+    /// The editable layers, in the order added: what the branch builds on.
+    pub fn editable(&self) -> impl Iterator<Item = &Layer> {
+        self.layers.iter().filter(|l| l.edit)
+    }
+
+    /// The names of the editable layers.
+    pub fn editable_names(&self) -> Vec<String> {
+        self.editable().map(|l| l.branch.clone()).collect()
     }
 
     /// Whether there are layers.
@@ -313,6 +303,63 @@ fn every_layers(common_dir: &std::path::Path, applied: bool) -> impl Iterator<It
         .and_then(|a| a.layers().ok());
         stored.into_iter().chain(applied)
     })
+}
+
+/// Every branch's layers stored in the repository at `common_dir` (a
+/// workspace's, or a branch's without one: its editable layers), by branch;
+/// files that can't be read are left out.
+pub fn every_branch(common_dir: &std::path::Path) -> Vec<(String, Layers)> {
+    let dirs = fs::read_dir(super::state_root(common_dir))
+        .into_iter()
+        .flatten();
+    let mut out: Vec<(String, Layers)> = (dirs.flatten())
+        .filter_map(|dir| {
+            let id = dir.file_name().to_string_lossy().into_owned();
+            if id.starts_with('.') {
+                return None;
+            }
+            let layers = Layers::parse(&fs::read(dir.path().join(LAYERS)).ok()?).ok()?;
+            let branch =
+                super::read_branch(&dir.path()).unwrap_or_else(|| super::workspace_branch(&id));
+            Some((branch, layers))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+/// Gives branch `to` (a fork of `from`, just made) the editable layers of
+/// `from`, and its own ref if that is in `to`'s history: it is built on the
+/// same.
+pub fn copy_editable(common_dir: &std::path::Path, from: &str, to: &str) -> Result<()> {
+    use git::stack;
+    let source = StateDir::of(common_dir, from);
+    let editable = Layers {
+        layers: Layers::read(&source)?
+            .layers
+            .into_iter()
+            .filter(|l| l.edit)
+            .collect(),
+    };
+    if editable.layers.is_empty() {
+        return Ok(());
+    }
+    let target = StateDir::of(common_dir, to);
+    fs::create_dir_all(&target.dir)?;
+    let mut layers = Layers::read(&target)?;
+    layers.layers.retain(|l| editable.find(&l.branch).is_none());
+    layers.layers.extend(editable.layers);
+    layers.write(&target)?;
+    let (Some(base), Some(tip)) = (
+        stack::rev(common_dir, &stack::own_ref(from))?,
+        stack::rev(common_dir, &format!("refs/heads/{to}"))?,
+    ) else {
+        return Ok(());
+    };
+    if stack::is_ancestor(common_dir, base, tip)? {
+        stack::set_base(common_dir, to, base)?;
+    }
+    Ok(())
 }
 
 /// Whether any workspace of the repository at `common_dir` has `branch`'s
@@ -381,6 +428,8 @@ pub struct View {
     /// layers (their indexes in `Layers::layers`) whose changes show there:
     /// read-only.
     pub mixed: HashMap<Vec<u8>, Vec<usize>>,
+    /// The paths of `mixed` only editable layers changed: writable.
+    pub writable: HashSet<Vec<u8>>,
     /// The union files (see `union`), with the layers union-merged in: the
     /// workspace writes them, its own lines on top of theirs.
     pub union: HashMap<Vec<u8>, Vec<usize>>,
@@ -486,9 +535,14 @@ pub fn view(
             }
         });
     }
+    let editable = |ixs: &Vec<usize>| ixs.iter().all(|&i| layers.layers[i].edit);
     Ok(Some(View {
         tree: view.view_tree,
         hunk_tree: view.hunk_tree,
+        writable: (view.mixed.iter())
+            .filter(|(_, ixs)| editable(ixs))
+            .map(|(p, _)| p.to_vec())
+            .collect(),
         mixed: (view.mixed.iter())
             .map(|(p, ixs)| (p.to_vec(), ixs.clone()))
             .collect(),
@@ -691,73 +745,108 @@ impl ShownLayers {
     }
 }
 
-/// The file whose presence means the layers of a workspace are taken off
-/// for a move of its branch onto its base (`cli::layer::moves`): the layers file
-/// stays as it is (what is stored is the truth), but none show until
-/// `put_back`.
-pub const OFF: &str = "layers-off";
+/// The file holding the layers a branch will have once a move under way is
+/// done (see the module doc): `onto <commit>`, the commit its own commits
+/// start from then, followed by the layers file's content.
+pub const NEXT: &str = "layers.next";
 
-/// Whether the layers of the workspace in `state` are taken off for a move.
-pub fn off(state: &StateDir) -> bool {
-    fs::symlink_metadata(state.dir.join(OFF)).is_ok()
+/// The layers of a move under way (`NEXT`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Next {
+    /// Where the branch's own commits start once moved (its own ref then).
+    pub onto: ObjectId,
+    /// The layers file's content then.
+    pub layers: Vec<u8>,
 }
 
-/// Takes the layers of the workspace in `state` off for a move (see `OFF`),
-/// durably; `lock` held.
-pub fn take_off(state: &StateDir) -> Result<()> {
-    write_atomic(
-        &state.dir.join(OFF),
-        b"taken off for a move onto the base\n",
-    )?;
+/// Records `layers` as what the branch of `state` will have once its own
+/// ref is at `onto`, durably; `lock` held.
+pub fn write_next(state: &StateDir, onto: ObjectId, layers: &Layers) -> Result<()> {
+    fs::create_dir_all(&state.dir)?;
+    let mut data = format!("onto {onto}\n").into_bytes();
+    data.extend_from_slice(&layers.to_bytes());
+    write_atomic(&state.dir.join(NEXT), &data)?;
     fs::File::open(&state.dir)?.sync_all()?;
     Ok(())
 }
 
-/// Puts the layers of the workspace in `state` back after a move (or one
-/// interrupted, finished or undone since): they show again (the daemon
-/// switches to them, its base first catching up with the moved branch;
-/// their changes are taken against that, see `view`). Whether they were
-/// off; `lock` held.
-pub fn put_back(state: &StateDir) -> Result<bool> {
-    if !off(state) {
-        return Ok(false);
-    }
-    match fs::remove_file(state.dir.join(OFF)) {
-        Err(e) if !not_found(&e) => return Err(e.into()),
-        _ => {}
-    }
-    fs::File::open(&state.dir)?.sync_all()?;
-    Ok(true)
+/// The layers of a move under way for the branch of `state`, if any.
+pub fn read_next(state: &StateDir) -> Result<Option<Next>> {
+    let data = match fs::read(state.dir.join(NEXT)) {
+        Ok(data) => data,
+        Err(e) if not_found(&e) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let nl = data.iter().position(|&b| b == b'\n').unwrap_or(data.len());
+    let onto = (data[..nl].strip_prefix(b"onto "))
+        .and_then(|hex| ObjectId::from_hex(hex).ok())
+        .with_context(|| format!("reading {}", state.dir.join(NEXT).display()))?;
+    let layers = data.get(nl + 1..).unwrap_or_default().to_vec();
+    Ok(Some(Next { onto, layers }))
 }
 
-/// The layers of the workspace in `state` to show, and their bytes as
-/// stored: those stored, none while taken off for a move (`OFF`).
-pub fn to_show(state: &StateDir) -> Result<(Layers, Vec<u8>)> {
-    match off(state) {
-        true => Ok((Layers::default(), Vec::new())),
-        false => Ok((Layers::read(state)?, stored_bytes(state)?)),
+/// Forgets the layers of a move under way (it didn't happen).
+pub fn drop_next(state: &StateDir) -> Result<()> {
+    match fs::remove_file(state.dir.join(NEXT)) {
+        Err(e) if !not_found(&e) => Err(e.into()),
+        _ => Ok(()),
     }
 }
 
-/// `to_show`'s bytes alone (a cheap read).
+/// Whether the move `next` records got there: the branch's own ref is at
+/// its `onto`.
+fn arrived(state: &StateDir, next: &Next) -> Result<bool> {
+    let own = git::stack::rev(&state.common_dir, &git::stack::own_ref(&state.branch))?;
+    Ok(own == Some(next.onto))
+}
+
+/// Settles a move under way that changed what the branch of `state` builds
+/// on: its own ref got there, so its layers are the move's (and with no
+/// editable layer left, its own ref goes); or it didn't, and no workspace's
+/// move of it may still finish (`state::moves`), so they are forgotten.
+/// `lock` held.
+pub fn settle(state: &StateDir) -> Result<()> {
+    let Some(next) = read_next(state)? else {
+        return Ok(());
+    };
+    if arrived(state, &next)? {
+        store_bytes(state, &next.layers)?;
+        if Layers::parse(&next.layers)?.editable().next().is_none() {
+            git::stack::drop_base(&state.common_dir, &state.branch)?;
+        }
+        return drop_next(state);
+    }
+    if super::moves::pending(state) {
+        return Ok(());
+    }
+    drop_next(state)
+}
+
+/// The layers of the workspace in `state` to show, as stored: those of a
+/// move that got there but isn't settled yet, else its layers file. A cheap
+/// read but while a move is under way.
 pub fn shown_bytes(state: &StateDir) -> Result<Vec<u8>> {
-    match off(state) {
-        true => Ok(Vec::new()),
-        false => stored_bytes(state),
+    if let Some(next) = read_next(state)?
+        && arrived(state, &next)?
+    {
+        return Ok(next.layers);
+    }
+    stored_bytes(state)
+}
+
+/// What a move of the branch of `state` shows over its new tip: the layers
+/// of a move under way that changes what it builds on, else its layers.
+pub fn next_or_stored(state: &StateDir) -> Result<Vec<u8>> {
+    match read_next(state)? {
+        Some(next) => Ok(next.layers),
+        None => stored_bytes(state),
     }
 }
 
-/// `put_back` for the daemon, after a move it didn't make was interrupted:
-/// only if no command holds the layers' lock (one moving it holds it
-/// throughout). Whether they were put back.
-pub fn put_back_if_left(state: &StateDir) -> Result<bool> {
-    if !off(state) {
-        return Ok(false);
-    }
-    match try_lock(state)? {
-        Some(_lock) => put_back(state),
-        None => Ok(false),
-    }
+/// `shown_bytes`, parsed, with the bytes.
+pub fn to_show(state: &StateDir) -> Result<(Layers, Vec<u8>)> {
+    let bytes = shown_bytes(state)?;
+    Ok((Layers::parse(&bytes)?, bytes))
 }
 
 /// The content of the layers file of the workspace in `state` (empty if none).
@@ -794,8 +883,6 @@ pub fn store_and_show(
 ) -> Result<String> {
     let before = stored_bytes(state)?;
     layers.write(state)?;
-    // Taken off for a move that was interrupted: back.
-    put_back(state)?;
     show().inspect_err(|_| {
         if let Err(e) = store_bytes(state, &before) {
             log::warn!("putting the layers back: {e:#}");
@@ -811,30 +898,10 @@ mod tests {
     const B: &str = "2222222222222222222222222222222222222222";
 
     #[test]
-    fn version_1_files_are_read() {
-        let v1 = format!("version 1\nlayer on1\ton\t{A}\t{B}\nlayer off1\toff\t{B}\t{A}\n");
-        let layers = Layers::parse(v1.as_bytes()).unwrap();
-        // On: live, all work; off (hidden): dropped.
-        assert_eq!(layers.layers.len(), 1);
-        let l = &layers.layers[0];
-        assert_eq!(
-            (
-                l.branch.as_str(),
-                l.shows,
-                l.updates,
-                l.snapshot.to_string()
-            ),
-            ("on1", Shows::Work, Updates::Live, A.to_string())
-        );
-        assert!(l.instead.is_none());
-        assert!(Layers::parse(b"version 9\n").is_err());
-    }
-
-    #[test]
     fn a_proposal_keeps_the_layer_it_stands_in_for() {
         let text = format!(
-            "version 3\nlayer b-prop/c\twork\tlive\t5\t{A}\n\
-             instead b\tcommits-only\tfrozen\t3\t{B}\nlayer d\tcommits\tfixed\t4\t{A}\n"
+            "version 1\nlayer b-prop/c\twork\tlive\t5\t{A}\tsee\n\
+             instead b\tcommits-only\tfrozen\t3\t{B}\tsee\nlayer d\tcommits\tfixed\t4\t{A}\tedit\n"
         );
         let layers = Layers::parse(text.as_bytes()).unwrap();
         let was = layers.layers[0].instead.as_deref().unwrap();
@@ -843,6 +910,7 @@ mod tests {
             ("b", Shows::CommitsOnly, Updates::Frozen, 3)
         );
         assert!(layers.layers[1].instead.is_none());
+        assert_eq!(layers.editable_names(), ["d"]);
         let dir = std::env::temp_dir().join(format!("gitfold-layers-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let state = StateDir {
@@ -855,21 +923,11 @@ mod tests {
     }
 
     #[test]
-    fn version_2_files_are_read_their_merge_bases_dropped() {
-        let v2 = format!(
-            "version 2\nlayer b-prop/c\twork\tlive\t5\t{A}\t{B}\n\
-             instead b\tcommits-only\tfrozen\t3\t{B}\t{A}\nlayer d\tcommits\tfixed\t4\t{A}\t{A}\n"
-        );
-        let v3 = format!(
-            "version 3\nlayer b-prop/c\twork\tlive\t5\t{A}\n\
-             instead b\tcommits-only\tfrozen\t3\t{B}\nlayer d\tcommits\tfixed\t4\t{A}\n"
-        );
-        assert_eq!(
-            Layers::parse(v2.as_bytes()).unwrap(),
-            Layers::parse(v3.as_bytes()).unwrap()
-        );
-        // Only version 2 lines have the sixth field.
-        let bad = format!("version 3\nlayer d\tcommits\tfixed\t4\t{A}\t{A}\n");
+    fn only_this_version_is_read() {
+        assert!(Layers::parse(b"version 3\n").is_err());
+        let five = format!("version 1\nlayer d\tcommits\tfixed\t4\t{A}\n");
+        assert!(Layers::parse(five.as_bytes()).is_err(), "no see|edit field");
+        let bad = format!("version 1\nlayer d\tcommits\tfixed\t4\t{A}\tmaybe\n");
         assert!(Layers::parse(bad.as_bytes()).is_err());
     }
 }

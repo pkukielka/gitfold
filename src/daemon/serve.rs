@@ -120,6 +120,9 @@ pub fn run(options: Options) -> Result<()> {
             Request::Layers { branch } => workspaces
                 .switch_layers(&store, &branch)
                 .inspect(|done| log::info!("{done}")),
+            Request::Move { branch, intent } => workspaces
+                .move_branch(&store, &branch, intent)
+                .map(|moved| moved.encode()),
             Request::Fork { from, to } => workspaces
                 .fork(&from, &to)
                 .inspect(|done| log::info!("{done}")),
