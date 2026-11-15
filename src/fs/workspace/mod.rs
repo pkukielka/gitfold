@@ -145,9 +145,12 @@ pub struct Workspace {
     /// The stored layers last refused (and when), retried by the sync thread
     /// after a while (see `layers`).
     layers_refused: Mutex<Option<(Vec<u8>, std::time::Instant)>>,
-    /// What git's filter was given to smudge, by the hash of what it gave
-    /// back (see `layers::filter`).
-    filter_memo: Mutex<HashMap<[u8; 20], Vec<u8>>>,
+    /// What git's filter was given to smudge, by the path and the hash of
+    /// what it gave back (see `layers::filter`).
+    filter_memo: Mutex<layers::FilterMemo>,
+    /// The index's object ids of the filtered paths, as of the index file
+    /// it was read from (see `layers::index_oid`).
+    index_oids: Mutex<Option<layers::IndexOids>>,
     /// The safety net's last error (`check_branch`), logged once.
     guard_check_failed: Mutex<Option<String>>,
     /// Files only editable layers changed whose index entries' size was
@@ -349,6 +352,7 @@ impl Workspace {
             kernel: std::sync::OnceLock::new(),
             layers_refused: Mutex::new(None),
             filter_memo: Mutex::new(HashMap::new()),
+            index_oids: Mutex::new(None),
             guard_check_failed: Mutex::new(None),
             unstated: Mutex::new(HashMap::new()),
             index_checked: Mutex::new(None),

@@ -341,6 +341,20 @@ fn invalidate_tree(
     Ok(())
 }
 
+/// The object ids of `paths`' stage-0 entries in the index `data` (those
+/// it has).
+pub fn oids_of(data: &[u8], paths: &HashSet<Vec<u8>>) -> Result<HashMap<Vec<u8>, ObjectId>> {
+    let mut r = Reader::new(data)?;
+    let mut out = HashMap::new();
+    while let Some(e) = r.next_entry()? {
+        if e.stage() == 0 && paths.contains(r.path.as_slice()) {
+            let oid = &data[e.start + STAT_LEN..e.start + FLAGS_AT];
+            out.insert(r.path.clone(), ObjectId::try_from(oid)?);
+        }
+    }
+    Ok(out)
+}
+
 /// An entry's place in the index and its flags.
 struct Entry {
     start: usize,

@@ -62,7 +62,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -101,6 +101,28 @@ const MEMO_MAX: usize = 1024;
 /// What `carry_over` gives: per path, the upper file's new content, or `None`
 /// to drop it.
 type Carried = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+
+/// What smudge was given for a file (see `Workspace::filter`).
+#[derive(Clone)]
+pub(super) struct Smudged {
+    /// git's version.
+    own: Vec<u8>,
+    /// For a file only editable layers changed, the waiting edits it kept
+    /// (the file shown with them), so a smudge of that content again keeps
+    /// the same ones.
+    kept: Option<Vec<u8>>,
+}
+
+/// What smudge was given, by path and the hash of what it gave back.
+pub(super) type FilterMemo = HashMap<(Vec<u8>, [u8; 20]), Smudged>;
+
+/// The index's object ids of some paths, as read from the index file with
+/// `stamp` (its mtime, size and inode).
+pub(super) struct IndexOids {
+    stamp: (SystemTime, u64, u64),
+    paths: HashSet<Vec<u8>>,
+    oids: HashMap<Vec<u8>, ObjectId>,
+}
 
 /// A move of the branch made with a switch (`moves`).
 pub(super) struct MoveStep {
@@ -276,7 +298,7 @@ impl Workspace {
     }
 
     /// Whether the stored layers differ from those applied (a cheap read).
-    pub(super) fn layers_pending(&self) -> bool {
+    pub(crate) fn layers_pending(&self) -> bool {
         let stored = layers::shown_bytes(&self.state).unwrap_or_default();
         stored != self.layers.read().applied.layers
     }
@@ -364,7 +386,14 @@ impl Workspace {
             let mut layers = self.layers.write();
             // Under the write lock: no write to a union file can land
             // between reading it and replacing it.
-            let carried = self.carry_over(&layers, new_view, &union, (&edited, &edited_new))?;
+            let read_only = |p: &[u8]| mixed.contains_key(p) && !writable.contains(p);
+            let carried = self.carry_over(
+                &layers,
+                (new_view, base_tree),
+                &union,
+                (&edited, &edited_new),
+                read_only,
+            )?;
             let changes = git::with_repo(|repo| git::layers::delta(repo, layers.view, new_view))
                 .context("comparing the views")?;
             // The move's steps 1 and 2 (`state::moves`): the index, then
@@ -591,9 +620,10 @@ impl Workspace {
     fn carry_over(
         &self,
         layers: &Layers,
-        new_view: ObjectId,
+        (new_view, new_base_tree): (ObjectId, ObjectId),
         union: &HashMap<Vec<u8>, Vec<usize>>,
         (edited, edited_new): (&HashSet<Vec<u8>>, &HashSet<Vec<u8>>),
+        read_only: impl Fn(&[u8]) -> bool,
     ) -> Result<Carried> {
         let mut out = Vec::new();
         let base_tree = git::with_repo(|repo| git::layers::commit_tree(repo, layers.base))?;
@@ -618,6 +648,17 @@ impl Workspace {
             let stays =
                 union.contains_key(path) || edited.contains(path) || edited_new.contains(path);
             let is_union = layers.union.contains_key(path) || union.contains_key(path);
+            // A file an editable layer changed that a see-only layer's change
+            // now shows in (the layer made see-only, another added): the
+            // upper copy, which wins whole and which git sees unfiltered,
+            // keeps only the workspace's own lines, carried onto the new
+            // base; the layers' show read-only below it if that is all.
+            if layers.edited.contains(path) && !stays && read_only(path) {
+                let own = self.own_only(path, base_tree, new_base_tree, &old, &ours)?;
+                let below = content_at(new_base_tree, path)?;
+                out.push((path.clone(), (own != below).then_some(own)));
+                continue;
+            }
             let merged = match (old == new, is_union) {
                 (true, _) => Some(ours.clone()),
                 (false, true) => self.carry_union(base_tree, path, &old, &ours, &new)?,
@@ -629,8 +670,9 @@ impl Workspace {
                         true => "the layers' newer work".to_string(),
                         false => format!("{}'s newer work", names.join(" + ")),
                     };
-                    let mine = "your waiting edits";
-                    Some(git::layers::merge3_marked(&old, &ours, &new, mine, &theirs).0)
+                    // Yours: the workspace's own changes, or its waiting
+                    // edits, or both.
+                    Some(git::layers::merge3_marked(&old, &ours, &new, "yours", &theirs).0)
                 }
             };
             let new_exists = git::with_repo(|repo| {
@@ -653,6 +695,48 @@ impl Workspace {
             }
         }
         Ok(out)
+    }
+
+    /// The workspace's own lines of upper copy `ours` of `path`, a file only
+    /// editable layers changed when shown as `old` over base tree
+    /// `base_tree`, carried onto base tree `new_base_tree` (see
+    /// `carry_over`). Refused (the switch with it) if it has waiting edits,
+    /// which can't stand without the layers' lines, or if its own changes
+    /// can't be carried.
+    fn own_only(
+        &self,
+        path: &[u8],
+        base_tree: ObjectId,
+        new_base_tree: ObjectId,
+        old: &[u8],
+        ours: &[u8],
+    ) -> Result<Vec<u8>> {
+        let before = content_at(base_tree, path)?;
+        let split = filter::Edited {
+            base: before.clone(),
+            shown: old.to_vec(),
+        }
+        .split(ours);
+        let refused = |why: &str| {
+            Err(Refusal::Changes.error(format!(
+                "{}: {why}; the layers stay as they are",
+                path.to_str_lossy()
+            )))
+        };
+        if split.waiting > 0 {
+            return refused(
+                "your waiting edits in it change an editable layer's uncommitted lines, which \
+                 would show read-only now",
+            );
+        }
+        let after = content_at(new_base_tree, path)?;
+        if after == before {
+            return Ok(split.own);
+        }
+        match git::merge_file(&self.tmp, &before, &split.own, &after)? {
+            Some(own) => Ok(own),
+            None => refused("your changes to it depend on lines that would no longer show"),
+        }
     }
 
     /// A union file's upper copy `ours` carried from union `old` onto `new`
@@ -879,8 +963,11 @@ impl Workspace {
     /// view as it is now: a union file's own lines (clean) or all of them
     /// (smudge); any other path's content as it is (its attribute is left
     /// over from an earlier view). Clean gives back exactly what smudge was
-    /// given for content it smudged (remembered, `MEMO_MAX` of them, until
-    /// the view changes), so a checkout's files are clean in git's eyes.
+    /// given for content it smudged (remembered, `MEMO_MAX` of them, by path,
+    /// until the view changes), so a checkout's files are clean in git's
+    /// eyes, but only while git's index has that version of the file: once
+    /// it has another (`git reset <path>` after `git checkout <rev> --
+    /// <path>`), the content is cleaned as any other.
     pub fn filter(&self, op: filter::Op, path: &[u8], content: Vec<u8>) -> Result<Vec<u8>> {
         let (base, hunk, view, edited) = {
             let layers = self.layers.read();
@@ -901,11 +988,11 @@ impl Workspace {
         match op {
             filter::Op::Smudge => {
                 let out = versions.smudge(&content);
-                self.remember(&out, content);
+                self.remember(path, &out, content, None);
                 Ok(out)
             }
-            filter::Op::Clean => match self.remembered(&content) {
-                Some(own) => Ok(own),
+            filter::Op::Clean => match self.remembered(path, &content) {
+                Some(smudged) => Ok(smudged.own),
                 None => Ok(versions.clean(&content)),
             },
         }
@@ -914,7 +1001,16 @@ impl Workspace {
     /// `filter` for a file only editable layers changed, on base tree
     /// `base_tree`, with view tree `view`: clean strips the layers' lines and
     /// the waiting edits; smudge puts them back, the waiting edits as the
-    /// file has them now (its upper copy, else as shown).
+    /// file has them now (its upper copy, else as shown; as they were before
+    /// a smudge of this content, if it is one).
+    ///
+    /// A file with a conflict of the workspace's changes and the layers'
+    /// (git's markers, `Edited::conflicted`) is git's version as it is
+    /// (the index's) to clean until the conflict is resolved: nothing of it
+    /// reaches git, markers included, and git sees no change it didn't
+    /// make. Smudge leaves it as it is when git writes that same version
+    /// back (`stash`, `reset --hard` to it); another version (a checkout of
+    /// another commit) is merged into the workspace's side of the conflict.
     fn filter_edited(
         &self,
         op: filter::Op,
@@ -923,41 +1019,113 @@ impl Workspace {
         base_tree: ObjectId,
         view: ObjectId,
     ) -> Result<Vec<u8>> {
-        let edited = filter::Edited {
-            base: content_at(base_tree, path)?,
-            shown: content_at(view, path)?,
-        };
+        let tip = git::branch_tip(&self.state.branch).map_or(base_tree, |c| c.tree);
+        let edited = filter::Edited::on_tip(
+            content_at(base_tree, path)?,
+            content_at(view, path)?,
+            content_at(tip, path)?,
+        );
         match op {
             filter::Op::Smudge => {
-                let now = match fs::read(self.upper_path(path)) {
+                let mut now = match fs::read(self.upper_path(path)) {
                     Ok(now) => now,
                     Err(e) if crate::fsutil::not_found(&e) => edited.shown.clone(),
                     Err(e) => return Err(e.into()),
                 };
-                let out = edited.smudge(&content, &now);
-                self.remember(&out, content);
+                let earlier = self.remembered(path, &now).and_then(|s| s.kept);
+                if earlier.is_none() && edited.conflicted(&now) {
+                    if self.index_has(path, &content) {
+                        return Ok(now);
+                    }
+                    now = filter::Edited::first_sides(&now);
+                }
+                let out = edited.smudge(&content, &now, earlier.as_deref());
+                if edited.conflicted(&out) {
+                    log::warn!(
+                        "{}: {}: git's version conflicts with the layers' lines or your waiting \
+                         edits: the file shows git's conflict markers",
+                        self.state.branch,
+                        path.to_str_lossy()
+                    );
+                }
+                let kept = match earlier {
+                    Some(kept) => kept,
+                    None => edited.split(&now).kept,
+                };
+                self.remember(path, &out, content, Some(kept));
                 Ok(out)
             }
-            filter::Op::Clean => match self.remembered(&content) {
-                Some(own) => Ok(own),
-                None => Ok(edited.clean(&content)),
-            },
+            filter::Op::Clean => {
+                if let Some(smudged) = self.remembered(path, &content) {
+                    return Ok(smudged.own);
+                }
+                if edited.conflicted(&content)
+                    && let Some(oid) = self.index_oid(path)
+                {
+                    return git::read_blob(oid);
+                }
+                Ok(edited.clean(&content))
+            }
         }
     }
 
-    /// Remembers that smudge gave `out` for `own` (see `filter`).
-    fn remember(&self, out: &[u8], own: Vec<u8>) {
+    /// Remembers that smudge gave `out` at `path` for `own`, keeping the
+    /// waiting edits `kept` (see `filter`).
+    fn remember(&self, path: &[u8], out: &[u8], own: Vec<u8>, kept: Option<Vec<u8>>) {
         let mut memo = self.filter_memo.lock();
         if memo.len() >= MEMO_MAX {
             memo.clear();
         }
-        memo.insert(sha1::Sha1::digest(out).into(), own);
+        let key = (path.to_vec(), sha1::Sha1::digest(out).into());
+        memo.insert(key, Smudged { own, kept });
     }
 
-    /// What smudge was given for content it gave `out` for, if remembered.
-    fn remembered(&self, out: &[u8]) -> Option<Vec<u8>> {
-        let hash: [u8; 20] = sha1::Sha1::digest(out).into();
-        self.filter_memo.lock().get(&hash).cloned()
+    /// What smudge was given at `path` for content it gave `out` for, if
+    /// remembered and git's index still has it there.
+    fn remembered(&self, path: &[u8], out: &[u8]) -> Option<Smudged> {
+        let key = (path.to_vec(), sha1::Sha1::digest(out).into());
+        let smudged = self.filter_memo.lock().get(&key).cloned()?;
+        self.index_has(path, &smudged.own).then_some(smudged)
+    }
+
+    /// Whether git's index has `content` at `path`.
+    fn index_has(&self, path: &[u8], content: &[u8]) -> bool {
+        let Some(oid) = self.index_oid(path) else {
+            return false;
+        };
+        gix::objs::compute_hash(gix::hash::Kind::Sha1, gix::objs::Kind::Blob, content)
+            .is_ok_and(|id| id == oid)
+    }
+
+    /// The object id of `path`'s entry in git's index (a filtered path), if
+    /// it has one; read once per change of the index file.
+    fn index_oid(&self, path: &[u8]) -> Option<ObjectId> {
+        let index = self.state.index();
+        let meta = fs::metadata(&index).ok()?;
+        let stamp = (meta.modified().ok()?, meta.len(), meta.ino());
+        let mut cached = self.index_oids.lock();
+        if let Some(c) = cached.as_ref()
+            && c.stamp == stamp
+            && c.paths.contains(path)
+        {
+            return c.oids.get(path).copied();
+        }
+        let mut paths: HashSet<Vec<u8>> = {
+            let layers = self.layers.read();
+            layers.union.keys().chain(&layers.edited).cloned().collect()
+        };
+        paths.insert(path.to_vec());
+        let data = fs::read(&index).ok()?;
+        let oids = match index_edit::oids_of(&data, &paths) {
+            Ok(oids) => oids,
+            Err(e) => {
+                log::warn!("{}: reading the index: {e:#}", self.state.branch);
+                return None;
+            }
+        };
+        let oid = oids.get(path).copied();
+        *cached = Some(IndexOids { stamp, paths, oids });
+        oid
     }
 
     /// Edits the worktree's index, waiting up to `INDEX_WAIT` for git to

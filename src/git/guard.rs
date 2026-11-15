@@ -486,7 +486,7 @@ pub fn is_marker(line: &[u8]) -> bool {
     if line == b"=======" {
         return true;
     }
-    [b'<', b'>', b'|'].iter().any(|&c| {
+    b"<>|".iter().any(|&c| {
         line.len() >= 7
             && line[..7].iter().all(|&b| b == c)
             && line.get(7).is_none_or(|&b| b == b' ')
