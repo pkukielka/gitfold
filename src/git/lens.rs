@@ -212,14 +212,14 @@ fn commit_tree(repo: &gix::Repository, commit: ObjectId) -> Result<ObjectId> {
 
 /// One layer of a stack: a seal and the merge base it is pinned to.
 #[derive(Clone, Copy, Debug)]
-pub struct Layer {
+pub struct Pin {
     pub seal: ObjectId,
     pub merge_base: ObjectId,
 }
 
 /// What `build_view` made.
 #[derive(Debug)]
-pub struct View {
+pub struct Built {
     /// H: B's tree with the hunk paths blended (B's tree if none is).
     pub hunk_tree: ObjectId,
     /// M: H with the whole-file paths of the layers.
@@ -234,7 +234,7 @@ pub struct View {
     pub notes: Vec<Note>,
 }
 
-impl View {
+impl Built {
     /// The layers whose changes are in H: the seals that are L's parents.
     pub fn hunk_layers(&self) -> Vec<usize> {
         let set: BTreeSet<usize> = self.blended.values().flatten().copied().collect();
@@ -261,9 +261,9 @@ pub enum Note {
 pub fn build_view(
     repo: &gix::Repository,
     base: ObjectId,
-    layers: &[Layer],
+    layers: &[Pin],
     hunk_paths: &dyn Fn(&[BString]) -> Result<HashSet<BString>>,
-) -> Result<View> {
+) -> Result<Built> {
     let base_tree = commit_tree(repo, base)?;
     let mut layer_bases = Vec::with_capacity(layers.len());
     let mut deltas = Vec::with_capacity(layers.len());
@@ -357,7 +357,7 @@ pub fn build_view(
         }
         mixed.insert(path.clone(), ix);
     }
-    Ok(View {
+    Ok(Built {
         hunk_tree,
         view_tree,
         mixed,
@@ -693,7 +693,7 @@ pub struct Conflict {
 }
 
 /// What extraction needs to know about the lens it extracts from.
-pub struct Lens<'a> {
+pub struct Extractor<'a> {
     /// L's parents after the base, for L'.
     pub seals: &'a [ObjectId],
     /// The subject of L' (see `lens_subject`).
@@ -709,7 +709,7 @@ pub struct Lens<'a> {
 /// and only the agent's changes. Moves no ref: see `advance`.
 pub fn extract(
     repo: &gix::Repository,
-    lens: &Lens,
+    lens: &Extractor,
     prev: ObjectId,
     tip: ObjectId,
     commits: &[ObjectId],
@@ -744,7 +744,7 @@ pub fn extract(
 /// One commit of `extract`: its copy on `tip`, or the conflicts.
 fn extract_one(
     repo: &gix::Repository,
-    lens: &Lens,
+    lens: &Extractor,
     prev: ObjectId,
     tip: ObjectId,
     commit: ObjectId,
@@ -1108,8 +1108,8 @@ mod tests {
         base
     }
 
-    fn stack(r: &Repo, base: ObjectId, names: &[&str]) -> Vec<Layer> {
-        let layer = |name: &&str| Layer {
+    fn stack(r: &Repo, base: ObjectId, names: &[&str]) -> Vec<Pin> {
+        let layer = |name: &&str| Pin {
             seal: r.id(name),
             merge_base: base,
         };
@@ -1120,8 +1120,8 @@ mod tests {
         path == "registry.txt"
     }
 
-    /// The layers whose content is at `path` in M (`Lens::owners`).
-    fn owners_of(view: &View, path: &BStr) -> Vec<usize> {
+    /// The layers whose content is at `path` in M (`Extractor::owners`).
+    fn owners_of(view: &Built, path: &BStr) -> Vec<usize> {
         match view.mixed.get(path) {
             Some(layer) => vec![*layer],
             None => view.blended.get(path).cloned().unwrap_or_default(),
@@ -1340,7 +1340,7 @@ mod tests {
     /// The lensed worktree as gitfold would serve it: HEAD detached at L,
     /// the files of M, skip-worktree on the layers' paths L has and the
     /// layers' new paths excluded. Returns the worktree's directory.
-    fn lensed_worktree(r: &Repo, l: ObjectId, view: &View) -> PathBuf {
+    fn lensed_worktree(r: &Repo, l: ObjectId, view: &Built) -> PathBuf {
         let wt = r.dir.join("mine");
         let wt_str = wt.to_str().unwrap();
         r.git(&["worktree", "add", "-q", "--detach", wt_str, &l.to_string()]);
@@ -1423,7 +1423,7 @@ mod tests {
         assert_eq!(chain(&repo, base, l, 10).unwrap(), Some(vec![l]));
         assert_eq!(chain(&repo, seals[0], head, 10).unwrap(), None);
         let owners = |p: &BStr| owners_of(&view, p);
-        let lens = Lens {
+        let lens = Extractor {
             seals: &seals,
             subject: &subject,
             is_hunk: &registry,
@@ -1502,7 +1502,7 @@ mod tests {
         let hunk_tree = edit_tree(&repo, view.hunk_tree, promoted).unwrap();
         let l = lens_commit(&repo, hunk_tree, base, &seals, "lens").unwrap();
         let owners = |p: &BStr| owners_of(&view, p);
-        let lens = Lens {
+        let lens = Extractor {
             seals: &seals,
             subject: "lens",
             is_hunk: &registry,

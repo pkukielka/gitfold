@@ -181,8 +181,8 @@ pub fn view(common_dir: &std::path::Path, base: &ObjectId, lens: &Lens) -> Resul
     let shown: Vec<usize> = (0..lens.layers.len())
         .filter(|&i| lens.layers[i].on)
         .collect();
-    let stack: Vec<git::lens::Layer> = (shown.iter())
-        .map(|&i| git::lens::Layer {
+    let stack: Vec<git::lens::Pin> = (shown.iter())
+        .map(|&i| git::lens::Pin {
             seal: lens.layers[i].seal,
             merge_base: lens.layers[i].merge_base,
         })

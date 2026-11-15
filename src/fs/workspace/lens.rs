@@ -736,7 +736,7 @@ impl Workspace {
                 None if first_parent(repo, head)? == first_parent(repo, l)? => vec![head],
                 None => return Ok(None),
             };
-            let lens = git::lens::Lens {
+            let lens = git::lens::Extractor {
                 seals: &view.hunk_seals,
                 subject: &subject,
                 is_hunk: &is_hunk,
