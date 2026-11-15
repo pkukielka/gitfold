@@ -62,9 +62,9 @@ Non-goals for now: macOS and Windows; applying checkout filters
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
            refs/gitfold/<id>                 keeps the workspace base from git gc
-           refs/gitfold-snapshot/<id>/<n>        keeps a workspace's snapshots (the newest 16)
-           refs/gitfold-layers/<id>            keeps the view commit of a workspace showing layers (and its layers commit)
-           refs/gitfold-own/<branch>       a stacked branch's parent base
+           refs/gitfold-snapshot/<id>/<n>    keeps a workspace's snapshots (the newest 16)
+           refs/gitfold-layers/<id>          keeps the view commit of a workspace showing layers (and its layers commit)
+           refs/gitfold-own/<branch>         a stacked branch's parent base
 ```
 
 Names below the root are resolved by `Workspaces::resolve`, one component at a
@@ -215,9 +215,9 @@ Then, per request (`fs/workspace/`):
 ## Glossary
 
 User-facing text uses three concepts only: **layer**, **base** and
-**snapshot**. The code keeps some internal names (snapshot,
-move, stack, surrender), marked *internal* below with the user-facing
-term; they never appear in messages, help or the README.
+**snapshot**. The code keeps some internal names (stack, record), marked
+*internal* below with the user-facing term; they never appear in
+messages, help or the README.
 
 - **Snapshot**: `@<rev>`, showing the tree of a commit, read-only.
 - **Workspace**: `<branch>`, a writable view of a branch, made of a lower and an
@@ -240,8 +240,8 @@ term; they never appear in messages, help or the README.
   view tree).
 - **Upper**: every file that differs from the base, as real files in
   `.git/gitfold/<id>/upper`.
-- **Snapshot of work** (of a workspace): a
-  commit of a workspace's uncommitted work: the tree it shows, ignored
+- **Snapshot of work**: a commit of a workspace's uncommitted work: the
+  tree it shows, ignored
   files left out, on its base (or its branch tip, when it committed and
   its base hasn't caught up, if it has the tip's changes), made with a
   fixed identity and date.
@@ -277,8 +277,7 @@ term; they never appear in messages, help or the README.
 - **Mixed path**: a path a layer changed (or deleted) that isn't union-merged:
   the base's version with the layers' changes merged in, read-only, unless
   upper has it. It belongs to every layer that changed it.
-- **Layers commit** (L): HEAD, detached,
-  while files are union-merged: tree H over the branch tip, parents the tip
+- **Layers commit** (L): HEAD, detached, while files are union-merged: tree H over the branch tip, parents the tip
   and the union layers' snapshots, a `gitfold-layers` header. The **view commit** (V, tree M, first parent L)
   is what `refs/gitfold-layers/<id>` points at, keeping both.
 - **Extraction**: copying the commits made on L onto the branch with only
@@ -299,15 +298,14 @@ term; they never appear in messages, help or the README.
   base): a branch built on another, its **base** (`gitfold layer base`;
   the **parent** in the code, `gitfoldParent`); its **parent base** is the
   commit of the parent its own commits sit on (`refs/gitfold-own/<branch>`).
-- **Move** (*internal*; user-facing: "moved onto its base",
-  "updated"): copying a stacked branch's own commits onto its parent's
-  tip, and moving the branch (and its workspace's files) there.
+- **Move** ("moved onto its base", "updated"): copying a stacked
+  branch's own commits onto its parent's tip, and moving the branch (and
+  its workspace's files) there.
 - **Switch**: changing what the layers show (a layer added, replaced,
   removed or moved to newer work), telling the kernel and git, and
   carrying the workspace's own lines in union files over.
-- **Git off** ("git is off here"): turning git
-  off in a workspace with layers whose index can't be
-  edited, or whose HEAD left the layers commit's line: its `.git` names a
+- **Git off** ("git is off here"): turning git off in a workspace with
+  layers whose index can't be edited, or whose HEAD left the layers commit's line: its `.git` names a
   nonexistent `/LAYERS SHOWN (...)` directory saying why.
 - **Whiteout**: a recorded deleted lower path, so it stays hidden.
 - **Opaque**: a directory recreated over a whiteout, or a lower directory
