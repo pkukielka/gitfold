@@ -346,7 +346,7 @@ impl Workspace {
     /// Before layers go on in a workspace showing none: its base catches up
     /// with its branch first (`rebase`), as the sync thread would have
     /// soon, since the base waits while layers show. After a move of the
-    /// branch onto its base (`cli::stack`, which takes the layers off for
+    /// branch onto its base (`cli::layer::moves`, which takes the layers off for
     /// it), the files the move wrote are then the new base's, not the
     /// workspace's own, which would hide the layers' at those paths. Fails
     /// (the switch refused, retried) if it can't catch up now, and while a

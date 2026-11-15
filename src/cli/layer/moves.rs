@@ -15,7 +15,7 @@
 //! is finished by the next `layer base` or turn start (`finish_landing`),
 //! never moved back onto the old base.
 //!
-//! A move is computed first, moving nothing (`git::stack::restack`).
+//! A move is computed first, moving nothing (`git::stack::compute_move`).
 //! A conflict is recorded (`gitfoldRestackBlocked`) and reported, and the
 //! branch stays on the old base. Otherwise where the branch lives decides
 //! how it moves:
@@ -28,7 +28,7 @@
 //!   then the refs; the sync thread's ordinary rebase then drops the files
 //!   the read-tree copied up;
 //! - a workspace, unmounted: only without uncommitted changes, under the
-//!   repository lock: its index, its base (`fs::workspace::restack_closed`),
+//!   repository lock: its index, its base (`fs::workspace::move_closed`),
 //!   the refs.
 //!
 //! Both workspace cases record an intent first (`state::moves`), so a
@@ -174,7 +174,7 @@ fn rebase_onto(
         declare(common_dir, name, target, base.commit)?;
         return update_one(common_dir, name, yes, false);
     }
-    let blocked = local.restack_blocked(name);
+    let blocked = local.move_blocked(name);
     each(common_dir, &[name.to_string()], Some(target), |name| {
         if let Some(why) = ask(common_dir, name, base.commit, target, yes)? {
             return Ok(Outcome::Refused(why));
@@ -206,7 +206,7 @@ fn rebase_onto(
                 // finish it).
                 finish_landing(common_dir, name)?;
                 // A conflict with what it isn't built on: not its block.
-                settings::set_restack_blocked(common_dir, name, blocked.as_deref())?;
+                settings::set_move_blocked(common_dir, name, blocked.as_deref())?;
             }
         }
         Ok(outcome)
@@ -255,7 +255,7 @@ fn frozen_after(common_dir: &Path, name: &str, target: &str, frozen: bool) -> Re
     if Local::read(common_dir).parent(name).is_none() {
         return Ok(());
     }
-    settings::set_restack_manual(common_dir, name, frozen)?;
+    settings::set_move_manual(common_dir, name, frozen)?;
     if frozen {
         println!(
             "frozen: {name} doesn't follow {target}'s new commits; `gitfold layer base \
@@ -277,7 +277,7 @@ fn base_all(common_dir: &Path, yes: bool) -> Result<()> {
     let (mut branches, frozen): (Vec<String>, Vec<String>) = (local.parents().into_iter())
         .filter(|(_, parent)| !land::is_trunk(common_dir, &local, parent))
         .map(|(b, _)| b)
-        .partition(|b| !local.restack_manual(b));
+        .partition(|b| !local.move_manual(b));
     if !frozen.is_empty() {
         println!(
             "left as they are (frozen): {}; `gitfold layer base <BASE> --frozen -w <BRANCH>` \
@@ -308,7 +308,7 @@ pub(super) fn base_command(target: &str, frozen: bool, tick: bool) -> String {
 /// `--frozen`: its base is frozen, and `target` isn't the trunk (which takes
 /// the base away).
 fn frozen_onto(common_dir: &Path, local: &Local, name: &str, target: &str) -> bool {
-    local.restack_manual(name) && !land::is_trunk(common_dir, local, target)
+    local.move_manual(name) && !land::is_trunk(common_dir, local, target)
 }
 
 /// What to run to bring branch `name` onto `target` (as users name it):
@@ -352,7 +352,7 @@ pub fn declare(common_dir: &Path, name: &str, parent: &str, base: ObjectId) -> R
         "the base {base} isn't in {name}'s history"
     );
     settings::set_parent(common_dir, name, Some(parent))?;
-    settings::set_restack_blocked(common_dir, name, None)?;
+    settings::set_move_blocked(common_dir, name, None)?;
     stack::set_base(common_dir, name, base)?;
     moved_now(common_dir, name)?;
     land::record(common_dir, name, parent, base)
@@ -369,8 +369,8 @@ fn moved_now(common_dir: &Path, name: &str) -> Result<()> {
 /// follows it, a blocked move and a landing under way.
 fn forget_base(common_dir: &Path, name: &str) -> Result<()> {
     settings::set_parent(common_dir, name, None)?;
-    settings::set_restack_manual(common_dir, name, false)?;
-    settings::set_restack_blocked(common_dir, name, None)?;
+    settings::set_move_manual(common_dir, name, false)?;
+    settings::set_move_blocked(common_dir, name, None)?;
     settings::set_landing(common_dir, name, None)?;
     settings::set_base_on_target(common_dir, name, None)?;
     settings::set_moved(common_dir, name, None)?;
@@ -474,16 +474,16 @@ fn ask(
 /// Brings `name` up to date with its base, asked for: says what moves
 /// first, and moves commits already pushed only with `yes`. `to_landing`:
 /// where its base landed was named, so the landing is followed even while
-/// the base's branch is still there (see `restack_branch`).
+/// the base's branch is still there (see `move_onto_base`).
 fn update(common_dir: &Path, name: &str, yes: bool, to_landing: bool) -> Result<Outcome> {
     // First, so what is said is about where it is now.
     finish_landing(common_dir, name)?;
-    if let Outcome::Would { onto, base } = restack_branch(common_dir, name, true, to_landing)?
+    if let Outcome::Would { onto, base } = move_onto_base(common_dir, name, true, to_landing)?
         && let Some(why) = ask(common_dir, name, base, &onto, yes)?
     {
         return Ok(Outcome::Refused(why));
     }
-    restack_branch(common_dir, name, false, to_landing)
+    move_onto_base(common_dir, name, false, to_landing)
 }
 
 /// `update` for `name` alone, said as `each` says it.
@@ -503,7 +503,7 @@ enum Outcome {
     /// Moved onto its base: onto how many new commits of the base, how
     /// many of its own were dropped (made empty), the paths changed in its
     /// workspace (`None`: no workspace).
-    Restacked {
+    Moved {
         new: usize,
         dropped: usize,
         files: Option<Vec<BString>>,
@@ -578,7 +578,7 @@ impl Outcome {
     }
 }
 
-/// Runs `restack` for each of `branches`, says what it did, one line each,
+/// Runs `move_one` for each of `branches`, says what it did, one line each,
 /// then the force-pushes to run; fails (exit 4) if any wasn't brought up to
 /// date. `onto` names what they move onto in what is said (default: each
 /// one's base).
@@ -586,18 +586,18 @@ fn each(
     common_dir: &Path,
     branches: &[String],
     onto: Option<&str>,
-    restack: impl Fn(&str) -> Result<Outcome>,
+    move_one: impl Fn(&str) -> Result<Outcome>,
 ) -> Result<()> {
     let mut failed = 0;
     let mut pushes = Vec::new();
     for name in branches {
-        let outcome = restack(name).unwrap_or_else(|e| Outcome::Refused(format!("{e:#}")));
+        let outcome = move_one(name).unwrap_or_else(|e| Outcome::Refused(format!("{e:#}")));
         // As now: finishing an interrupted move onto a landing changes it.
         let parent = (onto.map(str::to_string))
             .unwrap_or_else(|| Local::read(common_dir).parent(name).unwrap_or_default());
         failed += usize::from(!outcome.done());
         println!("{name}: {}", describe(common_dir, &outcome, name, &parent));
-        if matches!(outcome, Outcome::Restacked { .. } | Outcome::Landed { .. })
+        if matches!(outcome, Outcome::Moved { .. } | Outcome::Landed { .. })
             && let Some(push) = force_push(common_dir, name)?
         {
             pushes.push(push);
@@ -641,7 +641,7 @@ fn describe(common_dir: &Path, outcome: &Outcome, name: &str, parent: &str) -> S
         Outcome::BaseMoved => {
             format!("has {parent}'s tip already; its own commits now start there")
         }
-        Outcome::Restacked {
+        Outcome::Moved {
             new,
             dropped,
             files,
@@ -746,7 +746,7 @@ fn stack_base(common_dir: &Path, name: &str) -> Option<ObjectId> {
 /// before, and the landing is only said (`LooksLanded`, when nothing else is
 /// to be said). Its callers finish an interrupted move first
 /// (`finish_landing`).
-fn restack_branch(
+fn move_onto_base(
     common_dir: &Path,
     name: &str,
     dry_run: bool,
@@ -787,7 +787,7 @@ fn restack_branch(
     })
 }
 
-/// `restack_branch` onto the tip of base `parent` (`resolved`), its own
+/// `move_onto_base` onto the tip of base `parent` (`resolved`), its own
 /// commits starting after `base`.
 #[allow(clippy::too_many_arguments)]
 fn onto_parent(
@@ -819,7 +819,7 @@ fn onto_parent(
             (base.stored, parent_tip),
             "gitfold: base",
         )?;
-        settings::set_restack_blocked(common_dir, name, None)?;
+        settings::set_move_blocked(common_dir, name, None)?;
         moved_now(common_dir, name)?;
         land::record(common_dir, name, &parent, parent_tip)?;
         return Ok(match base.commit == parent_tip {
@@ -901,7 +901,7 @@ fn reparent(
     let onto = format!("{} at {}", target.pr_base, short(landing.at));
     let at = short(landing.at);
     // Recorded first: the parent can't join the ref transaction, and a
-    // branch moved but still stacked on its old parent would be restacked
+    // branch moved but still stacked on its old parent would be moved
     // back onto the parent's commits (`finish_landing`).
     let marker = format!("{} {}", target.name, landing.at);
     if !dry_run {
@@ -973,7 +973,7 @@ fn finish_landing(common_dir: &Path, name: &str) -> Result<()> {
         if let Some(&follows) = words.get(2)
             && Local::read(common_dir).parent(name).is_some()
         {
-            settings::set_restack_manual(common_dir, name, follows == "frozen")?;
+            settings::set_move_manual(common_dir, name, follows == "frozen")?;
         }
         return Ok(());
     } else if moves::pending(&state) {
@@ -1013,7 +1013,7 @@ impl Copied {
     /// its own commits start was guessed).
     fn outcome(self, new: usize, guessed: bool) -> Outcome {
         match self {
-            Copied::Moved { files, dropped } => Outcome::Restacked {
+            Copied::Moved { files, dropped } => Outcome::Moved {
                 new,
                 dropped,
                 files,
@@ -1040,21 +1040,21 @@ fn copy_onto(
 ) -> Result<Copied> {
     let local = Local::read(common_dir);
     let state = StateDir::of(common_dir, name);
-    let computed = git::with_repo(|repo| stack::restack(repo, base.commit, onto, tip))?;
+    let computed = git::with_repo(|repo| stack::compute_move(repo, base.commit, onto, tip))?;
     let (new_tip, dropped) = match computed {
-        stack::Restack::Merge(commit) => {
+        stack::Move::Merge(commit) => {
             return Ok(Copied::Stop(Outcome::Refused(format!(
                 "its commit {} is a merge, which isn't moved; rebase by hand",
                 short(commit)
             ))));
         }
-        stack::Restack::Conflict { commit, paths } => {
+        stack::Move::Conflict { commit, paths } => {
             let record = format!("{onto} {commit} {}", lossy(&paths).join(" "));
             let told = local
-                .restack_blocked(name)
+                .move_blocked(name)
                 .is_some_and(|b| b.starts_with(&onto.to_string()));
             if !dry_run && !told {
-                settings::set_restack_blocked(common_dir, name, Some(&record))?;
+                settings::set_move_blocked(common_dir, name, Some(&record))?;
             }
             return Ok(Copied::Stop(Outcome::Blocked {
                 commit,
@@ -1064,7 +1064,7 @@ fn copy_onto(
                 rebase: format!("git rebase --onto {onto_rev} {}", short(base.commit)),
             }));
         }
-        stack::Restack::Done { tip, dropped, .. } => (tip, dropped.len()),
+        stack::Move::Done { tip, dropped, .. } => (tip, dropped.len()),
     };
     if dry_run {
         return Ok(Copied::Dry);
@@ -1090,8 +1090,8 @@ fn copy_onto(
         if now == tip || now == new_tip || !stack::is_ancestor(common_dir, tip, now)? {
             return move_branch(&state, intent);
         }
-        match git::with_repo(|repo| stack::restack(repo, base.commit, onto, now))? {
-            stack::Restack::Done {
+        match git::with_repo(|repo| stack::compute_move(repo, base.commit, onto, now))? {
+            stack::Move::Done {
                 tip: to,
                 dropped: d,
                 ..
@@ -1117,7 +1117,7 @@ fn copy_onto(
         Moved::Already => return Ok(Copied::Stop(Outcome::UpToDate)),
         Moved::Waits(why) => return Ok(Copied::Stop(Outcome::Waits(why))),
     };
-    settings::set_restack_blocked(common_dir, name, None)?;
+    settings::set_move_blocked(common_dir, name, None)?;
     moved_now(common_dir, name)?;
     Ok(Copied::Moved { files, dropped })
 }
@@ -1153,7 +1153,7 @@ fn move_branch(state: &StateDir, intent: Intent) -> Result<Moved> {
     }
 }
 
-/// Whether a branch at `tip` with parent base `base` needs no restack onto
+/// Whether a branch at `tip` with parent base `base` needs no move onto
 /// parent tip `parent_tip`: it is the base, or it is past the base and in
 /// the branch already (rebased by hand). Not a parent rewound behind the
 /// base: the commits it dropped go from the branch too, as `git rebase
@@ -1169,7 +1169,7 @@ fn on_parent(
             && stack::is_ancestor(common_dir, parent_tip, tip)?))
 }
 
-/// An interrupted restack of the workspace in `state` finished or undone
+/// An interrupted move of the workspace in `state` finished or undone
 /// first (`state::moves`); why not, if it can't be.
 fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
     Ok(match moves::recover(state)? {
@@ -1179,7 +1179,7 @@ fn recovered(state: &StateDir) -> Result<std::result::Result<(), String>> {
     })
 }
 
-/// How moving a branch for a restack ended.
+/// How moving a branch for a move ended.
 enum Moved {
     /// Moved: the paths changed in its workspace (`None`: no workspace).
     Done(Option<Vec<BString>>),
@@ -1190,7 +1190,7 @@ enum Moved {
 }
 
 /// With the intent held: whether the branch and its own ref are still
-/// where `intent` starts from (`None`), else how it ended. A restack
+/// where `intent` starts from (`None`), else how it ended. A move
 /// computed before another one finished would otherwise run its read-tree
 /// against the other's result.
 fn moved_meanwhile(state: &StateDir, intent: &Intent) -> Result<Option<Moved>> {
@@ -1225,7 +1225,7 @@ fn read_tree(dir: &Path, from: ObjectId, to: ObjectId) -> Result<std::process::O
         .output()?)
 }
 
-/// Restacks the mounted workspace in `state`, at `dir`, as `intent` says:
+/// Moves the mounted workspace in `state`, at `dir`, as `intent` says:
 /// its files and index by `git read-tree -m -u`, then the refs.
 fn apply_open(state: &StateDir, dir: &Path, intent: &Intent) -> Result<Moved> {
     if let Err(why) = recovered(state)? {
@@ -1284,7 +1284,7 @@ fn in_the_way<S: AsRef<str>>(paths: &[S]) -> String {
     )
 }
 
-/// Restacks the unmounted workspace in `state` (the repository lock held),
+/// Moves the unmounted workspace in `state` (the repository lock held),
 /// only if it has no uncommitted changes: its index, its base, then the
 /// refs.
 fn apply_closed(state: &StateDir, intent: &Intent) -> Result<Moved> {
@@ -1315,7 +1315,7 @@ fn apply_closed(state: &StateDir, intent: &Intent) -> Result<Moved> {
     if let Some(moved) = moved_meanwhile(state, intent)? {
         return Ok(moved);
     }
-    let moved = crate::fs::workspace::restack_closed(&store, state.clone(), &from, &to, || {
+    let moved = crate::fs::workspace::move_closed(&store, state.clone(), &from, &to, || {
         moves::move_index(state, intent, false)
     });
     let moved = match moved {
@@ -1353,8 +1353,8 @@ fn move_refs(state: &StateDir, intent: &Intent) -> Result<()> {
     )
 }
 
-/// What to run to push `name` after a restack, if it has a remote-tracking
-/// branch the restack left behind: a push with a lease on that tip, so a
+/// What to run to push `name` after a move, if it has a remote-tracking
+/// branch the move left behind: a push with a lease on that tip, so a
 /// push someone else made meanwhile is refused.
 fn force_push(common_dir: &Path, name: &str) -> Result<Option<String>> {
     let Some((remote, theirs, at)) = upstream(common_dir, name)? else {
@@ -1411,7 +1411,7 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
             "{parent} {landed} in {}: {advice} moves it there",
             target.pr_base
         ));
-    } else if let Some(blocked) = local.restack_blocked(name) {
+    } else if let Some(blocked) = local.move_blocked(name) {
         // `<onto> <commit> <paths>`.
         let paths: Vec<&str> = blocked.split(' ').skip(2).collect();
         notes.push(format!("blocked: conflicts on {}", shown_str(&paths)));
@@ -1434,7 +1434,7 @@ pub fn notes(common_dir: &Path, local: &Local, name: &str) -> Vec<String> {
 /// new commits (unless it is frozen), and what happened is said as context.
 /// Nothing when nothing happened, or when what keeps it from happening was
 /// told before (a block per base tip, anything else while it says the same:
-/// `restack-told` in the state directory).
+/// `move-told` in the state directory).
 pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
     layers::resume(&StateDir::of(common_dir, name))?;
     // A move onto a new base interrupted: finished first, so the base it is
@@ -1445,12 +1445,12 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
         return Ok(None);
     };
     // Not onto the trunk's every move: that is `layer base`'s, on request.
-    if local.restack_manual(name) || land::is_trunk(common_dir, &local, &parent) {
+    if local.move_manual(name) || land::is_trunk(common_dir, &local, &parent) {
         return Ok(None);
     }
     let told_file = StateDir::of(common_dir, name).dir.join(TOLD);
     let before = stack_base(common_dir, name);
-    let outcome = restack_branch(common_dir, name, false, false)?;
+    let outcome = move_onto_base(common_dir, name, false, false)?;
     let say = |text: String| -> Result<Option<String>> {
         if std::fs::read_to_string(&told_file).is_ok_and(|told| told == text) {
             return Ok(None);
@@ -1483,7 +1483,7 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
                 landed.target
             ))
         }
-        Outcome::Restacked {
+        Outcome::Moved {
             new,
             files,
             guessed,
@@ -1527,9 +1527,9 @@ pub fn hook_context(common_dir: &Path, name: &str) -> Result<Option<String>> {
     })
 }
 
-/// The hook's last message about why a workspace wasn't restacked, in its
+/// The hook's last message about why a workspace wasn't moved, in its
 /// state directory: said once while it stays the same.
-const TOLD: &str = "restack-told";
+const TOLD: &str = "move-told";
 
 /// The subjects of `from..to`, oldest first, at most three.
 fn subjects(common_dir: &Path, from: ObjectId, to: ObjectId) -> Result<Vec<String>> {

@@ -19,7 +19,7 @@
 //! - `follow`: its live layers moved by the daemon when no agent works in it.
 //! - `nodes`: local id ↔ (parent, name) table.
 //! - `rebase`: moving the base to the branch tip.
-//! - `restack`: a closed workspace's base moved for a restack, visibly.
+//! - `moves`: a closed workspace's base moved for a move, visibly.
 //! - `reads`: recording the files read in it (`gitfold overlaps`).
 //! - `times`: timestamps of files dropped from upper (only the mount uses them).
 //! - `write`: mutations and copy-up.
@@ -37,7 +37,7 @@ mod times;
 mod write;
 
 pub use follow::{Activities, Activity};
-pub use moves::restack_closed;
+pub use moves::move_closed;
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};

@@ -9,7 +9,7 @@
 //! - `snapshot`: a workspace's uncommitted work as a commit (`gitfold snapshot`).
 //! - `layers`: other workspaces' work shown in one, and its storage.
 //! - `follow`: moving a workspace's live layers to their latest work.
-//! - `restack`: a stacked branch's restack under way in a workspace (its
+//! - `moves`: a stacked branch's move under way in a workspace (its
 //!   intent file), and recovering one a crash interrupted.
 //! - `task`: the task folder (the `.task` link), kept apart from the changes.
 //!
@@ -17,8 +17,8 @@
 //! being `b` with `%`, `/` and a leading `.` escaped (`workspace_id`): `base` (the
 //! commit its changes are against, written last when it is made, so its
 //! presence means the workspace was opened), `branch`, `upper/`, `markers`,
-//! `times`, `reads`, `tmp/`, while a restack runs `restack` (and what the
-//! hook last said about one, `restack-told`). Its worktree
+//! `times`, `reads`, `tmp/`, while a move runs `move` (and what the
+//! hook last said about one, `move-told`). Its worktree
 //! registration (the admin directory, with its index and HEAD) is
 //! `.git/worktrees/gitfold-ws-<id>/`.
 

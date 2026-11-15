@@ -9,7 +9,7 @@
 //!   `gitfoldLanding` (a move onto a new base under way: a parent's
 //!   landing, or another base) and
 //!   `gitfoldBaseOnTarget` (whether its parent base was in the parent's
-//!   target when recorded; see `cli::stack`), `gitfoldMoved` (when it
+//!   target when recorded; see `cli::layer::moves`), `gitfoldMoved` (when it
 //!   was last moved onto its base); for a proposal (`gitfold
 //!   propose`), `gitfoldProposal` (the layer it would change),
 //!   `gitfoldProposedBy` (the workspace that proposed it) and
@@ -39,10 +39,10 @@ const TRACK_READS: &str = "gitfoldTrackReads";
 /// `branch.<branch>.gitfoldParent`: the branch it is stacked on.
 const PARENT: &str = "gitfoldParent";
 /// `branch.<branch>.gitfoldRestack`: `manual`, or (unset) at turn boundaries.
-const RESTACK: &str = "gitfoldRestack";
+const MOVE: &str = "gitfoldRestack";
 /// `branch.<branch>.gitfoldRestackBlocked`: `<parent tip> <commit> <paths>`,
-/// the restack onto that parent tip that conflicted.
-const RESTACK_BLOCKED: &str = "gitfoldRestackBlocked";
+/// the move onto that parent tip that conflicted.
+const MOVE_BLOCKED: &str = "gitfoldRestackBlocked";
 /// `branch.<branch>.gitfoldProposal`: the layer a proposal would change.
 const PROPOSAL: &str = "gitfoldProposal";
 /// `branch.<branch>.gitfoldProposedBy`: the workspace that proposed it.
@@ -218,13 +218,13 @@ impl Local {
 
     /// Whether `branch` follows its base only when asked (`layer base
     /// --frozen`: `gitfoldRestack` is `manual`), not at its turn boundaries.
-    pub fn restack_manual(&self, branch: &str) -> bool {
-        self.branch(branch, RESTACK).as_deref() == Some("manual")
+    pub fn move_manual(&self, branch: &str) -> bool {
+        self.branch(branch, MOVE).as_deref() == Some("manual")
     }
 
-    /// The restack of `branch` that conflicted, if any (see `RESTACK_BLOCKED`).
-    pub fn restack_blocked(&self, branch: &str) -> Option<String> {
-        self.branch(branch, RESTACK_BLOCKED)
+    /// The move of `branch` that conflicted, if any (see `MOVE_BLOCKED`).
+    pub fn move_blocked(&self, branch: &str) -> Option<String> {
+        self.branch(branch, MOVE_BLOCKED)
     }
 
     /// The move of `branch` onto a new base under way, if any (see
@@ -313,19 +313,19 @@ pub fn set_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<
     }
 }
 
-/// Stores the restack mode of `branch`: `manual` or not (unset).
-pub fn set_restack_manual(git_dir: &Path, branch: &str, manual: bool) -> Result<()> {
+/// Stores the move mode of `branch`: `manual` or not (unset).
+pub fn set_move_manual(git_dir: &Path, branch: &str, manual: bool) -> Result<()> {
     match manual {
-        true => set_branch(git_dir, branch, RESTACK, "manual"),
-        false => unset_branch(git_dir, branch, RESTACK),
+        true => set_branch(git_dir, branch, MOVE, "manual"),
+        false => unset_branch(git_dir, branch, MOVE),
     }
 }
 
-/// Records the restack of `branch` that conflicted, or forgets it.
-pub fn set_restack_blocked(git_dir: &Path, branch: &str, blocked: Option<&str>) -> Result<()> {
+/// Records the move of `branch` that conflicted, or forgets it.
+pub fn set_move_blocked(git_dir: &Path, branch: &str, blocked: Option<&str>) -> Result<()> {
     match blocked {
-        Some(blocked) => set_branch(git_dir, branch, RESTACK_BLOCKED, blocked),
-        None => unset_branch(git_dir, branch, RESTACK_BLOCKED),
+        Some(blocked) => set_branch(git_dir, branch, MOVE_BLOCKED, blocked),
+        None => unset_branch(git_dir, branch, MOVE_BLOCKED),
     }
 }
 
@@ -433,8 +433,8 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
                 .map(|parent| set_parent(common_dir, to, Some(&parent))),
         ),
         (
-            RESTACK,
-            (local.restack_manual(from)).then(|| set_restack_manual(common_dir, to, true)),
+            MOVE,
+            (local.move_manual(from)).then(|| set_move_manual(common_dir, to, true)),
         ),
         // Names the base it is about: stale on the fork if its base differs.
         (

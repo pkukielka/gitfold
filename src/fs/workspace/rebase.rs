@@ -140,7 +140,7 @@ impl Workspace {
     }
 
     fn sync_with(&self, store: &Store, fetch: bool) -> Result<()> {
-        // A restack of the branch (`state::moves`), first: while one runs,
+        // A move of the branch (`state::moves`), first: while one runs,
         // or one a crash interrupted can't be told apart, neither the base
         // nor the layers move. One that finishes moves the branch, which the
         // rebase below then follows.

@@ -977,7 +977,7 @@ gitfold list                       # p1
   (a fork keeps both; moved
   with the branch in one ref transaction; after `git branch -m` it is
   guessed from the base's reflog, as `git merge-base --fork-point` does),
-  and, while a workspace is moved, a `restack` intent in its state
+  and, while a workspace is moved, a `move` intent in its state
   directory, so a crash half-way is finished or undone (one gitfold can't
   tell apart is reported, and `gitfold layer base main` forgets it,
   moving nothing).

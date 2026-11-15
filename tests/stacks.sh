@@ -202,7 +202,7 @@ for _ in $(seq 30); do [ "$(cat "$COMMON/gitfold/p2/base")" = "$(R rev-parse p2)
 eq "the base follows" "$(R rev-parse p2)" "$(cat "$COMMON/gitfold/p2/base")"
 for _ in $(seq 30); do [ ! -e "$COMMON/gitfold/p2/upper/p1b.txt" ] && break; sleep 0.1; done
 check "and upper no longer holds the moved files" test ! -e "$COMMON/gitfold/p2/upper/p1b.txt" -a ! -e "$COMMON/gitfold/p2/upper/a.txt"
-check "no intent left" test ! -e "$COMMON/gitfold/p2/restack"
+check "no intent left" test ! -e "$COMMON/gitfold/p2/move"
 eq "the hook again: nothing to say" "" "$(prompt_hook "$W")"
 eq "list: workspaces in the tree too" "p1
 └─ p2" "$(tree)"
@@ -229,7 +229,7 @@ for i in 1 2 3; do
 done
 check "both at once: on the base's tip" parent_is p2 p1
 eq "its files and index at the tip" "r3|" "$(cat "$W/r.txt")|$(git -C "$W" status --short r.txt)"
-check "no intent left" test ! -e "$COMMON/gitfold/p2/restack"
+check "no intent left" test ! -e "$COMMON/gitfold/p2/move"
 
 # A fork keeps the base.
 "$BIN" -C "$W" branch p2f -w >/dev/null
@@ -308,7 +308,7 @@ eq "mounted: the hook moves it" yes "$(grep -q 'was moved onto its base p1' <<<"
 eq "own change kept" " M a.txt" "$(git -C "$W" status --short)"
 # An intent recovery can't read: layer switches wait, taking
 # its base away forgets it.
-echo junk >"$COMMON/gitfold/p2/restack"
+echo junk >"$COMMON/gitfold/p2/move"
 out=$("$BIN" -C "$W" layer add la 2>&1); rc=$?
 eq "an intent left: layer switches refused (exit 4)" "4 yes" "$rc $(grep -q 'p2 is being moved onto its base' <<<"$out" && echo yes)"
 # The layers taken off by that move: the next turn leaves them off while
@@ -611,9 +611,9 @@ echo n >"$MNT/p1/n.txt"; G "$MNT/p1" add n.txt; G "$MNT/p1" commit -qm "p1 n"
 crash_after_move p2
 base p2 p1 >/dev/null 2>&1
 check "killed: the branch moved" parent_is p2 p1
-for _ in $(seq 50); do [ ! -e "$S/layers-off" ] && [ ! -e "$S/restack" ] && break; sleep 0.1; done
+for _ in $(seq 50); do [ ! -e "$S/layers-off" ] && [ ! -e "$S/move" ] && break; sleep 0.1; done
 eq "mounted: the daemon finishes it and puts the layers back" "no|no|$(R rev-parse p1)" \
-    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(own_ref p2)"
+    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/move" && echo yes || echo no)|$(own_ref p2)"
 for _ in $(seq 30); do [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
 eq "the layer shows, the new file too, git sees only its own" "a la|n|" \
     "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n.txt")|$(git -C "$W" status --short)"
@@ -629,12 +629,12 @@ unset GIT_INDEX_FILE
 crash_after_move p2
 base p2 p1 >/dev/null 2>&1
 eq "killed unmounted: moved, the layers off, the intent left" "$(R rev-parse p1)|yes|yes" \
-    "$(R rev-parse p2^)|$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)"
+    "$(R rev-parse p2^)|$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/move" && echo yes || echo no)"
 mount_fs
 cat "$W/own.txt" >/dev/null
 for _ in $(seq 50); do [ ! -e "$S/layers-off" ] && [ "$(paste -sd' ' "$W/a.txt")" = "a la" ] && break; sleep 0.1; done
 eq "opened: finished, the layers back" "no|no|$(R rev-parse p1)" \
-    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/restack" && echo yes || echo no)|$(own_ref p2)"
+    "$(test -e "$S/layers-off" && echo yes || echo no)|$(test -e "$S/move" && echo yes || echo no)|$(own_ref p2)"
 eq "the layer, the new file, git clean" "a la|n2|" "$(paste -sd' ' "$W/a.txt")|$(cat "$W/n2.txt")|$(git -C "$W" status --short)"
 }
 

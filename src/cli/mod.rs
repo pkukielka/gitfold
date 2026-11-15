@@ -9,7 +9,7 @@
 //!   in a workspace, and its base.
 //! - `proposal`: `propose`, `proposals`, `consent`, `accept`, `reject`:
 //!   changes to a layer proposed from a workspace that shows it.
-//! - `stack`: `layer base` and `branch --base`: branches built on another
+//! - `layer::moves`: `layer base` and `branch --base`: branches built on another
 //!   branch (stacked), moved onto its new commits.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.

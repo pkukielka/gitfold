@@ -1,6 +1,6 @@
 //! `gitfold layer`: other branches' work shown in a workspace, read-only,
 //! over its base (see `state::layers`), and the base itself (`layer base`,
-//! see `stack`). The layers are stored with the workspace; while mounted,
+//! see `moves`). The layers are stored with the workspace; while mounted,
 //! the daemon shows them at once.
 
 use std::fmt::Write as _;
@@ -293,7 +293,7 @@ fn updates(layer: &Layer) -> String {
 /// --claude-hook stop` took it when its last turn ended, one without an
 /// agent as it is now), so what shows changes only between turns, never
 /// half-way through another's; a branch built on a base is moved onto its
-/// new commits first (`stack::hook_context`). Records that the workspace
+/// new commits first (`moves::hook_context`). Records that the workspace
 /// has an agent (`snapshot::turn_started`): the daemon leaves its layers to its
 /// turns. What changed is printed, which becomes context. Does nothing
 /// outside a workspace with layers or a base; errors are only logged.
@@ -306,7 +306,7 @@ pub fn layer_hook(event: &str) -> Result<()> {
         let name = super::branch_or_current(None, &repo)?;
         let common_dir = git::init(&repo)?;
         // A branch built on a base first follows its new commits, at the
-        // same boundary (see `stack`).
+        // same boundary (see `moves`).
         match moves::hook_context(&common_dir, &name) {
             Ok(Some(context)) => println!("{context}"),
             Ok(None) => {}
@@ -783,7 +783,7 @@ fn listing(common_dir: &Path, state: &StateDir, layers: &Layers) -> Result<Strin
 }
 
 /// The listing's base line (and the lines below it): what `branch` is built
-/// on, whether it follows it, and its notes (see `stack::notes`).
+/// on, whether it follows it, and its notes (see `moves::notes`).
 fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
     let local = Local::read(common_dir);
     let Some(parent) = local.parent(branch) else {
@@ -791,7 +791,7 @@ fn base_line(common_dir: &Path, branch: &str) -> Result<String> {
         return Ok(format!("Base: {trunk}\n"));
     };
     let trunk = land::is_trunk(common_dir, &local, &parent);
-    let frozen = local.restack_manual(branch);
+    let frozen = local.move_manual(branch);
     let head = format!("Base: {parent}, {}", if frozen { "frozen" } else { "live" });
     let tip = git::branch_tip(branch)?.id;
     let own = match land::resolve(common_dir, &parent)? {

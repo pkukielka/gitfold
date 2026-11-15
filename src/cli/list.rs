@@ -139,7 +139,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         };
         let parent = local.parent(&branch);
         let mut notes = super::layer::moves::notes(&common_dir, &local, &branch);
-        if parent.is_some() && local.restack_manual(&branch) {
+        if parent.is_some() && local.move_manual(&branch) {
             notes.insert(0, "frozen".into());
         }
         let parent = parent.unwrap_or_else(|| "-".into());

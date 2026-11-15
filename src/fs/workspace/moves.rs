@@ -1,6 +1,6 @@
-//! A closed workspace's base moved for a restack of its branch (see
-//! `cli::stack`), visibly: unlike a rebase, which keeps what the workspace
-//! shows, the restack's changes are meant to show. Done unmounted, under the
+//! A closed workspace's base moved for a move of its branch (see
+//! `cli::layer::moves`), visibly: unlike a rebase, which keeps what the workspace
+//! shows, the move's changes are meant to show. Done unmounted, under the
 //! repository lock, and only for a workspace with no uncommitted changes:
 //! upper then holds nothing but ignored files, and the view is the base's
 //! tree. The new base's tree shows instead, and its changed files get a
@@ -20,10 +20,10 @@ use crate::store::Store;
 
 /// Moves the base of the closed workspace in `state` from `from` (its
 /// base) to `to`, after `before` (which moves the index). The paths the
-/// restack changes where the workspace has something of its own (an ignored
+/// move changes where the workspace has something of its own (an ignored
 /// file, a whiteout, a directory hiding the base's) are returned instead,
 /// with nothing done.
-pub fn restack_closed(
+pub fn move_closed(
     store: &Store,
     state: StateDir,
     from: &Commit,

@@ -1,21 +1,21 @@
-//! A restack under way in a workspace (`cli::stack`): its intent file,
-//! `restack` in the state directory, and finishing or undoing one a crash
+//! A move under way in a workspace (`cli::layer::moves`): its intent file,
+//! `move` in the state directory, and finishing or undoing one a crash
 //! interrupted.
 //!
 //! The intent is `<mode> <C> <C'> <A> <own ref>`: the branch moves from C
 //! to C' onto parent tip A, its own ref from what it held (`-`: none) to
 //! A. The command doing it holds the file locked (`flock`; locked before
-//! it is linked into place), so `recover` leaves a restack in progress
+//! it is linked into place), so `recover` leaves a move in progress
 //! alone. The steps, by mode:
 //!
 //! - `open` (a mounted workspace): `git read-tree -m -u C C'` in the
 //!   workspace (its index and files), then the refs.
 //! - `closed` (unmounted): the index (`read-tree -m -i C C'`), then the base
-//!   and the stamps of the changed files (`fs::workspace::restack_closed`),
+//!   and the stamps of the changed files (`fs::workspace::move_closed`),
 //!   then the refs.
 //!
 //! What a crash left is told by the branch tip, the index on the paths the
-//! restack changes, and (closed) the base:
+//! move changes, and (closed) the base:
 //!
 //! - tip at C': the refs moved; the own ref is set if it isn't yet;
 //! - tip at C, index at C': open, the files moved too, so the refs follow;
@@ -38,16 +38,16 @@ use super::StateDir;
 use crate::git::{self, cmd, stack};
 
 /// The intent file's name in a workspace's state directory.
-pub const INTENT: &str = "restack";
+pub const INTENT: &str = "move";
 
-/// Where the restack moves the workspace's files (see the module doc).
+/// Where the move moves the workspace's files (see the module doc).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Open,
     Closed,
 }
 
-/// A restack to do, as its intent file records it.
+/// A move to do, as its intent file records it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Intent {
     pub mode: Mode,
@@ -61,7 +61,7 @@ pub struct Intent {
     pub stack_old: Option<ObjectId>,
 }
 
-/// An intent recorded and locked by this process: the restack is in
+/// An intent recorded and locked by this process: the move is in
 /// progress until `done`. Dropped otherwise (an error before anything
 /// moved), the intent goes too, unless `keep` said something may have
 /// moved half-way: then it stays for `recover`.
@@ -72,7 +72,7 @@ pub struct Held {
 }
 
 impl Held {
-    /// The restack is done (or undone): the intent goes.
+    /// The move is done (or undone): the intent goes.
     pub fn done(mut self) -> Result<()> {
         self.keep = true;
         remove(&self.path)
@@ -102,13 +102,13 @@ fn remove(path: &std::path::Path) -> Result<()> {
     }
 }
 
-/// Whether the workspace in `state` has an intent: a restack under way, or
+/// Whether the workspace in `state` has an intent: a move under way, or
 /// one a crash interrupted.
 pub fn pending(state: &StateDir) -> bool {
     fs::symlink_metadata(state.dir.join(INTENT)).is_ok()
 }
 
-/// Deletes the intent of the workspace in `state` unless a restack holds
+/// Deletes the intent of the workspace in `state` unless a move holds
 /// it: for one `recover` can't tell apart (`Recovery::Stuck`), once the
 /// workspace is as wanted. Whether there was one to delete.
 pub fn forget(state: &StateDir) -> Result<bool> {
@@ -139,14 +139,14 @@ impl Intent {
     fn parse(text: &str) -> Result<Intent> {
         let words: Vec<&str> = text.split_whitespace().collect();
         let [mode, from, to, a, stack] = words[..] else {
-            bail!("not a restack intent: {text:?}");
+            bail!("not a move intent: {text:?}");
         };
         let id = |hex: &str| ObjectId::from_hex(hex.as_bytes());
         Ok(Intent {
             mode: match mode {
                 "open" => Mode::Open,
                 "closed" => Mode::Closed,
-                _ => bail!("not a restack intent: {text:?}"),
+                _ => bail!("not a move intent: {text:?}"),
             },
             from: id(from)?,
             to: id(to)?,
@@ -200,20 +200,20 @@ impl Intent {
 /// What `recover` found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Recovery {
-    /// No restack was interrupted.
+    /// No move was interrupted.
     Nothing,
-    /// Another process is restacking it right now.
+    /// Another process is moving it right now.
     InProgress,
-    /// An interrupted restack, now finished.
+    /// An interrupted move, now finished.
     Finished,
-    /// An interrupted restack that had moved nothing (or only the index,
+    /// An interrupted move that had moved nothing (or only the index,
     /// put back), now forgotten.
     Undone,
     /// One that can't be told apart: left, with why.
     Stuck(String),
 }
 
-/// Finishes or undoes a restack of the workspace in `state` that a crash
+/// Finishes or undoes a move of the workspace in `state` that a crash
 /// interrupted (see the module doc). Needs `git::init`.
 pub fn recover(state: &StateDir) -> Result<Recovery> {
     let path = state.dir.join(INTENT);
@@ -285,7 +285,7 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
         && index_matches(state, tip, &[])?
     {
         // The branch moved on and git's index describes it (a commit, a
-        // reset since): whatever the restack left is history now.
+        // reset since): whatever the move left is history now.
         log::warn!(
             "{}: forgetting an interrupted move onto its base from {}: the branch moved on since",
             state.branch,
@@ -309,7 +309,7 @@ fn decide(state: &StateDir, text: &str) -> Result<Recovery> {
 /// own ref to A, unless the own ref was moved past the intent meanwhile.
 fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
     let stored = stack::rev(&state.common_dir, &stack::own_ref(&state.branch))?;
-    // Both moved already (the restack itself got that far).
+    // Both moved already (the move itself got that far).
     if tip == intent.to && stored == Some(intent.parent_tip) {
         return Ok(());
     }
@@ -331,7 +331,7 @@ fn finish(state: &StateDir, intent: &Intent, tip: ObjectId) -> Result<()> {
     moved
 }
 
-/// The paths the restack changes, as `git` takes them.
+/// The paths the move changes, as `git` takes them.
 pub fn changed_paths(intent: &Intent) -> Result<Vec<BString>> {
     git::with_repo(|repo| {
         let from = git::layers::commit_tree(repo, intent.from)?;
@@ -344,7 +344,7 @@ pub fn changed_paths(intent: &Intent) -> Result<Vec<BString>> {
 }
 
 /// Whether the workspace's index is at C' (`Some(true)`) or at C
-/// (`Some(false)`) on the paths the restack changes, or neither.
+/// (`Some(false)`) on the paths the move changes, or neither.
 fn index_at(state: &StateDir, intent: &Intent) -> Result<Option<bool>> {
     let paths = changed_paths(intent)?;
     // C and C' have the same tree: the index is at both.
@@ -429,10 +429,10 @@ mod tests {
     }
 
     #[test]
-    fn a_finished_restack_is_recovered_as_finished() {
-        let (r, state, [c1, c2, c3]) = workspace("restack-finished");
+    fn a_finished_move_is_recovered_as_finished() {
+        let (r, state, [c1, c2, c3]) = workspace("move-finished");
         let common = r.common();
-        // The branch and its own ref both moved: the restack got that far.
+        // The branch and its own ref both moved: the move got that far.
         stack::set_base(&common, "p2", c1).unwrap();
         let intent = Intent {
             mode: Mode::Open,
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn held_intents_go_unless_kept() {
-        let (_r, state, [c1, c2, c3]) = workspace("restack-held");
+        let (_r, state, [c1, c2, c3]) = workspace("move-held");
         let intent = Intent {
             mode: Mode::Open,
             from: c1,
@@ -494,7 +494,7 @@ mod tests {
 
     #[test]
     fn an_intent_the_branch_moved_past_is_forgotten() {
-        let (r, state, [c1, c2, _]) = workspace("restack-moved");
+        let (r, state, [c1, c2, _]) = workspace("move-moved");
         // The branch is at c3 and its index describes it: neither C nor C'.
         let intent = Intent {
             mode: Mode::Open,

@@ -692,7 +692,7 @@ impl ShownLayers {
 }
 
 /// The file whose presence means the layers of a workspace are taken off
-/// for a move of its branch onto its base (`cli::stack`): the layers file
+/// for a move of its branch onto its base (`cli::layer::moves`): the layers file
 /// stays as it is (what is stored is the truth), but none show until
 /// `put_back`.
 pub const OFF: &str = "layers-off";

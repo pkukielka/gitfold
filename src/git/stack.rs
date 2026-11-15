@@ -5,7 +5,7 @@
 //! pushes): with only `merge-base(a, b)`, a rewritten parent would have its
 //! old commits replayed too.
 //!
-//! Restacking b onto a's tip A copies each commit C of `B..b`, oldest first,
+//! Moving b onto a's tip A copies each commit C of `B..b`, oldest first,
 //! onto the copy of its parent: `merge_trees(base = C^, ours = the copy so
 //! far, theirs = C)`, with C's author, committer and message
 //! (`layers::copy_commit`). These are the commits `git rebase --onto A B b`
@@ -13,7 +13,7 @@
 //! made the same change) is dropped, as `git rebase` drops it; a merge in
 //! `B..b` is refused. Nothing moves here but in `move_refs`: b and its stack
 //! ref, in one compare-and-swap transaction, so a crash can't leave b
-//! restacked with B stale.
+//! moved with B stale.
 
 use std::path::Path;
 
@@ -134,9 +134,9 @@ pub fn count(common_dir: &Path, from: ObjectId, to: ObjectId) -> Result<usize> {
     Ok(String::from_utf8_lossy(&out).trim().parse()?)
 }
 
-/// What `restack` computed.
+/// What `compute_move` computed.
 #[derive(Debug, PartialEq, Eq)]
-pub enum Restack {
+pub enum Move {
     /// The copies: `tip` is the new branch tip (C'), `copied` each commit
     /// with its copy, `dropped` the commits that became empty.
     Done {
@@ -149,18 +149,18 @@ pub enum Restack {
         commit: ObjectId,
         paths: Vec<BString>,
     },
-    /// `commit` is a merge, which v1 doesn't restack.
+    /// `commit` is a merge, which v1 doesn't move.
     Merge(ObjectId),
 }
 
 /// Copies the commits of `base..tip` onto `onto` (see the module doc).
 /// Writes objects only; no ref moves.
-pub fn restack(
+pub fn compute_move(
     repo: &gix::Repository,
     base: ObjectId,
     onto: ObjectId,
     tip: ObjectId,
-) -> Result<Restack> {
+) -> Result<Move> {
     let range = format!("{base}..{tip}");
     let args = ["rev-list", "--reverse", "--topo-order", "--parents", &range];
     let out = cmd::output(repo.common_dir(), &args)?;
@@ -173,14 +173,14 @@ pub fn restack(
             .collect::<Result<Vec<_>, _>>()?;
         let (commit, parent) = match ids[..] {
             [commit, parent] => (commit, parent),
-            [commit, ..] if ids.len() > 2 => return Ok(Restack::Merge(commit)),
+            [commit, ..] if ids.len() > 2 => return Ok(Move::Merge(commit)),
             _ => bail!("{base} isn't an ancestor of {tip}"),
         };
         let (parent_tree, tree) = (commit_tree(repo, parent)?, commit_tree(repo, commit)?);
         let at_tree = commit_tree(repo, at)?;
         let merged = match merge_trees(repo, parent_tree, at_tree, tree)? {
             Ok(merged) => merged,
-            Err(paths) => return Ok(Restack::Conflict { commit, paths }),
+            Err(paths) => return Ok(Move::Conflict { commit, paths }),
         };
         // Empty only now: the parent made its change already. A commit
         // that was empty all along is kept, as `git rebase` keeps it.
@@ -192,7 +192,7 @@ pub fn restack(
         copied.push((commit, copy));
         at = copy;
     }
-    Ok(Restack::Done {
+    Ok(Move::Done {
         tip: at,
         copied,
         dropped,
@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn restack_as_git_rebase() {
+    fn move_as_git_rebase() {
         let r = stack("stack-rebase");
         let old_p1 = r.id("p1");
         fix_p1(&r, "6", "6 fix");
@@ -502,11 +502,11 @@ mod tests {
         r.commit("p1 adds a file");
         let repo = r.open();
         let (p1, p2) = (r.id("p1"), r.id("p2"));
-        let Restack::Done {
+        let Move::Done {
             tip,
             copied,
             dropped,
-        } = restack(&repo, old_p1, p1, p2).unwrap()
+        } = compute_move(&repo, old_p1, p1, p2).unwrap()
         else {
             panic!("a conflict")
         };
@@ -527,8 +527,8 @@ mod tests {
         // p1 takes p2's first change as is.
         fix_p1(&r, "15", "15 p2");
         let repo = r.open();
-        let Restack::Done { tip, dropped, .. } =
-            restack(&repo, old_p1, r.id("p1"), r.id("p2")).unwrap()
+        let Move::Done { tip, dropped, .. } =
+            compute_move(&repo, old_p1, r.id("p1"), r.id("p2")).unwrap()
         else {
             panic!("a conflict")
         };
@@ -543,10 +543,10 @@ mod tests {
         let old_p1 = r.id("p1");
         fix_p1(&r, "15", "15 p1 too");
         let repo = r.open();
-        let got = restack(&repo, old_p1, r.id("p1"), r.id("p2")).unwrap();
+        let got = compute_move(&repo, old_p1, r.id("p1"), r.id("p2")).unwrap();
         assert_eq!(
             got,
-            Restack::Conflict {
+            Move::Conflict {
                 commit: r.id("p2~1"),
                 paths: vec![BString::from("f.txt")],
             }
@@ -570,8 +570,8 @@ mod tests {
         r.git(&["merge", "-q", "--no-edit", "side"]);
         fix_p1(&r, "6", "6 fix");
         let repo = r.open();
-        let got = restack(&repo, old_p1, r.id("p1"), r.id("p2")).unwrap();
-        assert_eq!(got, Restack::Merge(r.id("p2")));
+        let got = compute_move(&repo, old_p1, r.id("p1"), r.id("p2")).unwrap();
+        assert_eq!(got, Move::Merge(r.id("p2")));
     }
 
     #[test]
@@ -588,7 +588,7 @@ mod tests {
         let wt1 = r.dir.join("wt-p1");
         edit_in(&r, &wt1);
         let (p1, p2) = (r.id("p1"), r.id("p2"));
-        let Restack::Done { tip, .. } = restack(&r.open(), old_p1, p1, p2).unwrap() else {
+        let Move::Done { tip, .. } = compute_move(&r.open(), old_p1, p1, p2).unwrap() else {
             panic!("a conflict")
         };
         // A stale compare-and-swap value for the own ref: nothing moves.

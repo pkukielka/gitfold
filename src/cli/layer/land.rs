@@ -106,10 +106,10 @@ pub fn same(common_dir: &Path, local: &Local, a: &str, b: &str) -> bool {
     a == b || (is_trunk(common_dir, local, a) && is_trunk(common_dir, local, b))
 }
 
-/// Whether `name` is the trunk: a parent never restacked onto at a turn
+/// Whether `name` is the trunk: a parent never moved onto at a turn
 /// boundary (following the trunk is `layer base`'s, on request).
 /// A local branch tracking it counts too (`main` for `origin/main`): a
-/// branch stacked on it would otherwise be restacked on every pull, and its
+/// branch stacked on it would otherwise be moved on every pull, and its
 /// own commits taken for landed once rebased onto the trunk.
 pub fn is_trunk(common_dir: &Path, local: &Local, name: &str) -> bool {
     let Some(trunk) = trunk(common_dir, local) else {
