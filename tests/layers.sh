@@ -808,6 +808,8 @@ sleep 5
 chmod 644 "$COMMON/gitfold/src/upper/u.txt"
 wait_for_line "$P/u.txt" "u 1" >/dev/null
 eq "a layer that couldn't move is tried again" "u 1" "$(cat "$P/u.txt" 2>/dev/null)"
+# git is told just after the view shows the move.
+for _ in $(seq 30); do [ -z "$(git -C "$P" status --short)" ] && break; sleep 0.1; done
 eq "git sees no change after the moves" "" "$(git -C "$P" status --short)"
 echo fromSrc2 >>"$S/reg.txt"
 wait_for_line "$P/reg.txt" "fromSrc2" >/dev/null
@@ -826,6 +828,99 @@ wait_for_line "$P/s.txt" "s 3" >/dev/null
 eq "back on the branch: it moves" "s 3" "$(cat "$P/s.txt")"
 }
 
+has() { grep -qF -- "$2" <<<"$1"; }
+# Waits up to $2 tenths of a second for command $1 (a string) to succeed.
+wait_until() { for _ in $(seq "$2"); do eval "$1" && return; sleep 0.1; done; return 1; }
+
+# Waiting edits beyond the use cases: an own line next to one, a file the
+# editable layer added, the child's snapshot, `layer remove --all`, the
+# safety net for a commit made without hooks, and what happens once the
+# lead commits.
+waiting_edits_in_more_files() {
+printf '// head\n// api\n// tail\n' >"$REPO/api.rs"; R add -A; R commit -qm api
+R branch lead
+"$BIN" -C "$REPO" branch child --edit lead >/dev/null || fail "branch child --edit lead"
+mount_fs
+L=$MNT/lead C=$MNT/child
+turn_starts "$C" >/dev/null
+printf '// head\n// api\nclass Api {\n    fn a() {}\n}\n// tail\n' >"$L/api.rs"
+printf 'fn draft() {}\n' >"$L/new.rs"
+turn_ends "$L" >/dev/null; turn_starts "$C" >/dev/null
+eq "the lead's uncommitted work shows" "fn draft() {}" "$(cat "$C/new.rs" 2>&1)"
+eq "git status: clean (its stat of the files recorded)" "" "$(git -C "$C" status --short)"
+printf '// head\n// api\nclass Api {\n    fn a() { mine }\n}\n// tail\n// mine\n' >"$C/api.rs"
+eq "an own line next to a waiting edit: git sees the own line only" "+// mine" \
+    "$(git -C "$C" diff | grep '^+[^+]')"
+echo 'fn mine() {}' >>"$C/new.rs"
+eq "a file only the lead has, edited: hidden from git" " M api.rs" "$(git -C "$C" status --short)"
+out=$(listing "$C")
+check "listed: the waiting edit in api.rs, whose lines it changes" has "$out" \
+    "1 waiting edit in api.rs: it changes lead's uncommitted lines; it becomes yours to commit once lead commits them"
+check "and the one in the lead's new file" has "$out" "1 waiting edit in new.rs"
+c=$(snap child)
+eq "the child's snapshot: its own lines only" "// head|// api|// tail|// mine" "$(R show "$c:api.rs" | paste -sd'|')"
+eq "without the lead's file" "" "$(R ls-tree --name-only "$c" new.rs)"
+out=$("$BIN" -C "$C" layer remove --all 2>&1); rc=$?
+eq "layer remove --all with waiting edits: refused (exit 4)" 4 "$rc"
+check "naming them" has "$out" "api.rs (1 waiting edit), new.rs (1 waiting edit)"
+G "$C" commit -qam "child: mine"
+eq "committed: the own line only" "// head|// api|// tail|// mine" "$(R show child:api.rs | paste -sd'|')"
+
+# A commit made without the filter and the hooks (as a libgit2 tool makes
+# it): it lands, and the daemon says so.
+tip=$(R rev-parse child)
+blob=$(git -C "$C" hash-object -w --no-filters api.rs)
+G "$C" update-index --cacheinfo "100644,$blob,api.rs"
+G "$C" -c core.hooksPath=/dev/null commit -qm "child: by libgit2"
+eq "without hooks the commit lands" "$tip" "$(R rev-parse child^)"
+bad=$(R rev-parse --short=12 child)
+wait_until 'has "$(listing "$C")" WARNING' 50
+out=$(listing "$C")
+check "the listing warns: the commit" has "$out" "WARNING: commit $bad (child: by libgit2) on child"
+check "whose lines, in which file" has "$out" "has lead's uncommitted lines in api.rs: \"class Api {\""
+check "and how to undo it" has "$out" "git reset --soft $bad^"
+check "the turn's notes too" has "$(turn_starts "$C")" "WARNING: commit $bad"
+check "and the log" grep -q "commit $bad (child: by libgit2)" "$LOG"
+G "$C" reset -q --soft HEAD~1; G "$C" reset -q
+wait_until '! has "$(listing "$C")" WARNING' 50
+check "taken out: no warning" fails has "$(listing "$C")" WARNING
+eq "git sees the waiting edits as before" "" "$(git -C "$C" status --short)"
+
+G "$L" add -A; G "$L" commit -qm "lead: class, new"; turn_ends "$L" >/dev/null
+turn_starts "$C" >/dev/null
+eq "the lead committed them: the child moves onto it" "$(R rev-parse lead)" "$(R rev-parse child^)"
+eq "its waiting edits are ordinary changes" " M api.rs| M new.rs" "$(git -C "$C" status --short | paste -sd'|')"
+eq "with what they changed" "-    fn a() {}|+    fn a() { mine }|+fn mine() {}" \
+    "$(git -C "$C" diff | grep '^[-+][^-+]' | paste -sd'|')"
+check "none listed" fails has "$(listing "$C")" "waiting edit"
+}
+
+# A workspace without an agent: the daemon moves its branch onto the
+# lead's commit once it is idle, and the waiting edit becomes an ordinary
+# change.
+waiting_edits_without_an_agent() {
+printf '// api\n' >"$REPO/api.rs"; R add -A; R commit -qm api
+R branch lead
+"$BIN" -C "$REPO" branch pc --edit lead >/dev/null || fail "branch pc --edit lead"
+mount_fs
+L=$MNT/lead P=$MNT/pc
+ls "$P" >/dev/null
+printf '// api\nclass Api {\n    fn a() {}\n}\n' >"$L/api.rs"
+wait_for_line "$P/api.rs" "}" >/dev/null
+eq "the lead's class shows by itself" "// api|class Api {|    fn a() {}|}" "$(paste -sd'|' "$P/api.rs")"
+# git told, and its stat of the file recorded: a write must make it read the
+# file again.
+wait_until '[ -z "$(git -C "$P" status --short)" ]' 30
+printf '// api\nclass Api {\n    fn a() {}\n    fn m() {}\n}\n' >"$P/api.rs"
+eq "a waiting edit: git sees nothing" "" "$(git -C "$P" status --short)"
+check "listed" has "$(listing "$P")" "1 waiting edit in api.rs"
+G "$L" commit -qam "lead: class"
+wait_until '[ "$(git -C "$P" status --short)" = " M api.rs" ]' 200
+eq "the lead committed: the daemon moved the branch onto it" "$(R rev-parse lead)" "$(R rev-parse pc)"
+eq "the waiting edit is an ordinary change" "+    fn m() {}" "$(git -C "$P" diff | grep '^+[^+]')"
+check "none listed" fails has "$(listing "$P")" "waiting edit"
+}
+
 section "layers: shown in a workspace" layers_shown_in_a_workspace
 section "layers: live, frozen, commits only, revisions; the listing" layers_live_frozen_commits_and_revisions
 section "layers: several changing one file" layers_changing_one_file
@@ -839,4 +934,6 @@ section "proposals: a contract changed by consent" proposals_to_change_a_contrac
 section "proposals: the layer kept as it was" proposals_keep_the_layer_as_it_was
 section "layers: on the workspace's own commits" layers_on_the_workspaces_own_commits
 section "layers: moving by themselves in a workspace with union files" layers_move_by_themselves_in_a_workspace_with_union_files
+section "layers: waiting edits in more files, the safety net" waiting_edits_in_more_files
+section "layers: waiting edits without an agent" waiting_edits_without_an_agent
 finish
