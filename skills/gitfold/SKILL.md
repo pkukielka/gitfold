@@ -469,7 +469,7 @@ when done).
 re-reads the files it uses (run `gitfold layer add <layer>` first if the message
 came mid-turn: the layer moves at your next prompt), and adapts its work.
 
-## Stacked branches
+## Bases (stacked branches)
 
 For stacked pull requests (`main <- p1 <- p2`), build the child on the
 parent's commits (p1 is p2's **base**) and let gitfold carry it along when
@@ -480,8 +480,8 @@ gitfold branch p2 --base p1       # p2 at p1's tip, built on it
 gitfold layer base p1 -w p2       # or: an existing branch, its own commits moved onto p1
 gitfold layer base p1             # again, in your workspace: onto p1's new commits now
 gitfold layer base p1 --frozen    # built on p1 as it is now; not followed by itself
-gitfold layer base main           # the trunk: off the stack, own commits onto main
-gitfold list                      # the stacks as a tree, with what each needs
+gitfold layer base main           # no base any more: its own commits onto main
+gitfold list                      # each branch under its base, with what it needs
 ```
 
 - `layer base` says first what it moves (`moves 3 commits of p2 onto p1`).
@@ -496,21 +496,25 @@ gitfold list                      # the stacks as a tree, with what each needs
 - A commit that conflicts with the base's new ones leaves your branch as
   it was, and you are told once (`list`: `blocked: conflicts on <paths>`).
   Rebase by hand in your workspace, `git rebase --onto p1 <start>` (the line
-  names it), then `gitfold layer base p1`.
+  names it), then `gitfold layer base p1` (`--frozen` too, for a frozen
+  base: the notes say which).
 - Uncommitted changes to a file the move changes: it waits, and tells you
   which; commit or stash them, and it happens at the next turn.
-- It is refused while layers are shown (`gitfold layer remove --all`
-  first).
+- It is refused while layers are shown, before anything changes
+  (`gitfold layer remove --all` first). A `layer base` that is refused or
+  can't move the branch leaves its base as it was.
 - When the base is merged into main (a merge, squash, rebase merge or
   fast-forward), your branch moves onto that merge with only its own
-  commits and is built on main from then on; you are told. Suggest the
-  push and then `gh pr edit <BRANCH> --base main` to the user; don't run
-  them yourself. A squash (or fast-forward) is a guess, so while the
-  base's branch still exists you are only told it looks merged: suggest
-  `gitfold layer base p1` to the user. It doesn't follow main's later
-  commits by itself: `gitfold layer base main` does, when wanted (and
-  takes it off the stack). A merge gitfold can't recognise (a squash
-  rewritten when merged): `gitfold layer base main` too.
+  commits and has no base any more (`Base: main`, as a branch never given
+  one); you are told. Suggest the push and then `gh pr edit <BRANCH>
+  --base main` to the user; don't run them yourself. A squash (or
+  fast-forward) is a guess, so while the base's branch still exists you
+  are only told it looks merged: suggest `gitfold layer base main` to the
+  user (it follows the landing the same way, and asks for `--yes` if your
+  commits are pushed). A base merged into its own base (p1 into p0) works
+  the same, naming p0; p2 is then built on p0. A merge gitfold can't
+  recognise (a squash rewritten when merged): `gitfold layer base main`
+  moves your own commits onto main's tip.
 - gitfold never pushes. After a move your branch's history is rewritten:
   push with `--force-with-lease` (`layer base` prints the command, `list`
   notes it).
