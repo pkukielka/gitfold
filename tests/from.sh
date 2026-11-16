@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# End-to-end test of `gitfold branch NEW --from A --from B …`: the branch
-# starts at the merge of the revisions, as `git merge` makes it on a branch at
-# the first (compared with git's own merge in a scratch worktree). A
-# conflicting merge says "not implemented yet" for now, leaving nothing.
+# End-to-end test of `gitfold branch NEW --from A --from B …`: NEW at A, then
+# `git merge B …` run in NEW's workspace, so it is what git's own merge makes
+# (compared with git merge in a scratch worktree). A conflict leaves NEW with
+# git's merge in progress; git refusing leaves nothing. Unmounted, the
+# repository is mounted again where it last was.
 # usage: tests/from.sh (or with the others: tests/run.sh); sections as in
 # tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
+export LC_ALL=C   # git's messages, as checked
 
 BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
 NAME=from
@@ -20,7 +22,7 @@ says() { local code=$1 text=$2; shift 2; local r; r=$(gf "$@"); [[ $r == "$code 
 # Branch $1 off $2 with a commit writing $4 into file $3.
 work() { R branch "$1" "$2"; R worktree add -q "$T/wt-$1" "$1"; mkdir -p "$(dirname "$T/wt-$1/$3")"; echo "$4" >"$T/wt-$1/$3"; G "$T/wt-$1" add -A; G "$T/wt-$1" commit -qm "$1: $3"; R worktree remove "$T/wt-$1"; }
 # What `git merge REV…` makes on a branch at $2 for branch name $1: the
-# commit's parents, tree and whole message (or "same" if it didn't move).
+# commit's parents, tree and whole message.
 git_merge() {
     local name=$1 at=$2; shift 2
     R worktree add -q --detach "$T/git-$name" "$at"
@@ -38,141 +40,95 @@ git_refuses() {
     R worktree remove --force "$T/git-refuses"
     return $refused
 }
+# Whether branch $1 left nothing: no branch, no workspace.
+nothing_of() { ! R rev-parse --verify -q "refs/heads/$1" >/dev/null && [ ! -e "$MNT/$1" ] && ! "$BIN" -C "$REPO" list | grep -q "^$1 "; }
+# git in workspace $1 of the mount.
+W() { git -C "$MNT/$1" -c user.name=t -c user.email=t@t "${@:2}"; }
 
 setup() {
     R config user.name t; R config user.email t@t   # for the merge commits
     work api main api.txt api
     work ui main ui.txt ui
     work x main x.txt x
+    mount_fs
 }
 
 clean_merges() {
 setup
-check "two sources: created at a merge" says 0 "created branch c at a merge of api and ui" branch c --from api --from ui
-eq "two sources: as git merge makes it" "$(git_merge c api ui)" "$(made c)"
-eq "two sources: the merged files" "api ui" "$(R show c:api.txt) $(R show c:ui.txt)"
-check "three: an octopus" says 0 "at a merge of api, ui and x" branch c3 --from api --from ui --from x
-eq "three: as git merge makes it" "$(git_merge c3 api ui x)" "$(made c3)"
-eq "three: three parents" 3 "$(R log -1 --format=%P c3 | wc -w)"
-check "the first contained in the others: dropped from the parents" says 0 "created branch s at a merge of api and ui" branch s --from main --from api --from ui
-eq "  as git merge does" "$(git_merge s main api ui)" "$(made s)"
-check "a source repeated counts once" says 0 "created branch r" branch r --from api --from ui --from api
-eq "  as git merge does" "$(git_merge r api ui api)" "$(made r)"
-check "a revision, a tag, an early part: git's message" says 0 "created branch m" branch m --from x --from "$(R rev-parse ui)" --from api~0
-eq "  as git merge does" "$(git_merge m x "$(R rev-parse ui)" api~0)" "$(made m)"
-R tag -a -m "the tag's message" v1 ui; R tag lw api
-check "tags" says 0 "created branch t" branch t --from x --from v1 --from lw
-eq "  as git merge does (an annotated tag's message too)" "$(git_merge t x v1 lw)" "$(made t)"
-v1=$(R rev-parse v1)
-check "an annotated tag by its id" says 0 "created branch ti" branch ti --from x --from "$v1"
-eq "  as git merge does (a tag, with its message)" "$(git_merge ti x "$v1")" "$(made ti)"
-work api2 api api.txt api2
-check "an early part (api2~1)" says 0 "created branch e" branch e --from ui --from api2~1
-eq "  as git merge does" "$(git_merge e ui api2~1)" "$(made e)"
-eq "no relation afterwards" "" "$(R config --get-regexp '^branch\.(c|c3)\.' || true)"
-}
-
-octopus_steps() {
-setup
-work lines main m.txt "$(printf '1\n2\n3\n4\n5')"
-work top lines m.txt "$(printf 'one\n2\n3\n4\n5')"
-work bottom lines m.txt "$(printf '1\n2\n3\n4\nfive')"
-check "an octopus merging a file's content (merge-one-file)" says 0 "at a merge of top, bottom and x" branch o --from top --from bottom --from x
-eq "  as git merge does" "$(git_merge o top bottom x)" "$(made o)"
-R branch ren main; R worktree add -q "$T/wt-ren" ren; G "$T/wt-ren" mv a.txt moved.txt; G "$T/wt-ren" commit -qm ren; R worktree remove "$T/wt-ren"
-work edit main a.txt edited
-check "two sources: renames followed (ort, git's default)" says 0 "at a merge of ren and edit" branch two --from ren --from edit
-eq "  as git merge does" "$(git_merge two ren edit)" "$(made two)"
-check "an octopus follows no renames: refused before the last, as git" says 1 "Should not be doing an octopus" branch o2 --from ren --from edit --from x
-check "  git refuses it too" git_refuses ren edit x
-check "  nothing left behind" fails R rev-parse --verify -q refs/heads/o2
-eq "  nothing of the merge left in the git directory" "" "$(ls -A "$COMMON" | grep gitfold-merge)"
-check "  nothing of gitfold's made in a repository never mounted" test ! -e "$COMMON/gitfold"
-R checkout -q -b bins main; printf 'a\0b' >"$REPO/bin.dat"; R add bin.dat; R commit -qm bin; R checkout -q main
-work bin1 bins bin.dat "$(printf 'one\001')"; work bin2 bins bin.dat "$(printf 'two\001')"
-check "binary files changed in both, before the last: refused, as git" says 1 "Should not be doing an octopus" branch b1 --from bin1 --from bin2 --from x
-check "  git refuses it too" git_refuses bin1 bin2 x
-check "binary files changed in both, last: a conflict (not implemented yet)" says 1 "not implemented yet" branch b2 --from x --from bin1 --from bin2
-work df1 main q file; work df2 main q/f file
-check "a file in one, a directory in another, last: a conflict (not implemented yet)" says 1 "not implemented yet" branch d1 --from x --from df1 --from df2
-check "  git conflicts too" git_refuses x df1 df2
-check "  nothing left behind" fails R rev-parse --verify -q refs/heads/d1
-}
-
-messages() {
-setup
-work feat main f.txt f
-echo m >"$REPO/m.txt"; R add m.txt; R commit -qm m; R branch rel
-check "a source the repository's HEAD contains, not the first: named" says 0 "at a merge of feat and rel" branch n --from feat --from rel
-eq "  as git merge does" "$(git_merge n feat rel)" "$(made n)"
-R config merge.log true
-check "merge.log: the shortlog" says 0 "created branch l" branch l --from api --from ui
-eq "  as git merge does" "$(git_merge l api ui)" "$(made l)"
-R config --unset merge.log
-R symbolic-ref HEAD refs/heads/unborn
-check "the repository's HEAD unborn: no matter" says 0 "created branch u" branch u --from api --from ui
-R symbolic-ref HEAD refs/heads/main
-eq "  as git merge does" "$(git_merge u api ui)" "$(made u)"
-}
-
-merge_ff() {
-setup
-R config merge.ff false
-check "merge.ff=false: a merge where a fast-forward would do" says 0 "at a merge of main and api" branch n --from main --from api
-eq "  as git merge does" "$(git_merge n main api)" "$(made n)"
-check "  already up to date stays so" says 0 "already up to date" branch n2 --from api --from main
-R config --add merge.ff bogus
-check "merge.ff: a value git doesn't know is skipped, as git skips it" says 0 "at a merge of main and api" branch n3 --from main --from api
-R config --unset-all merge.ff; R config merge.ff only
-check "merge.ff=only: a fast-forward" says 0 "a fast-forward" branch f --from main --from api
-check "merge.ff=only: no merge" says 1 "Not possible to fast-forward" branch m --from api --from ui
-check "  git refuses it too" git_refuses api ui
-check "  nothing left behind" fails R rev-parse --verify -q refs/heads/m
-}
-
-no_merge_needed() {
-setup
-check "the first contains the rest: up to date, at it" says 0 "created branch u at api (already up to date: it contains main)" branch u --from api --from main
+check "two sources: created, git saying how" says 0 "created branch c; open it as $MNT/c" branch c --from api --from ui
+eq "  as git merge makes it" "$(git_merge c api ui)" "$(made c)"
+eq "  its workspace shows it, clean" "api ui " "$(cat "$MNT/c/api.txt" "$MNT/c/ui.txt" | tr '\n' ' ')$(W c status --porcelain)"
+check "three: an octopus" says 0 "Merge made by the 'octopus' strategy." branch c3 --from api --from ui --from x
+eq "  as git merge makes it" "$(git_merge c3 api ui x)" "$(made c3)"
+check "the first contained in the others" says 0 "created branch s" branch s --from main --from api --from ui
+eq "  as git merge makes it" "$(git_merge s main api ui)" "$(made s)"
+R tag -a -m "the tag's message" v1 ui
+check "a tag" says 0 "created branch t" branch t --from x --from v1
+eq "  as git merge makes it (the tag's message too)" "$(git_merge t x v1)" "$(made t)"
+check "the first contains the rest: up to date, at it" says 0 "Already up to date." branch u --from api --from main
 eq "  at api" "$(R rev-parse api)" "$(R rev-parse u)"
-check "another contains the first: a fast-forward" says 0 "created branch f at api (a fast-forward: it contains main)" branch f --from main --from api
+check "another contains the first: a fast-forward" says 0 "Fast-forward" branch f --from main --from api
 eq "  at api" "$(R rev-parse api)" "$(R rev-parse f)"
-check "contained ones dropped: a fast-forward to the one left" says 0 "at api" branch f2 --from main --from api --from main~0
-eq "  at api" "$(R rev-parse api)" "$(R rev-parse f2)"
+R config merge.ff false
+check "merge.ff=false: a merge, as git" says 0 "created branch n" branch n --from main --from api
+eq "  as git merge makes it" "$(git_merge n main api)" "$(made n)"
+R config --unset merge.ff
+eq "no relation afterwards" "" "$(R config --get-regexp '^branch\.(c|c3)\.' || true)"
 }
 
 refused() {
 setup
-work clash main api.txt clash
-work clash2 main ui.txt clash
+work clash main api.txt clash; work clash2 main ui.txt clash2
 R checkout -q --orphan lone; R rm -rqf .; echo z >"$REPO/z"; R add z; R commit -qm lone; R checkout -q main
-check "a conflict: not implemented yet" says 1 "not implemented yet" branch c --from api --from clash
-check "  nothing left behind" fails R rev-parse --verify -q refs/heads/c
-check "a conflict at the last of several: not implemented yet" says 1 "not implemented yet" branch c --from x --from ui --from clash2
-check "  nothing left behind" fails R rev-parse --verify -q refs/heads/c
-check "a conflict before the last: refused as the octopus refuses it" says 1 "Should not be doing an octopus" branch c --from api --from clash --from x
-check "  nothing left behind" fails R rev-parse --verify -q refs/heads/c
-check "unrelated histories: refused, as git does" says 1 "refusing to merge unrelated histories" branch c --from api --from lone
-check "an unknown revision" says 1 "nosuch - not something we can merge" branch c --from api --from nosuch
+check "a conflict before the last: git's octopus refusal" says 1 "Should not be doing an octopus" branch c --from api --from clash --from x
+check "  git refuses it too" git_refuses api clash x
+check "  nothing left behind" nothing_of c
+check "unrelated histories: git's refusal" says 1 "refusing to merge unrelated histories" branch c --from api --from lone
+check "  nothing left behind" nothing_of c
+R config merge.ff only
+check "merge.ff=only: git's refusal" says 1 "Not possible to fast-forward" branch c --from api --from ui
+check "  nothing left behind" nothing_of c
+R config --unset merge.ff
+check "an unknown revision: git's refusal" says 1 "not something we can merge" branch c --from api --from nosuch
+check "  nothing left behind" nothing_of c
+check "an unknown first revision: git branch's refusal" says 1 "not a valid object name" branch c --from nosuch --from api
+check "  nothing left behind" nothing_of c
 check "an existing branch" says 1 "a branch named 'ui' already exists" branch ui --from api --from x
 check "-w with several: not implemented yet" says 1 "not implemented yet" branch c -w --from api --from ui
-check "  nothing left behind" fails R rev-parse --verify -q refs/heads/c
+check "  nothing left behind" nothing_of c
 }
 
-mounted() {
+conflicts() {
 setup
-mount_fs
-check "mounted: created at a merge" says 0 "created branch c at a merge of api and ui" branch c --from api --from ui
-eq "mounted: its workspace shows the merge" "api ui" "$(cat "$MNT/c/api.txt" "$MNT/c/ui.txt" | tr '\n' ' ' | sed 's/ $//')"
-eq "mounted: git status is clean" "" "$(git -C "$MNT/c" status --porcelain)"
-eq "mounted: HEAD is the merge" "$(R rev-parse c)" "$(git -C "$MNT/c" rev-parse HEAD)"
+work clash main api.txt clash; work clash2 main ui.txt clash2
+check "a conflict: exit 1, git's merge in progress" says 1 "created branch c with its merge in progress: resolve the conflicts in $MNT/c, then \`git merge --continue\`" branch c --from api --from clash
+eq "  git status says so" "AA api.txt" "$(W c status --porcelain)"
+check "  the markers in the file" grep -q '^<<<<<<< HEAD' "$MNT/c/api.txt"
+echo resolved >"$MNT/c/api.txt"; W c add api.txt
+check "  git merge --continue" W c merge --continue
+eq "  a merge of both" "$(R rev-parse api clash | tr '\n' ' ')" "$(R log -1 --format=%P c | tr ' ' '\n' | tr '\n' ' ')"
+check "aborted" says 1 "merge in progress" branch c2 --from api --from clash
+check "  git merge --abort" W c2 merge --abort
+eq "  back at the first, clean" "$(R rev-parse api)" "$(R rev-parse c2)$(W c2 status --porcelain)"
+check "a conflict at the last of several: in progress" says 1 "merge in progress" branch c3 --from x --from ui --from clash2
+eq "  merging both others" "$(R rev-parse ui clash2 | tr '\n' ' ')" "$(cat "$(W c3 rev-parse --absolute-git-dir)/MERGE_HEAD" | tr '\n' ' ')"
+check "unmounted, remounted: still in progress" says 1 "merge in progress" branch c4 --from api --from clash
+unmount_fs; mount_fs
+eq "  git status says so" "AA api.txt" "$(W c4 status --porcelain)"
+check "  git merge --abort" W c4 merge --abort
+}
+
+unmounted() {
+setup
 unmount_fs
+check "unmounted: mounted again where it was, then merged" says 0 "created branch c; open it as $MNT/c" branch c --from api --from ui
+check "  the mount stays" mountpoint -q "$MNT"
+eq "  as git merge makes it" "$(git_merge c api ui)" "$(made c)"
+"$BIN" unmount "$MNT" >/dev/null
 }
 
 section "from: clean merges, as git makes them" clean_merges
-section "from: octopus steps, as git takes them" octopus_steps
-section "from: messages, as git writes them" messages
-section "from: merge.ff" merge_ff
-section "from: no merge needed" no_merge_needed
-section "from: refused, and conflicts" refused
-section "from: mounted" mounted
+section "from: refused: nothing left" refused
+section "from: conflicts: git's merge in progress" conflicts
+section "from: unmounted" unmounted
 finish
