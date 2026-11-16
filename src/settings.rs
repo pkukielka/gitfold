@@ -33,8 +33,12 @@ const PARENT: &str = "gitfoldParent";
 /// `branch.<branch>.gitfoldFollow`: a boolean; unset means on.
 const FOLLOW: &str = "gitfoldFollow";
 /// `branch.<branch>.gitfoldConflict`: the parent's tip its commits
-/// conflicted with, then the paths, one per line.
+/// conflicted with, then the paths (quoted as git quotes them), one per
+/// line.
 const CONFLICT: &str = "gitfoldConflict";
+/// `branch.<branch>.gitfoldMoving`: the outcome of a move under way (see
+/// `follow`).
+const MOVING: &str = "gitfoldMoving";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -170,6 +174,12 @@ impl Local {
         Some((lines.next()?, lines.collect()))
     }
 
+    /// The outcome of a move of `branch` under way, as recorded
+    /// (`gitfoldMoving`).
+    pub fn moving(&self, branch: &str) -> Option<String> {
+        self.branch(branch, MOVING)
+    }
+
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
     fn branch(&self, branch: &str, key: &str) -> Option<String> {
         let config = self.0.as_ref()?;
@@ -252,6 +262,15 @@ pub fn forget_parent(git_dir: &Path, branch: &str) -> Result<()> {
     unset_branch(git_dir, branch, PARENT)?;
     unset_branch(git_dir, branch, FOLLOW)?;
     set_conflict(git_dir, branch, None)
+}
+
+/// Records the outcome of a move of `branch` under way, or with `None`
+/// forgets it.
+pub fn set_moving(git_dir: &Path, branch: &str, outcome: Option<&str>) -> Result<()> {
+    match outcome {
+        Some(outcome) => set_branch(git_dir, branch, MOVING, outcome),
+        None => unset_branch(git_dir, branch, MOVING),
+    }
 }
 
 /// Records that the commits of `branch` conflict with its parent's tip

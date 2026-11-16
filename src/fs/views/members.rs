@@ -133,6 +133,8 @@ pub fn committed(
 }
 
 /// The best merge base of commits `a` and `b`, as `git merge-base` finds it.
+/// (`follow::merge_base` runs git itself instead, for `--fork-point` and
+/// several commits; this one, in the daemon, avoids a git process.)
 fn merge_base(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
     git::with_repo(|repo| Ok(repo.merge_base(a, b)?.map(|id| id.detach())))
 }

@@ -276,7 +276,7 @@ check "--update: moved onto the parent's new commits" says 0 "moved 2 commits of
 check "  ui sits on api" R merge-base --is-ancestor api ui
 eq "  with its own commits only" "2" "$(own api ui)"
 eq "  its base recorded" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/ui)"
-check "  no move left behind" fails R rev-parse -q --verify refs/gitfold-moving/ui
+check "  no move left behind" fails R config branch.ui.gitfoldMoving
 check "  nor a worktree" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
 check "up to date" says 0 "ui is up to date with api" parent ui --update
 # api takes one of ui's changes as it is: git rebase drops it from ui.
@@ -321,6 +321,14 @@ R branch side main; on side s.txt s
 R switch -q api; R merge -q --no-ff --no-edit side; R switch -q main
 R branch plain api; on plain p.txt p; on api a.txt after
 check "a merge in the parent's history: moved all the same" says 0 "moves 1 commit of plain onto api" parent plain --set api
+# Conflicting paths are said and recorded as git quotes them.
+"$BIN" -C "$REPO" branch q --parent api >/dev/null
+on q 'n"q.txt' mine; on api 'n"q.txt' theirs
+check "a conflict on a path git quotes: quoted" says 4 'conflict with api'"'"'s on "n\"q.txt"' parent q --update
+eq "  recorded so" '"n\"q.txt"' "$(R config branch.q.gitfoldConflict | sed -n 2p)"
+check "  shown as a pause while following" says 0 "following paused" parent q
+R config branch.q.gitfoldFollow false
+check "  not while not following" lacks 0 "paused" parent q
 }
 
 pushed() {
@@ -377,10 +385,21 @@ check "a workspace's branch: not implemented yet" says 1 "gitfold parent --updat
 rmdir "$REPO/.git/gitfold/ui"
 # A move a crash interrupted after git moved the branch: its base recorded.
 R update-ref refs/gitfold-base/ui main~1
-R update-ref refs/gitfold-moving/ui api~1
+R config branch.ui.gitfoldMoving "$(R rev-parse api~1)"
 check "an interrupted move: finished by the next move" says 0 "moved 1 commit of ui onto api" parent ui --update
 eq "  only its own commit moved (its base was recorded first)" "1" "$(own api ui)"
-check "  the record gone" fails R rev-parse -q --verify refs/gitfold-moving/ui
+check "  the record gone" fails R config branch.ui.gitfoldMoving
+# A --set a crash interrupted after git moved the branch: its new parent
+# and following written by the next move (main is no parent of ui yet).
+R branch other api; R config branch.ui.gitfoldMoving "$(R rev-parse api) false refs/heads/other"
+check "an interrupted --set: finished by the next move" says 0 "ui is up to date with other" parent ui --update
+eq "  its parent and following written" "refs/heads/other false" "$(R config branch.ui.gitfoldParent) $(R config branch.ui.gitfoldFollow)"
+R config branch.ui.gitfoldParent refs/heads/api; R config --unset branch.ui.gitfoldFollow
+# A move recorded that never happened (the branch isn't on its target):
+# forgotten.
+R config branch.ui.gitfoldMoving "$(R commit-tree -m elsewhere "$(R rev-parse 'main^{tree}')") true refs/heads/main"
+check "a recorded move that didn't happen: forgotten" says 0 "ui is up to date with api" parent ui --update
+eq "  its parent unchanged" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
 # A move's worktree a dead process left: cleaned up by the next move.
 on api a.txt newer
 R -c worktree.useRelativePaths=true worktree add -q --no-checkout "$REPO/.git/gitfold-moves/gitfold-move-ui" ui

@@ -10,10 +10,12 @@
 //!   more), git's fork point of the parent (`merge-base --fork-point`, from
 //!   the parent's reflog), else their merge base. A branch without a parent
 //!   owns what isn't on the root (local or remote-tracking).
-//! - **Crash safety:** before the rebase, `refs/gitfold-moving/<branch>`
-//!   names the commit it moves onto; after, the base takes it and it goes.
-//!   One left behind (`recover`) means the move was interrupted: if the
-//!   branch sits on that commit, git finished, and the base is recorded.
+//! - **Crash safety:** before the rebase, one record (`gitfoldMoving`, see
+//!   `settings::set_moving`) holds the whole outcome: the commit it moves
+//!   onto, and for `--set` the new parent and following. After, they are
+//!   written (`finish`) and it goes. One left behind (`recover`) means the
+//!   move was interrupted: if the branch sits on that commit, git finished,
+//!   and the outcome is written then; else nothing moved, and it goes.
 //! - **Pushed commits** (on the branch's same-name branch of its push
 //!   remote, never main or its upstream) are moved only when asked
 //!   (`--yes`); gitfold prints the force-push and never pushes.
@@ -33,11 +35,6 @@ use crate::settings::{self, Local};
 /// The ref keeping where the own commits of `branch` start.
 fn base_ref(branch: &str) -> String {
     format!("refs/gitfold-base/{branch}")
-}
-
-/// The ref naming the commit a move of `branch` under way moves it onto.
-fn moving_ref(branch: &str) -> String {
-    format!("refs/gitfold-moving/{branch}")
 }
 
 /// The commit ref `name` points at, if it exists.
@@ -64,17 +61,28 @@ fn count(common_dir: &Path, args: &[&str]) -> Result<usize> {
     Ok(String::from_utf8_lossy(&out).trim().parse()?)
 }
 
-/// What `git merge-base` says for `args`, if it finds one.
+/// What `git merge-base` says for `args`, if it finds one (exit 1: none;
+/// any other failure is an error). Git itself, for `--fork-point` and
+/// several commits (`fs::views` has a gix one for two, in the daemon, which
+/// avoids git processes).
 fn merge_base(common_dir: &Path, args: &[&str]) -> Result<Option<ObjectId>> {
     let out = cmd::command(common_dir)
         .arg("merge-base")
         .args(args)
         .output()?;
-    if !out.status.success() {
-        return Ok(None);
+    match out.status.code() {
+        Some(0) => {
+            let hex = String::from_utf8_lossy(&out.stdout);
+            Ok(Some(ObjectId::from_hex(hex.trim().as_bytes())?))
+        }
+        Some(1) => Ok(None),
+        _ => bail!(
+            "git merge-base {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
     }
-    let hex = String::from_utf8_lossy(&out.stdout);
-    Ok(Some(ObjectId::from_hex(hex.trim().as_bytes())?))
 }
 
 /// Points `name` at `at` (with a reflog message).
@@ -116,18 +124,56 @@ fn clear_conflict(common_dir: &Path, branch: &str) -> Result<()> {
     }
 }
 
-/// Finishes the record of a move of `branch` a crash interrupted (see the
-/// module doc).
+/// The outcome of a move, recorded before it (see the module doc).
+pub struct Outcome {
+    /// What it moves onto: its base after.
+    pub onto: ObjectId,
+    /// For `--set`: the new parent (a full ref) and whether it follows it.
+    pub parent: Option<(String, bool)>,
+}
+
+impl Outcome {
+    fn encode(&self) -> String {
+        match &self.parent {
+            None => self.onto.to_string(),
+            Some((parent, follow)) => format!("{} {follow} {parent}", self.onto),
+        }
+    }
+
+    fn decode(text: &str) -> Option<Outcome> {
+        let mut words = text.split(' ');
+        let onto = ObjectId::from_hex(words.next()?.as_bytes()).ok()?;
+        let parent = match (words.next(), words.next()) {
+            (Some(follow), Some(parent)) => Some((parent.to_string(), follow.parse().ok()?)),
+            _ => None,
+        };
+        Some(Outcome { onto, parent })
+    }
+
+    /// Writes it for `branch`, which git moved: its base, its parent, then
+    /// the record goes.
+    fn finish(&self, common_dir: &Path, branch: &str) -> Result<()> {
+        set_base(common_dir, branch, self.onto)?;
+        if let Some((parent, follow)) = &self.parent {
+            settings::set_parent(common_dir, branch, parent)?;
+            settings::set_follow(common_dir, branch, *follow)?;
+        }
+        settings::set_moving(common_dir, branch, None)
+    }
+}
+
+/// Finishes or forgets the outcome of a move of `branch` a crash
+/// interrupted (see the module doc).
 fn recover(common_dir: &Path, branch: &str) -> Result<()> {
-    let Some(onto) = rev(&moving_ref(branch)) else {
+    let Some(text) = Local::read_checked(common_dir)?.moving(branch) else {
         return Ok(());
     };
-    if let Some(tip) = rev(&format!("refs/heads/{branch}"))
-        && is_ancestor(common_dir, onto, tip)?
-    {
-        set_base(common_dir, branch, onto)?;
+    match Outcome::decode(&text) {
+        Some(outcome) if is_ancestor(common_dir, outcome.onto, git::branch_tip(branch)?.id)? => {
+            outcome.finish(common_dir, branch)
+        }
+        _ => settings::set_moving(common_dir, branch, None),
     }
-    drop_ref(common_dir, &moving_ref(branch))
 }
 
 /// Where the own commits of `branch` (at `tip`) start, on `parent` (a full
@@ -141,19 +187,27 @@ fn own_base(
 ) -> Result<ObjectId> {
     let tip_hex = tip.to_string();
     if let Some(parent) = parent {
+        // A parent gone (T3) has nothing to ask git about.
+        let exists = rev(parent).is_some();
         if let Some(base) = rev(&base_ref(branch))
             && is_ancestor(common_dir, base, tip)?
         {
             // Taken more of the parent's commits by hand since (rebased or
             // merged onto it): those aren't its own.
-            return Ok(match merge_base(common_dir, &[parent, &tip_hex])? {
+            let on = match exists {
+                true => merge_base(common_dir, &[parent, &tip_hex])?,
+                false => None,
+            };
+            return Ok(match on {
                 Some(on) if is_ancestor(common_dir, base, on)? => on,
                 _ => base,
             });
         }
-        for args in [&["--fork-point", parent, &tip_hex][..], &[parent, &tip_hex]] {
-            if let Some(base) = merge_base(common_dir, args)? {
-                return Ok(base);
+        if exists {
+            for args in [&["--fork-point", parent, &tip_hex][..], &[parent, &tip_hex]] {
+                if let Some(base) = merge_base(common_dir, args)? {
+                    return Ok(base);
+                }
             }
         }
     }
@@ -319,22 +373,28 @@ impl Plan {
         }))
     }
 
-    /// Moves it (see the module doc): its base recorded, a conflict
-    /// cleared, or with `record` recorded (following its parent; not for a
-    /// move to another parent). Not with a merge among its own commits, nor
-    /// commits already pushed unless `yes`. `moving` is called once it is
-    /// sure to try. The caller holds `lock`.
+    /// Moves it (see the module doc): its base recorded and, for `--set`,
+    /// its new `parent` (a full ref) and following; a conflict cleared, or
+    /// recorded when following its parent (not for `--set`). Not with a
+    /// merge among its own commits, nor commits already pushed unless
+    /// `yes`. `moving` is called once it is sure to try. The caller holds
+    /// `lock`.
     pub fn run(
         &self,
         common_dir: &Path,
         yes: bool,
-        record: bool,
+        parent: Option<(String, bool)>,
         moving: impl FnOnce(),
     ) -> Result<Moved> {
         let branch = &self.branch;
+        let record = parent.is_none();
+        let outcome = Outcome {
+            onto: self.onto,
+            parent,
+        };
         if self.up_to_date(common_dir)? {
             // Sits on it already (rebased by hand, say).
-            set_base(common_dir, branch, self.onto)?;
+            outcome.finish(common_dir, branch)?;
             clear_conflict(common_dir, branch)?;
             return Ok(Moved::UpToDate);
         }
@@ -348,14 +408,14 @@ impl Plan {
         }
         moving();
         let upstream = (!self.on_history).then_some(self.base);
-        set_ref(common_dir, &moving_ref(branch), self.onto)?;
+        settings::set_moving(common_dir, branch, Some(&outcome.encode()))?;
+        // On an error (git may have moved it) the record stays, for
+        // `recover`.
         let rebased = rebase::rebase(common_dir, branch, self.tip, self.onto, upstream)?;
-        // Its base recorded before the record of the move goes; on an error
-        // (git may have moved it) the record stays, for `recover`.
-        if let rebase::Rebased::Moved(_) = rebased {
-            set_base(common_dir, branch, self.onto)?;
+        match rebased {
+            rebase::Rebased::Moved(_) => outcome.finish(common_dir, branch)?,
+            rebase::Rebased::Conflict(_) => settings::set_moving(common_dir, branch, None)?,
         }
-        drop_ref(common_dir, &moving_ref(branch))?;
         Ok(match rebased {
             rebase::Rebased::Moved(tip) => {
                 clear_conflict(common_dir, branch)?;
@@ -366,6 +426,10 @@ impl Plan {
                 }
             }
             rebase::Rebased::Conflict(paths) => {
+                // As git quotes paths: a newline in one can't split it.
+                let paths: Vec<String> = (paths.iter())
+                    .map(|p| String::from_utf8_lossy(&crate::cli::quote(p)).into_owned())
+                    .collect();
                 if record {
                     let at = self.onto.to_string();
                     settings::set_conflict(common_dir, branch, Some((&at, &paths)))?;
