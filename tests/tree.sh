@@ -218,6 +218,17 @@ R branch -D -q api
 check "T3: parent gone" says 0 "ui is built on api (parent gone), following it" parent ui
 check "T3: --no-follow still possible" says 0 "ui doesn't follow api" parent ui --no-follow
 check "--no-follow again: the same" says 0 "ui doesn't follow api" parent ui --no-follow
+R config branch.ui.gitfoldFollow maybe
+check "--follow replaces a malformed value" says 0 "ui follows api" parent ui --follow
+check "  (unset: on)" fails R config branch.ui.gitfoldFollow
+R config branch.ui.gitfoldFollow maybe
+check "--no-follow replaces it too" says 0 "ui doesn't follow api" parent ui --no-follow
+eq "  (stored off)" "false" "$(R config branch.ui.gitfoldFollow)"
+# A remote-tracking parent isn't the upstream (git branch would make it one).
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/main main
+check "a remote-tracking parent" says 0 "created branch rt on origin/main" branch rt --parent origin/main
+check "  sets no upstream: no branch.rt.remote" fails R config branch.rt.remote
+check "  nor branch.rt.merge" fails R config branch.rt.merge
 # Settings a deleted branch left (T2) don't carry over to a new one.
 R update-ref -d refs/heads/ui
 check "N5: following on, whatever a deleted branch of its name left" says 0 "created branch ui on main (following it)" branch ui --parent main

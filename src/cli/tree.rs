@@ -120,9 +120,8 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         }
     } else if args.follow || args.no_follow {
         let parent = parent.expect("check_follow: a branch with a parent (F6)");
-        if tree.follows(&name) != args.follow {
-            settings::set_follow(&common_dir, &name, args.follow)?;
-        }
+        // Written even if unchanged: a malformed value is replaced.
+        settings::set_follow(&common_dir, &name, args.follow)?;
         match args.follow {
             true => println!("{name} follows {parent}"),
             false => println!("{name} doesn't follow {parent}"),

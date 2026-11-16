@@ -31,10 +31,11 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     } = args;
     let name = name.as_deref().context("name the branch")?;
     if let Some(parent) = &parent {
-        // N5: created at P's tip, as `git branch NEW P` creates it, then
-        // built on P.
+        // N5: created at P's tip, then built on P. With no upstream from P
+        // (`--no-track`): the parent isn't the upstream, and a plain `git
+        // push` to origin/main would go wrong.
         let full = super::tree::check_new_parent(repo, name, parent)?;
-        create(repo, name, Some(&full))?;
+        git::cmd::output(repo, &["branch", "--no-track", "--", name, &full])?;
         // Following set either way: a deleted branch's settings may be left
         // (T2). Without its settings the branch goes again, so the command
         // can be retried.
