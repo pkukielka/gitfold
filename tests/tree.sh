@@ -24,8 +24,7 @@ R branch api
 check "branch --from one revision: as before" says 0 "created branch two" branch two --from main
 check "the name may come after --from" says 0 "created branch three" branch --from main three
 check "several --from, never mounted: refused, nothing made" says 1 "mount it first" branch c --from main --from api
-check "-w with several --from: said plainly" says 1 "gitfold branch --with-changes with several --from: not implemented yet" branch c -w --from main --from api
-check "no Error: prefix on not implemented" fails sh -c "'$BIN' -C '$REPO' branch c -w --from main --from api 2>&1 | grep -q '^Error:'"
+check "-w with several --from, never mounted: refused, nothing made" says 1 "mount it first" branch c -w --from main --from api
 check "--parent: created on P, following it" says 0 "created branch c on api (following it)" branch c --parent api
 check "--parent an unknown branch: exit 3" says 3 "no branch nosuch" branch x --parent nosuch
 check "--parent --no-follow: created, not following" says 0 "created branch e on api (not following it)" branch e --parent api --no-follow

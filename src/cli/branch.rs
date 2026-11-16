@@ -63,15 +63,11 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         );
         return Ok(());
     }
-    if from.len() > 1 && with_changes {
-        return Err(super::tree::not_implemented(
-            "gitfold branch --with-changes with several --from",
-        ));
-    }
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
     if from.len() > 1 {
-        return merged(repo, &common_dir, name, &from, prewarm, track_reads);
+        let settings = (prewarm, track_reads);
+        return merged(repo, &common_dir, name, &from, with_changes, settings);
     }
     let from = from.into_iter().next();
     if with_changes {
@@ -128,13 +124,16 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
 /// (exit 1); git refusing leaves nothing: NEW's workspace and branch go
 /// again. Unmounted, the repository is mounted again where it last was;
 /// never mounted, refused. No relation to the sources afterwards.
+///
+/// `with_changes`: each source's uncommitted changes too (`Changes`), taken
+/// before NEW is made, and applied after the merge, unstaged.
 fn merged(
     repo: &Path,
     common_dir: &Path,
     name: &str,
     from: &[String],
-    prewarm: Option<Prewarm>,
-    track_reads: Option<bool>,
+    with_changes: bool,
+    (prewarm, track_reads): (Option<Prewarm>, Option<bool>),
 ) -> Result<()> {
     check_branch_name(common_dir, name)?;
     ensure!(
@@ -143,11 +142,12 @@ fn merged(
     );
     // Where the user stands, before anything is made (or mounted). `-` is
     // the previous branch, as for `git merge -`, except as the start point.
-    // Only the merged ones go to git by name.
+    // Only the merged ones go to git by name, unless their workspaces are
+    // copied: those are branches'.
     let sources = (from.iter().enumerate())
         .map(|(i, rev)| {
             let rev = if rev == "-" && i > 0 { "@{-1}" } else { rev };
-            Source::resolve(repo, rev, i > 0)
+            Source::resolve(repo, rev, i > 0 || with_changes)
         })
         .collect::<Result<Vec<_>>>()?;
     let Some(mount) = super::mount::mount_or_again(common_dir)? else {
@@ -156,6 +156,10 @@ fn merged(
              in the new branch's workspace",
             common_dir.display()
         )
+    };
+    let changes = match with_changes {
+        true => Changes::take(common_dir, &mount, &sources)?,
+        false => Changes::default(),
     };
     let (first, others) = sources.split_first().expect("several --from");
     // Without an upstream: no relation afterwards.
@@ -183,6 +187,12 @@ fn merged(
                 .collect::<Result<Vec<_>>>()?;
             run_merge(&workspace, &revs)
         });
+    // The changes on what git made: refused by git while the merge is in
+    // progress (with conflicts), which undoes it all.
+    let merge = match merge {
+        Ok(merged) if !changes.is_empty() => changes.apply(&workspace).map(|()| merged),
+        merge => merge,
+    };
     match merge {
         Ok(true) => {
             println!("created branch {name}; open it as {}", workspace.display());
@@ -307,6 +317,119 @@ impl Source {
             }
         }
         Ok(self.id.clone())
+    }
+}
+
+/// The uncommitted changes of the sources' workspaces (`branch --from A
+/// --from B -w`), each as git takes it there: a commit of its files (tracked
+/// and untracked, not ignored) on its HEAD, made with a copy of its index
+/// (`git add -A`, `write-tree`), its own index untouched. Taken through the
+/// mount while the workspaces may change: not atomic, as `git stash create`
+/// isn't.
+#[derive(Default)]
+struct Changes(Vec<(String, String)>);
+
+impl Changes {
+    /// Those of `sources` (branches; `refs` names them) with a workspace
+    /// under `mount` and changes; refused if one is no branch, or git is
+    /// busy in its workspace (a merge, a rebase).
+    fn take(common_dir: &Path, mount: &Path, sources: &[Source]) -> Result<Changes> {
+        let index = common_dir.join(format!("gitfold-snapshot-{}", std::process::id()));
+        let mut changes = Changes::default();
+        for source in sources {
+            let branch = (source.name.as_deref())
+                .filter(|name| git::branch_exists(name))
+                .ok_or_else(|| {
+                    let message = format!(
+                        "--with-changes copies branches' workspaces: no branch {}",
+                        source.rev
+                    );
+                    Refusal::NotFound.error(message)
+                })?;
+            let taken = Changes::of(common_dir, mount, branch, &index);
+            let _ = fs::remove_file(&index);
+            if let Some(commit) = taken? {
+                changes.0.push((branch.to_string(), commit));
+            }
+        }
+        Ok(changes)
+    }
+
+    /// The changes of the workspace of `branch`, if it has one and they are
+    /// any, with `index` for a copy of its index.
+    fn of(common_dir: &Path, mount: &Path, branch: &str, index: &Path) -> Result<Option<String>> {
+        let state = StateDir::of(common_dir, branch);
+        if !state.opened() {
+            return Ok(None);
+        }
+        let then = "branch from it once that is done";
+        crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
+        fs::copy(state.index(), index).context("copying its git index")?;
+        let workspace = mount.join(branch);
+        let git = |args: &[&str]| -> Result<String> {
+            let mut git = Command::new("git");
+            git::cmd::in_other_worktree(&mut git)?;
+            git.current_dir(&workspace).env("GIT_INDEX_FILE", index);
+            let out = git::cmd::output_of(&mut git, args, None)?;
+            Ok(String::from_utf8_lossy(&out).trim().to_string())
+        };
+        git(&["add", "-A"])?;
+        let tree = git(&["write-tree"])?;
+        if tree == git(&["rev-parse", "--verify", "HEAD^{tree}"])? {
+            return Ok(None);
+        }
+        let head = git(&["rev-parse", "--verify", "HEAD^{commit}"])?;
+        let message = format!("uncommitted changes of {branch}");
+        git(&["commit-tree", &tree, "-p", &head, "-m", &message]).map(Some)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Applies them in workspace `workspace`, each as `git cherry-pick -n`
+    /// does (a conflict between them left in the files as markers), then
+    /// unstages them (`git reset`). Refused if git refuses one.
+    fn apply(&self, workspace: &Path) -> Result<()> {
+        let git = || -> Result<Command> {
+            let mut git = Command::new("git");
+            git::cmd::in_other_worktree(&mut git)?;
+            git.current_dir(workspace);
+            Ok(git)
+        };
+        let mut conflicts = Vec::new();
+        for (branch, commit) in &self.0 {
+            // git's messages the user's, as for the merge.
+            let args = ["cherry-pick", "-n", "--end-of-options", commit];
+            if !git()?.args(args).status()?.success() {
+                // A conflict leaves unmerged paths; a refusal, none.
+                let unmerged = git::cmd::output_of(&mut git()?, &["ls-files", "-u"], None)?;
+                ensure!(
+                    !unmerged.is_empty(),
+                    "git cherry-pick of the uncommitted changes of {branch} failed"
+                );
+                conflicts.push(branch.as_str());
+            }
+            // Staged, so the next one merges with them.
+            git::cmd::output_of(&mut git()?, &["add", "-A"], None)?;
+        }
+        git::cmd::output_of(&mut git()?, &["reset", "-q"], None)?;
+        if !conflicts.is_empty() {
+            println!(
+                "the uncommitted changes of {} conflict: in the files as markers",
+                and_list(&conflicts)
+            );
+        }
+        Ok(())
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
     }
 }
 
