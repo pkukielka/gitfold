@@ -41,8 +41,8 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         // (T2). Without its settings the branch goes again, so the command
         // can be retried.
         // Its own commits start at P's tip.
-        let set = crate::follow::tip(repo, name)
-            .and_then(|tip| crate::follow::set_base(repo, name, tip))
+        let set = git::branch_tip(name)
+            .and_then(|tip| crate::follow::set_base(repo, name, tip.id))
             .and_then(|()| settings::set_parent(repo, name, &full))
             .and_then(|()| settings::set_follow(repo, name, !no_follow))
             .and_then(|()| set_branch_settings(repo, name, prewarm, track_reads));

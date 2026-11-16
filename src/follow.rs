@@ -31,7 +31,7 @@ use crate::git::{self, cmd, rebase};
 use crate::settings::{self, Local};
 
 /// The ref keeping where the own commits of `branch` start.
-pub fn base_ref(branch: &str) -> String {
+fn base_ref(branch: &str) -> String {
     format!("refs/gitfold-base/{branch}")
 }
 
@@ -40,42 +40,16 @@ fn moving_ref(branch: &str) -> String {
     format!("refs/gitfold-moving/{branch}")
 }
 
-/// The commit `spec` names, if it names one.
-fn rev(common_dir: &Path, spec: &str) -> Result<Option<ObjectId>> {
-    let out = cmd::command(common_dir)
-        .args(["rev-parse", "-q", "--verify", "--end-of-options"])
-        .arg(format!("{spec}^{{commit}}"))
-        .output()?;
-    match out.status.success() {
-        true => Ok(Some(parse_id(&out.stdout)?)),
-        false => Ok(None),
-    }
-}
-
-fn parse_id(out: &[u8]) -> Result<ObjectId> {
-    let hex = String::from_utf8_lossy(out);
-    Ok(ObjectId::from_hex(hex.trim().as_bytes())?)
-}
-
-/// The commit `spec` (a full ref) names.
-pub fn commit(common_dir: &Path, spec: &str) -> Result<ObjectId> {
-    rev(common_dir, spec)?.with_context(|| format!("no commit {spec}"))
-}
-
-/// The tip of local branch `branch`.
-pub fn tip(common_dir: &Path, branch: &str) -> Result<ObjectId> {
-    rev(common_dir, &format!("refs/heads/{branch}"))?.with_context(|| format!("no branch {branch}"))
+/// The commit ref `name` points at, if it exists.
+fn rev(name: &str) -> Option<ObjectId> {
+    git::resolve(name).ok().map(|c| c.id)
 }
 
 /// Whether `a` is an ancestor of `b` (or `b`).
 fn is_ancestor(common_dir: &Path, a: ObjectId, b: ObjectId) -> Result<bool> {
+    let (a, b) = (a.to_string(), b.to_string());
     let status = cmd::command(common_dir)
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            &a.to_string(),
-            &b.to_string(),
-        ])
+        .args(["merge-base", "--is-ancestor", &a, &b])
         .status()?;
     match status.code() {
         Some(0) => Ok(true),
@@ -96,25 +70,23 @@ fn merge_base(common_dir: &Path, args: &[&str]) -> Result<Option<ObjectId>> {
         .arg("merge-base")
         .args(args)
         .output()?;
-    match out.status.success() {
-        true => Ok(Some(parse_id(&out.stdout)?)),
-        false => Ok(None),
+    if !out.status.success() {
+        return Ok(None);
     }
+    let hex = String::from_utf8_lossy(&out.stdout);
+    Ok(Some(ObjectId::from_hex(hex.trim().as_bytes())?))
 }
 
 /// Points `name` at `at` (with a reflog message).
 fn set_ref(common_dir: &Path, name: &str, at: ObjectId) -> Result<()> {
     let at = at.to_string();
-    cmd::output(
-        common_dir,
-        &["update-ref", "-m", "gitfold: parent", name, &at],
-    )
-    .map(drop)
+    let args = ["update-ref", "-m", "gitfold: parent", name, &at];
+    cmd::output(common_dir, &args).map(drop)
 }
 
 /// Deletes ref `name`, if it exists.
 fn drop_ref(common_dir: &Path, name: &str) -> Result<()> {
-    match rev(common_dir, name)? {
+    match rev(name) {
         Some(_) => cmd::output(common_dir, &["update-ref", "-d", name]).map(drop),
         None => Ok(()),
     }
@@ -130,13 +102,21 @@ pub fn drop_base(common_dir: &Path, branch: &str) -> Result<()> {
     drop_ref(common_dir, &base_ref(branch))
 }
 
+/// Forgets a conflict recorded for `branch`, if there is one.
+fn clear_conflict(common_dir: &Path, branch: &str) -> Result<()> {
+    match Local::read(common_dir).conflict(branch) {
+        Some(_) => settings::set_conflict(common_dir, branch, None),
+        None => Ok(()),
+    }
+}
+
 /// Finishes the record of a move of `branch` a crash interrupted (see the
 /// module doc).
 pub fn recover(common_dir: &Path, branch: &str) -> Result<()> {
-    let Some(onto) = rev(common_dir, &moving_ref(branch))? else {
+    let Some(onto) = rev(&moving_ref(branch)) else {
         return Ok(());
     };
-    if let Some(tip) = rev(common_dir, &format!("refs/heads/{branch}"))?
+    if let Some(tip) = rev(&format!("refs/heads/{branch}"))
         && is_ancestor(common_dir, onto, tip)?
     {
         set_base(common_dir, branch, onto)?;
@@ -145,50 +125,37 @@ pub fn recover(common_dir: &Path, branch: &str) -> Result<()> {
 }
 
 /// Where the own commits of `branch` (at `tip`) start, on `parent` (a full
-/// ref; `None`: on the root, whose names are `roots`). See the module doc.
-pub fn own_base(
+/// ref; `None`: on the root, its existing refs `roots`). See the module doc.
+fn own_base(
     common_dir: &Path,
     branch: &str,
     parent: Option<&str>,
     roots: &[String],
     tip: ObjectId,
 ) -> Result<ObjectId> {
+    let tip_hex = tip.to_string();
     if let Some(parent) = parent {
-        if let Some(base) = rev(common_dir, &base_ref(branch))?
+        if let Some(base) = rev(&base_ref(branch))
             && is_ancestor(common_dir, base, tip)?
         {
             return Ok(base);
         }
-        let tip = tip.to_string();
-        for args in [&["--fork-point", parent, &tip][..], &[parent, &tip]] {
+        for args in [&["--fork-point", parent, &tip_hex][..], &[parent, &tip_hex]] {
             if let Some(base) = merge_base(common_dir, args)? {
                 return Ok(base);
             }
         }
     }
-    let mut args = vec![tip.to_string()];
-    args.extend(
-        roots
-            .iter()
-            .filter(|r| matches!(rev(common_dir, r), Ok(Some(_))))
-            .cloned(),
-    );
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match args.len() > 1 {
-        true => merge_base(common_dir, &args)?,
-        false => None,
-    }
-    .with_context(|| format!("can't tell where the own commits of {branch} start"))
-}
-
-/// The full refs of the tree's root `root`: the local branch and origin's.
-pub fn root_refs(root: Option<&str>) -> Vec<String> {
-    root.map_or(Vec::new(), |root| {
-        vec![
-            format!("refs/heads/{root}"),
-            format!("refs/remotes/origin/{root}"),
-        ]
-    })
+    let base = match roots.is_empty() {
+        true => None,
+        false => {
+            let args: Vec<&str> = std::iter::once(tip_hex.as_str())
+                .chain(roots.iter().map(String::as_str))
+                .collect();
+            merge_base(common_dir, &args)?
+        }
+    };
+    base.with_context(|| format!("can't tell where the own commits of {branch} start"))
 }
 
 /// Own commits of a branch already on its remote.
@@ -200,39 +167,6 @@ pub struct Pushed {
     pub push: String,
 }
 
-/// The own commits of `branch` (after `base`, at `tip`) on its same-name
-/// branch of its push remote, as git chooses that remote (`pushRemote`,
-/// `remote.pushDefault`, its remote, `origin`), if any.
-pub fn pushed(
-    common_dir: &Path,
-    branch: &str,
-    base: ObjectId,
-    tip: ObjectId,
-) -> Result<Option<Pushed>> {
-    let remote = git::with_repo(|repo| {
-        let name = repo.branch_remote_name(branch, gix::remote::Direction::Push);
-        match name {
-            Some(name) => name.as_symbol().map(String::from),
-            None => repo
-                .remote_default_name(gix::remote::Direction::Push)
-                .map(|n| n.to_string()),
-        }
-    });
-    let Some(remote) = remote else {
-        return Ok(None);
-    };
-    let Some(at) = rev(common_dir, &format!("refs/remotes/{remote}/{branch}"))? else {
-        return Ok(None);
-    };
-    let (tip, base, at) = (tip.to_string(), base.to_string(), at.to_string());
-    let own = count(common_dir, &[&tip, &format!("^{base}")])?;
-    let unpushed = count(common_dir, &[&tip, &format!("^{base}"), &format!("^{at}")])?;
-    Ok((own > unpushed).then(|| Pushed {
-        count: own - unpushed,
-        push: format!("git push --force-with-lease={branch}:{at} {remote} {branch}"),
-    }))
-}
-
 /// Where `branch` lives, if not on its own: a gitfold workspace, or another
 /// git worktree's checkout (its path).
 pub enum CheckedOut {
@@ -240,29 +174,16 @@ pub enum CheckedOut {
     Worktree(String),
 }
 
-/// Whether `branch` is checked out somewhere (see `CheckedOut`), as `git
-/// worktree list` says.
-pub fn checked_out(common_dir: &Path, branch: &str) -> Result<Option<CheckedOut>> {
+/// Whether `branch` is checked out somewhere (see `CheckedOut`): a move's
+/// own worktree, left by one that died, doesn't count (the next move cleans
+/// it up).
+pub fn checked_out(common_dir: &Path, branch: &str) -> Option<CheckedOut> {
     if crate::state::StateDir::of(common_dir, branch).dir.exists() {
-        return Ok(Some(CheckedOut::Workspace));
+        return Some(CheckedOut::Workspace);
     }
-    let out = cmd::output(common_dir, &["worktree", "list", "--porcelain", "-z"])?;
-    let wanted = format!("branch refs/heads/{branch}");
-    let mut path = None;
-    for field in String::from_utf8_lossy(&out).split('\0') {
-        if let Some(p) = field.strip_prefix("worktree ") {
-            path = Some(p.to_string());
-        } else if field == wanted {
-            let path = path.unwrap_or_default();
-            // A move's own worktree, left by one that died: the next move
-            // cleans it up.
-            if rebase::is_scratch(common_dir, Path::new(&path)) {
-                return Ok(None);
-            }
-            return Ok(Some(CheckedOut::Worktree(path)));
-        }
-    }
-    Ok(None)
+    git::worktree::checked_out(common_dir, branch, None)
+        .filter(|path| !rebase::is_scratch(common_dir, Path::new(path)))
+        .map(CheckedOut::Worktree)
 }
 
 /// What a move of a branch did, or why it didn't.
@@ -270,14 +191,9 @@ pub fn checked_out(common_dir: &Path, branch: &str) -> Result<Option<CheckedOut>
 pub enum Moved {
     /// It sits on the parent's tip already.
     UpToDate,
-    /// Moved: of its `own` commits, `kept` onto the parent's tip (the
-    /// others were there already); `push`, the force-push if they had been
-    /// pushed.
-    Done {
-        own: usize,
-        kept: usize,
-        push: Option<String>,
-    },
+    /// Moved: `kept` of its own commits onto the parent's tip (the others
+    /// were there already); `push`, the force-push if they had been pushed.
+    Done { kept: usize, push: Option<String> },
     /// Not moved: commits are pushed (moved only with `yes`).
     Pushed(Pushed),
     /// Not moved: a merge among its own commits.
@@ -286,22 +202,37 @@ pub enum Moved {
     Conflict(Vec<String>),
 }
 
-/// A planned move of `branch` from `base` (where its own commits start)
-/// onto `onto`.
+/// A move of `branch` from `base` (where its own commits start) onto
+/// `onto`.
 pub struct Plan {
     pub branch: String,
     pub tip: ObjectId,
     pub base: ObjectId,
     pub onto: ObjectId,
+    /// How many own commits it has.
+    pub own: usize,
 }
 
 impl Plan {
-    /// How many own commits it moves.
-    pub fn own(&self, common_dir: &Path) -> Result<usize> {
-        count(
-            common_dir,
-            &[&self.tip.to_string(), &format!("^{}", self.base)],
-        )
+    /// The move of local branch `branch`, built on `from` (a full ref, or
+    /// `None`: on the root, with existing refs `roots`), onto the tip of
+    /// `onto` (a full ref).
+    pub fn new(
+        common_dir: &Path,
+        branch: &str,
+        from: Option<&str>,
+        roots: &[String],
+        onto: &str,
+    ) -> Result<Plan> {
+        let tip = git::branch_tip(branch)?.id;
+        let base = own_base(common_dir, branch, from, roots, tip)?;
+        Ok(Plan {
+            branch: branch.to_string(),
+            tip,
+            base,
+            onto: git::resolve(onto)?.id,
+            own: count(common_dir, &[&tip.to_string(), &format!("^{base}")])?,
+        })
     }
 
     /// Whether it sits on `onto` already, with nothing of its old parent's
@@ -309,6 +240,33 @@ impl Plan {
     pub fn up_to_date(&self, common_dir: &Path) -> Result<bool> {
         Ok(is_ancestor(common_dir, self.base, self.onto)?
             && is_ancestor(common_dir, self.onto, self.tip)?)
+    }
+
+    /// Its own commits on its same-name branch of its push remote, as git
+    /// chooses that remote (`pushRemote`, `remote.pushDefault`, its remote,
+    /// `origin`), if any.
+    pub fn pushed(&self, common_dir: &Path) -> Result<Option<Pushed>> {
+        let branch = &self.branch;
+        let remote = git::with_repo(|repo| {
+            match repo.branch_remote_name(branch.as_str(), gix::remote::Direction::Push) {
+                Some(name) => name.as_symbol().map(String::from),
+                None => {
+                    (repo.remote_default_name(gix::remote::Direction::Push)).map(|n| n.to_string())
+                }
+            }
+        });
+        let Some(remote) = remote else {
+            return Ok(None);
+        };
+        let Some(at) = rev(&format!("refs/remotes/{remote}/{branch}")) else {
+            return Ok(None);
+        };
+        let (tip, base) = (self.tip.to_string(), format!("^{}", self.base));
+        let unpushed = count(common_dir, &[&tip, &base, &format!("^{at}")])?;
+        Ok((self.own > unpushed).then(|| Pushed {
+            count: self.own - unpushed,
+            push: format!("git push --force-with-lease={branch}:{at} {remote} {branch}"),
+        }))
     }
 
     /// Moves it (see the module doc): its base recorded, a conflict
@@ -319,68 +277,54 @@ impl Plan {
         if self.up_to_date(common_dir)? {
             // Sits on it already (rebased by hand, say).
             set_base(common_dir, branch, self.onto)?;
-            settings::set_conflict(common_dir, branch, None)?;
+            clear_conflict(common_dir, branch)?;
             return Ok(Moved::UpToDate);
         }
         let range = format!("{}..{}", self.base, self.tip);
         if count(common_dir, &["--merges", &range])? > 0 {
             return Ok(Moved::Merge);
         }
-        let pushed = pushed(common_dir, branch, self.base, self.tip)?;
-        if let Some(pushed) = pushed.as_ref().filter(|_| !yes) {
-            return Ok(Moved::Pushed(Pushed {
-                count: pushed.count,
-                push: pushed.push.clone(),
-            }));
+        let pushed = self.pushed(common_dir)?;
+        if !yes && let Some(pushed) = pushed {
+            return Ok(Moved::Pushed(pushed));
         }
-        let own = self.own(common_dir)?;
         set_ref(common_dir, &moving_ref(branch), self.onto)?;
         let rebased = rebase::rebase(common_dir, branch, self.tip, self.onto, self.base);
-        let moved = match rebased {
-            Ok(rebase::Rebased::Moved(tip)) => {
-                set_base(common_dir, branch, self.onto)?;
-                settings::set_conflict(common_dir, branch, None)?;
+        // Its base is recorded before the record of the move goes.
+        if let Ok(rebase::Rebased::Moved(_)) = rebased {
+            set_base(common_dir, branch, self.onto)?;
+        }
+        drop_ref(common_dir, &moving_ref(branch))?;
+        Ok(match rebased? {
+            rebase::Rebased::Moved(tip) => {
+                clear_conflict(common_dir, branch)?;
                 let kept = count(common_dir, &[&tip.to_string(), &format!("^{}", self.onto)])?;
                 Moved::Done {
-                    own,
                     kept,
                     push: pushed.map(|p| p.push),
                 }
             }
-            Ok(rebase::Rebased::Conflict(paths)) => {
+            rebase::Rebased::Conflict(paths) => {
                 if record {
                     let at = self.onto.to_string();
                     settings::set_conflict(common_dir, branch, Some((&at, &paths)))?;
                 }
                 Moved::Conflict(paths)
             }
-            Err(e) => {
-                drop_ref(common_dir, &moving_ref(branch))?;
-                return Err(e);
-            }
-        };
-        drop_ref(common_dir, &moving_ref(branch))?;
-        Ok(moved)
+        })
     }
-}
 
-/// The conflict recorded for `branch` (at `tip`) on its parent at
-/// `parent_tip`, if it still holds: recorded against that tip, which the
-/// branch doesn't sit on.
-pub fn conflict(
-    common_dir: &Path,
-    local: &Local,
-    branch: &str,
-    parent_tip: ObjectId,
-    tip: ObjectId,
-) -> Result<Option<Vec<String>>> {
-    let Some((at, paths)) = local.conflict(branch) else {
-        return Ok(None);
-    };
-    if ObjectId::from_hex(at.as_bytes()).ok() != Some(parent_tip)
-        || is_ancestor(common_dir, parent_tip, tip)?
-    {
-        return Ok(None);
+    /// The conflict recorded for it, if it still holds: recorded against
+    /// `onto`, which it doesn't sit on.
+    pub fn conflict(&self, common_dir: &Path, local: &Local) -> Result<Option<Vec<String>>> {
+        let Some((at, paths)) = local.conflict(&self.branch) else {
+            return Ok(None);
+        };
+        if ObjectId::from_hex(at.as_bytes()).ok() != Some(self.onto)
+            || is_ancestor(common_dir, self.onto, self.tip)?
+        {
+            return Ok(None);
+        }
+        Ok(Some(paths))
     }
-    Ok(Some(paths))
 }

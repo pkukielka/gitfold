@@ -187,6 +187,19 @@ impl Tree {
         self.root.as_deref()
     }
 
+    /// The branches that are the root, as full refs: the local branch and
+    /// origin's, those that exist (local `main` and `origin/main` are the
+    /// same root).
+    pub fn root_refs(&self) -> Vec<String> {
+        let Some(root) = &self.root else {
+            return Vec::new();
+        };
+        [local(root), format!("refs/remotes/origin/{root}")]
+            .into_iter()
+            .filter(|full| git::full_ref(full).as_ref() == Some(full))
+            .collect()
+    }
+
     /// The local branches whose parent is local branch `branch`, by name.
     pub fn children(&self, branch: &str) -> Vec<&str> {
         self.children_of(&local(branch))

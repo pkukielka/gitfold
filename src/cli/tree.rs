@@ -168,48 +168,27 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
     let Some(parent) = tree.parent(name).filter(|_| !tree.parent_gone(name)) else {
         return Ok(None);
     };
-    let plan = plan(common_dir, tree, name, tree.parent(name), parent)?;
+    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
     if plan.up_to_date(common_dir)? {
         return Ok(None);
     }
     let local = settings::Local::read_checked(common_dir)?;
     let short = crate::tree::short(parent);
-    if let Some(paths) = follow::conflict(common_dir, &local, name, plan.onto, plan.tip)? {
+    if let Some(paths) = plan.conflict(common_dir, &local)? {
         return Ok(Some(format!(
             "following paused: {}",
             conflict_said(name, short, plan.base, &paths)
         )));
     }
-    let pushed = follow::pushed(common_dir, name, plan.base, plan.tip)?;
+    let pushed = plan.pushed(common_dir)?;
     Ok(pushed.map(|p| format!("following paused: {}", pushed_said(name, &p))))
-}
-
-/// The move of `name` (built on `from`, a full ref, or on the root) onto
-/// the tip of `onto` (a full ref), with any interrupted move's record
-/// finished first.
-fn plan(
-    common_dir: &Path,
-    tree: &Tree,
-    name: &str,
-    from: Option<&str>,
-    onto: &str,
-) -> Result<follow::Plan> {
-    follow::recover(common_dir, name)?;
-    let tip = follow::tip(common_dir, name)?;
-    let roots = follow::root_refs(tree.root());
-    Ok(follow::Plan {
-        branch: name.to_string(),
-        tip,
-        base: follow::own_base(common_dir, name, from, &roots, tip)?,
-        onto: follow::commit(common_dir, onto)?,
-    })
 }
 
 /// Refuses moving `name` where gitfold doesn't move it (`what`: the flag):
 /// in a workspace (not yet), or checked out in another git worktree (never:
 /// git rebase there).
 fn movable(common_dir: &Path, name: &str, what: &str) -> Result<()> {
-    match follow::checked_out(common_dir, name)? {
+    match follow::checked_out(common_dir, name) {
         None => Ok(()),
         Some(follow::CheckedOut::Workspace) => Err(not_implemented(&format!(
             "gitfold parent {what} for a workspace's branch"
@@ -235,12 +214,15 @@ fn update(common_dir: &Path, tree: &Tree, name: &str, yes: bool) -> Result<()> {
         );
     }
     movable(common_dir, name, "--update")?;
-    let plan = plan(common_dir, tree, name, Some(parent), parent)?;
+    follow::recover(common_dir, name)?;
+    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
     match plan.run(common_dir, yes, true)? {
-        follow::Moved::UpToDate => println!("{name} is up to date with {short}"),
-        moved => said(name, short, &plan, moved)?,
+        follow::Moved::UpToDate => {
+            println!("{name} is up to date with {short}");
+            Ok(())
+        }
+        moved => said(name, short, &plan, moved),
     }
-    Ok(())
 }
 
 /// `gitfold parent NAME --set P` (P's full ref `full`): its own commits
@@ -254,34 +236,27 @@ fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str) -> Result<()> {
         return Ok(());
     }
     movable(common_dir, name, "--set")?;
-    let plan = plan(common_dir, tree, name, tree.parent(name), full)?;
-    let own = plan.own(common_dir)?;
-    println!("moves {} of {name} onto {short}", commits(own));
+    follow::recover(common_dir, name)?;
+    let plan = follow::Plan::new(common_dir, name, tree.parent(name), &tree.root_refs(), full)?;
+    println!("moves {} of {name} onto {short}", commits(plan.own));
     let moved = plan.run(common_dir, false, false)?;
-    let built = |base| -> Result<()> {
-        settings::set_parent(common_dir, name, full)?;
-        settings::set_follow(common_dir, name, true)?;
-        follow::set_base(common_dir, name, base)
-    };
-    match moved {
-        follow::Moved::UpToDate => {
-            built(plan.onto)?;
-            println!("{name} is now built on {short}");
-        }
-        follow::Moved::Pushed(pushed) => {
-            built(plan.base)?;
-            println!(
-                "{name} is now built on {short}; following paused: {}",
-                pushed_said(name, &pushed)
-            );
-        }
-        follow::Moved::Done { .. } => {
-            built(plan.onto)?;
-            said(name, short, &plan, moved)?;
-        }
-        moved => said(name, short, &plan, moved)?,
+    if matches!(moved, follow::Moved::Merge | follow::Moved::Conflict(_)) {
+        return said(name, short, &plan, moved);
     }
-    Ok(())
+    // Built on P from now on, following it (F4).
+    settings::set_parent(common_dir, name, full)?;
+    settings::set_follow(common_dir, name, true)?;
+    if let follow::Moved::Pushed(pushed) = &moved {
+        // Not moved: its own commits start where they did.
+        follow::set_base(common_dir, name, plan.base)?;
+        println!(
+            "{name} is now built on {short}; following paused: {}",
+            pushed_said(name, pushed)
+        );
+        return Ok(());
+    }
+    println!("{name} is now built on {short}");
+    said(name, short, &plan, moved)
 }
 
 /// What a move of `name` onto `parent` (short) did, or why it didn't, said
@@ -289,10 +264,13 @@ fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str) -> Result<()> {
 fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> Result<()> {
     match moved {
         follow::Moved::UpToDate => Ok(()),
-        follow::Moved::Done { own, kept, push } => {
+        follow::Moved::Done { kept, push } => {
             println!("moved {} of {name} onto {parent}", commits(kept));
-            if own > kept {
-                println!("({} already in {parent}: dropped)", commits(own - kept));
+            if plan.own > kept {
+                println!(
+                    "({} already in {parent}: dropped)",
+                    commits(plan.own - kept)
+                );
             }
             if let Some(push) = push {
                 println!("its history was rewritten; force-push with: {push}");

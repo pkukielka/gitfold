@@ -30,7 +30,12 @@ pub fn run(git_dir: &Path, args: &[&str]) -> Result<()> {
 /// Runs git with `args`, returning what it printed; a failure's error holds
 /// what git said.
 pub fn output(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    let out = command(git_dir).args(args).output()?;
+    output_of(command(git_dir), args)
+}
+
+/// `output` for `git` set up as `command` (another directory, settings).
+pub fn output_of(mut command: Command, args: &[&str]) -> Result<Vec<u8>> {
+    let out = command.args(args).output()?;
     if !out.status.success() {
         bail!(
             "git {} failed ({}): {}",

@@ -16,6 +16,10 @@
 //! the worktree's own `info/sparse-checkout`, so the repository's config
 //! isn't changed (`git sparse-checkout` would turn on
 //! `extensions.worktreeConfig` for good).
+//!
+//! Not `git replay`, which needs no worktree: it is experimental, and (git
+//! 2.49) keeps commits that become empty and skips none by patch id, so its
+//! result isn't what `git rebase` makes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -109,30 +113,22 @@ impl Scratch {
             common_dir,
             &["worktree", "add", "-q", "--no-checkout", path, branch],
         )?;
-        fs::create_dir_all(scratch.admin()?.join("info"))?;
-        fs::write(scratch.admin()?.join("info/sparse-checkout"), PATTERNS)?;
+        let info = scratch.admin()?.join("info");
+        fs::create_dir_all(&info)?;
+        fs::write(info.join("sparse-checkout"), PATTERNS)?;
         scratch.git(&["read-tree", "-mu", "HEAD"])?;
         Ok(scratch)
     }
 
-    /// The worktree's admin directory (`.git/worktrees/<name>`), as git says.
+    /// The worktree's admin directory (`.git/worktrees/<name>`).
     fn admin(&self) -> Result<PathBuf> {
-        let out = self.git(&["rev-parse", "--absolute-git-dir"])?;
-        Ok(PathBuf::from(String::from_utf8_lossy(&out).trim()))
+        (self.registrations()?.into_iter().next())
+            .with_context(|| format!("no registration of {}", self.path.display()))
     }
 
     /// git in the worktree, sparse; fails if git does.
     fn git(&self, args: &[&str]) -> Result<Vec<u8>> {
-        let out = self.command().args(args).output()?;
-        if !out.status.success() {
-            bail!(
-                "git {} failed ({}): {}",
-                args.join(" "),
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-        Ok(out.stdout)
+        super::cmd::output_of(self.command(), args)
     }
 
     fn command(&self) -> Command {
@@ -154,8 +150,8 @@ impl Scratch {
         onto: ObjectId,
         upstream: ObjectId,
     ) -> Result<Rebased> {
-        let head = self.git(&["rev-parse", "HEAD"])?;
-        if ObjectId::from_hex(String::from_utf8_lossy(&head).trim().as_bytes()).ok() != Some(tip) {
+        // The worktree is on the branch: its tip is what it has.
+        if crate::git::branch_tip(branch)?.id != tip {
             bail!("{branch} moved meanwhile");
         }
         let (onto, upstream) = (onto.to_string(), upstream.to_string());

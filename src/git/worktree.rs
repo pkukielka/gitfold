@@ -170,6 +170,37 @@ impl std::fmt::Display for GitBusy {
     }
 }
 
+/// Where `branch` is checked out, but in the worktree with admin directory
+/// `except`: git allows one checkout per branch. A worktree in the middle
+/// of a rebase or bisect of the branch (detached meanwhile) counts too, as
+/// for git. Said as "the main worktree" or the worktree's path (its name if
+/// that can't be read).
+pub fn checked_out(common_dir: &Path, branch: &str, except: Option<&Path>) -> Option<String> {
+    let full = format!("refs/heads/{branch}");
+    let head = format!("ref: {full}");
+    let reads = |dir: &Path, file: &str, want: &str| {
+        fs::read_to_string(dir.join(file)).is_ok_and(|s| s.trim() == want)
+    };
+    let is_ours = |dir: &Path| {
+        reads(dir, "HEAD", &head)
+            || reads(dir, "rebase-merge/head-name", &full)
+            || reads(dir, "rebase-apply/head-name", &full)
+            || reads(dir, "BISECT_START", branch)
+    };
+    // A bare repository's HEAD names a branch but checks nothing out.
+    if !crate::git::is_bare() && is_ours(common_dir) {
+        return Some("the main worktree".into());
+    }
+    let worktrees = fs::read_dir(common_dir.join("worktrees")).ok()?;
+    worktrees.flatten().find_map(|w| {
+        let name = w.file_name().to_string_lossy().into_owned();
+        (Some(w.path().as_path()) != except && is_ours(&w.path())).then(|| {
+            fs::read_to_string(w.path().join("gitdir"))
+                .map_or(name, |g| g.trim().trim_end_matches("/.git").to_string())
+        })
+    })
+}
+
 /// Whether `name` (in `<common>/worktrees/`) is a snapshot registration
 /// (`gitfold-<sha12>`, see `register`).
 pub fn is_snapshot_registration(name: &str) -> bool {

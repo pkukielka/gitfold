@@ -343,12 +343,13 @@ mkdir -p "$REPO/.git/gitfold/ui"
 check "a workspace's branch: not implemented yet" says 1 "gitfold parent --update for a workspace's branch: not implemented yet" parent ui --update
 rmdir "$REPO/.git/gitfold/ui"
 # A move a crash interrupted after git moved the branch: its base recorded.
-R update-ref refs/gitfold-base/ui main
+R update-ref refs/gitfold-base/ui main~1
 R update-ref refs/gitfold-moving/ui api~1
-check "an interrupted move: finished when next looked at" says 0 "ui is built on api" parent ui
-eq "  its base recorded" "$(R rev-parse api~1)" "$(R rev-parse refs/gitfold-base/ui)"
+check "an interrupted move: finished by the next move" says 0 "moved 1 commit of ui onto api" parent ui --update
+eq "  only its own commit moved (its base was recorded first)" "1" "$(own api ui)"
 check "  the record gone" fails R rev-parse -q --verify refs/gitfold-moving/ui
 # A move's worktree a dead process left: cleaned up by the next move.
+on api a.txt newer
 R worktree add -q --no-checkout "$REPO/.git/gitfold/.moves/gitfold-move-ui" ui
 check "a dead move's worktree: cleaned up" says 0 "moved 1 commit of ui onto api" parent ui --update
 check "  gone" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
