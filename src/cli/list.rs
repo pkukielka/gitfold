@@ -192,15 +192,20 @@ fn matching<'a>(
     }
     let empty = git::with_repo(|repo| gix::ObjectId::empty_blob(repo.object_hash()));
     let entry = format!("100644 {empty} 0\t");
-    // A plain index, whatever the repository's are like: nothing of it
-    // (a split index's shared part) is written into the repository.
+    // A plain index, whatever the repository's are like: nothing of it (a
+    // split index's shared part, a sparse index's trees) is written into
+    // the repository, and no hook hears of it.
     let plain = [
         "-c",
         "core.splitIndex=false",
         "-c",
+        "index.sparse=false",
+        "-c",
         "core.fsmonitor=false",
         "-c",
         "core.untrackedCache=false",
+        "-c",
+        "core.hooksPath=/dev/null",
         "--literal-pathspecs",
     ];
     let update: Vec<&str> = plain
@@ -216,6 +221,11 @@ fn matching<'a>(
     for (n, index) in indexes.iter().enumerate() {
         // An index that doesn't exist is an empty one.
         let file = dir.0.join(format!("index{n}"));
+        let on_index = || {
+            let mut command = git::cmd::here();
+            command.env("GIT_INDEX_FILE", &file);
+            command
+        };
         if !index.is_empty() {
             let mut info = Vec::new();
             for path in index {
@@ -223,13 +233,9 @@ fn matching<'a>(
                 info.extend(*path);
                 info.push(0);
             }
-            let mut command = git::cmd::here();
-            command.env("GIT_INDEX_FILE", &file);
-            git::cmd::output_of(&mut command, &update, Some(info))?;
+            git::cmd::output_of(&mut on_index(), &update, Some(info))?;
         }
-        let mut command = git::cmd::here();
-        command.env("GIT_INDEX_FILE", &file);
-        let out = git::cmd::output_of(&mut command, &list, None)?;
+        let out = git::cmd::output_of(&mut on_index(), &list, None)?;
         matching.extend(
             out.split(|b| *b == 0)
                 .filter(|p| !p.is_empty())
@@ -270,7 +276,9 @@ impl TempDir {
         let pid = std::process::id();
         let nanos = (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH))
             .map_or(0, |d| d.subsec_nanos());
-        let dir = std::env::temp_dir().join(format!("gitfold-changes-{pid}-{nanos}"));
+        // Absolute: git opens GIT_INDEX_FILE from the work tree's top.
+        let dir = std::path::absolute(std::env::temp_dir())?
+            .join(format!("gitfold-changes-{pid}-{nanos}"));
         fs::create_dir(&dir)?;
         Ok(TempDir(dir))
     }
