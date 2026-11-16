@@ -363,8 +363,17 @@ impl Changes {
                 "--symbolic-full-name",
                 &source.rev,
             ];
-            let full = git::cmd::output(repo, &args).unwrap_or_default();
-            let full = String::from_utf8_lossy(&full);
+            let out = git::cmd::command(repo).args(args).output()?;
+            // `--verify -q`: exit 1 for what names nothing; git's own error
+            // otherwise.
+            ensure!(
+                out.status.success() || out.status.code() == Some(1),
+                "git rev-parse {} failed ({}): {}",
+                source.rev,
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            let full = String::from_utf8_lossy(&out.stdout);
             let Some(branch) = full.trim().strip_prefix("refs/heads/") else {
                 let message = format!(
                     "--with-changes copies branches' workspaces: no branch {}",
@@ -372,6 +381,10 @@ impl Changes {
                 );
                 return Err(Refusal::NotFound.error(message));
             };
+            // Once each, as git merges a source given twice once.
+            if changes.0.iter().any(|(taken, _)| taken == branch) {
+                continue;
+            }
             let taken = Changes::of(common_dir, mount, branch, &index);
             let _ = fs::remove_file(&index);
             if let Some(commit) = taken? {
@@ -390,22 +403,33 @@ impl Changes {
         }
         let then = "branch from it once that is done";
         crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
-        match fs::copy(state.index(), index) {
-            // No registration (deleted since; its next open writes one): git
-            // builds the index anew, reading every file.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            copied => drop(copied.context("copying its git index")?),
-        }
         let workspace = mount.join(branch);
         // On the copy, as a plain index (nothing of it written into the
-        // repository).
+        // repository); its throwaway commit unsigned and by gitfold, as `git
+        // stash create` makes one by git where no one is configured.
         let git = |args: &[&str]| -> Result<String> {
             let mut git = git::cmd::in_workspace(&workspace)?;
             git.env("GIT_INDEX_FILE", index);
-            let args: Vec<&str> = git::cmd::PLAIN_INDEX.iter().chain(args).copied().collect();
+            for (var, value) in [("NAME", "gitfold"), ("EMAIL", "gitfold@localhost")] {
+                git.env(format!("GIT_COMMITTER_{var}"), value);
+                git.env(format!("GIT_AUTHOR_{var}"), value);
+            }
+            let unsigned = ["-c", "commit.gpgSign=false"];
+            let args: Vec<&str> = (git::cmd::PLAIN_INDEX.iter().chain(&unsigned))
+                .chain(args)
+                .copied()
+                .collect();
             let out = git::cmd::output_of(&mut git, &args, None)?;
             Ok(String::from_utf8_lossy(&out).trim().to_string())
         };
+        match fs::copy(state.index(), index) {
+            // No registration (deleted since; its next open writes one): an
+            // index of HEAD, its files read anew.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                drop(git(&["read-tree", "HEAD"])?)
+            }
+            copied => drop(copied.context("copying its git index")?),
+        }
         git(&["add", "-A"])?;
         let tree = git(&["write-tree"])?;
         let head = git(&["rev-parse", "HEAD^{commit}", "HEAD^{tree}"])?;

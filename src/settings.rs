@@ -332,10 +332,10 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
                 .output()?;
             match out.status.code() {
                 Some(0) => return Ok(()),
-                // Not a write that failed (git config's exit codes): a bad
-                // key or config, which waiting doesn't change.
-                Some(1..=3 | 6) => {}
-                _ if started.elapsed() < CONFIG_WAIT => {
+                // The file not written (4, git config's exit code) or its
+                // lock held (255, what git exits with then): retried; any
+                // other failure waiting doesn't change.
+                Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
                     sleep(Duration::from_millis(100));
                     continue;
                 }
