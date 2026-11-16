@@ -68,7 +68,12 @@ pub fn tree_lock(common_dir: &Path) -> Result<Lock> {
         if let Some(lock) = crate::lock::try_file(&dir.join(".tree.lock"))? {
             return Ok(lock);
         }
-        if started.elapsed() > TREE_WAIT {
+        // Tests shorten the wait (`GITFOLD_TEST_TREE_WAIT`, seconds).
+        let wait = std::env::var("GITFOLD_TEST_TREE_WAIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .map_or(TREE_WAIT, std::time::Duration::from_secs);
+        if started.elapsed() > wait {
             return Err(Refusal::InUse
                 .error("another gitfold command is changing the parents of branches; retry"));
         }

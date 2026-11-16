@@ -294,6 +294,8 @@ pub struct Plan {
     /// Whether its base is on `onto`'s history (the parent only gained
     /// commits since).
     on_history: bool,
+    /// Whether a merge is among the commits it replays, once asked.
+    merges: std::cell::Cell<Option<bool>>,
 }
 
 impl Plan {
@@ -319,6 +321,7 @@ impl Plan {
             onto_ref: onto.to_string(),
             own: 0,
             on_history,
+            merges: Default::default(),
         };
         let [tip, from] = plan.own_range();
         plan.own = count(common_dir, &[&tip, &from])?;
@@ -389,22 +392,20 @@ impl Plan {
     /// Whether a merge is among the commits it would replay (which aren't
     /// moved).
     pub fn merges(&self, common_dir: &Path) -> Result<bool> {
+        if let Some(merges) = self.merges.get() {
+            return Ok(merges);
+        }
         let [tip, from] = self.own_range();
-        Ok(count(common_dir, &["--merges", &tip, &from])? > 0)
+        let merges = count(common_dir, &["--merges", &tip, &from])? > 0;
+        self.merges.set(Some(merges));
+        Ok(merges)
     }
 
-    /// Moves it (see the module doc): its base recorded, a conflict
-    /// cleared, or with `record` recorded (following its parent; not for
-    /// `--set`, which takes its parent back). Not with a merge among its own
-    /// commits, nor commits already pushed unless `yes`. `moving` is called
-    /// once it is sure to try. The caller holds `lock`.
-    pub fn run(
-        &self,
-        common_dir: &Path,
-        yes: bool,
-        record: bool,
-        moving: impl FnOnce(),
-    ) -> Result<Moved> {
+    /// Moves it (see the module doc): its base recorded, a conflict cleared
+    /// or recorded. Not with a merge among its own commits, nor commits
+    /// already pushed unless `yes`. `moving` is called once it is sure to
+    /// try. The caller holds `lock`.
+    pub fn run(&self, common_dir: &Path, yes: bool, moving: impl FnOnce()) -> Result<Moved> {
         let branch = &self.branch;
         let outcome = Moving {
             from: self.tip,
@@ -447,10 +448,8 @@ impl Plan {
                 let paths: Vec<String> = (paths.iter())
                     .map(|p| String::from_utf8_lossy(&crate::cli::quote(p)).into_owned())
                     .collect();
-                if record {
-                    let at = self.onto.to_string();
-                    settings::set_conflict(common_dir, branch, Some((&at, &paths)))?;
-                }
+                let at = self.onto.to_string();
+                settings::set_conflict(common_dir, branch, Some((&at, &paths)))?;
                 Moved::Conflict(paths)
             }
         })

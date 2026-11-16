@@ -77,6 +77,7 @@ echo m >>"$REPO/a.txt"; R commit -qam m
 check "compare: local main" says 6 "W	main	a.txt" overlaps w
 check "R4: root: main" says 2 "main is the root of the tree" parent main --set w
 check "S7: building on the root: allowed (a conflict here: nothing moved, exit 4)" says 4 "w's commits conflict with main's on a.txt" parent w --set main
+R config --unset branch.w.gitfoldParent
 # A clone: origin/main at main, origin/HEAD pointing at it; local main
 # gets an unpushed commit of its own.
 remote_main
@@ -374,8 +375,11 @@ on ui u.txt one; on api a.txt new
 R branch side main; on side s.txt s
 R switch -q ui; R merge -q --no-ff --no-edit side; R switch -q main
 check "a merge among its own commits: not moved" says 1 "ui's own commits include a merge" parent ui --update
-check "--set with such a merge: refused" says 1 "ui's own commits include a merge" parent ui --set main
+R branch elsewhere main; on elsewhere e.txt e
+check "--set with such a merge: refused" says 1 "ui's own commits include a merge" parent ui --set elsewhere
 eq "  its parent unchanged" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
+check "--set where it sits already, merge and all: up to date" says 0 "ui is now built on main" parent ui --set main
+R config branch.ui.gitfoldParent refs/heads/api
 R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
 # Checked out in a git worktree: never moved by gitfold.
 R worktree add -q "$T/wt" ui
@@ -402,15 +406,18 @@ R config branch.ui.gitfoldMoving "not a record"
 check "a record that can't be read: reported (exit 1)" says 1 "branch.ui.gitfoldMoving holds \"not a record\"" parent ui --update
 check "  and left" R config branch.ui.gitfoldMoving
 R config --unset branch.ui.gitfoldMoving
-# --set that conflicts: nothing moves, the old parent taken back.
+# --set that conflicts: nothing moves; built on P all the same, following
+# paused by the conflict recorded (back is --set the old parent).
 R branch other main; on other u.txt other-side
 before=$(R rev-parse ui)
-check "--set with a conflict: nothing moves (exit 4)" says 4 "ui's commits conflict with other's" parent ui --set other
-eq "  the old parent and following back" "refs/heads/api " "$(R config branch.ui.gitfoldParent) $(R config branch.ui.gitfoldFollow)"
+check "--set with a conflict: nothing moves (exit 4), built on P, paused" says 4 "ui is now built on other; following paused" parent ui --set other
+eq "  built on other" "refs/heads/other" "$(R config branch.ui.gitfoldParent)"
 eq "  nothing moved" "$before" "$(R rev-parse ui)"
+check "  shown paused" says 0 "following paused: ui's commits conflict with other's" parent ui
+check "  back by --set the old parent" says 0 "ui is now built on api" parent ui --set api
 # The tree changes one --set at a time.
 mkdir -p "$REPO/.git/gitfold-moves"
-check "another --set changing the tree: refused (exit 5)" sh -c "flock '$REPO/.git/gitfold-moves/.tree.lock' sh -c \"'$BIN' -C '$REPO' parent ui --set main; [ \\\$? = 5 ]\""
+check "another --set changing the tree: refused (exit 5)" sh -c "flock '$REPO/.git/gitfold-moves/.tree.lock' sh -c \"GITFOLD_TEST_TREE_WAIT=0 '$BIN' -C '$REPO' parent ui --set main; [ \\\$? = 5 ]\""
 # A move's worktree a dead process left: cleaned up by the next move.
 on api a.txt newer
 R -c worktree.useRelativePaths=true worktree add -q --no-checkout "$REPO/.git/gitfold-moves/gitfold-move-ui" ui
