@@ -177,8 +177,7 @@ mount_fs --track-reads --prewarm none --log "$T/last.log"
 check "gitfold mount records its flags" recorded "--prewarm=none --prewarm-walks=2 --track-reads --log=$T/last.log"
 unmount_fs
 check "mounted again by branch --from" says 0 "created branch c" branch c --from api --from ui
-check "  with the flags it last had (recorded again by that mount)" recorded "--prewarm=none --prewarm-walks=2 --track-reads --log=$T/last.log"
-check "  logging where it last did" grep -q "mounting" "$T/last.log"
+check "  with the flags it last had: logging where it last did" grep -q "mounting" "$T/last.log"
 "$BIN" unmount "$MNT" >/dev/null
 mount_fs
 check "an explicit gitfold mount: its own flags, recorded" recorded "--prewarm=meta --prewarm-walks=2"

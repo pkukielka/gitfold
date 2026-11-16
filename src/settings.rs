@@ -265,12 +265,11 @@ pub fn set_follow(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 /// mounted with (`gitfold.mountOptions`, one per line), given its git
 /// directory or one of its worktrees'.
 pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result<()> {
-    let value = mountpoint
-        .to_str()
-        .context("a mount point that isn't UTF-8")?;
     // Each written even if the other can't be (the config locked meanwhile).
     let key = format!("gitfold.{MOUNTPOINT}");
-    let place = git::cmd::run(git_dir, &["config", "--local", &key, value]);
+    let place = (mountpoint.to_str())
+        .context("a mount point that isn't UTF-8")
+        .and_then(|value| git::cmd::run(git_dir, &["config", "--local", &key, value]));
     let key = format!("gitfold.{MOUNT_OPTIONS}");
     let options = git::cmd::run(git_dir, &["config", "--local", &key, &flags.join("\n")]);
     place.and(options)
