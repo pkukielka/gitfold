@@ -6,7 +6,8 @@
 //! F, T); the tree owns them: only existing branches, the root has no
 //! parent, no branch is its own parent, no cycles (`Tree::check`,
 //! `Tree::check_new`), and parent names resolve one way (`resolve_parent`).
-//! Parents and following are written with `settings::set_parent`.
+//! Parents and following are written with `settings::set_parent`,
+//! `set_follow` and `forget_parent`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;

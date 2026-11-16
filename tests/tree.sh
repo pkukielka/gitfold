@@ -169,7 +169,7 @@ check "S7: accepted (not implemented yet)" says 1 "gitfold parent: not implement
 check "S7: the root as a parent, accepted" says 1 "not implemented yet" parent api --set main
 check "F6: --follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --follow
 check "F6: --no-follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --no-follow
-check "F6: with a parent: --no-follow accepted" says 0 "ui no longer follows api" parent ui --no-follow
+check "F6: with a parent: --no-follow accepted" says 0 "ui doesn't follow api" parent ui --no-follow
 check "F6: with a parent: --follow accepted" says 0 "ui follows api" parent ui --follow
 check "F6 on the root: the root has no parent (S4)" says 2 "main is the root of the tree" parent main --follow
 }
@@ -210,13 +210,25 @@ check "--none again: nothing to forget" says 0 "ui has no parent" parent ui --no
 check "the root is shown as the root" says 0 "main is the root of the tree; it has no parent" parent main
 R config branch.main.gitfoldParent refs/heads/api
 check "T1: a parent stored on the root: not shown" says 0 "main is the root of the tree" parent main
-check "T1: --none on the root forgets it" says 0 "main has no parent" parent main --none
+check "T1: --none on the root forgets it" says 0 "main is the root of the tree; it has no parent" parent main --none
 check "  gone from the config" fails R config branch.main.gitfoldParent
 R config branch.ui.gitfoldParent api
 check "a short stored value is a local branch" says 0 "ui is built on api, following it" parent ui
 R branch -D -q api
 check "T3: parent gone" says 0 "ui is built on api (parent gone), following it" parent ui
-check "T3: --no-follow still possible" says 0 "ui no longer follows api" parent ui --no-follow
+check "T3: --no-follow still possible" says 0 "ui doesn't follow api" parent ui --no-follow
+check "--no-follow again: the same" says 0 "ui doesn't follow api" parent ui --no-follow
+# Settings a deleted branch left (T2) don't carry over to a new one.
+R update-ref -d refs/heads/ui
+check "N5: following on, whatever a deleted branch of its name left" says 0 "created branch ui on main (following it)" branch ui --parent main
+check "  and shown so" says 0 "ui is built on main, following it" parent ui
+check "an invalid name is refused first, as git branch does" says 1 "is not a valid branch name" branch 'a..b' --parent nosuch
+# The parent can't be stored: the branch goes again, so it can be retried.
+touch "$REPO/.git/config.lock"
+check "the parent not stored: refused" says 1 "" branch half --parent main
+rm "$REPO/.git/config.lock"
+check "  and the branch gone again" fails R rev-parse -q --verify refs/heads/half
+check "  so it can be retried" says 0 "created branch half on main" branch half --parent main
 }
 
 stored_tree() {

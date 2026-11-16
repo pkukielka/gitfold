@@ -116,18 +116,18 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         settings::forget_parent(&common_dir, &name)?;
         match parent {
             Some(parent) => println!("{name} no longer has a parent (it was {parent})"),
-            None => println!("{name} has no parent"),
+            None => println!("{}", show(&tree, &name, None)),
         }
-    } else if let Some(parent) = parent.filter(|_| args.follow || args.no_follow) {
-        // (`check_follow` let only a branch with a parent through, F6.)
+    } else if args.follow || args.no_follow {
+        let parent = parent.expect("check_follow: a branch with a parent (F6)");
         if tree.follows(&name) != args.follow {
             settings::set_follow(&common_dir, &name, args.follow)?;
         }
         match args.follow {
             true => println!("{name} follows {parent}"),
             false => println!(
-                "{name} no longer follows {parent}: `gitfold parent {name} --update` takes its \
-                 new commits"
+                "{name} doesn't follow {parent}: `gitfold parent {name} --update` takes its new \
+                 commits"
             ),
         }
     } else {
@@ -167,6 +167,7 @@ pub fn following(on: bool) -> &'static str {
 /// P's full ref.
 pub fn check_new_parent(repo: &Path, branch: &str, parent: &str) -> Result<String> {
     let common_dir = git::init(repo)?;
+    super::branch::check_branch_name(&common_dir, branch)?;
     super::branch::check_new(&common_dir, branch)?;
     anyhow::ensure!(
         !git::branch_exists(branch),

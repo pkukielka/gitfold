@@ -475,8 +475,8 @@ P's tip built on P, following it unless `--no-follow`; `gitfold parent`
 shows a branch's parent and whether it follows it, forgets it (`--none`:
 the history stays as it is) or turns following on and off. Nothing moves
 commits yet: following itself is still to come. The command-line contract
-is in place; the commands marked "not yet" above parse their arguments, then say `not implemented yet`
-(exit 1). Commands people guess (`gitfold sync`, `pull`, `restack`,
+is in place; the commands marked "not yet" above parse their arguments,
+then say `not implemented yet` (exit 1). Commands people guess (`gitfold sync`, `pull`, `restack`,
 `rebase`, `branch --on`, `branch --merge`) exit 2 naming the right one.
 
 ### Partial clones

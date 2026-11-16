@@ -35,10 +35,16 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         // built on P.
         let full = super::tree::check_new_parent(repo, name, parent)?;
         create(repo, name, Some(&full))?;
-        settings::set_parent(repo, name, &full)?;
-        // Following is on unless set off; a new branch has nothing set.
-        if no_follow {
-            settings::set_follow(repo, name, false)?;
+        // Following set either way: a deleted branch's settings may be left
+        // (T2). Without its parent the branch goes again, its settings with
+        // it, so the command can be retried.
+        let built = settings::set_parent(repo, name, &full)
+            .and_then(|()| settings::set_follow(repo, name, !no_follow));
+        if let Err(e) = built {
+            if let Err(undo) = git::cmd::output(repo, &["branch", "-D", "--", name]) {
+                log::warn!("deleting branch {name} again: {undo:#}");
+            }
+            return Err(e);
         }
         set_branch_settings(repo, name, prewarm, track_reads)?;
         let (parent, following) = (
@@ -59,8 +65,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     if with_changes {
         // `git branch` checks names itself; `update-ref` would take `HEAD`, and
         // refuse other bad names only after the copy.
-        let valid = git::cmd::output(&common_dir, &["check-ref-format", "--branch", name]);
-        ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
+        check_branch_name(&common_dir, name)?;
         // A workspace to copy: `from`, or the one we are in.
         let source = super::branch_or_current(from, repo).map_err(|_| {
             anyhow::anyhow!("not in a gitfold workspace: name the source with --from")
@@ -101,6 +106,14 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
         git::branch_exists(name) || !StateDir::of(common_dir, name).dir.exists(),
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
+    Ok(())
+}
+
+/// Refuses `name` if git doesn't take it as a branch name, as `git branch`
+/// does before anything else.
+pub fn check_branch_name(common_dir: &Path, name: &str) -> Result<()> {
+    let valid = git::cmd::output(common_dir, &["check-ref-format", "--branch", name]);
+    ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
     Ok(())
 }
 
