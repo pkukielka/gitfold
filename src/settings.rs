@@ -154,9 +154,9 @@ impl Local {
     }
 
     /// Whether `branch` takes its parent's new commits by itself
-    /// (`gitfoldFollow`): on unless set false (F1).
-    pub fn follow(&self, branch: &str) -> bool {
-        self.branch_bool(branch, FOLLOW).unwrap_or(true)
+    /// (`gitfoldFollow`), if set (`Tree::follows` applies the rules).
+    pub fn follow(&self, branch: &str) -> Option<bool> {
+        self.branch_bool(branch, FOLLOW)
     }
 
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
@@ -212,11 +212,10 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
-/// Makes `parent` (a full ref) the parent of `branch`, following it unless
-/// `follow` is false (see `set_branch`).
-pub fn set_parent(git_dir: &Path, branch: &str, parent: &str, follow: bool) -> Result<()> {
-    set_branch(git_dir, branch, PARENT, parent)?;
-    set_follow(git_dir, branch, follow)
+/// Makes `parent` (a full ref) the parent of `branch` (see `set_branch`);
+/// following is `set_follow`'s.
+pub fn set_parent(git_dir: &Path, branch: &str, parent: &str) -> Result<()> {
+    set_branch(git_dir, branch, PARENT, parent)
 }
 
 /// Forgets the parent of `branch`, and whether it follows it (F5).

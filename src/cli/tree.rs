@@ -110,51 +110,55 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         return Err(not_implemented("gitfold parent"));
     }
     let parent = tree.parent(&name).map(crate::tree::short);
-    match parent {
-        // The rules table's F5; a parent stored on the root or a deleted
-        // branch (T1, T2) goes too.
-        _ if args.none => {
-            settings::forget_parent(&common_dir, &name)?;
-            match parent {
-                Some(parent) => println!("{name} no longer has a parent (it was {parent})"),
-                None => println!("{name} has no parent"),
-            }
+    if args.none {
+        // F5; a parent stored on the root or a deleted branch (T1, T2) goes
+        // too.
+        settings::forget_parent(&common_dir, &name)?;
+        match parent {
+            Some(parent) => println!("{name} no longer has a parent (it was {parent})"),
+            None => println!("{name} has no parent"),
         }
-        // `check_follow` let only a branch with a parent through (F6).
-        Some(parent) if args.follow || args.no_follow => {
+    } else if let Some(parent) = parent.filter(|_| args.follow || args.no_follow) {
+        // (`check_follow` let only a branch with a parent through, F6.)
+        if tree.follows(&name) != args.follow {
             settings::set_follow(&common_dir, &name, args.follow)?;
-            match args.follow {
-                true => println!("{name} follows {parent}"),
-                false => println!(
-                    "{name} no longer follows {parent}: `gitfold parent {name} --update` takes \
-                     its new commits"
-                ),
-            }
         }
-        _ => println!("{}", show(&common_dir, &tree, &name)?),
+        match args.follow {
+            true => println!("{name} follows {parent}"),
+            false => println!(
+                "{name} no longer follows {parent}: `gitfold parent {name} --update` takes its \
+                 new commits"
+            ),
+        }
+    } else {
+        println!("{}", show(&tree, &name, parent));
     }
     Ok(())
 }
 
-/// What `gitfold parent` says of local branch `name`: its parent, whether
-/// it follows it, and whether the parent is gone (T3).
-fn show(common_dir: &Path, tree: &Tree, name: &str) -> Result<String> {
-    let Some(parent) = tree.parent(name) else {
-        return Ok(match tree.is_root(name) {
+/// What `gitfold parent` says of local branch `name` with `parent` (short):
+/// whether it follows it, and whether the parent is gone (T3).
+fn show(tree: &Tree, name: &str, parent: Option<&str>) -> String {
+    let Some(parent) = parent else {
+        return match tree.is_root(name) {
             true => format!("{name} is the root of the tree; it has no parent"),
             false => format!("{name} has no parent"),
-        });
+        };
     };
-    let follows = settings::Local::read_checked(common_dir)?.follow(name);
-    let short = crate::tree::short(parent);
-    let gone = match git::resolve(parent) {
-        Ok(_) => "",
-        Err(_) => " (parent gone)",
+    let gone = match tree.parent_gone(name) {
+        true => " (parent gone)",
+        false => "",
     };
-    Ok(match follows {
-        true => format!("{name} is built on {short}{gone}, following it"),
-        false => format!("{name} is built on {short}{gone}, not following it"),
-    })
+    let following = following(tree.follows(name));
+    format!("{name} is built on {parent}{gone}, {following}")
+}
+
+/// How a branch's following reads after its parent's name.
+pub fn following(on: bool) -> &'static str {
+    match on {
+        true => "following it",
+        false => "not following it",
+    }
 }
 
 /// Checks `gitfold branch NEW --parent P` (in the repository of `repo`):

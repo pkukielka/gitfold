@@ -35,13 +35,16 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         // built on P.
         let full = super::tree::check_new_parent(repo, name, parent)?;
         create(repo, name, Some(&full))?;
-        settings::set_parent(repo, name, &full, !no_follow)?;
+        settings::set_parent(repo, name, &full)?;
+        // Following is on unless set off; a new branch has nothing set.
+        if no_follow {
+            settings::set_follow(repo, name, false)?;
+        }
         set_branch_settings(repo, name, prewarm, track_reads)?;
-        let following = match no_follow {
-            true => "not following it",
-            false => "following it",
-        };
-        let parent = crate::tree::short(&full);
+        let (parent, following) = (
+            crate::tree::short(&full),
+            super::tree::following(!no_follow),
+        );
         println!("created branch {name} on {parent} ({following}); open it as <mountpoint>/{name}");
         return Ok(());
     }
