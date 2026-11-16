@@ -51,6 +51,8 @@ check "its own parent: refused" says 2 "can't be its own parent" parent api --se
 check "outside a workspace, the branch must be named" says 1 "not in a gitfold workspace" parent
 check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
 check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.txt
+check "changes -z -- PATH: not implemented yet" says 1 "not implemented yet" changes -z -- a.txt
+check "changes --stat -- PATH: refused" says 2 "cannot be used with" changes --stat -- a.txt
 eq "changes without PATH: as before (no workspace yet: nothing, exit 0)" "0 " "$(gf changes api)"
 check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a 2>&1 | grep -q 'not implemented'"
 for g in sync pull restack rebase; do

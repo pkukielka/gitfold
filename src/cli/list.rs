@@ -194,8 +194,9 @@ pub struct ChangesArgs {
     #[arg(short = 'z')]
     pub nul: bool,
     /// Also the lines added and removed per path (`-` for binary files),
-    /// as `git diff --numstat`, and a summary line (not with -z).
-    #[arg(long)]
+    /// as `git diff --numstat`, and a summary line (not with -z; not with
+    /// -- PATH).
+    #[arg(long, conflicts_with = "paths")]
     pub stat: bool,
     /// Instead: who is changing these paths, on every branch (committed on
     /// it, not yet in main) and in every workspace (uncommitted).
