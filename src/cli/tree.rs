@@ -164,8 +164,8 @@ pub fn following(on: bool) -> &'static str {
 /// P's full ref.
 pub fn check_new_parent(repo: &Path, branch: &str, parent: &str) -> Result<String> {
     let common_dir = git::init(repo)?;
-    super::branch::check_branch_name(&common_dir, branch)?;
     super::branch::check_new(&common_dir, branch)?;
+    super::branch::check_branch_name(&common_dir, branch)?;
     anyhow::ensure!(
         !git::branch_exists(branch),
         "a branch named '{branch}' already exists"
