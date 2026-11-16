@@ -10,7 +10,6 @@ use gix::objs::tree::EntryKind;
 use log::error;
 
 use super::GitFold;
-use super::views::build::Entry;
 use super::views::{Item, ViewDir};
 use super::workspace::{GITFILE_LOCAL, Obj, Read, TASKLINK_LOCAL, Workspace};
 use super::workspaces::Slot;
@@ -211,21 +210,11 @@ impl GitFold {
                 let size = data.len() as u64;
                 self.make_attr(ino, FileType::RegularFile, 0o444, size, *time)
             }
-            Item::File(Entry::Stored(id), time) => {
+            Item::File(id, time) => {
                 let mut attr = self.file_attr(ino, *id, false)?;
                 (attr.atime, attr.mtime, attr.ctime) = (*time, *time, *time);
                 attr
             }
-            Item::File(Entry::Merged { data, kind }, time) => {
-                let (kind, perm) = match kind {
-                    EntryKind::Link => (FileType::Symlink, 0o777),
-                    EntryKind::BlobExecutable => (FileType::RegularFile, 0o555),
-                    _ => (FileType::RegularFile, 0o444),
-                };
-                self.make_attr(ino, kind, perm, data.len() as u64, *time)
-            }
-            // Uncommitted files come with `@live`.
-            Item::File(Entry::Upper { .. }, _) => return Err(Errno::EIO),
         })
     }
 
@@ -510,11 +499,8 @@ impl GitFold {
                 _ => Err(Errno::EISDIR),
             },
             Ino::View { slot, local } => match self.views.get(slot)?.get(&self.store, local)? {
-                Item::Summary(data, _) | Item::File(Entry::Merged { data, .. }, _) => {
-                    Ok(Content::Whole(data))
-                }
-                Item::File(Entry::Stored(id), _) => cached(inode::file(id), &|| self.blob(id)),
-                Item::File(Entry::Upper { .. }, _) => Err(Errno::EIO),
+                Item::Summary(data, _) => Ok(Content::Whole(data)),
+                Item::File(id, _) => cached(inode::file(id), &|| self.blob(id)),
                 Item::Dir(_) => Err(Errno::EISDIR),
             },
             _ => Err(Errno::EISDIR),
@@ -526,8 +512,7 @@ impl GitFold {
         match decode(ino.0)? {
             Ino::File(id) => Ok(self.blob(id)?.to_vec()),
             Ino::View { slot, local } => match self.views.get(slot)?.get(&self.store, local)? {
-                Item::File(Entry::Merged { data, .. }, _) => Ok(data.to_vec()),
-                Item::File(Entry::Stored(id), _) => Ok(self.blob(id)?.to_vec()),
+                Item::File(id, _) => Ok(self.blob(id)?.to_vec()),
                 _ => Err(Errno::EINVAL),
             },
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {

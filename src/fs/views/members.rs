@@ -1,16 +1,13 @@
-//! Which branches a view merges in (`members`), the refs it is made of now
-//! (`Refs`, compared between refreshes), and what each member brings to the
-//! committed view (`committed`): its tip, against its merge point with its
-//! parent.
+//! Which branches a view merges in (`members`), and the refs it is made of
+//! now (`refs`, compared between refreshes): each member's tip and its
+//! parent's, whose merge base (`Bases`) is where it left it.
 
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use gix::ObjectId;
 
-use super::build::{Changes, Files, Member};
 use crate::git;
-use crate::store::{EMPTY_TREE, Store};
 use crate::tree::Tree;
 
 /// A branch a view merges in, and its parent (a full ref).
@@ -89,7 +86,7 @@ pub struct Note {
 }
 
 /// The refs a committed view is made of, resolved once: compared between
-/// refreshes to see whether it changed, and built from (`committed`).
+/// refreshes to see whether it changed, and merged (`merge`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Refs {
     /// The view's own files: the branch's tip, or its origin root's.
@@ -111,7 +108,7 @@ pub struct Bases {
 impl Bases {
     /// The best merge base of commits `a` and `b`, as `git merge-base` finds
     /// it.
-    fn get(&mut self, a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
+    pub fn get(&mut self, a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
         if let Some(&base) = self.now.get(&(a, b)) {
             return Ok(base);
         }
@@ -208,36 +205,6 @@ pub fn refs(
         members: out,
         notes,
     })
-}
-
-/// The committed view's inputs from `refs`: the view's own files, and each
-/// member's tip with its merge point (the merge base of its tip and its
-/// parent's; none for unrelated histories: everything is its change).
-pub fn committed(store: &Store, refs: &Refs, bases: &mut Bases) -> Result<(Files, Vec<Member>)> {
-    let files = |tree: ObjectId| -> Result<Files> {
-        Ok(Files {
-            tree: store.load_tree(tree)?,
-            uncommitted: Changes::new(),
-        })
-    };
-    let mut members = Vec::with_capacity(refs.members.len());
-    for (branch, (tip, tree), parent) in &refs.members {
-        let merge_point = match bases.get(*tip, *parent)? {
-            Some(base) => {
-                let tree = git::with_repo(|repo| -> Result<ObjectId> {
-                    Ok(repo.find_commit(base)?.tree_id()?.detach())
-                })?;
-                store.load_tree(tree)?
-            }
-            None => EMPTY_TREE,
-        };
-        members.push(Member {
-            branch: branch.clone(),
-            merge_point,
-            files: files(*tree)?,
-        });
-    }
-    Ok((files(refs.own.1)?, members))
 }
 
 #[cfg(test)]

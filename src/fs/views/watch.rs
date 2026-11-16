@@ -1,8 +1,9 @@
 //! Keeping a view current: every second, its members' refs are read (the
 //! tree of branches again when the repository's config changed, or every
 //! 30 s; for the root's view, which workspaces are opened); if anything
-//! moved, the view is built again and the kernel told which paths changed, so
-//! its long-cached entries, attributes and pages stay right.
+//! moved, git merges the view again (`merge`) and the kernel is told which
+//! paths changed, so its long-cached entries, attributes and pages stay
+//! right.
 
 use std::collections::HashSet;
 use std::fs;
@@ -14,10 +15,8 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use log::error;
 
-use super::build;
 use super::members::{self, Bases, BuiltOn, Refs};
-use super::merge;
-use super::merge::ConflictStyle;
+use super::merge::{Member, Private};
 use super::serve::ViewDir;
 use super::shown::{Changed, Shown, Times};
 use crate::fs::NameChanges;
@@ -38,6 +37,7 @@ pub struct Context {
     pub store: Arc<Store>,
     pub names: Arc<NameChanges>,
     pub branch: String,
+    pub private: Arc<Private>,
 }
 
 /// What a view was last built from.
@@ -48,9 +48,8 @@ pub struct Watch {
     config: Option<Stamp>,
     reads: u32,
     tree: Tree,
-    built: Option<(Vec<BuiltOn>, Refs, ConflictStyle)>,
-    /// The conflict style the config asks for.
-    style: ConflictStyle,
+    /// With the config's stamp: git reads its merge settings there.
+    built: Option<(Vec<BuiltOn>, Refs, Stamp)>,
     times: Times,
     bases: Bases,
     last_error: String,
@@ -65,9 +64,9 @@ fn stamp(path: &Path) -> Stamp {
 }
 
 impl Watch {
-    /// The view again, if its refs moved since it was last built (or it
-    /// wasn't yet), after `before`: what it shows, and the paths that
-    /// changed.
+    /// The view again, if its refs (or the config) moved since it was last
+    /// built (or it wasn't yet), after `before`: what it shows, and the
+    /// paths that changed.
     pub fn next(
         &mut self,
         ctx: &Context,
@@ -77,8 +76,6 @@ impl Watch {
         if self.config != Some(config) || self.reads >= TREE_EVERY {
             self.tree = Tree::read(&ctx.common_dir)?;
             self.config = Some(config);
-            // As git reads it now; a change builds the view again.
-            self.style = merge::conflict_style(&ctx.common_dir);
             self.reads = 0;
         }
         self.reads += 1;
@@ -95,16 +92,34 @@ impl Watch {
         let opened = |b: &str| opened.contains(b);
         let members = members::members(&self.tree, branch, origin.as_deref(), opened);
         let refs = members::refs(branch, origin.as_deref(), &members, &mut self.bases)?;
-        if let Some((m, r, s)) = &self.built
-            && (m, r, *s) == (&members, &refs, self.style)
+        if let Some((m, r, c)) = &self.built
+            && (m, r, *c) == (&members, &refs, config)
         {
             return Ok(None);
         }
-        let (files, inputs) = members::committed(&ctx.store, &refs, &mut self.bases)?;
+        let mut inputs = Vec::with_capacity(refs.members.len());
+        for (member, (tip, _), parent) in &refs.members {
+            let base = self.bases.get(*tip, *parent)?;
+            inputs.push(Member {
+                branch: member,
+                tip: *tip,
+                base,
+            });
+        }
         self.bases.next_round();
-        let view = build::build(&ctx.store, branch, files, &inputs, self.style)?;
-        let next = Shown::next(&ctx.store, view, &refs.notes, before, &self.times);
-        self.built = Some((members, refs, self.style));
+        // No lock the requests need is held meanwhile: git may read the mount.
+        let merged = ctx.private.merge(branch, (branch, refs.own.0), &inputs)?;
+        let tree = ctx.store.load_tree(merged.tree)?;
+        let notes = &refs.notes;
+        let next = Shown::next(
+            &ctx.store,
+            tree,
+            &merged.conflicts,
+            notes,
+            before,
+            &self.times,
+        );
+        self.built = Some((members, refs, config));
         Ok(Some(next))
     }
 }

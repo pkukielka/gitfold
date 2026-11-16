@@ -66,10 +66,25 @@ commit_on ui api $'a.txt=ui\n' 'gone.txt=-'
 commit_on web api $'a.txt=web\n' $'gone.txt=web\n'
 built_on ui api; built_on web api
 mount_fs
-eq "markers named by branch" $'<<<<<<< api + ui\nui\n=======\nweb\n>>>>>>> web' "$(cat "$MNT/$V/a.txt")"
-eq "a change wins over a deletion" "web" "$(cat "$MNT/$V/gone.txt")"
-eq "the summary" $'markers\tapi, ui, web\ta.txt\nmodified-deleted\tapi, ui, web\tgone.txt' \
+eq "markers named by branch" $'<<<<<<< api+ui\nui\n=======\nweb\n>>>>>>> web' "$(cat "$MNT/$V/a.txt")"
+eq "modify/delete: the changed version, as git leaves it" "web" "$(cat "$MNT/$V/gone.txt")"
+eq "the summary, as git says it" $'CONFLICT (contents)\tapi+ui, web\ta.txt\nCONFLICT (modify/delete)\tapi+ui, web\tgone.txt' \
     "$(cat "$MNT/$V/.gitfold-conflicts")"
+}
+
+gits_merge() {
+commit_on api main $'CHANGES=c\n' $'.gitattributes=CHANGES merge=union\n'
+commit_on ui api a.txt=- $'renamed.txt=a\n' $'CHANGES=c\nui\n'
+commit_on web api $'a.txt=a\nweb\n' $'CHANGES=c\nweb\n'
+built_on ui api; built_on web api
+refs_before=$(R for-each-ref | wc -l)
+objects_before=$(R count-objects -v | sed -n 's/^count: //p')
+mount_fs
+eq "an edit follows a rename" $'a\nweb' "$(cat "$MNT/$V/renamed.txt")"
+eq "merge=union" $'c\nui\nweb' "$(cat "$MNT/$V/CHANGES")"
+eq "no ref in the repository" "$refs_before" "$(R for-each-ref | wc -l)"
+eq "no object in the repository" "$objects_before" "$(R count-objects -v | sed -n 's/^count: //p')"
+check "the private repository's" test -d "$COMMON/gitfold/.views.git"
 }
 
 kept_current() {
@@ -145,6 +160,7 @@ for i in 1 7 20; do eq "f$i.txt" "$i" "$(cat "$MNT/$V/f$i.txt")"; done
 
 section "views: merged with what is built on it" merged_with_whats_built_on_it
 section "views: conflicts" conflicts
+section "views: git's merge" gits_merge
 section "views: kept current" kept_current
 section "views: names under @" names
 section "views: the root shows opened branches" root_shows_opened_branches

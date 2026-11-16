@@ -490,15 +490,17 @@ naming the right one.
 `<mount>/@committed/<branch>/` is a read-only view of a branch merged with
 every branch built on it, their committed tips (for the main branch, only
 branches opened as workspaces, and those they are built on). Each branch's
-change is its files against where it left its parent, merged path by path as
-git's merge does (renames aren't followed, `.gitattributes` merge settings
-aren't applied). Conflicts show as git's markers named by branch; where no
-markers can show one (a change against a deletion, binary files, a file and a
-directory), the earlier side shows. `.gitfold-conflicts` at the view's root lists
-every conflict, one per line (`<kind>\t<branches>\t<path>`), and the branches
-left out (`skipped`) or refs that couldn't be read (`unread`). The view follows
-new commits and changes to the tree within about a second. `@live` (with
-uncommitted work) is reserved and comes later; a branch named `committed` or
+change is its files against where it left its parent, merged in turn by git
+(`git merge-tree`): renames, `.gitattributes` merge settings and
+`merge.conflictStyle` apply as in a merge, and conflicts stay in the files as
+git leaves them, markers named by branch (`api+ui`, `web`).
+`.gitfold-conflicts` at the view's root lists every conflict git reports, one
+per line (`CONFLICT (<kind>)\t<the two sides>\t<path>`), and the branches left
+out (`skipped`) or refs that couldn't be read (`unread`). Git's objects go
+into a private repository, `.git/gitfold/.views.git`, which borrows the
+repository's objects: nothing is written into the repository. The view
+follows new commits and changes to the tree within about a second. `@live`
+(with uncommitted work) is reserved and comes later; a branch named `committed` or
 `live` is reached as `@refs/heads/committed` (a remote so named as
 `@refs/remotes/committed/<branch>`).
 

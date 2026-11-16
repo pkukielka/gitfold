@@ -12,7 +12,7 @@ use fuser::Errno;
 use log::{error, info};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 
-use super::build::Entry;
+use super::merge::Private;
 use super::shown::{Changed, Obj, Shown};
 use super::watch::{self, Watch};
 use crate::fs::NameChanges;
@@ -24,7 +24,8 @@ use crate::store::Store;
 /// What a view inode is, with its time.
 pub enum Item {
     Dir(SystemTime),
-    File(Entry, SystemTime),
+    /// A file or symlink: its store file id.
+    File(u32, SystemTime),
     Summary(Arc<Vec<u8>>, SystemTime),
 }
 
@@ -33,7 +34,7 @@ impl Item {
     fn of(shown: &Shown, obj: &Obj, path: &[u8]) -> Item {
         match obj {
             Obj::Dir => Item::Dir(shown.time(path)),
-            Obj::File(entry) => Item::File(entry.clone(), shown.time(path)),
+            Obj::File(id) => Item::File(*id, shown.time(path)),
             Obj::Summary(data) => Item::Summary(data.clone(), shown.time(path)),
         }
     }
@@ -191,6 +192,8 @@ pub struct Views {
     creating: Mutex<()>,
     /// Bumped when a view opens: the namespace listings holding it changed.
     mtime: Mutex<SystemTime>,
+    /// Where the views' merges are made, once the first view opens.
+    private: Mutex<Option<Arc<Private>>>,
 }
 
 impl Views {
@@ -202,6 +205,7 @@ impl Views {
             list: RwLock::default(),
             creating: Mutex::default(),
             mtime: Mutex::new(SystemTime::now()),
+            private: Mutex::default(),
         }
     }
 
@@ -216,6 +220,20 @@ impl Views {
     /// When a view last opened.
     pub fn mtime(&self) -> SystemTime {
         *self.mtime.lock()
+    }
+
+    /// The private repository the views are merged in, made when the first
+    /// view opens (`merge::Private::create`). EIO if it can't be.
+    fn private(&self) -> Result<Arc<Private>, Errno> {
+        let mut private = self.private.lock();
+        if let Some(p) = &*private {
+            return Ok(p.clone());
+        }
+        let made = Private::create(&self.common_dir).map_err(|e| {
+            error!("views: making their private repository: {e:#}");
+            Errno::EIO
+        })?;
+        Ok(private.insert(Arc::new(made)).clone())
     }
 
     /// How many views were opened; only grows.
@@ -252,6 +270,7 @@ impl Views {
             store: self.store.clone(),
             names: self.names.clone(),
             branch: branch.to_string(),
+            private: self.private()?,
         };
         let mut watch = Watch::default();
         let built = watch.next(&ctx, None).and_then(|built| {

@@ -39,10 +39,39 @@ const MIN_INDEX_SLOTS: usize = 16384;
 
 static REPO: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
 
+/// A repository of objects gitfold made itself (the views' merges), borrowing
+/// `REPO`'s objects (alternates): looked in when `REPO` hasn't an object.
+static PRIVATE: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
+
 thread_local! {
     static LOCAL: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
     /// The same, without rescanning packs on a miss (see `with_repo_no_refresh`).
     static LOCAL_NO_REFRESH: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
+    static LOCAL_PRIVATE: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
+}
+
+/// Opens the bare repository at `path`, which borrows the open repository's
+/// objects, as where objects `REPO` hasn't are looked for too. Once per
+/// process.
+pub fn open_private(path: &Path) -> Result<()> {
+    let repo = gix::open(path).with_context(|| format!("opening {}", path.display()))?;
+    PRIVATE
+        .set(repo.into_sync())
+        .map_err(|_| anyhow!("a private repository is open already"))
+}
+
+/// `f` on the private repository's handle, if one is open (`open_private`).
+fn with_private<R>(f: impl FnOnce(&gix::Repository) -> R) -> Option<R> {
+    let private = PRIVATE.get()?;
+    Some(LOCAL_PRIVATE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let repo = slot.get_or_insert_with(|| {
+            let mut repo = private.to_thread_local();
+            repo.object_cache_size(0);
+            repo
+        });
+        f(repo)
+    }))
 }
 
 /// Opens the repository at `path` and returns its common git dir (`.git`).
@@ -169,9 +198,17 @@ pub struct Entry {
 }
 
 /// Lists one tree level; `None` if the tree isn't in the object database
-/// (as of the last `refresh_packs`).
+/// (as of the last `refresh_packs`), nor in the private one.
 pub fn tree_entries(tree: ObjectId) -> Result<Option<Tree>> {
-    with_repo_no_refresh(|repo| {
+    let entries = with_repo_no_refresh(|repo| tree_entries_in(repo, tree))?;
+    match entries {
+        None => with_private(|repo| tree_entries_in(repo, tree)).unwrap_or(Ok(None)),
+        found => Ok(found),
+    }
+}
+
+fn tree_entries_in(repo: &gix::Repository, tree: ObjectId) -> Result<Option<Tree>> {
+    {
         let Some(object) = repo.try_find_object(tree)? else {
             return Ok(None);
         };
@@ -193,13 +230,20 @@ pub fn tree_entries(tree: ObjectId) -> Result<Option<Tree>> {
             })
             .collect();
         Ok(Some(Tree { entries, names }))
-    })
+    }
 }
 
 /// Uncompressed size of an object, without decompressing it; `None` if it
-/// isn't in the object database (as of the last `refresh_packs`).
+/// isn't in the object database (as of the last `refresh_packs`), nor in the
+/// private one.
 pub fn object_size(oid: ObjectId) -> Result<Option<u64>> {
-    with_repo_no_refresh(|repo| Ok(repo.try_find_header(oid)?.map(|h| h.size())))
+    let size = |repo: &gix::Repository| -> Result<Option<u64>> {
+        Ok(repo.try_find_header(oid)?.map(|h| h.size()))
+    };
+    match with_repo_no_refresh(size)? {
+        None => with_private(size).unwrap_or(Ok(None)),
+        found => Ok(found),
+    }
 }
 
 pub static BLOB_NS: AtomicU64 = AtomicU64::new(0);
@@ -207,7 +251,14 @@ pub static BLOB_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn read_blob(oid: ObjectId) -> Result<Vec<u8>> {
     let started = Instant::now();
-    let data = with_repo(|repo| Ok(repo.find_blob(oid)?.take_data()));
+    let read = |repo: &gix::Repository| -> Result<Option<Vec<u8>>> {
+        Ok(repo.try_find_object(oid)?.map(|o| o.detach().data))
+    };
+    let data = match with_repo(read) {
+        Ok(None) => with_private(read).unwrap_or(Ok(None)),
+        found => found,
+    }
+    .and_then(|data| data.ok_or_else(|| anyhow!("object {oid} not found")));
     BLOB_NS.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if let Ok(d) = &data {
         BLOB_BYTES.fetch_add(d.len() as u64, Ordering::Relaxed);
