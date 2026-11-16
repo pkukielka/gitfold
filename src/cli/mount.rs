@@ -21,6 +21,9 @@ use crate::{mount_table, prewarm, procs, settings};
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
 
+/// How long `mount` retries recording where and how it mounted.
+const RECORD_WAIT: Duration = Duration::from_secs(2);
+
 /// Set for the daemon `gitfold mount` starts in the background: the mount
 /// point and flags are recorded by that command, before it returns, not by
 /// the daemon at an unknown moment after (see `mount`).
@@ -205,11 +208,18 @@ pub fn mount(args: MountArgs) -> Result<()> {
     start(&mountpoint, &log)?;
     // Recorded before returning, once the mount answers: a caller (one
     // mounting it again) writes the config only after.
-    let recorded = std::path::absolute(&args.repo)
-        .map_err(anyhow::Error::from)
-        .and_then(|repo| crate::git::init(&repo))
-        .and_then(|common_dir| settings::set_mountpoint(&common_dir, &mountpoint, &args.flags()));
-    if let Err(e) = recorded {
+    let record = || -> Result<()> {
+        let common_dir = crate::git::init(&std::path::absolute(&args.repo)?)?;
+        let (flags, started) = (args.flags(), Instant::now());
+        loop {
+            // Retried a while: another git command may hold the config's lock.
+            match settings::set_mountpoint(&common_dir, &mountpoint, &flags) {
+                Err(_) if started.elapsed() < RECORD_WAIT => sleep(Duration::from_millis(100)),
+                recorded => return recorded,
+            }
+        }
+    };
+    if let Err(e) = record() {
         eprintln!("warning: recording the mount point in the git config: {e:#}");
     }
     println!(
