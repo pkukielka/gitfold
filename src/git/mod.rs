@@ -294,25 +294,28 @@ pub fn branch_exists(name: &str) -> bool {
 }
 
 /// Whether reference `name` (a full name, `refs/...`) exists.
-pub fn ref_exists(name: &str) -> bool {
+fn ref_exists(name: &str) -> bool {
     with_repo(|repo| repo.try_find_reference(name).is_ok_and(|r| r.is_some()))
 }
 
-/// A remote-tracking branch named `<remote>/<branch>`, as a full ref,
-/// `origin`'s if there is one.
-pub fn remote_tracking(branch: &str) -> Option<String> {
+/// Whether reference `name` (a full name) exists and is a branch: points
+/// at a commit itself, not at another ref as `refs/remotes/origin/HEAD` does.
+pub fn branch_ref_exists(name: &str) -> bool {
     with_repo(|repo| {
-        let platform = repo.references().ok()?;
-        (platform.prefixed("refs/remotes/").ok()?)
-            .filter_map(Result::ok)
-            .map(|r| r.name().as_bstr().to_string())
-            .filter(|name| {
-                name.strip_prefix("refs/remotes/")
-                    .and_then(|rest| rest.split_once('/'))
-                    .is_some_and(|(_, b)| b == branch)
-            })
-            .min_by_key(|name| !name.starts_with("refs/remotes/origin/"))
+        repo.try_find_reference(name)
+            .is_ok_and(|r| r.is_some_and(|r| r.target().try_id().is_some()))
     })
+}
+
+/// A remote-tracking branch `<remote>/<branch>` of a configured remote, as a
+/// full ref, `origin`'s if there is one.
+pub fn remote_tracking(branch: &str) -> Option<String> {
+    let remotes: Vec<String> =
+        with_repo(|repo| repo.remote_names().iter().map(|r| r.to_string()).collect());
+    (remotes.iter())
+        .map(|remote| format!("refs/remotes/{remote}/{branch}"))
+        .filter(|name| branch_ref_exists(name))
+        .min_by_key(|name| !name.starts_with("refs/remotes/origin/"))
 }
 
 /// Whether any reference starts with one of `prefixes` (e.g. `refs/heads/feature/`).

@@ -109,7 +109,7 @@ check "R2: and local main is an ordinary branch" says 1 "not implemented yet" pa
 parent_names() {
 R branch api
 check "P1: a local branch" says 1 "not implemented yet" parent api --set main
-remote_main; R update-ref refs/remotes/origin/feat main
+R remote add origin /nonexistent; remote_main; R update-ref refs/remotes/origin/feat main
 check "P2: a remote-tracking branch" says 1 "not implemented yet" parent api --set origin/feat
 check "P3: a full ref" says 1 "not implemented yet" parent api --set refs/remotes/origin/feat
 check "P3: a full ref that doesn't exist" says 3 "no branch refs/heads/nope" parent api --set refs/heads/nope
@@ -120,13 +120,19 @@ R branch -D -q origin/feat
 check "P5: only origin/feat: both ways out (exit 3)" says 3 "no branch feat (only origin/feat exists). Either: " parent api --set feat
 check "P5: naming both commands" says 3 "git branch feat origin/feat" parent api --set feat
 check "P6: nothing of that name (exit 3)" says 3 "no branch nope" parent api --set nope
+check "P2: origin/HEAD is no branch (a symbolic ref)" says 3 "no branch origin/HEAD" parent api --set origin/HEAD
+check "P5: not for HEAD (origin/HEAD is no branch)" says 3 "no branch HEAD" parent api --set HEAD
+check "P5: not for HEAD, no hint" fails sh -c "'$BIN' -C '$REPO' parent api --set HEAD 2>&1 | grep -q 'only origin'"
 check "P5 for branch --parent too" says 3 "only origin/feat exists" branch c --parent feat
+R remote add team/a /nonexistent; R update-ref refs/remotes/team/a/x main
+check "P5: a remote whose name has a slash" says 3 "no branch x (only team/a/x exists)" parent api --set x
 }
 
 parent_set() {
 R branch api; R branch ui; R config branch.ui.gitfoldParent refs/heads/api
 check "S1: B doesn't exist (exit 3)" says 3 "gitfold parent: no branch nope" parent nope --set api
 check "S1: and nothing was created" fails R rev-parse -q --verify refs/heads/nope
+check "S1: without --set too (exit 3)" says 3 "gitfold parent: no branch nope" parent nope
 check "S2: P doesn't resolve (exit 3)" says 3 "gitfold parent: no branch nope" parent api --set nope
 check "S4: B is the root (exit 2)" says 2 "main is the root of the tree" parent main --set api
 check "S5: P is B (exit 2)" says 2 "a branch can't be its own parent" parent api --set api
@@ -135,7 +141,9 @@ check "S7: accepted (not implemented yet)" says 1 "gitfold parent: not implement
 check "S7: the root as a parent, accepted" says 1 "not implemented yet" parent api --set main
 check "F6: --follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --follow
 check "F6: --no-follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --no-follow
-check "F6: with a parent: accepted (not implemented yet)" says 1 "not implemented yet" parent ui --no-follow
+check "F6: with a parent: --no-follow accepted (not implemented yet)" says 1 "not implemented yet" parent ui --no-follow
+check "F6: with a parent: --follow accepted (not implemented yet)" says 1 "not implemented yet" parent ui --follow
+check "F6 on the root: the root has no parent (S4)" says 2 "main is the root of the tree" parent main --follow
 }
 
 branch_parent() {

@@ -91,13 +91,13 @@ pub fn short(full: &str) -> &str {
 /// remote-tracking branch, or a full ref as given.
 fn resolve_parent(name: &str) -> Result<String, Refused> {
     if name.starts_with("refs/heads/") || name.starts_with("refs/remotes/") {
-        return match git::ref_exists(name) {
+        return match git::branch_ref_exists(name) {
             true => Ok(name.to_string()),
             false => Err(Refused::Unknown(name.to_string())),
         };
     }
     let is_local = git::branch_exists(name);
-    let remote = git::ref_exists(&format!("refs/remotes/{name}"));
+    let remote = git::branch_ref_exists(&format!("refs/remotes/{name}"));
     match (is_local, remote) {
         (true, true) => Err(Refused::Ambiguous(name.to_string())),
         (true, false) => Ok(local(name)),
@@ -223,8 +223,12 @@ impl Tree {
         Ok(full)
     }
 
-    /// Whether local branch `branch` has a parent to follow or not (F6).
+    /// Whether local branch `branch` has a parent to follow or not (F6; the
+    /// root never has one, S4).
     pub fn check_follow(&self, branch: &str) -> Result<(), Refused> {
+        if self.root.as_deref() == Some(branch) {
+            return Err(Refused::Root);
+        }
         match self.parent(branch) {
             Some(_) => Ok(()),
             None => Err(Refused::NoParent),
@@ -312,7 +316,8 @@ mod tests {
         assert_eq!(t.check_root("main"), Err(Refused::Root));
         assert_eq!(t.check_root("web"), Ok(()));
         assert_eq!(t.check_follow("ui"), Ok(()));
-        assert_eq!(t.check_follow("main"), Err(Refused::NoParent));
+        assert_eq!(t.check_follow("api"), Ok(()));
+        assert_eq!(t.check_follow("main"), Err(Refused::Root));
         let rootless = Tree::of(BTreeMap::new(), None, |_| true);
         assert_eq!(
             rootless.check_ancestry("ui", "refs/heads/api"),
