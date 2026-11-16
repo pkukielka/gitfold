@@ -212,11 +212,21 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
-/// Forgets the workspace settings of `branch` (prewarm, read tracking): a
-/// branch made and deleted again by one command.
-pub fn forget_workspace(git_dir: &Path, branch: &str) -> Result<()> {
-    unset_branch(git_dir, branch, PREWARM)?;
-    unset_branch(git_dir, branch, TRACK_READS)
+/// Forgets the workspace settings of `branch` asked for: its prewarm mode,
+/// its read tracking (a branch made and deleted again by one command).
+pub fn forget_workspace(
+    git_dir: &Path,
+    branch: &str,
+    prewarm: bool,
+    track_reads: bool,
+) -> Result<()> {
+    if prewarm {
+        unset_branch(git_dir, branch, PREWARM)?;
+    }
+    if track_reads {
+        unset_branch(git_dir, branch, TRACK_READS)?;
+    }
+    Ok(())
 }
 
 /// Makes `parent` (a full ref) the parent of `branch` (see `set_branch`);

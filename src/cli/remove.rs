@@ -45,13 +45,25 @@ pub fn remove(repo: &Path, args: RemoveArgs) -> Result<()> {
         claude_hook: _,
     } = args;
     let name = name.as_deref().context("name the workspace")?;
-    let wait = Duration::from_secs(wait);
     check_name(name)?;
     let common_dir = git::init(repo)?;
+    let done = remove_waiting(&common_dir, name, force, check, Duration::from_secs(wait))?;
+    println!("{done}");
+    Ok(())
+}
+
+/// `remove_once`, retried while it is in use, for up to `wait` (said once).
+pub(super) fn remove_waiting(
+    common_dir: &Path,
+    name: &str,
+    force: bool,
+    check: bool,
+    wait: Duration,
+) -> Result<String> {
     let started = Instant::now();
     let mut told = false;
-    let done = loop {
-        match remove_once(&common_dir, name, force, check) {
+    loop {
+        match remove_once(common_dir, name, force, check) {
             Err(e) if Refusal::of(&e) == Some(Refusal::InUse) && started.elapsed() < wait => {
                 if !told {
                     eprintln!("{e:#}\nwaiting (up to {} s)...", wait.as_secs());
@@ -63,22 +75,15 @@ pub fn remove(repo: &Path, args: RemoveArgs) -> Result<()> {
                 let waited = started.elapsed().as_secs();
                 return Err(e.context(format!("still in use after {waited} s")));
             }
-            done => break done?,
+            done => return done,
         }
-    };
-    println!("{done}");
-    Ok(())
+    }
 }
 
 /// One attempt at `remove`: under the repository lock, or by the daemon while
 /// mounted; the lock held otherwise (another `remove` or `prune`) is in use, so
 /// `--wait` retries.
-pub(super) fn remove_once(
-    common_dir: &Path,
-    name: &str,
-    force: bool,
-    check: bool,
-) -> Result<String> {
+fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Result<String> {
     let request = control::Request::Remove {
         name: name.to_string(),
         force,

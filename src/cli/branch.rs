@@ -137,9 +137,13 @@ fn merged(
         !git::branch_exists(name),
         "a branch named '{name}' already exists"
     );
-    // Where the user stands, before anything is made (or mounted).
-    let sources = (from.iter())
-        .map(|rev| Source::resolve(repo, rev))
+    // Where the user stands, before anything is made (or mounted). `-` is
+    // the previous branch, as for `git merge -`, except as the start point.
+    let sources = (from.iter().enumerate())
+        .map(|(i, rev)| match rev.as_str() {
+            "-" if i > 0 => Source::resolve(repo, "@{-1}"),
+            rev => Source::resolve(repo, rev),
+        })
         .collect::<Result<Vec<_>>>()?;
     let mount = match mount_table::mount_of(common_dir)? {
         Some(mount) => mount,
@@ -161,18 +165,27 @@ fn merged(
     let (first, others) = sources.split_first().expect("several --from");
     // Without an upstream: no relation afterwards.
     git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.id])?;
+    let made = Made {
+        name,
+        at: &first.id,
+        prewarm: prewarm.is_some(),
+        track_reads: track_reads.is_some(),
+    };
     let state = StateDir::of(common_dir, name);
     let workspace = mount.join(name);
-    // Before the workspace opens: it opens with them.
-    let merge = set_branch_settings(repo, name, prewarm, track_reads)
+    let merge = no_relation(repo, common_dir, name)
+        // Before the workspace opens: it opens with them.
+        .and_then(|()| set_branch_settings(repo, name, prewarm, track_reads))
         // Looking it up opens it.
         .and_then(|()| {
             fs::metadata(&workspace)
                 .with_context(|| format!("opening workspace {}", workspace.display()))
         })
         .and_then(|_| {
-            let revs: Vec<String> = others.iter().map(|s| s.as_in(&state.admin)).collect();
-            run_merge(common_dir, &workspace, &revs)
+            let revs = (others.iter())
+                .map(|s| s.as_in(&state.admin))
+                .collect::<Result<Vec<_>>>()?;
+            run_merge(&workspace, &revs)
         });
     match merge {
         Ok(true) => {
@@ -189,47 +202,63 @@ fn merged(
             let failed = failed
                 .err()
                 .unwrap_or_else(|| anyhow::anyhow!("git merge failed"));
-            let undone = undo(
-                repo,
-                common_dir,
-                name,
-                &first.id,
-                &state,
-                prewarm,
-                track_reads,
-            );
-            Err(match undone {
+            Err(match made.undo(repo, common_dir, &state) {
                 Ok(()) => failed.context(format!("branch {name} not created")),
-                Err(e) => failed.context(format!(
-                    "branch {name} created, but not removed again ({e:#}): `gitfold remove \
-                     --force {name}`, then `git branch -D {name}`"
-                )),
+                Err(e) => failed.context(format!("branch {name} created, but {e:#}")),
             })
         }
     }
 }
 
-/// Removes what `merged` made for branch `name` (at `at`): its workspace if
-/// it opened, the settings it stored, then the branch (without it, its
-/// workspace couldn't be removed).
-fn undo(
-    repo: &Path,
-    common_dir: &Path,
-    name: &str,
-    at: &str,
-    state: &StateDir,
-    prewarm: Option<Prewarm>,
-    track_reads: Option<bool>,
-) -> Result<()> {
-    if state.dir.exists() || state.admin.exists() {
-        super::remove::remove_once(common_dir, name, true, false)?;
+/// Forgets what a deleted branch `name` left that would relate the new one
+/// to another (its parent, following, base ref): `--from` makes none.
+fn no_relation(repo: &Path, common_dir: &Path, name: &str) -> Result<()> {
+    settings::forget_parent(repo, name)?;
+    let base = format!("refs/gitfold-base/{name}");
+    if git::cmd::output(common_dir, &["rev-parse", "--verify", "-q", &base]).is_ok() {
+        git::cmd::output(common_dir, &["update-ref", "-d", &base])?;
     }
-    if prewarm.is_some() || track_reads.is_some() {
-        settings::forget_workspace(repo, name)?;
-    }
-    let branch = format!("refs/heads/{name}");
-    git::cmd::output(common_dir, &["update-ref", "-d", &branch, at]).map(drop)
+    Ok(())
 }
+
+/// What `merged` made: branch `name` at `at`, and which settings it stored.
+struct Made<'a> {
+    name: &'a str,
+    at: &'a str,
+    prewarm: bool,
+    track_reads: bool,
+}
+
+impl Made<'_> {
+    /// Removes it again: the workspace if it opened (retried while busy, as
+    /// `gitfold remove --wait`), the settings it stored, then the branch
+    /// (without it, its workspace couldn't be removed). An error says what is
+    /// left, and how to remove it.
+    fn undo(&self, repo: &Path, common_dir: &Path, state: &StateDir) -> Result<()> {
+        let name = self.name;
+        if state.dir.exists() || state.admin.exists() {
+            super::remove::remove_waiting(common_dir, name, true, false, UNDO_WAIT).with_context(
+                || {
+                    format!(
+                        "not removed again: `gitfold remove --force {name}`, then `git branch \
+                         -D {name}`"
+                    )
+                },
+            )?;
+        }
+        let branch_left = || format!("not deleted again: `git branch -D {name}`");
+        settings::forget_workspace(repo, name, self.prewarm, self.track_reads)
+            .with_context(branch_left)?;
+        let branch = format!("refs/heads/{name}");
+        git::cmd::output(common_dir, &["update-ref", "-d", &branch, self.at])
+            .with_context(branch_left)
+            .map(drop)
+    }
+}
+
+/// How long removing a new workspace again waits while it is busy (git's
+/// processes still in it).
+const UNDO_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A `--from` as git takes it where the user stands: as typed, its commit,
 /// and the ref it names, shortened as git shortens it (`ui` for `HEAD` on
@@ -242,16 +271,23 @@ struct Source {
 
 impl Source {
     /// `rev` in the worktree of git directory `repo`; refused as `git merge`
-    /// refuses what isn't a commit.
+    /// refuses what isn't a commit; git's own error if it fails otherwise.
     fn resolve(repo: &Path, rev: &str) -> Result<Source> {
         let line = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
         let commit = format!("{rev}^{{commit}}");
-        let id = git::cmd::output(
-            repo,
-            &["rev-parse", "--verify", "-q", "--end-of-options", &commit],
-        )
-        .map(line)
-        .map_err(|_| anyhow::anyhow!("{rev} - not something we can merge"))?;
+        let args = ["rev-parse", "--verify", "-q", "--end-of-options", &commit];
+        let out = git::cmd::command(repo).args(args).output()?;
+        // `--verify -q`: exit 1, silently, for what names no commit.
+        if out.status.code() == Some(1) && out.stderr.is_empty() {
+            bail!("{rev} - not something we can merge");
+        }
+        ensure!(
+            out.status.success(),
+            "git rev-parse {commit} failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`).
         let name = (!rev.starts_with('-'))
             .then(|| git::cmd::output(repo, &["rev-parse", "--abbrev-ref", rev]).ok())
@@ -269,34 +305,27 @@ impl Source {
     /// the revision as typed, else the ref it named, if git takes it for
     /// the same commit there (so git's message names it as the user did);
     /// else the commit.
-    fn as_in(&self, admin: &Path) -> String {
+    fn as_in(&self, admin: &Path) -> Result<String> {
         let typed = (!self.rev.starts_with('-')).then_some(&self.rev);
-        let same = |name: &&String| {
+        for name in typed.into_iter().chain(&self.name) {
             let commit = format!("{name}^{{commit}}");
-            let there = git::cmd::output(admin, &["rev-parse", "--verify", "-q", &commit]);
-            there.is_ok_and(|out| String::from_utf8_lossy(&out).trim() == self.id)
-        };
-        (typed.into_iter().chain(&self.name))
-            .find(same)
-            .unwrap_or(&self.id)
-            .clone()
+            let args = ["rev-parse", "--verify", "-q", &commit];
+            let there = git::cmd::command_in_other(admin)?.args(args).output()?;
+            if there.status.success() && String::from_utf8_lossy(&there.stdout).trim() == self.id {
+                return Ok(name.clone());
+            }
+        }
+        Ok(self.id.clone())
     }
 }
 
 /// Runs `git merge` of `revs` in workspace `workspace`, its messages the
-/// user's; whether it made the merge. As in a shell there: without the
-/// variables that tie git to another repository (a hook caller's), as `git
-/// rev-parse --local-env-vars` lists them, but for the configuration given
-/// in the environment (`git -c`, `GIT_CONFIG_COUNT`), which still applies.
-fn run_merge(common_dir: &Path, workspace: &Path, revs: &[String]) -> Result<bool> {
-    let local = git::cmd::output(common_dir, &["rev-parse", "--local-env-vars"])?;
+/// user's, as in a shell there (`git::cmd::in_other_worktree`); whether it
+/// made the merge.
+fn run_merge(workspace: &Path, revs: &[String]) -> Result<bool> {
     let mut git = Command::new("git");
-    for var in String::from_utf8_lossy(&local).lines() {
-        if !matches!(var, "GIT_CONFIG_PARAMETERS" | "GIT_CONFIG_COUNT") {
-            git.env_remove(var);
-        }
-    }
-    let status = (git.current_dir(workspace))
+    let status = (git::cmd::in_other_worktree(&mut git)?)
+        .current_dir(workspace)
         .args(["merge", "--end-of-options"])
         .args(revs)
         .status()

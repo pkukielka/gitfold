@@ -100,6 +100,8 @@ eq "  no setting left" "" "$(R config --get branch.c.gitfoldPrewarm)"
 R config branch.c.gitfoldTrackReads true
 check "refused without settings given: settings found there stay" says 1 "refusing to merge" branch c --from api --from lone
 eq "  still there" true "$(R config --get branch.c.gitfoldTrackReads)"
+check "refused with --prewarm only: the other setting found there stays" says 1 "refusing to merge" branch c --from api --from lone --prewarm none
+eq "  still there" "true " "$(R config --get branch.c.gitfoldTrackReads) $(R config --get branch.c.gitfoldPrewarm)"
 R config --unset branch.c.gitfoldTrackReads
 check "-w with several: not implemented yet" says 1 "not implemented yet" branch c -w --from api --from ui
 check "  nothing left behind" nothing_of c
@@ -144,6 +146,15 @@ eq "  merged" "$(R rev-parse api ui~1 | tr '\n' ' ')" "$(R log -1 --format=%P p 
 R config merge.ff true
 check "configuration given in the environment applies (git -c)" sh -c "GIT_CONFIG_PARAMETERS=\"'merge.ff'='false'\" '$BIN' -C '$REPO' branch n --from main --from api"
 eq "  a merge, not a fast-forward" 2 "$(R log -1 --format=%P n | wc -w)"
+check "a repository's variables from a caller: not for the new workspace" sh -c "GIT_INDEX_FILE='$T/nowhere/index' '$BIN' -C '$REPO' branch g --from api --from ui"
+eq "  as git merge makes it" "$(git_merge g api ui)" "$(made g)"
+R checkout -q x; R checkout -q main
+check "- : the previous branch where the user stands, as git merge -" says 0 "created branch prev" branch prev --from api --from -
+eq "  named as git merge - names it" "Merge branch 'x' into prev" "$(R log -1 --format=%s prev --)"
+R config branch.lp.gitfoldParent refs/heads/api; R config branch.lp.gitfoldFollow false
+R update-ref refs/gitfold-base/lp api
+check "a deleted branch's relation left: forgotten" says 0 "created branch lp" branch lp --from api --from ui
+eq "  no parent, following or base ref" "" "$(R config --get-regexp '^branch\.lp\.gitfold(parent|follow)'; R rev-parse -q --verify refs/gitfold-base/lp)"
 }
 
 unmounted() {
