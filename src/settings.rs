@@ -323,13 +323,29 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
         .context("a mount point that isn't UTF-8");
     // Each written even if the other can't be, each retried a while: another
     // git command may hold the config's lock.
-    let write = |key: &str, value: &str| {
-        let (key, started) = (format!("gitfold.{key}"), Instant::now());
+    let write = |key: &str, value: &str| -> Result<()> {
+        let key = format!("gitfold.{key}");
+        let started = Instant::now();
         loop {
-            match git::cmd::run(git_dir, &["config", "--local", &key, value]) {
-                Err(_) if started.elapsed() < CONFIG_WAIT => sleep(Duration::from_millis(100)),
-                written => return written,
+            let out = (git::cmd::command(git_dir))
+                .args(["config", "--local", &key, value])
+                .output()?;
+            match out.status.code() {
+                Some(0) => return Ok(()),
+                // Not a write that failed (git config's exit codes): a bad
+                // key or config, which waiting doesn't change.
+                Some(1..=3 | 6) => {}
+                _ if started.elapsed() < CONFIG_WAIT => {
+                    sleep(Duration::from_millis(100));
+                    continue;
+                }
+                _ => {}
             }
+            anyhow::bail!(
+                "git config {key} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
     };
     let place = value.and_then(|value| write(MOUNTPOINT, value));

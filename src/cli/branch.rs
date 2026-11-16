@@ -149,12 +149,11 @@ fn merged(
     );
     // Where the user stands, before anything is made (or mounted). `-` is
     // the previous branch, as for `git merge -`, except as the start point.
-    // Only the merged ones go to git by name, unless their workspaces are
-    // copied: those are branches'.
+    // Only the merged ones go to git by name.
     let sources = (from.iter().enumerate())
         .map(|(i, rev)| {
             let rev = if rev == "-" && i > 0 { "@{-1}" } else { rev };
-            Source::resolve(repo, rev, i > 0 || with_changes)
+            Source::resolve(repo, rev, i > 0)
         })
         .collect::<Result<Vec<_>>>()?;
     let Some(mount) = super::mount::mount_or_again(common_dir)? else {
@@ -165,7 +164,7 @@ fn merged(
         )
     };
     let changes = if with_changes {
-        Changes::take(common_dir, &mount, &sources)?
+        Changes::take(repo, common_dir, &mount, &sources)?
     } else {
         Changes::default()
     };
@@ -195,19 +194,30 @@ fn merged(
                 .collect::<Result<Vec<_>>>()?;
             run_merge(&workspace, &revs)
         });
-    // The changes on what git made: refused by git while the merge is in
-    // progress (with conflicts), which undoes it all.
-    let merge = match merge {
-        Ok(merged) if !changes.is_empty() => changes.apply(&workspace).map(|()| merged),
-        merge => merge,
-    };
+    // The changes go on the merge git made. On one it didn't make (stopped
+    // by a conflict), they can't, as `git cherry-pick` can't: that undoes it.
+    let merge = merge.and_then(|merged| match merged {
+        true => changes.apply(&workspace).map(Some),
+        false if changes.is_empty() => Ok(None),
+        false => bail!(
+            "the merge didn't complete (see above): the uncommitted changes go only on a \
+             merge made"
+        ),
+    });
     match merge {
-        Ok(true) => {
+        Ok(Some(conflicts)) if conflicts.is_empty() => {
             println!("created branch {name}; open it as {}", workspace.display());
             Ok(())
         }
+        // As `git cherry-pick` exits after a conflict.
+        Ok(Some(conflicts)) => bail!(
+            "created branch {name}; the uncommitted changes of {} conflict: in the files as \
+             markers, in {}",
+            and_list(&conflicts),
+            workspace.display()
+        ),
         // Stopped by a conflict, or by a hook or an empty message: git says.
-        Ok(false) if state.admin.join("MERGE_HEAD").is_file() => bail!(
+        Ok(None) if state.admin.join("MERGE_HEAD").is_file() => bail!(
             "created branch {name} with its merge in progress (see above): finish it in {} \
              with `git merge --continue`, or `git merge --abort`",
             workspace.display()
@@ -338,22 +348,30 @@ impl Source {
 struct Changes(Vec<(String, String)>);
 
 impl Changes {
-    /// Those of `sources` (branches; `refs` names them) with a workspace
+    /// Those of `sources` (branches, as git takes them where the user
+    /// stands, in the worktree of git directory `repo`) with a workspace
     /// under `mount` and changes; refused if one is no branch, or git is
     /// busy in its workspace (a merge, a rebase).
-    fn take(common_dir: &Path, mount: &Path, sources: &[Source]) -> Result<Changes> {
+    fn take(repo: &Path, common_dir: &Path, mount: &Path, sources: &[Source]) -> Result<Changes> {
         let index = common_dir.join(format!("gitfold-snapshot-{}", std::process::id()));
         let mut changes = Changes::default();
         for source in sources {
-            let branch = (source.name.as_deref())
-                .filter(|name| git::branch_exists(name))
-                .ok_or_else(|| {
-                    let message = format!(
-                        "--with-changes copies branches' workspaces: no branch {}",
-                        source.rev
-                    );
-                    Refusal::NotFound.error(message)
-                })?;
+            let args = [
+                "rev-parse",
+                "--verify",
+                "-q",
+                "--symbolic-full-name",
+                &source.rev,
+            ];
+            let full = git::cmd::output(repo, &args).unwrap_or_default();
+            let full = String::from_utf8_lossy(&full);
+            let Some(branch) = full.trim().strip_prefix("refs/heads/") else {
+                let message = format!(
+                    "--with-changes copies branches' workspaces: no branch {}",
+                    source.rev
+                );
+                return Err(Refusal::NotFound.error(message));
+            };
             let taken = Changes::of(common_dir, mount, branch, &index);
             let _ = fs::remove_file(&index);
             if let Some(commit) = taken? {
@@ -372,7 +390,12 @@ impl Changes {
         }
         let then = "branch from it once that is done";
         crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
-        fs::copy(state.index(), index).context("copying its git index")?;
+        match fs::copy(state.index(), index) {
+            // No registration (deleted since; its next open writes one): git
+            // builds the index anew, reading every file.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            copied => drop(copied.context("copying its git index")?),
+        }
         let workspace = mount.join(branch);
         // On the copy, as a plain index (nothing of it written into the
         // repository).
@@ -400,8 +423,12 @@ impl Changes {
 
     /// Applies them in workspace `workspace`, each as `git cherry-pick -n`
     /// does (a conflict between them left in the files as markers), then
-    /// unstages them (`git reset`). Refused if git refuses one.
-    fn apply(&self, workspace: &Path) -> Result<()> {
+    /// unstages them (`git reset`); the branches whose changes conflicted.
+    /// Refused if git refuses one.
+    fn apply(&self, workspace: &Path) -> Result<Vec<&str>> {
+        if self.0.is_empty() {
+            return Ok(Vec::new());
+        }
         let git = || git::cmd::in_workspace(workspace);
         let mut conflicts = Vec::new();
         for (n, (branch, commit)) in self.0.iter().enumerate() {
@@ -432,13 +459,7 @@ impl Changes {
         }
         // Unstaged; only the index is reset (no refresh of every file).
         git::cmd::output_of(&mut git()?, &["reset", "-q", "--no-refresh"], None)?;
-        if !conflicts.is_empty() {
-            println!(
-                "the uncommitted changes of {} conflict: in the files as markers",
-                and_list(&conflicts)
-            );
-        }
-        Ok(())
+        Ok(conflicts)
     }
 }
 

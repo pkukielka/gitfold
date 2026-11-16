@@ -202,11 +202,11 @@ check "  ignored files not carried" test ! -e "$MNT/w/x.o"
 eq "  the sources as they were" "$before_api|$before_ui" "$(status api)|$(status ui)"
 eq "  HEAD the merge, as without -w" "$(git_merge w api ui x)" "$(made w)"
 echo "a by api" >"$MNT/api/a.txt"; echo "a by ui" >"$MNT/ui/a.txt"
-check "-w: changes that conflict: in the files as markers" says 0 "the uncommitted changes of ui conflict" branch w2 -w --from api --from ui
+check "-w: changes that conflict: in the files as markers, exit 1 as git cherry-pick" says 1 "created branch w2; the uncommitted changes of ui conflict" branch w2 -w --from api --from ui
 check "  the markers" grep -q '^<<<<<<< HEAD' "$MNT/w2/a.txt"
 eq "  unstaged" "" "$(git -C "$MNT/w2" diff --cached --name-only)"
 echo "x changed" >"$MNT/x/x.txt"
-check "-w: a conflict before the last source's changes" says 0 "the uncommitted changes of ui conflict" branch w6 -w --from api --from ui --from x
+check "-w: a conflict before the last source's changes" says 1 "the uncommitted changes of ui conflict" branch w6 -w --from api --from ui --from x
 eq "  the markers, and the last one's changes after them" "1 x changed" "$(grep -c '^<<<<<<< ' "$MNT/w6/a.txt") $(cat "$MNT/w6/x.txt")"
 work clash main api.txt clash
 check "-w, the branches conflicting: git refuses the changes, nothing left" says 1 "not created" branch w3 -w --from api --from clash
