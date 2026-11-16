@@ -296,43 +296,37 @@ pub fn branch_exists(name: &str) -> bool {
     })
 }
 
-/// Whether full ref `name` is a branch, as the tree of branches counts them:
-/// a local (`refs/heads/`) or remote-tracking (`refs/remotes/`) ref that
-/// points at a commit itself; not a symbolic ref (`refs/remotes/origin/HEAD`,
-/// an alias made with `git symbolic-ref`), nor a ref to a tag or a tree.
-pub fn is_branch(name: &str) -> bool {
-    (name.starts_with("refs/heads/") || name.starts_with("refs/remotes/"))
-        && with_repo(|repo| is_branch_in(repo, name))
-}
-
-fn is_branch_in(repo: &gix::Repository, name: &str) -> bool {
-    let Ok(Some(reference)) = repo.try_find_reference(name) else {
-        return false;
-    };
-    let Some(id) = reference.target().try_id().map(ToOwned::to_owned) else {
-        return false;
-    };
-    repo.find_header(id)
-        .is_ok_and(|h| h.kind() == gix::object::Kind::Commit)
-}
-
-/// A remote-tracking branch `<remote>/<branch>` (`is_branch`), as a full
-/// ref: `origin`'s if there is one. Any remote, configured or not, its name
-/// with slashes or without.
-pub fn remote_tracking(branch: &str) -> Option<String> {
-    let suffix = format!("/{branch}");
+/// The full ref that `name` stands for, as git takes it: a short name by
+/// git's order (gitrevisions: as given, then under `refs/tags/`,
+/// `refs/heads/`, `refs/remotes/`, then `refs/remotes/<name>/HEAD`), and a
+/// symbolic ref followed to the ref it points at (`origin/HEAD` stands for
+/// `refs/remotes/origin/main`, as `git rev-parse --symbolic-full-name` says).
+pub fn full_ref(name: &str) -> Option<String> {
     with_repo(|repo| {
-        let platform = repo.references().ok()?;
-        (platform.prefixed("refs/remotes/").ok()?)
-            .filter_map(Result::ok)
-            .map(|r| r.name().as_bstr().to_string())
-            .filter(|name| {
-                (name.strip_prefix("refs/remotes/"))
-                    .and_then(|rest| rest.strip_suffix(&suffix))
-                    .is_some_and(|remote| !remote.is_empty())
+        let mut reference = repo.try_find_reference(name).ok()??;
+        // git gives up on longer chains of symbolic refs too.
+        for _ in 0..5 {
+            match reference.follow() {
+                None => return Some(reference.name().as_bstr().to_string()),
+                Some(next) => reference = next.ok()?,
+            }
+        }
+        None
+    })
+}
+
+/// The remote-tracking branch `<remote>/<branch>` of a configured remote, as
+/// a full ref (`origin`'s if there are several), if it exists.
+pub fn remote_tracking(branch: &str) -> Option<String> {
+    with_repo(|repo| {
+        (repo.remote_names().iter())
+            .map(|remote| remote.to_string())
+            .filter(|remote| {
+                repo.try_find_reference(format!("refs/remotes/{remote}/{branch}").as_str())
+                    .is_ok_and(|r| r.is_some())
             })
-            .filter(|name| is_branch_in(repo, name))
-            .min_by_key(|name| *name != format!("refs/remotes/origin{suffix}"))
+            .min_by_key(|remote| remote != "origin")
+            .map(|remote| format!("refs/remotes/{remote}/{branch}"))
     })
 }
 

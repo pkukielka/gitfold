@@ -46,11 +46,7 @@ fn refused(what: &str, branch: &str, parent: &str, refused: Refused) -> anyhow::
     match refused {
         Refused::Unknown(_) | Refused::OnlyRemote { .. } => Refusal::NotFound.error(message),
         Refused::NoRoot => anyhow::anyhow!(message),
-        Refused::Ambiguous(_)
-        | Refused::Root
-        | Refused::Own
-        | Refused::Cycle
-        | Refused::NoParent => Usage(message).into(),
+        Refused::Root | Refused::Own | Refused::Cycle | Refused::NoParent => Usage(message).into(),
     }
 }
 
@@ -90,15 +86,16 @@ pub struct ParentArgs {
 /// `gitfold parent`: the checks of the rules table (S1-S6, F6), then not
 /// implemented yet.
 pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
-    let name = super::branch_or_current(args.branch, repo)?;
+    let given = super::branch_or_current(args.branch, repo)?;
     let common_dir = git::init(repo)?;
-    check_name(&name)?;
-    let refuse = |parent: &str, r| refused("gitfold parent", &name, parent, r);
+    check_name(&given)?;
     // S1 before reading the tree: an unknown branch is "not found" even when
     // the config can't be read (T5).
-    if !git::is_branch(&crate::tree::local(&name)) {
-        return Err(refuse("", Refused::Unknown(name.clone())));
-    }
+    let Some(name) = crate::tree::local_branch(&given) else {
+        let r = Refused::Unknown(given.clone());
+        return Err(refused("gitfold parent", &given, "", r));
+    };
+    let refuse = |parent: &str, r| refused("gitfold parent", &name, parent, r);
     let tree = Tree::read(&common_dir)?;
     if let Some(parent) = &args.set {
         tree.check(&name, parent).map_err(|r| refuse(parent, r))?;

@@ -33,10 +33,9 @@ pub struct Tree {
 pub enum Refused {
     /// No such branch (P6, S1).
     Unknown(String),
-    /// No local branch of that name, but a remote-tracking one (P5).
+    /// No branch of that name, but a remote-tracking one of a configured
+    /// remote (P5).
     OnlyRemote { name: String, remote: String },
-    /// Both a local and a remote-tracking branch of that name (P4).
-    Ambiguous(String),
     /// No root known: no main branch to build the tree on (S3, N3).
     NoRoot,
     /// The branch is the root, which has no parent (S4, N4).
@@ -58,10 +57,6 @@ pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
              local {name}), then retry; or retry with {remote} (build on the remote-tracking \
              branch)"
         ),
-        Refused::Ambiguous(name) => format!(
-            "{name} is both a local branch and a remote-tracking branch: name it \
-             refs/heads/{name} or refs/remotes/{name}"
-        ),
         Refused::NoRoot => "no main branch found (no origin/HEAD, and no branch main, master, \
              origin/main or origin/master): the tree of branches has no root to build on"
             .to_string(),
@@ -75,7 +70,7 @@ pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
 }
 
 /// The full ref of local branch `name`.
-pub fn local(name: &str) -> String {
+fn local(name: &str) -> String {
     format!("refs/heads/{name}")
 }
 
@@ -87,22 +82,15 @@ pub fn short(full: &str) -> &str {
         .unwrap_or(full)
 }
 
-/// The full ref a parent named `name` is (P1-P6): a local branch, a
-/// remote-tracking branch, or a full ref as given.
+/// The full ref a parent named `name` is (P1-P6): what git takes the name
+/// for (`git::full_ref`), if that is a local or a remote-tracking branch.
 fn resolve_parent(name: &str) -> Result<String, Refused> {
-    if name.starts_with("refs/") {
-        return match git::is_branch(name) {
-            true => Ok(name.to_string()),
-            false => Err(Refused::Unknown(name.to_string())),
-        };
-    }
-    let is_local = git::is_branch(&local(name));
-    let remote = git::is_branch(&format!("refs/remotes/{name}"));
-    match (is_local, remote) {
-        (true, true) => Err(Refused::Ambiguous(name.to_string())),
-        (true, false) => Ok(local(name)),
-        (false, true) => Ok(format!("refs/remotes/{name}")),
-        (false, false) => match git::remote_tracking(name) {
+    match git::full_ref(name) {
+        Some(full) if full.starts_with("refs/heads/") || full.starts_with("refs/remotes/") => {
+            Ok(full)
+        }
+        Some(_) => Err(Refused::Unknown(name.to_string())),
+        None => match git::remote_tracking(name) {
             Some(remote) => Err(Refused::OnlyRemote {
                 name: name.to_string(),
                 remote: short(&remote).to_string(),
@@ -112,14 +100,23 @@ fn resolve_parent(name: &str) -> Result<String, Refused> {
     }
 }
 
+/// The local branch named `name`, as git takes it: itself, or the branch
+/// it is an alias of (`git symbolic-ref`), if it exists.
+pub fn local_branch(name: &str) -> Option<String> {
+    let full = git::full_ref(&local(name))?;
+    full.strip_prefix("refs/heads/").map(String::from)
+}
+
 impl Tree {
     /// The tree of the repository of `common_dir` (`git::init` done); an
     /// unreadable config fails (T5).
     pub fn read(common_dir: &Path) -> Result<Tree> {
         let parents = Local::read_checked(common_dir)?.parents();
-        Ok(Tree::of(parents, git::root_branch(common_dir), |branch| {
-            git::is_branch(&local(branch))
-        }))
+        Ok(Tree::of(
+            parents,
+            git::root_branch(common_dir),
+            git::branch_exists,
+        ))
     }
 
     /// The tree of `stored` (branch to the parent as stored) rooted at
@@ -221,10 +218,12 @@ impl Tree {
         Ok(full)
     }
 
-    /// Whether local branch `branch` has a parent to follow (F6): a root is
-    /// known and `branch` isn't it (S3, S4), and it has a parent.
+    /// Whether local branch `branch` has a parent to follow (F6): it isn't
+    /// the root (S4), and it has a parent. (Following needs no root.)
     pub fn check_follow(&self, branch: &str) -> Result<(), Refused> {
-        self.check_root(branch)?;
+        if self.root.as_deref() == Some(branch) {
+            return Err(Refused::Root);
+        }
         match self.parent(branch) {
             Some(_) => Ok(()),
             None => Err(Refused::NoParent),
@@ -316,7 +315,7 @@ mod tests {
         assert_eq!(t.check_follow("main"), Err(Refused::Root));
         assert_eq!(
             Tree::of(stored(&[("ui", "api")]), None, |_| true).check_follow("ui"),
-            Err(Refused::NoRoot)
+            Ok(())
         );
         let rootless = Tree::of(BTreeMap::new(), None, |_| true);
         assert_eq!(

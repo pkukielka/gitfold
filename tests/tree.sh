@@ -95,6 +95,7 @@ check "R4: only master: root is master" says 2 "master is the root of the tree" 
 # No main branch at all: no root, so no parents.
 R branch -m master trunk
 check "R5, S3: no root: setting a parent refused (exit 1)" says 1 "the tree of branches has no root" parent w --set trunk
+check "F6: no root: following needs only a parent" says 2 "w has no parent to follow" parent w --follow
 check "N3: no root: a new branch with a parent refused (exit 1)" says 1 "the tree of branches has no root" branch c --parent trunk
 }
 
@@ -111,33 +112,34 @@ check "R2: and local main is an ordinary branch" says 1 "not implemented yet" pa
 parent_names() {
 R branch api
 check "P1: a local branch" says 1 "not implemented yet" parent api --set main
-remote_main; R update-ref refs/remotes/origin/feat main
+R remote add origin /nonexistent; remote_main; R update-ref refs/remotes/origin/feat main
 check "P2: a remote-tracking branch" says 1 "not implemented yet" parent api --set origin/feat
 check "P3: a full ref" says 1 "not implemented yet" parent api --set refs/remotes/origin/feat
 check "P3: a full ref that doesn't exist" says 3 "no branch refs/heads/nope" parent api --set refs/heads/nope
 R branch origin/feat main
-check "P4: both local and remote-tracking: ambiguous (exit 2)" says 2 "origin/feat is both a local branch and a remote-tracking branch" parent api --set origin/feat
-check "P4: the full ref resolves it" says 1 "not implemented yet" parent api --set refs/remotes/origin/feat
+check "P4: local and remote-tracking of one name: the local branch, as in git" says 1 "not implemented yet" parent api --set origin/feat
 R branch -D -q origin/feat
 check "P5: only origin/feat: both ways out (exit 3)" says 3 "no branch feat (only origin/feat exists). Either: " parent api --set feat
 check "P5: naming both commands" says 3 "git branch feat origin/feat" parent api --set feat
-check "P6: nothing of that name (exit 3)" says 3 "no branch nope" parent api --set nope
-check "P2: origin/HEAD is no branch (a symbolic ref)" says 3 "no branch origin/HEAD" parent api --set origin/HEAD
-check "P5: not for HEAD (origin/HEAD is no branch)" says 3 "no branch HEAD" parent api --set HEAD
-check "P5: not for HEAD, no hint" lacks 3 "only origin" parent api --set HEAD
 check "P5 for branch --parent too" says 3 "only origin/feat exists" branch c --parent feat
-R update-ref refs/remotes/team/a/x main
-check "P5: a remote whose name has a slash, configured or not" says 3 "no branch x (only team/a/x exists)" parent api --set x
-R update-ref refs/remotes/team/b/x main; R update-ref refs/remotes/origin/x main
-check "P5: origin's preferred" says 3 "only origin/x exists" parent api --set x
-# An alias made with git symbolic-ref is no branch: neither as P nor as B.
+check "P6: nothing of that name (exit 3)" says 3 "no branch nope" parent api --set nope
+R tag v1 main
+check "P6: a tag is no branch" says 3 "no branch v1" parent api --set v1
+# Names stand for what git takes them for: symbolic refs followed.
+check "origin/HEAD stands for origin/main" says 1 "not implemented yet" parent api --set origin/HEAD
+check "origin stands for origin/main, as in git" says 1 "not implemented yet" parent api --set origin
 R symbolic-ref refs/heads/trunk refs/heads/main
-check "P1: an alias is no branch" says 3 "no branch trunk" parent api --set trunk
-check "P3: nor by its full ref" says 3 "no branch refs/heads/trunk" parent api --set refs/heads/trunk
-check "S1: an alias of the root can't get a parent" says 3 "no branch trunk" parent trunk --set api
-# A ref to something that isn't a commit is no branch.
-R update-ref refs/remotes/origin/tree "$(R rev-parse 'main^{tree}')"
-check "P2: a ref to a tree is no branch" says 3 "no branch origin/tree" parent api --set origin/tree
+check "an alias stands for its branch" says 1 "not implemented yet" parent api --set trunk
+check "S4: an alias of the root is the root" says 2 "main is the root of the tree" parent trunk --set api
+# P5 looks at configured remotes only, by name.
+R remote add team/a /nonexistent; R update-ref refs/remotes/team/a/x main
+check "P5: a remote whose name has a slash" says 3 "no branch x (only team/a/x exists)" parent api --set x
+R update-ref refs/remotes/origin/x main
+check "P5: origin's preferred" says 3 "only origin/x exists" parent api --set x
+R update-ref refs/remotes/gone/y main
+check "P5: not for a remote no longer configured" lacks 3 "only" parent api --set y
+R update-ref refs/remotes/origin/fix/test main
+check "P5: not origin/fix/test for test" lacks 3 "only" parent api --set test
 }
 
 parent_set() {
