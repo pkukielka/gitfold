@@ -96,7 +96,7 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     let refuse = |parent: &str, r| refused("gitfold parent", &name, parent, r);
     // S1 before reading the tree: an unknown branch is "not found" even when
     // the config can't be read (T5).
-    if !git::branch_exists(&name) {
+    if !git::is_branch(&crate::tree::local(&name)) {
         return Err(refuse("", Refused::Unknown(name.clone())));
     }
     let tree = Tree::read(&common_dir)?;

@@ -75,7 +75,7 @@ pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
 }
 
 /// The full ref of local branch `name`.
-fn local(name: &str) -> String {
+pub fn local(name: &str) -> String {
     format!("refs/heads/{name}")
 }
 
@@ -90,14 +90,14 @@ pub fn short(full: &str) -> &str {
 /// The full ref a parent named `name` is (P1-P6): a local branch, a
 /// remote-tracking branch, or a full ref as given.
 fn resolve_parent(name: &str) -> Result<String, Refused> {
-    if name.starts_with("refs/heads/") || name.starts_with("refs/remotes/") {
-        return match git::branch_ref_exists(name) {
+    if name.starts_with("refs/") {
+        return match git::is_branch(name) {
             true => Ok(name.to_string()),
             false => Err(Refused::Unknown(name.to_string())),
         };
     }
-    let is_local = git::branch_exists(name);
-    let remote = git::branch_ref_exists(&format!("refs/remotes/{name}"));
+    let is_local = git::is_branch(&local(name));
+    let remote = git::is_branch(&format!("refs/remotes/{name}"));
     match (is_local, remote) {
         (true, true) => Err(Refused::Ambiguous(name.to_string())),
         (true, false) => Ok(local(name)),
@@ -117,11 +117,9 @@ impl Tree {
     /// unreadable config fails (T5).
     pub fn read(common_dir: &Path) -> Result<Tree> {
         let parents = Local::read_checked(common_dir)?.parents();
-        Ok(Tree::of(
-            parents,
-            git::root_branch(common_dir),
-            git::branch_exists,
-        ))
+        Ok(Tree::of(parents, git::root_branch(common_dir), |branch| {
+            git::is_branch(&local(branch))
+        }))
     }
 
     /// The tree of `stored` (branch to the parent as stored) rooted at
@@ -223,12 +221,10 @@ impl Tree {
         Ok(full)
     }
 
-    /// Whether local branch `branch` has a parent to follow or not (F6; the
-    /// root never has one, S4).
+    /// Whether local branch `branch` has a parent to follow (F6): a root is
+    /// known and `branch` isn't it (S3, S4), and it has a parent.
     pub fn check_follow(&self, branch: &str) -> Result<(), Refused> {
-        if self.root.as_deref() == Some(branch) {
-            return Err(Refused::Root);
-        }
+        self.check_root(branch)?;
         match self.parent(branch) {
             Some(_) => Ok(()),
             None => Err(Refused::NoParent),
@@ -318,6 +314,10 @@ mod tests {
         assert_eq!(t.check_follow("ui"), Ok(()));
         assert_eq!(t.check_follow("api"), Ok(()));
         assert_eq!(t.check_follow("main"), Err(Refused::Root));
+        assert_eq!(
+            Tree::of(stored(&[("ui", "api")]), None, |_| true).check_follow("ui"),
+            Err(Refused::NoRoot)
+        );
         let rootless = Tree::of(BTreeMap::new(), None, |_| true);
         assert_eq!(
             rootless.check_ancestry("ui", "refs/heads/api"),

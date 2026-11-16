@@ -290,32 +290,50 @@ pub fn root_branch(common_dir: &Path) -> Option<String> {
 
 /// Whether `refs/heads/<name>` exists.
 pub fn branch_exists(name: &str) -> bool {
-    ref_exists(&format!("refs/heads/{name}"))
-}
-
-/// Whether reference `name` (a full name, `refs/...`) exists.
-fn ref_exists(name: &str) -> bool {
-    with_repo(|repo| repo.try_find_reference(name).is_ok_and(|r| r.is_some()))
-}
-
-/// Whether reference `name` (a full name) exists and is a branch: points
-/// at a commit itself, not at another ref as `refs/remotes/origin/HEAD` does.
-pub fn branch_ref_exists(name: &str) -> bool {
     with_repo(|repo| {
-        repo.try_find_reference(name)
-            .is_ok_and(|r| r.is_some_and(|r| r.target().try_id().is_some()))
+        repo.try_find_reference(format!("refs/heads/{name}").as_str())
+            .is_ok_and(|r| r.is_some())
     })
 }
 
-/// A remote-tracking branch `<remote>/<branch>` of a configured remote, as a
-/// full ref, `origin`'s if there is one.
+/// Whether full ref `name` is a branch, as the tree of branches counts them:
+/// a local (`refs/heads/`) or remote-tracking (`refs/remotes/`) ref that
+/// points at a commit itself; not a symbolic ref (`refs/remotes/origin/HEAD`,
+/// an alias made with `git symbolic-ref`), nor a ref to a tag or a tree.
+pub fn is_branch(name: &str) -> bool {
+    (name.starts_with("refs/heads/") || name.starts_with("refs/remotes/"))
+        && with_repo(|repo| is_branch_in(repo, name))
+}
+
+fn is_branch_in(repo: &gix::Repository, name: &str) -> bool {
+    let Ok(Some(reference)) = repo.try_find_reference(name) else {
+        return false;
+    };
+    let Some(id) = reference.target().try_id().map(ToOwned::to_owned) else {
+        return false;
+    };
+    repo.find_header(id)
+        .is_ok_and(|h| h.kind() == gix::object::Kind::Commit)
+}
+
+/// A remote-tracking branch `<remote>/<branch>` (`is_branch`), as a full
+/// ref: `origin`'s if there is one. Any remote, configured or not, its name
+/// with slashes or without.
 pub fn remote_tracking(branch: &str) -> Option<String> {
-    let remotes: Vec<String> =
-        with_repo(|repo| repo.remote_names().iter().map(|r| r.to_string()).collect());
-    (remotes.iter())
-        .map(|remote| format!("refs/remotes/{remote}/{branch}"))
-        .filter(|name| branch_ref_exists(name))
-        .min_by_key(|name| !name.starts_with("refs/remotes/origin/"))
+    let suffix = format!("/{branch}");
+    with_repo(|repo| {
+        let platform = repo.references().ok()?;
+        (platform.prefixed("refs/remotes/").ok()?)
+            .filter_map(Result::ok)
+            .map(|r| r.name().as_bstr().to_string())
+            .filter(|name| {
+                (name.strip_prefix("refs/remotes/"))
+                    .and_then(|rest| rest.strip_suffix(&suffix))
+                    .is_some_and(|remote| !remote.is_empty())
+            })
+            .filter(|name| is_branch_in(repo, name))
+            .min_by_key(|name| *name != format!("refs/remotes/origin{suffix}"))
+    })
 }
 
 /// Whether any reference starts with one of `prefixes` (e.g. `refs/heads/feature/`).
