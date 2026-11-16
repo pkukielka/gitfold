@@ -19,7 +19,7 @@ use super::members::{self, Bases, BuiltOn, Refs};
 use super::merge;
 use super::merge::ConflictStyle;
 use super::serve::ViewDir;
-use super::shown::{Shown, Times};
+use super::shown::{Changed, Shown, Times};
 use crate::fs::NameChanges;
 use crate::inode;
 use crate::state::{self, name, parent};
@@ -72,7 +72,7 @@ impl Watch {
         &mut self,
         ctx: &Context,
         before: Option<&Shown>,
-    ) -> Result<Option<(Shown, Vec<Vec<u8>>)>> {
+    ) -> Result<Option<(Shown, Vec<Changed>)>> {
         let config = stamp(&ctx.common_dir.join("config"));
         if self.config != Some(config) || self.reads >= TREE_EVERY {
             self.tree = Tree::read(&ctx.common_dir)?;
@@ -123,7 +123,7 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                     if let Some((shown, changed)) = next {
                         // Waits for requests served from the old view: their
                         // replies can't land after the kernel is told.
-                        view.swap(&ctx.store, shown, &changed);
+                        view.swap(shown, &changed);
                         tell(&ctx.names, &view, &changed);
                     }
                 }
@@ -146,12 +146,12 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
 /// Tells the kernel that `changed` paths of `view` changed: their entries in
 /// their directories, the directories' listings, their attributes and pages.
 /// Only for what it holds.
-fn tell(names: &NameChanges, view: &ViewDir, changed: &[Vec<u8>]) {
+fn tell(names: &NameChanges, view: &ViewDir, changed: &[Changed]) {
     let ino = |local: u64| inode::view(view.slot, local);
-    // The root's time is the view's: its attributes change every time.
+    // The root holds the summary, which changes with what is merged.
     let mut inodes = vec![ino(0)];
     let mut dirs = HashSet::from([0]);
-    for path in changed {
+    for path in changed.iter().map(|c| &c.path) {
         if let Some(dir) = view.held(parent(path)) {
             names.entry(ino(dir), name(path));
             if dirs.insert(dir) {

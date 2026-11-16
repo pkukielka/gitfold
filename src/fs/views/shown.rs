@@ -69,6 +69,16 @@ pub struct Shown {
 /// adds to it rather than copying it.
 pub type Times = Arc<RwLock<HashMap<Vec<u8>, SystemTime>>>;
 
+/// A path that differs from the view before.
+#[derive(Debug)]
+pub struct Changed {
+    pub path: Vec<u8>,
+    /// It appeared or went: its directory's listing changed.
+    pub listed: bool,
+    /// It was there and is now of another kind (or gone).
+    pub retyped: bool,
+}
+
 impl Shown {
     /// `view` as shown, after `before` (none: the first): with the paths
     /// whose files or directories differ from it, sorted, given the time now
@@ -79,7 +89,7 @@ impl Shown {
         notes: &[Note],
         before: Option<&Shown>,
         times: &Times,
-    ) -> (Shown, Vec<Vec<u8>>) {
+    ) -> (Shown, Vec<Changed>) {
         let made = SystemTime::now();
         let mut added = BTreeSet::new();
         for (path, entry) in &view.overlay {
@@ -111,20 +121,28 @@ impl Shown {
             summary: Arc::new(summary),
             times: times.clone(),
         };
-        let changed = match before {
-            Some(before) => changed(store, before, &shown),
-            None => Vec::new(),
-        };
+        let mut times = times.write();
         // The root keeps the time it was first built at: its attributes are
         // also read outside the view (`@committed`'s listing).
-        let mut times = times.write();
         times.entry(Vec::new()).or_insert(made);
-        let first = before.is_none().then(|| shown.view.overlay.keys());
-        for path in changed.iter().chain(first.into_iter().flatten()) {
-            times.insert(path.clone(), made);
+        let Some(before) = before else {
+            // What differs from the branch's own tree, and the directories
+            // made for it.
+            for path in shown.view.overlay.keys() {
+                times.insert(path.clone(), made);
+                for dir in ancestors(path).filter(|d| shown.added.contains(*d)) {
+                    times.insert(dir.to_vec(), made);
+                }
+            }
+            drop(times);
+            return (shown, Vec::new());
+        };
+        let changed = changed(store, before, &shown);
+        for c in &changed {
+            times.insert(c.path.clone(), made);
             // Its directory's listing changed.
-            let dir = parent(path);
-            if !dir.is_empty() {
+            let dir = parent(&c.path);
+            if c.listed && !dir.is_empty() {
                 times.insert(dir.to_vec(), made);
             }
         }
@@ -261,7 +279,7 @@ fn emptied(store: &Store, view: &View, added: &BTreeSet<Vec<u8>>) -> BTreeSet<Ve
 
 /// The paths whose files or directories (or the summary) differ between `a`
 /// and `b`, sorted.
-fn changed(store: &Store, a: &Shown, b: &Shown) -> Vec<Vec<u8>> {
+fn changed(store: &Store, a: &Shown, b: &Shown) -> Vec<Changed> {
     let mut paths: BTreeSet<Vec<u8>> = BTreeSet::new();
     paths.extend(a.view.overlay.keys().cloned());
     paths.extend(b.view.overlay.keys().cloned());
@@ -282,7 +300,18 @@ fn changed(store: &Store, a: &Shown, b: &Shown) -> Vec<Vec<u8>> {
     paths.extend(dirs);
     paths.insert(SUMMARY.to_vec());
     (paths.into_iter())
-        .filter(|p| a.obj(store, p) != b.obj(store, p))
+        .filter_map(|path| {
+            let (was, is) = (a.obj(store, &path), b.obj(store, &path));
+            if was == is {
+                return None;
+            }
+            let kind = |o: &Option<Obj>| o.as_ref().map(|o| o.kind(store));
+            Some(Changed {
+                listed: was.is_none() || is.is_none(),
+                retyped: was.is_some() && kind(&was) != kind(&is),
+                path,
+            })
+        })
         .collect()
 }
 
@@ -365,7 +394,7 @@ mod tests {
         );
         let (s2, changed) = Shown::next(&store, v, &[], Some(&s), &times);
         let changed: Vec<String> = (changed.into_iter())
-            .map(|p| String::from_utf8(p).unwrap())
+            .map(|c| String::from_utf8(c.path).unwrap())
             .collect();
         assert_eq!(changed, ["d", "d/x", "n", "n/m", "n/m/k"]);
         assert_eq!(names(s2.list(&store, b"d")), ["x"]);

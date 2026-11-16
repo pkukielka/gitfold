@@ -13,7 +13,7 @@ use log::{error, info};
 use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 
 use super::build::Entry;
-use super::shown::{Obj, Shown};
+use super::shown::{Changed, Obj, Shown};
 use super::watch::{self, Watch};
 use crate::fs::NameChanges;
 use crate::fs::workspace::nodes::Nodes;
@@ -65,28 +65,18 @@ impl ViewDir {
         self.shown.read().clone()
     }
 
-    /// Replaces what it shows with `shown`, where `changed` paths differ,
-    /// then waits for the requests served from the old one: their replies
-    /// reach the kernel before it is told what changed. A path whose kind
-    /// changed (a file now a directory) gets a node of its own: the kernel's
-    /// inode keeps its type.
-    pub fn swap(&self, store: &Store, shown: Shown, changed: &[Vec<u8>]) {
-        // Only the watch swaps: the current one can be read unlocked.
-        let current = self.shown();
-        let kind = |s: &Shown, p: &[u8]| s.obj(store, p).map(|o| o.kind(store));
-        let retyped: Vec<&Vec<u8>> = (changed.iter())
-            .filter(|p| {
-                let was = kind(&current, p);
-                was.is_some() && was != kind(&shown, p)
-            })
-            .collect();
-        // No request is served meanwhile: none can claim a node from the old
-        // view and answer with the old kind.
+    /// Replaces what it shows with `shown`, where `changed` paths differ:
+    /// first waits for the requests in flight (and holds new ones off), so no
+    /// reply from the old view reaches the kernel after it is told what
+    /// changed, and no lookup claims a node from the old view. A path whose
+    /// kind changed (a file now a directory) gets a node of its own: the
+    /// kernel's inode keeps its type.
+    pub fn swap(&self, shown: Shown, changed: &[Changed]) {
         let _gate = self.gate.write();
         let mut nodes = self.nodes.lock();
-        for path in retyped {
-            if let Some(dir) = held(&nodes, parent(path)) {
-                nodes.orphan(dir, name(path));
+        for c in changed.iter().filter(|c| c.retyped) {
+            if let Some(dir) = held(&nodes, parent(&c.path)) {
+                nodes.orphan(dir, name(&c.path));
             }
         }
         *self.shown.write() = Arc::new(shown);
