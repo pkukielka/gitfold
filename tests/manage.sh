@@ -182,8 +182,10 @@ gfc -- n >/dev/null
 eq "a split index configured: nothing written into the repository" "" "$(ls "$COMMON" | grep sharedindex)"
 R config --unset core.splitIndex
 out=$("$BIN" -C "$REPO" changes -- ../x 2>&1); rc=$?
-eq "outside the work tree: refused, exit 2, with git's own words only" "2 1 fatal:" "$rc $(wc -l <<<"$out") ${out%% *}"
+eq "outside the work tree: refused with git's own words only" "1 1 fatal: no" "$rc $(wc -l <<<"$out") ${out%% *} $(grep -qE 'ls-files|core\.|Error' <<<"$out" && echo yes || echo no)"
 unmount_fs
+git clone -q --depth 1 --no-single-branch "file://$REPO" "$T/shallow" 2>/dev/null; git -C "$T/shallow" branch -q api origin/api
+eq "a shallow clone: no history in common may be cut off, so said" yes "$("$BIN" -C "$T/shallow" changes -- d 2>&1 | grep -q 'skipping branch api' && echo yes)"
 R config core.worktree "$REPO"
 eq "core.worktree set, from a subdirectory" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- b.txt 2>&1)"
 R config --unset core.worktree

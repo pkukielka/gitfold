@@ -77,21 +77,23 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
 /// itself matches the paths, as typed (pathspecs taken literally, relative
 /// to the current directory), and the paths printed are from the
 /// repository's root, as `git diff --name-only` prints them; paths git
-/// refuses are refused with what git says (exit 2). Committed: the branch's
+/// refuses are refused with what git says (exit 1). Committed: the branch's
 /// own commits (since it diverged from its parent, if that still exists,
 /// else from main: `git::default_compare_target`) on branches not merged
 /// into main; with no main branch, only uncommitted. Uncommitted: what
-/// `gitfold changes` says of each workspace.
-pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
+/// `gitfold changes` says of each workspace. Its exit code.
+pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
     let common_dir = git::init(repo)?;
     // git checks the paths first, once: listing an empty index (one that
-    // doesn't exist).
+    // doesn't exist). If it fails, what git says is all that is said.
     let dir = TempDir::new()?;
     if let Err(e) = ls_files(&dir.0.join("none"), &args.paths) {
-        return Err(match e.downcast::<git::cmd::Failed>() {
-            Ok(failed) => super::tree::Usage(failed.stderr.trim().to_string()).into(),
-            Err(e) => e,
-        });
+        let failed = e.downcast::<git::cmd::Failed>()?;
+        match failed.stderr.trim() {
+            "" => eprintln!("{failed}"),
+            said => eprintln!("{said}"),
+        }
+        return Ok(1);
     }
     // Each workspace's uncommitted paths, and its note if any.
     let store = Store::default();
@@ -132,7 +134,7 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
         write_path(&mut out, path, args.nul)?;
     }
     out.flush()?;
-    Ok(())
+    Ok(0)
 }
 
 /// Adds to `lines` the paths matching `typed` that each branch not merged
@@ -182,22 +184,27 @@ fn committed(
                     lines.insert((path.to_vec(), branch.to_string(), "committed"));
                 }
             }
-            Err(_) if !shares_history(common_dir, from, &to)? => {}
+            Err(_) if unrelated(common_dir, from, &to) => {}
             Err(e) => eprintln!("skipping branch {branch}: {e:#}"),
         }
     }
     Ok(())
 }
 
-/// Whether `a` and `b` have a common ancestor: `git merge-base` exits 1 if
-/// they have none.
-fn shares_history(common_dir: &Path, a: &str, b: &str) -> Result<bool> {
-    let status = git::cmd::command(common_dir)
-        .args(["merge-base", a, b])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()?;
-    Ok(status.code() != Some(1))
+/// Whether `a` and `b` have no history in common (`git merge-base` exits 1),
+/// in a repository whose history is whole: in a shallow clone the common
+/// part may just be cut off. False if git can't tell.
+fn unrelated(common_dir: &Path, a: &str, b: &str) -> bool {
+    let quiet = |args: &[&str]| {
+        (git::cmd::command(common_dir).args(args))
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+    };
+    let no_merge_base = quiet(&["merge-base", a, b]).is_some_and(|o| o.status.code() == Some(1));
+    no_merge_base
+        && quiet(&["rev-parse", "--is-shallow-repository"])
+            .is_some_and(|o| o.status.success() && o.stdout.trim_ascii() == b"false")
 }
 
 /// Which of `paths` (from the root) match `typed`, as git matches them: they

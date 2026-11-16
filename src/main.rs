@@ -249,7 +249,7 @@ fn run() -> Result<i32> {
             if let Some(hint) = cli::tree::changes_hint(args.branch.is_some()) {
                 return usage(hint);
             }
-            cli::list::who_changes(&cli::repo()?, args)?
+            return cli::list::who_changes(&cli::repo()?, args);
         }
         Command::Changes(args) => cli::list::changes(&cli::repo()?, args)?,
         Command::Overlaps(args) => return cli::overlaps::overlaps(&cli::repo()?, args),
