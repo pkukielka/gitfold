@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use clap::ValueEnum;
 use log::warn;
 
@@ -270,10 +270,6 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
         .to_str()
         .context("a mount point that isn't UTF-8")?;
     git::cmd::run(git_dir, &["config", "--local", &key, value])?;
-    ensure!(
-        !flags.iter().any(|f| f.contains('\n')),
-        "a mount flag with a newline"
-    );
     let key = format!("gitfold.{MOUNT_OPTIONS}");
     git::cmd::run(git_dir, &["config", "--local", &key, &flags.join("\n")])
 }

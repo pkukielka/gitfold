@@ -165,18 +165,21 @@ eq "  as git merge makes it" "$(git_merge c api ui)" "$(made c)"
 "$BIN" unmount "$MNT" >/dev/null
 }
 
+# The flags gitfold mount recorded, on one line.
+mount_options() { R config --get gitfold.mountOptions | paste -sd" "; }
+
 remount_flags() {
 setup
 unmount_fs
 mount_fs --track-reads --prewarm none --log "$T/last.log"
-eq "gitfold mount records its flags" "--prewarm=none --prewarm-walks=2 --track-reads --log=$T/last.log" "$(R config --get gitfold.mountOptions | tr '\n' ' ' | sed 's/ $//')"
+eq "gitfold mount records its flags" "--prewarm=none --prewarm-walks=2 --track-reads --log=$T/last.log" "$(mount_options)"
 unmount_fs
 check "mounted again by branch --from" says 0 "created branch c" branch c --from api --from ui
-eq "  with the flags it last had (recorded again by that mount)" "--prewarm=none --prewarm-walks=2 --track-reads --log=$T/last.log" "$(R config --get gitfold.mountOptions | tr '\n' ' ' | sed 's/ $//')"
+eq "  with the flags it last had (recorded again by that mount)" "--prewarm=none --prewarm-walks=2 --track-reads --log=$T/last.log" "$(mount_options)"
 check "  logging where it last did" grep -q "mounting" "$T/last.log"
 "$BIN" unmount "$MNT" >/dev/null
 mount_fs
-eq "an explicit gitfold mount: its own flags, recorded" "--prewarm=meta --prewarm-walks=2" "$(R config --get gitfold.mountOptions | tr '\n' ' ' | sed 's/ $//')"
+eq "an explicit gitfold mount: its own flags, recorded" "--prewarm=meta --prewarm-walks=2" "$(mount_options)"
 unmount_fs
 }
 

@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::daemon::control;
 use crate::daemon::{self, serve};
@@ -76,7 +76,8 @@ pub struct MountArgs {
 impl MountArgs {
     /// The flags to record for mounting again the same way
     /// (`gitfold.mountOptions`): those mount takes the daemon's options from,
-    /// the log file absolute.
+    /// the log file absolute; a flag added to `MountArgs` belongs here too.
+    /// Not the hidden `--kernel-open`, for benchmarks only.
     fn flags(&self) -> Result<Vec<String>> {
         let mut flags = vec![
             format!("--prewarm={}", self.prewarm),
@@ -93,6 +94,8 @@ impl MountArgs {
         if let Some(log) = &self.log {
             let log = std::path::absolute(log)?;
             let log = log.to_str().context("a log file path that isn't UTF-8")?;
+            // Recorded one flag per line.
+            ensure!(!log.contains('\n'), "a log file path with a newline");
             flags.push(format!("--log={log}"));
         }
         Ok(flags)
@@ -105,10 +108,13 @@ impl MountArgs {
 pub fn mount_or_again(common_dir: &Path) -> Result<Option<PathBuf>> {
     let mount = match mount_table::mount_of(common_dir)? {
         Some(mount) => mount,
-        None => match settings::Local::read(common_dir).mountpoint() {
-            Some(last) => mount_again(common_dir, &last)?,
-            None => return Ok(None),
-        },
+        None => {
+            let local = settings::Local::read(common_dir);
+            match local.mountpoint() {
+                Some(last) => mount_again(common_dir, &last, &local.mount_options())?,
+                None => return Ok(None),
+            }
+        }
     };
     fs::metadata(&mount).with_context(|| {
         format!(
@@ -120,19 +126,19 @@ pub fn mount_or_again(common_dir: &Path) -> Result<Option<PathBuf>> {
 }
 
 /// Mounts the repository of `common_dir` at `mountpoint` (where it last was:
-/// `gitfold.mountpoint`, recorded by `gitfold mount`), with the flags it was
-/// last mounted with (`gitfold.mountOptions`): `gitfold mount` in the
+/// `gitfold.mountpoint`, recorded by `gitfold mount`), with `flags`, those it
+/// was last mounted with (`gitfold.mountOptions`): `gitfold mount` in the
 /// background, its messages on stderr. The mount point, the repository's
 /// mount found afterwards: another command may have mounted it meanwhile,
 /// its mount refused.
-pub fn mount_again(common_dir: &Path, mountpoint: &Path) -> Result<PathBuf> {
+fn mount_again(common_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result<PathBuf> {
     // Gone with a reboot if it was on a tmpfs (/tmp, /run/user).
     fs::create_dir_all(mountpoint)
         .with_context(|| format!("creating mount point {}", mountpoint.display()))?;
     let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
     let status = Command::new(std::env::current_exe()?)
         .arg("mount")
-        .args(settings::Local::read(common_dir).mount_options())
+        .args(flags)
         .arg("--")
         .arg(common_dir)
         .arg(mountpoint)

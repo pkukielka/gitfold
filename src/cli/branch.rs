@@ -140,9 +140,9 @@ fn merged(
     // the previous branch, as for `git merge -`, except as the start point.
     // Only the merged ones go to git by name.
     let sources = (from.iter().enumerate())
-        .map(|(i, rev)| match rev.as_str() {
-            "-" if i > 0 => Source::resolve(repo, "@{-1}", true),
-            rev => Source::resolve(repo, rev, i > 0),
+        .map(|(i, rev)| {
+            let rev = if rev == "-" && i > 0 { "@{-1}" } else { rev };
+            Source::resolve(repo, rev, i > 0)
         })
         .collect::<Result<Vec<_>>>()?;
     let Some(mount) = super::mount::mount_or_again(common_dir)? else {
@@ -173,7 +173,7 @@ fn merged(
             ensure!(meta.is_dir(), "{} is not a workspace", workspace.display());
             Ok(())
         })
-        .and_then(|_| {
+        .and_then(|()| {
             let revs = (others.iter())
                 .map(|s| s.as_in(&state.admin))
                 .collect::<Result<Vec<_>>>()?;
