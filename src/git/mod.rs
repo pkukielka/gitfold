@@ -296,6 +296,34 @@ pub fn branch_exists(name: &str) -> bool {
     })
 }
 
+/// Whether reference `name` (a full name, `refs/...`) exists.
+pub fn ref_exists(name: &str) -> bool {
+    with_repo(|repo| repo.try_find_reference(name).is_ok_and(|r| r.is_some()))
+}
+
+/// The remote-tracking branches named `<remote>/<branch>`, as full refs,
+/// `origin`'s first.
+pub fn remote_tracking(branch: &str) -> Vec<String> {
+    let mut found: Vec<String> = with_repo(|repo| {
+        let Ok(platform) = repo.references() else {
+            return Vec::new();
+        };
+        let Ok(refs) = platform.prefixed("refs/remotes/") else {
+            return Vec::new();
+        };
+        refs.filter_map(Result::ok)
+            .map(|r| r.name().as_bstr().to_string())
+            .filter(|name| {
+                name.strip_prefix("refs/remotes/")
+                    .and_then(|rest| rest.split_once('/'))
+                    .is_some_and(|(_, b)| b == branch)
+            })
+            .collect()
+    });
+    found.sort_by_key(|name| !name.starts_with("refs/remotes/origin/"));
+    found
+}
+
 /// Whether any reference starts with one of `prefixes` (e.g. `refs/heads/feature/`).
 pub fn any_ref_under(prefixes: &[String]) -> bool {
     with_repo(|repo| {

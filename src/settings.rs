@@ -55,6 +55,18 @@ impl Local {
         Local(gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok())
     }
 
+    /// The repository's config file as it is now, failing (naming it) if it
+    /// can't be read or parsed: for settings whose absence would be wrong
+    /// rather than a default (the tree of parents, whose cycle check an
+    /// empty config would silently disable).
+    pub fn read_checked(common_dir: &Path) -> Result<Local> {
+        let path = common_dir.join("config");
+        let file =
+            gix::config::File::from_path_no_includes(path.clone(), gix::config::Source::Local)
+                .with_context(|| format!("reading {}", path.display()))?;
+        Ok(Local(Some(file)))
+    }
+
     /// `gitfold.<key>`, trimmed, if set and not empty.
     fn repository(&self, key: &str) -> Option<String> {
         let value = self.0.as_ref()?.string_by("gitfold", None, key)?;

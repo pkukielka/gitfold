@@ -38,8 +38,8 @@ impl std::fmt::Display for Usage {
 
 impl std::error::Error for Usage {}
 
-/// The tree's refusal of `parent` for `branch` in command `what`: unknown
-/// names are "not found" (exit 3), the rest usage errors (exit 2).
+/// The tree's refusal of `parent` for `branch` in command `what`, with its
+/// exit code (`Refused::exit_code`).
 fn refused(
     what: &str,
     branch: &str,
@@ -47,9 +47,10 @@ fn refused(
     refused: &crate::tree::Refused,
 ) -> anyhow::Error {
     let message = format!("{what}: {}", crate::tree::refusal(branch, parent, refused));
-    match refused {
-        crate::tree::Refused::Unknown(_) => Refusal::NotFound.error(message),
-        _ => Usage(message).into(),
+    match refused.exit_code() {
+        3 => Refusal::NotFound.error(message),
+        2 => Usage(message).into(),
+        _ => anyhow::anyhow!(message),
     }
 }
 
@@ -86,30 +87,41 @@ pub struct ParentArgs {
     pub yes: bool,
 }
 
-/// `gitfold parent`.
+/// `gitfold parent`: the checks of the rules table (S1-S6, F6), then not
+/// implemented yet.
 pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
+    use crate::tree::{Refused, Tree, resolve_parent};
     let name = super::branch_or_current(args.branch, repo)?;
     let common_dir = git::init(repo)?;
-    for branch in std::iter::once(&name).chain(&args.set) {
-        check_name(branch)?;
-        git::require_branch(branch)?;
+    check_name(&name)?;
+    let refuse = |parent: &str, r: Refused| refused("gitfold parent", &name, parent, &r);
+    if !git::branch_exists(&name) {
+        return Err(refuse("", Refused::Unknown(name.clone())));
     }
+    let tree = Tree::read(&common_dir)?;
     if let Some(parent) = &args.set {
-        crate::tree::Tree::read(&common_dir)
-            .check(&name, parent)
-            .map_err(|r| refused("gitfold parent", &name, parent, &r))?;
+        let full = resolve_parent(parent).map_err(|r| refuse(parent, r))?;
+        tree.check(&name, &full).map_err(|r| refuse(parent, r))?;
+    } else if (args.follow || args.no_follow) && tree.parent(&name).is_none() {
+        return Err(refuse("", Refused::NoParent));
     }
     Err(not_implemented("gitfold parent"))
 }
 
 /// Checks `gitfold branch NEW --parent P` (in the repository of `repo`):
-/// the tree's rules for a new branch (`Tree::check_new`).
+/// NEW doesn't exist yet (N1, refused as `branch` refuses an existing
+/// branch), P resolves (N2), and the tree's rules for a new branch (N3, N4).
 pub fn check_new_parent(repo: &Path, branch: &str, parent: &str) -> Result<()> {
+    use crate::tree::{Tree, resolve_parent};
     let common_dir = git::init(repo)?;
-    check_name(parent)?;
-    crate::tree::Tree::read(&common_dir)
-        .check_new(branch, parent)
-        .map_err(|r| refused("gitfold branch", branch, parent, &r))
+    super::branch::check_new(&common_dir, branch)?;
+    anyhow::ensure!(
+        !git::branch_exists(branch),
+        "a branch named '{branch}' already exists"
+    );
+    let refuse = |r| refused("gitfold branch", branch, parent, &r);
+    resolve_parent(parent).map_err(refuse)?;
+    Tree::read(&common_dir)?.check_new(branch).map_err(refuse)
 }
 
 // The arguments of a command people guess (`gitfold sync`, `pull`, `restack`,

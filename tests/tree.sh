@@ -39,8 +39,8 @@ check "and nothing was created" fails R rev-parse -q --verify refs/heads/nosuch
 check "--set an unknown branch: exit 3" says 3 "no branch nosuch" parent api --set nosuch
 check "--set: not implemented yet" says 1 "not implemented yet" parent api --set main
 check "--none: not implemented yet" says 1 "not implemented yet" parent api --none
-check "--follow: not implemented yet" says 1 "not implemented yet" parent api --follow
-check "--no-follow: not implemented yet" says 1 "not implemented yet" parent api --no-follow
+check "--follow without a parent: refused (F6)" says 2 "api has no parent to follow" parent api --follow
+check "--no-follow without a parent: refused (F6)" says 2 "api has no parent to follow" parent api --no-follow
 check "--update --yes: not implemented yet" says 1 "not implemented yet" parent api --update --yes
 check "--set and --none: refused" says 2 "cannot be used with" parent api --set main --none
 check "--follow and --no-follow: refused" says 2 "cannot be used with" parent api --follow --no-follow
@@ -79,7 +79,7 @@ R switch -q w; echo w >>"$REPO/a.txt"; R commit -qam w; R switch -q main
 echo m >>"$REPO/a.txt"; R commit -qam m
 check "compare: local main" says 6 "W	main	a.txt" overlaps w
 check "root: main" says 2 "main is the root of the tree" parent main --set w
-check "a new branch named like the root can't have a parent" says 2 "main is the root of the tree" branch main --parent w
+check "main exists already: refused as an existing branch (N1)" says 1 "a branch named 'main' already exists" branch main --parent w
 check "building on the root: allowed (no parent stored)" says 1 "not implemented yet" parent w --set main
 # A clone: origin/main at main, origin/HEAD pointing at it; local main
 # gets an unpushed commit of its own.
@@ -104,10 +104,90 @@ check "only master: compare needs --against" says 1 "no origin/HEAD and no branc
 check "only master: root is master" says 2 "master is the root of the tree" parent master --set w
 # No main branch at all: no root, so no parents.
 R branch -m master trunk
-check "no root: setting a parent refused" says 2 "the tree of branches has no root" parent w --set trunk
-check "no root: a new branch with a parent refused" says 2 "the tree of branches has no root" branch c --parent trunk
+check "no root: setting a parent refused (exit 1)" says 1 "the tree of branches has no root" parent w --set trunk
+check "no root: a new branch with a parent refused (exit 1)" says 1 "the tree of branches has no root" branch c --parent trunk
+}
+
+# The rules table of the root, parents and names (blog notes,
+# layers-design/16-root-rules.md): one check per row, named after it.
+remote_main() { R update-ref refs/remotes/origin/main "${1:-main}"; R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main; }
+no_remote() { R update-ref -d --no-deref refs/remotes/origin/HEAD 2>/dev/null; for r in $(R for-each-ref --format='%(refname)' refs/remotes); do R update-ref -d "$r"; done; }
+
+the_root() {
+R branch api; R branch develop
+remote_main
+check "R1: origin/HEAD -> origin/main: main is the root" says 2 "main is the root of the tree" parent main --set api
+R update-ref refs/remotes/origin/develop develop; R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop
+check "R2: origin/HEAD -> origin/develop: develop is the root" says 2 "develop is the root of the tree" parent develop --set api
+check "R2: and local main is an ordinary branch" says 1 "not implemented yet" parent main --set api
+R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/nowhere
+check "R3: dangling origin/HEAD: ignored (main is the root)" says 2 "main is the root of the tree" parent main --set api
+no_remote; R branch -m main master
+check "R4: no origin/HEAD, master: the root" says 2 "master is the root of the tree" parent master --set api
+R branch -m master trunk
+check "R5: none: no root (exit 1)" says 1 "the tree of branches has no root" parent api --set trunk
+check "N3: no root: branch --parent refused (exit 1)" says 1 "the tree of branches has no root" branch c --parent trunk
+}
+
+parent_names() {
+R branch api
+check "P1: a local branch" says 1 "not implemented yet" parent api --set main
+remote_main; R update-ref refs/remotes/origin/feat main
+check "P2: a remote-tracking branch" says 1 "not implemented yet" parent api --set origin/feat
+check "P3: a full ref" says 1 "not implemented yet" parent api --set refs/remotes/origin/feat
+check "P3: a full ref that doesn't exist" says 3 "no branch refs/heads/nope" parent api --set refs/heads/nope
+R branch origin/feat main
+check "P4: both local and remote-tracking: ambiguous (exit 2)" says 2 "origin/feat is both a local branch and a remote-tracking branch" parent api --set origin/feat
+check "P4: the full ref resolves it" says 1 "not implemented yet" parent api --set refs/remotes/origin/feat
+R branch -D -q origin/feat
+check "P5: only origin/feat: both ways out (exit 3)" says 3 "no branch feat (only origin/feat exists). Either: " parent api --set feat
+check "P5: naming both commands" says 3 "git branch feat origin/feat" parent api --set feat
+check "P6: nothing of that name (exit 3)" says 3 "no branch nope" parent api --set nope
+check "P5 for branch --parent too" says 3 "only origin/feat exists" branch c --parent feat
+}
+
+parent_set() {
+R branch api; R branch ui; R config branch.ui.gitfoldParent refs/heads/api
+check "S1: B doesn't exist (exit 3)" says 3 "gitfold parent: no branch nope" parent nope --set api
+check "S2: P doesn't resolve (exit 3)" says 3 "gitfold parent: no branch nope" parent api --set nope
+check "S4: B is the root (exit 2)" says 2 "main is the root of the tree" parent main --set api
+check "S5: P is B (exit 2)" says 2 "a branch can't be its own parent" parent api --set api
+check "S6: a cycle (exit 2)" says 2 "ui is built on api: that would be a cycle" parent api --set ui
+check "S7: accepted (not implemented yet)" says 1 "gitfold parent: not implemented yet" parent ui --set main
+check "S7: the root as a parent, accepted" says 1 "not implemented yet" parent api --set main
+check "F6: --follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --follow
+check "F6: --no-follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --no-follow
+check "F6: with a parent: accepted (not implemented yet)" says 1 "not implemented yet" parent ui --no-follow
+}
+
+branch_parent() {
+R branch api
+check "N1: NEW exists: refused as branch refuses it (exit 1)" says 1 "a branch named 'api' already exists" branch api --parent main
+check "N2: P doesn't resolve (exit 3)" says 3 "gitfold branch: no branch nope" branch c --parent nope
+remote_main; R branch -m main mn
+check "N4: NEW is the root's name (exit 2)" says 2 "main is the root of the tree" branch main --parent api
+R branch -m mn main
+check "N5: accepted (not implemented yet)" says 1 "gitfold branch --parent: not implemented yet" branch c --parent api
+check "N5: on a remote-tracking parent too" says 1 "not implemented yet" branch c --parent origin/main
+}
+
+stored_tree() {
+R branch api; R branch ui
+R config branch.main.gitfoldParent refs/heads/ui
+R config branch.ui.gitfoldParent refs/heads/api
+check "T1: a parent stored on the root is ignored (no cycle through it)" says 1 "not implemented yet" parent api --set main
+R config branch.api.gitfoldParent refs/heads/ui
+check "T4: a hand-made cycle: walks stop, joining it refused" says 2 "would be a cycle" parent api --set ui
+R config --unset branch.api.gitfoldParent
+printf '[branch "x"\n' >>"$REPO/.git/config"
+check "T5: an unreadable config fails (exit 1)" says 1 "configuration could not be loaded" parent api --set main
 }
 
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
+section "tree: rules R (the root)" the_root
+section "tree: rules P (parent names)" parent_names
+section "tree: rules S, F (parent --set)" parent_set
+section "tree: rules N (branch --parent)" branch_parent
+section "tree: rules T (the stored tree)" stored_tree
 finish
