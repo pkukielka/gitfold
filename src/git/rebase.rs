@@ -3,19 +3,20 @@
 //! nothing: a sparse checkout of the top-level files only, with a sparse
 //! index, so its cost doesn't grow with the tree (a monorepo's million files
 //! aren't written). Git does everything a rebase does: it skips commits
-//! whose change is there already (by patch id), drops commits that become
-//! empty, keeps authors and runs the hooks; on a conflict it stops, says
-//! which paths conflict (`git diff --diff-filter=U`), and is aborted, so the
-//! branch stays where it was.
+//! whose change is there already (by patch id, for `git rebase <onto>`),
+//! drops commits that become empty, keeps authors and runs the hooks; on a
+//! conflict it stops, says which paths conflict (`git diff
+//! --diff-filter=U`), and is aborted, so the branch stays where it was.
 //!
-//! The worktree is `<common>/gitfold/.moves/gitfold-move-<id>`, made under a
-//! lock on `<id>.lock` beside it and removed after. One left by a process
-//! that died is cleaned up by the next move of that branch (its rebase
-//! aborted: git moves the branch only when the rebase finishes). The sparse
-//! settings are given on the command line (`-c`) and the patterns written to
-//! the worktree's own `info/sparse-checkout`, so the repository's config
-//! isn't changed (`git sparse-checkout` would turn on
-//! `extensions.worktreeConfig` for good).
+//! The worktree is `<common>/gitfold-moves/gitfold-move-<id>` (not under
+//! `<common>/gitfold/`, whose presence means the repository is used with
+//! gitfold mounts), made under a lock on `<id>.lock` beside it (`lock`) and
+//! removed after. One left by a process that died is cleaned up by the next
+//! move of that branch (its rebase aborted: git moves the branch only when
+//! the rebase finishes). The sparse settings are given on the command line
+//! (`-c`) and the patterns written to the worktree's own
+//! `info/sparse-checkout`, so the repository's config isn't changed (`git
+//! sparse-checkout` would turn on `extensions.worktreeConfig` for good).
 //!
 //! Not `git replay`, which needs no worktree: it is experimental, and (git
 //! 2.49) keeps commits that become empty and skips none by patch id, so its
@@ -29,20 +30,39 @@ use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 
 use crate::lock::Lock;
-use crate::state::{state_root, workspace_id};
+use crate::state::workspace_id;
 
 /// The sparse checkout: the top-level files, no directory.
 const PATTERNS: &str = "/*\n!/*/\n";
 
+/// What git's environment may point elsewhere (gitfold run from a hook):
+/// the worktree's git commands mustn't inherit them.
+const GIT_ENV: [&str; 5] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_PREFIX",
+];
+
 /// Where the moves' worktrees are.
 fn moves_dir(common_dir: &Path) -> PathBuf {
-    state_root(common_dir).join(".moves")
+    common_dir.join("gitfold-moves")
 }
 
 /// Whether `path` is the worktree of a move (one that a move left, if it
 /// is there when none runs).
 pub fn is_scratch(common_dir: &Path, path: &Path) -> bool {
     path.parent() == Some(moves_dir(common_dir).as_path())
+}
+
+/// Takes the lock of the moves of `branch` (one at a time), or fails if
+/// another holds it.
+pub fn lock(common_dir: &Path, branch: &str) -> Result<Lock> {
+    let dir = moves_dir(common_dir);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join(format!("{}.lock", workspace_id(branch)));
+    crate::lock::try_file(&path)?.with_context(|| format!("another move of {branch} is running"))
 }
 
 /// What `rebase` did.
@@ -54,26 +74,32 @@ pub enum Rebased {
     Conflict(Vec<String>),
 }
 
-/// The temporary worktree of a move of `branch`, and its lock.
+/// The temporary worktree of a move.
 struct Scratch {
     path: PathBuf,
     common_dir: PathBuf,
-    _lock: Lock,
 }
 
-/// Rebases local branch `branch`, at `tip`, onto `onto`: its commits after
-/// `upstream` (`git rebase --onto <onto> <upstream>`). Fails if another move
-/// of it is running, if it isn't at `tip` any more, or if it is checked out
-/// somewhere (`git worktree add` refuses it).
+/// Rebases local branch `branch`, at `tip`, onto `onto`: `git rebase
+/// <onto>`, or with `upstream`, `git rebase --onto <onto> <upstream>` (its
+/// commits after `upstream`). The caller holds `lock`. Fails if it isn't at
+/// `tip` any more, or if it is checked out somewhere (`git worktree add`
+/// refuses it).
 pub fn rebase(
     common_dir: &Path,
     branch: &str,
     tip: ObjectId,
     onto: ObjectId,
-    upstream: ObjectId,
+    upstream: Option<ObjectId>,
 ) -> Result<Rebased> {
-    let scratch = Scratch::make(common_dir, branch)?;
-    let rebased = scratch.rebase(branch, tip, onto, upstream);
+    let scratch = Scratch {
+        path: moves_dir(common_dir).join(format!("gitfold-move-{}", workspace_id(branch))),
+        common_dir: common_dir.to_path_buf(),
+    };
+    scratch.clean_up(branch)?;
+    let rebased = scratch
+        .make(branch)
+        .and_then(|()| scratch.rebase(branch, tip, onto, upstream));
     let removed = scratch.remove();
     let rebased = rebased?;
     removed?;
@@ -81,49 +107,48 @@ pub fn rebase(
 }
 
 impl Scratch {
-    /// Locks the moves of `branch`, cleans up a worktree a dead move left,
-    /// and adds a new one on the branch, nothing checked out.
-    fn make(common_dir: &Path, branch: &str) -> Result<Scratch> {
-        let dir = moves_dir(common_dir);
-        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-        let id = workspace_id(branch);
-        let Some(lock) = crate::lock::try_file(&dir.join(format!("{id}.lock")))? else {
-            bail!("another move of {branch} is running");
-        };
-        let scratch = Scratch {
-            path: dir.join(format!("gitfold-move-{id}")),
-            common_dir: common_dir.to_path_buf(),
-            _lock: lock,
-        };
-        let admins = scratch.registrations()?;
-        if scratch.path.exists() || !admins.is_empty() {
-            log::warn!("{branch}: cleaning up the worktree of an interrupted move");
-            // Its rebase aborted first, as git would. (A rebase moves the
-            // branch only when it finishes, so dropping the worktree alone
-            // also leaves the branch where it was.)
-            if admins.iter().any(|a| a.join("rebase-merge").exists())
-                && let Err(e) = scratch.git(&["rebase", "--abort"])
-            {
-                log::warn!("{branch}: aborting the interrupted move: {e:#}");
-            }
-            scratch.remove()?;
+    /// Removes the worktree a move that died left, its rebase aborted first,
+    /// as git would. (A rebase moves the branch only when it finishes, so
+    /// dropping the worktree alone also leaves the branch where it was.)
+    fn clean_up(&self, branch: &str) -> Result<()> {
+        if !self.path.exists() {
+            return Ok(());
         }
-        let path = scratch.path.to_str().context("a path that isn't UTF-8")?;
-        super::cmd::output(
-            common_dir,
-            &["worktree", "add", "-q", "--no-checkout", path, branch],
-        )?;
-        let info = scratch.admin()?.join("info");
-        fs::create_dir_all(&info)?;
-        fs::write(info.join("sparse-checkout"), PATTERNS)?;
-        scratch.git(&["read-tree", "-mu", "HEAD"])?;
-        Ok(scratch)
+        log::warn!("{branch}: cleaning up the worktree of an interrupted move");
+        if self.admin().is_ok_and(|a| a.join("rebase-merge").exists())
+            && let Err(e) = self.git(&["rebase", "--abort"])
+        {
+            log::warn!("{branch}: aborting the interrupted move: {e:#}");
+        }
+        self.remove()
     }
 
-    /// The worktree's admin directory (`.git/worktrees/<name>`).
+    /// Adds the worktree on the branch, nothing checked out but the
+    /// top-level files. A registration of it whose directory is gone (a
+    /// removal that failed half-way) is taken over (`-f`, only then: it also
+    /// lifts git's refusal of a branch checked out elsewhere).
+    fn make(&self, branch: &str) -> Result<()> {
+        let path = self.path.to_str().context("a path that isn't UTF-8")?;
+        let args = ["worktree", "add", "-q", "--no-checkout", path, branch];
+        if let Err(e) = super::cmd::output(&self.common_dir, &args) {
+            let ours = super::worktree::checked_out(&self.common_dir, branch, None)
+                .is_some_and(|at| Path::new(&at) == self.path);
+            if !ours {
+                return Err(e);
+            }
+            let forced = ["worktree", "add", "-q", "-f", "--no-checkout", path, branch];
+            super::cmd::output(&self.common_dir, &forced)?;
+        }
+        let info = self.admin()?.join("info");
+        fs::create_dir_all(&info)?;
+        fs::write(info.join("sparse-checkout"), PATTERNS)?;
+        self.git(&["read-tree", "-mu", "HEAD"]).map(drop)
+    }
+
+    /// The worktree's admin directory (`.git/worktrees/<name>`), as git says.
     fn admin(&self) -> Result<PathBuf> {
-        (self.registrations()?.into_iter().next())
-            .with_context(|| format!("no registration of {}", self.path.display()))
+        let out = self.git(&["rev-parse", "--absolute-git-dir"])?;
+        Ok(PathBuf::from(String::from_utf8_lossy(&out).trim()))
     }
 
     /// git in the worktree, sparse; fails if git does.
@@ -133,6 +158,9 @@ impl Scratch {
 
     fn command(&self) -> Command {
         let mut command = Command::new("git");
+        for var in GIT_ENV {
+            command.env_remove(var);
+        }
         command
             .arg("-C")
             .arg(&self.path)
@@ -148,13 +176,18 @@ impl Scratch {
         branch: &str,
         tip: ObjectId,
         onto: ObjectId,
-        upstream: ObjectId,
+        upstream: Option<ObjectId>,
     ) -> Result<Rebased> {
         // The worktree is on the branch: its tip is what it has.
         if crate::git::branch_tip(branch)?.id != tip {
             bail!("{branch} moved meanwhile");
         }
-        let (onto, upstream) = (onto.to_string(), upstream.to_string());
+        let onto = onto.to_string();
+        let upstream = upstream.map(|u| u.to_string());
+        let range: Vec<&str> = match &upstream {
+            Some(upstream) => vec!["--onto", &onto, upstream],
+            None => vec![&onto],
+        };
         // Only this branch moves, and only its own commits (whatever the
         // user's rebase.* settings say); an editor is never needed.
         let out = self
@@ -166,7 +199,8 @@ impl Scratch {
                 "--empty=drop",
                 "--no-reapply-cherry-picks",
             ])
-            .args(["--onto", &onto, &upstream])
+            .args(["--no-fork-point"])
+            .args(&range)
             .output()?;
         if out.status.success() {
             let tip = crate::git::branch_tip(branch)?;
@@ -186,43 +220,23 @@ impl Scratch {
                     .collect(),
             )),
             _ => bail!(
-                "git rebase --onto {onto} {upstream} on {branch} failed ({}): {}",
+                "git rebase {} on {branch} failed ({}): {}",
+                range.join(" "),
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
             ),
         }
     }
 
-    /// The registrations (`.git/worktrees/<name>`) of the worktree's path.
-    fn registrations(&self) -> Result<Vec<PathBuf>> {
-        let gitfile = self.path.join(".git");
-        let Ok(entries) = fs::read_dir(self.common_dir.join("worktrees")) else {
-            return Ok(Vec::new());
-        };
-        let mut out = Vec::new();
-        for entry in entries {
-            let admin = entry?.path();
-            let gitdir = fs::read_to_string(admin.join("gitdir")).unwrap_or_default();
-            if Path::new(gitdir.trim()) == gitfile {
-                out.push(admin);
-            }
-        }
-        Ok(out)
-    }
-
-    /// Removes the worktree and its registration: by git, else (half made,
-    /// or its directory gone) by hand. Never `git worktree prune`, which
-    /// would also drop the registrations of workspaces not mounted now.
+    /// Removes the worktree and its registration, by git; if git can't (half
+    /// made), its directory, leaving a registration `make` takes over.
+    /// Never `git worktree prune`, which would also drop the registrations of
+    /// workspaces not mounted now.
     fn remove(&self) -> Result<()> {
         let path = self.path.to_str().context("a path that isn't UTF-8")?;
         let args = ["worktree", "remove", "--force", path];
-        if super::cmd::output(&self.common_dir, &args).is_err() {
-            if self.path.exists() {
-                fs::remove_dir_all(&self.path)?;
-            }
-            for admin in self.registrations()? {
-                fs::remove_dir_all(&admin)?;
-            }
+        if super::cmd::output(&self.common_dir, &args).is_err() && self.path.exists() {
+            fs::remove_dir_all(&self.path)?;
         }
         Ok(())
     }

@@ -79,17 +79,18 @@ fn merge_base(common_dir: &Path, args: &[&str]) -> Result<Option<ObjectId>> {
 
 /// Points `name` at `at` (with a reflog message).
 fn set_ref(common_dir: &Path, name: &str, at: ObjectId) -> Result<()> {
-    let at = at.to_string();
-    let args = ["update-ref", "-m", "gitfold: parent", name, &at];
-    cmd::output(common_dir, &args).map(drop)
+    git::worktree::set_ref(common_dir, name, &at, "gitfold: parent")
 }
 
 /// Deletes ref `name`, if it exists.
 fn drop_ref(common_dir: &Path, name: &str) -> Result<()> {
-    match rev(name) {
-        Some(_) => cmd::output(common_dir, &["update-ref", "-d", name]).map(drop),
-        None => Ok(()),
-    }
+    git::worktree::unpin(common_dir, name)
+}
+
+/// Takes the lock of the moves of `branch` (see `git::rebase::lock`): held
+/// from `recover` to the end of the move.
+pub fn lock(common_dir: &Path, branch: &str) -> Result<crate::lock::Lock> {
+    rebase::lock(common_dir, branch)
 }
 
 /// Records that the own commits of `branch` start after `at`.
@@ -138,7 +139,12 @@ fn own_base(
         if let Some(base) = rev(&base_ref(branch))
             && is_ancestor(common_dir, base, tip)?
         {
-            return Ok(base);
+            // Taken more of the parent's commits by hand since (rebased or
+            // merged onto it): those aren't its own.
+            return Ok(match merge_base(common_dir, &[parent, &tip_hex])? {
+                Some(on) if is_ancestor(common_dir, base, on)? => on,
+                _ => base,
+            });
         }
         for args in [&["--fork-point", parent, &tip_hex][..], &[parent, &tip_hex]] {
             if let Some(base) = merge_base(common_dir, args)? {
@@ -209,6 +215,8 @@ pub struct Plan {
     pub tip: ObjectId,
     pub base: ObjectId,
     pub onto: ObjectId,
+    /// What `onto` is the tip of (a full ref).
+    onto_ref: String,
     /// How many own commits it has.
     pub own: usize,
 }
@@ -231,6 +239,7 @@ impl Plan {
             tip,
             base,
             onto: git::resolve(onto)?.id,
+            onto_ref: onto.to_string(),
             own: count(common_dir, &[&tip.to_string(), &format!("^{base}")])?,
         })
     }
@@ -244,7 +253,8 @@ impl Plan {
 
     /// Its own commits on its same-name branch of its push remote, as git
     /// chooses that remote (`pushRemote`, `remote.pushDefault`, its remote,
-    /// `origin`), if any.
+    /// `origin`), if any; not when that branch is what it moves onto (a
+    /// branch built on its own remote branch).
     pub fn pushed(&self, common_dir: &Path) -> Result<Option<Pushed>> {
         let branch = &self.branch;
         let remote = git::with_repo(|repo| {
@@ -258,7 +268,11 @@ impl Plan {
         let Some(remote) = remote else {
             return Ok(None);
         };
-        let Some(at) = rev(&format!("refs/remotes/{remote}/{branch}")) else {
+        let theirs = format!("refs/remotes/{remote}/{branch}");
+        if theirs == self.onto_ref {
+            return Ok(None);
+        }
+        let Some(at) = rev(&theirs) else {
             return Ok(None);
         };
         let (tip, base) = (self.tip.to_string(), format!("^{}", self.base));
@@ -269,9 +283,23 @@ impl Plan {
         }))
     }
 
-    /// Moves it (see the module doc): its base recorded, a conflict
-    /// cleared, or with `record` recorded (following its parent; not for a
-    /// move to another parent). `yes`: pushed commits move too.
+    /// Why it can't move as it stands, if it can't: a merge among its own
+    /// commits, or (unless `yes`) commits already pushed.
+    pub fn blocked(&self, common_dir: &Path, yes: bool) -> Result<Option<Moved>> {
+        let range = format!("{}..{}", self.base, self.tip);
+        if count(common_dir, &["--merges", &range])? > 0 {
+            return Ok(Some(Moved::Merge));
+        }
+        match yes {
+            true => Ok(None),
+            false => Ok(self.pushed(common_dir)?.map(Moved::Pushed)),
+        }
+    }
+
+    /// Moves it (see the module doc), unless `blocked`: its base recorded, a
+    /// conflict cleared, or with `record` recorded (following its parent;
+    /// not for a move to another parent). `yes`: pushed commits move too.
+    /// The caller holds `lock`.
     pub fn run(&self, common_dir: &Path, yes: bool, record: bool) -> Result<Moved> {
         let branch = &self.branch;
         if self.up_to_date(common_dir)? {
@@ -280,16 +308,19 @@ impl Plan {
             clear_conflict(common_dir, branch)?;
             return Ok(Moved::UpToDate);
         }
-        let range = format!("{}..{}", self.base, self.tip);
-        if count(common_dir, &["--merges", &range])? > 0 {
-            return Ok(Moved::Merge);
+        if let Some(blocked) = self.blocked(common_dir, yes)? {
+            return Ok(blocked);
         }
         let pushed = self.pushed(common_dir)?;
-        if !yes && let Some(pushed) = pushed {
-            return Ok(Moved::Pushed(pushed));
-        }
+        // On its parent's history: `git rebase <onto>`, which also skips
+        // commits the parent has by patch id. Off it (a parent rewritten,
+        // another parent): only its own commits, `--onto <onto> <base>`.
+        let upstream = match is_ancestor(common_dir, self.base, self.onto)? {
+            true => None,
+            false => Some(self.base),
+        };
         set_ref(common_dir, &moving_ref(branch), self.onto)?;
-        let rebased = rebase::rebase(common_dir, branch, self.tip, self.onto, self.base);
+        let rebased = rebase::rebase(common_dir, branch, self.tip, self.onto, upstream);
         // Its base is recorded before the record of the move goes.
         if let Ok(rebase::Rebased::Moved(_)) = rebased {
             set_base(common_dir, branch, self.onto)?;

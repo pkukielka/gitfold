@@ -298,6 +298,24 @@ R switch -q api; R revert --no-edit HEAD >/dev/null; R switch -q main
 check "  forgotten once the parent changed" lacks 0 "conflict" parent ui
 check "  and the move goes through" says 0 "moved 2 commits of ui onto api" parent ui --update
 check "  the record cleared" fails R config branch.ui.gitfoldConflict
+# api takes one of ui's commits, then changes the same line again: git
+# rebase skips the commit by patch id (replayed, it would conflict).
+on ui g.txt mine; on ui h.txt other
+R switch -q api; R cherry-pick -x ui~1 >/dev/null; echo again >>"$REPO/g.txt"; R commit -qam "api: again"; R switch -q main
+check "a commit the parent has, changed since: skipped by patch id" says 0 "(1 commit already in api: dropped)" parent ui --update
+# ui takes api's new commits by hand (a merge, fast-forward here, of api),
+# then api moves on: api's commits aren't ui's own.
+on api a.txt more; R switch -q ui; R rebase -q api; R switch -q main
+own_before=$(own api ui)
+on api a.txt evenmore
+check "commits taken by hand: only its own move" says 0 "moved $own_before commits of ui onto api" parent ui --update
+# gitfold run with git's environment set (from a hook): its rebase still
+# acts on the branch, not on the checkout the environment points at.
+on api a.txt hooked; head=$(R rev-parse HEAD)
+check "git's environment set: moved all the same" sh -c "cd / && GIT_DIR='$REPO/.git' GIT_WORK_TREE='$REPO' GIT_INDEX_FILE='$REPO/.git/index' '$BIN' -C '$REPO' parent ui --update"
+eq "  the checkout untouched" "$head refs/heads/main" "$(R rev-parse HEAD) $(R symbolic-ref HEAD)"
+check "  and clean" sh -c "[ -z \"\$(git -C '$REPO' status --porcelain)\" ]"
+check "moves don't make the repository look used with mounts" test ! -e "$REPO/.git/gitfold"
 }
 
 pushed() {
@@ -323,6 +341,16 @@ check "--set with pushed commits: the parent set, the move paused" says 0 "ui is
 eq "  stored" "refs/heads/main" "$(R config branch.ui.gitfoldParent)"
 check "  then --update --yes moves only its own commits" says 0 "moved 2 commits of ui onto main" parent ui --update --yes
 eq "  api's commits gone from it" "2" "$(own main ui)"
+# A branch built on its own remote branch: its commits there aren't
+# "pushed" ones to protect (they are its parent's).
+R update-ref refs/remotes/origin/feat main; "$BIN" -C "$REPO" branch feat --parent origin/feat >/dev/null
+# Pushed, then a collaborator's commit on top of it, fetched; then one more
+# of its own.
+on feat x.txt mine; R update-ref refs/remotes/origin/feat feat
+R switch -q --detach feat; echo theirs >"$REPO/y.txt"; R add y.txt; R commit -qm theirs
+R update-ref refs/remotes/origin/feat HEAD; R switch -q main
+on feat z.txt mine2
+check "built on its own remote branch: not paused" says 0 "moved 1 commit of feat onto origin/feat" parent feat --update
 }
 
 not_moved() {
@@ -350,7 +378,7 @@ eq "  only its own commit moved (its base was recorded first)" "1" "$(own api ui
 check "  the record gone" fails R rev-parse -q --verify refs/gitfold-moving/ui
 # A move's worktree a dead process left: cleaned up by the next move.
 on api a.txt newer
-R worktree add -q --no-checkout "$REPO/.git/gitfold/.moves/gitfold-move-ui" ui
+R worktree add -q --no-checkout "$REPO/.git/gitfold-moves/gitfold-move-ui" ui
 check "a dead move's worktree: cleaned up" says 0 "moved 1 commit of ui onto api" parent ui --update
 check "  gone" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
 # --set: its own commits onto another parent.

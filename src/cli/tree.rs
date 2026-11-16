@@ -214,6 +214,7 @@ fn update(common_dir: &Path, tree: &Tree, name: &str, yes: bool) -> Result<()> {
         );
     }
     movable(common_dir, name, "--update")?;
+    let _moving = follow::lock(common_dir, name)?;
     follow::recover(common_dir, name)?;
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
     match plan.run(common_dir, yes, true)? {
@@ -236,10 +237,24 @@ fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str) -> Result<()> {
         return Ok(());
     }
     movable(common_dir, name, "--set")?;
+    let _moving = follow::lock(common_dir, name)?;
     follow::recover(common_dir, name)?;
     let plan = follow::Plan::new(common_dir, name, tree.parent(name), &tree.root_refs(), full)?;
-    println!("moves {} of {name} onto {short}", commits(plan.own));
-    let moved = plan.run(common_dir, false, false)?;
+    // Says first what it moves, once it is sure to try.
+    let up_to_date = plan.up_to_date(common_dir)?;
+    let blocked = match up_to_date {
+        true => None,
+        false => plan.blocked(common_dir, false)?,
+    };
+    let moved = match blocked {
+        Some(blocked) => blocked,
+        None => {
+            if !up_to_date {
+                println!("moves {} of {name} onto {short}", commits(plan.own));
+            }
+            plan.run(common_dir, false, false)?
+        }
+    };
     if matches!(moved, follow::Moved::Merge | follow::Moved::Conflict(_)) {
         return said(name, short, &plan, moved);
     }
