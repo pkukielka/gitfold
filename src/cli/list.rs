@@ -27,7 +27,12 @@ use crate::store::Store;
 /// state, without listing the tree; mounted or not. A branch never opened has
 /// none.
 pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
-    let ChangesArgs { branch, nul, stat } = args;
+    let ChangesArgs {
+        branch,
+        nul,
+        stat,
+        paths: _,
+    } = args;
     let name = &super::branch_or_current(branch, repo)?;
     check_name(name)?;
     let common_dir = git::init(repo)?;
@@ -192,6 +197,10 @@ pub struct ChangesArgs {
     /// as `git diff --numstat`, and a summary line (not with -z).
     #[arg(long)]
     pub stat: bool,
+    /// Instead: who is changing these paths, on every branch (committed on
+    /// it, not yet in main) and in every workspace (uncommitted).
+    #[arg(last = true, value_name = "PATH")]
+    pub paths: Vec<String>,
 }
 
 #[cfg(test)]

@@ -118,6 +118,26 @@ enum Command {
     /// changes (or a git operation in progress), 5 in use, 1 other errors, 2
     /// usage errors.
     Remove(cli::remove::RemoveArgs),
+    /// Show or change the branch a branch is built on (its parent).
+    ///
+    /// A branch built on another (`gitfold branch NEW --parent P`) has its
+    /// own commits on P's; following P, it takes P's new commits by itself
+    /// (at its agent's turn start, or once its workspace is idle), replaying
+    /// its own commits onto them, uncommitted changes carried along; a
+    /// conflict moves nothing and is reported. Commits already pushed are
+    /// moved only with --update --yes. When P lands in main, the branch
+    /// follows it there. Without options: the parent, and whether it is
+    /// followed. Exit codes: 3 no such branch, 1 other errors (also: not
+    /// implemented yet), 2 usage errors.
+    Parent(cli::tree::ParentArgs),
+    #[command(hide = true)]
+    Sync(cli::tree::GuessArgs),
+    #[command(hide = true)]
+    Pull(cli::tree::GuessArgs),
+    #[command(hide = true)]
+    Restack(cli::tree::GuessArgs),
+    #[command(hide = true)]
+    Rebase(cli::tree::GuessArgs),
     /// Delete the snapshot registrations.
     ///
     /// They are registered again when opened. The repository must not be
@@ -175,6 +195,12 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
+/// A command people guess: says the right one, exit code 2.
+fn guessed(name: &str) -> Result<i32> {
+    eprintln!("{}", cli::tree::guessed(name));
+    Ok(2)
+}
+
 /// Runs the command; its exit code (see `refusal` for the codes errors get).
 fn run() -> Result<i32> {
     // Blob buffers are short-lived and often large. glibc raises its mmap threshold
@@ -196,8 +222,21 @@ fn run() -> Result<i32> {
         Command::Version { mountpoint } => return cli::mount::version(mountpoint.as_deref()),
         // As hooks, they find the repository from Claude Code's input.
         Command::Branch(args) if args.claude_hook.is_some() => cli::claude::worktree_create()?,
-        Command::Branch(args) => cli::branch::branch(&cli::repo()?, args)?,
+        Command::Branch(args) => {
+            if let Some(hint) = cli::tree::branch_hint(&args.on, &args.merge) {
+                eprintln!("{hint}");
+                return Ok(2);
+            }
+            cli::branch::branch(&cli::repo()?, args)?
+        }
         Command::List(args) => cli::list::list(&cli::repo()?, args)?,
+        Command::Changes(args) if !args.paths.is_empty() => {
+            if args.branch.is_some() {
+                eprintln!("gitfold changes: with -- PATH it lists every branch; drop BRANCH");
+                return Ok(2);
+            }
+            return Err(cli::tree::not_implemented("gitfold changes -- PATH"));
+        }
         Command::Changes(args) => cli::list::changes(&cli::repo()?, args)?,
         Command::Overlaps(args) => return cli::overlaps::overlaps(&cli::repo()?, args),
         Command::Watch(args) => cli::inbox::watch(&cli::repo()?, args)?,
@@ -207,6 +246,11 @@ fn run() -> Result<i32> {
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
+        Command::Parent(args) => cli::tree::parent(&cli::repo()?, args)?,
+        Command::Sync(_) => return guessed("sync"),
+        Command::Pull(_) => return guessed("pull"),
+        Command::Restack(_) => return guessed("restack"),
+        Command::Rebase(_) => return guessed("rebase"),
         Command::Prewarm(args) => cli::branch::prewarm(&cli::repo()?, args)?,
         Command::TrackReads(args) if args.claude_hook.is_some() => cli::claude::reads_hook()?,
         Command::TrackReads(args) => cli::branch::track_reads(&cli::repo()?, args)?,

@@ -21,11 +21,24 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         branch: name,
         with_changes,
         from,
+        parent,
+        no_follow: _,
         prewarm,
         track_reads,
         claude_hook: _,
+        on: _,
+        merge: _,
     } = args;
     let name = name.as_deref().context("name the branch")?;
+    if parent.is_some() {
+        return Err(super::tree::not_implemented("gitfold branch --parent"));
+    }
+    if from.len() > 1 {
+        return Err(super::tree::not_implemented(
+            "gitfold branch with several --from",
+        ));
+    }
+    let from = from.into_iter().next();
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
     if with_changes {
@@ -167,9 +180,25 @@ pub struct BranchArgs {
     #[arg(short = 'w', long)]
     pub with_changes: bool,
     /// Start point (default: HEAD of the worktree you are in, as for `git
-    /// branch`).
-    #[arg(long)]
-    pub from: Option<String>,
+    /// branch`). Repeated: the branch starts at the revisions merged (with
+    /// -w, each one's uncommitted changes too); conflicts are left in the
+    /// files, as a merge in progress. No relation to them afterwards.
+    #[arg(long, value_name = "REV", conflicts_with = "parent")]
+    pub from: Vec<String>,
+    /// Build the branch on branch P (its parent): it starts at P's tip, and
+    /// takes P's new commits from then on (see `gitfold parent`).
+    #[arg(long, value_name = "P", conflicts_with = "with_changes")]
+    pub parent: Option<String>,
+    /// With --parent: take P's new commits only when asked (`gitfold parent
+    /// --update`).
+    #[arg(long, requires = "parent")]
+    pub no_follow: bool,
+    /// Not a flag: `--parent` (a hint says so).
+    #[arg(long, hide = true, num_args = 1.., value_name = "P")]
+    pub on: Vec<String>,
+    /// Not a flag: repeated `--from` (a hint says so).
+    #[arg(long, hide = true, num_args = 1.., value_name = "REV")]
+    pub merge: Vec<String>,
     /// Prewarm mode for this workspace, kept across remounts (in git
     /// config, branch.<BRANCH>.gitfoldPrewarm); a mount's `--prewarm none`
     /// still wins.

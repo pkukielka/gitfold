@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# End-to-end test of the command-line contract of branches built on branches
+# (gitfold parent, branch --parent, branch with several --from, changes --
+# PATH, the hints for guessed commands): what parses, what is refused, and
+# what says "not implemented yet" (exit 1) until it is built.
+# usage: tests/tree.sh (or with the others: tests/run.sh); sections as in
+# tests/lib.sh, each on a fresh repository (tests/fixture.sh).
+set -uo pipefail
+
+BIN=$(realpath "$(dirname "$0")/../target/release/gitfold")
+NAME=tree
+. "$(dirname "$0")/lib.sh"
+. "$(dirname "$0")/fixture.sh"
+
+# gitfold run in the repository: its exit code, then its output on one line.
+gf() { local out rc; out=$("$BIN" -C "$REPO" "$@" 2>&1); rc=$?; echo "$rc $(tr '\n' ' ' <<<"$out")"; }
+# Whether `gf ARGS` exits with $1 and says $2.
+says() { local code=$1 text=$2; shift 2; local r; r=$(gf "$@"); [[ $r == "$code "* && $r == *"$text"* ]] || { echo "  got: $r"; false; }; }
+
+the_contract() {
+R branch api
+check "branch --from one revision: as before" says 0 "created branch two" branch two --from main
+check "the name may come after --from" says 0 "created branch three" branch --from main three
+check "several --from: not implemented yet" says 1 "not implemented yet" branch c --from main --from api
+check "--parent: not implemented yet" says 1 "not implemented yet" branch c --parent api
+check "--parent --no-follow: not implemented yet" says 1 "not implemented yet" branch c --parent api --no-follow
+check "--no-follow needs --parent" says 2 "--parent" branch c --no-follow
+check "--from and --parent: refused" says 2 "cannot be used with" branch c --from main --parent api
+check "-w and --parent: refused" says 2 "cannot be used with" branch c -w --parent api
+check "--on: a hint" says 2 "to build on a branch: --parent P" branch c --on api
+check "--merge: a hint" says 2 "--from api --from main" branch c --merge api main
+check "parent: not implemented yet" says 1 "gitfold parent: not implemented yet" parent api
+check "parent of an unknown branch: exit 3, nothing created" says 3 "no branch nosuch" parent nosuch
+check "and nothing was created" fails R rev-parse -q --verify refs/heads/nosuch
+check "--set an unknown branch: exit 3" says 3 "no branch nosuch" parent api --set nosuch
+check "--set: not implemented yet" says 1 "not implemented yet" parent api --set main
+check "--none: not implemented yet" says 1 "not implemented yet" parent api --none
+check "--follow: not implemented yet" says 1 "not implemented yet" parent api --follow
+check "--no-follow: not implemented yet" says 1 "not implemented yet" parent api --no-follow
+check "--update --yes: not implemented yet" says 1 "not implemented yet" parent api --update --yes
+check "--set and --none: refused" says 2 "cannot be used with" parent api --set main --none
+check "--follow and --no-follow: refused" says 2 "cannot be used with" parent api --follow --no-follow
+check "--none and --follow: refused" says 2 "cannot be used with" parent api --none --follow
+check "--yes needs --update" says 2 "--update" parent api --yes
+check "--update and --set: refused" says 2 "cannot be used with" parent api --update --set main
+check "outside a workspace, the branch must be named" says 1 "" parent
+check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
+check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.txt
+check "changes without PATH: as before" says 0 "" changes api
+for g in sync pull restack rebase; do
+    check "$g: a hint" says 2 "gitfold parent --update" "$g" --whatever x
+done
+}
+
+section "tree: the command-line contract" the_contract
+finish
