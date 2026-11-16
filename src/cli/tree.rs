@@ -125,10 +125,7 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         }
         match args.follow {
             true => println!("{name} follows {parent}"),
-            false => println!(
-                "{name} doesn't follow {parent}: `gitfold parent {name} --update` takes its new \
-                 commits"
-            ),
+            false => println!("{name} doesn't follow {parent}"),
         }
     } else {
         println!("{}", show(&tree, &name, parent));

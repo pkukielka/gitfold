@@ -200,7 +200,7 @@ check "shown: not following" says 0 "ui is built on api, not following it" paren
 check "--follow" says 0 "ui follows api" parent ui --follow
 check "  stored as the default (unset)" fails R config branch.ui.gitfoldFollow
 check "F1: following never set: follows" says 0 "ui is built on api, following it" parent ui
-check "--no-follow says how to take new commits" says 0 "\`gitfold parent ui --update\` takes its new commits" parent ui --no-follow
+check "--no-follow" says 0 "ui doesn't follow api" parent ui --no-follow
 check "F5: --none" says 0 "ui no longer has a parent (it was api)" parent ui --none
 check "  parent forgotten" fails R config branch.ui.gitfoldParent
 check "  following forgotten" fails R config branch.ui.gitfoldFollow

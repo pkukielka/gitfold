@@ -36,22 +36,22 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         let full = super::tree::check_new_parent(repo, name, parent)?;
         create(repo, name, Some(&full))?;
         // Following set either way: a deleted branch's settings may be left
-        // (T2). Without its parent the branch goes again, its settings with
-        // it, so the command can be retried.
-        let built = settings::set_parent(repo, name, &full)
-            .and_then(|()| settings::set_follow(repo, name, !no_follow));
-        if let Err(e) = built {
+        // (T2). Without its settings the branch goes again, so the command
+        // can be retried.
+        let set = settings::set_parent(repo, name, &full)
+            .and_then(|()| settings::set_follow(repo, name, !no_follow))
+            .and_then(|()| set_branch_settings(repo, name, prewarm, track_reads));
+        if let Err(e) = set {
             if let Err(undo) = git::cmd::output(repo, &["branch", "-D", "--", name]) {
                 log::warn!("deleting branch {name} again: {undo:#}");
             }
             return Err(e);
         }
-        set_branch_settings(repo, name, prewarm, track_reads)?;
-        let (parent, following) = (
+        println!(
+            "created branch {name} on {} ({}); open it as <mountpoint>/{name}",
             crate::tree::short(&full),
-            super::tree::following(!no_follow),
+            super::tree::following(!no_follow)
         );
-        println!("created branch {name} on {parent} ({following}); open it as <mountpoint>/{name}");
         return Ok(());
     }
     if from.len() > 1 {
