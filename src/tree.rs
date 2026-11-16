@@ -137,7 +137,7 @@ impl Tree {
     /// `root`, of the local branches `exists` says exist: a deleted branch's
     /// settings may outlive it (T2), and a parent stored on the root doesn't
     /// count (T1). A stored short value is a local branch.
-    fn of(
+    pub(crate) fn of(
         stored: BTreeMap<String, String>,
         root: Option<String>,
         exists: impl Fn(&str) -> bool,
@@ -182,9 +182,20 @@ impl Tree {
             .is_some_and(|parent| git::full_ref(parent).is_none())
     }
 
+    /// The root (`git::root_branch`), if known.
+    pub fn root(&self) -> Option<&str> {
+        self.root.as_deref()
+    }
+
     /// The local branches whose parent is local branch `branch`, by name.
     pub fn children(&self, branch: &str) -> Vec<&str> {
-        (self.children.get(&local(branch)))
+        self.children_of(&local(branch))
+    }
+
+    /// The local branches whose parent is `full` (the full ref of a local or
+    /// a remote-tracking branch), by name.
+    fn children_of(&self, full: &str) -> Vec<&str> {
+        (self.children.get(full))
             .into_iter()
             .flatten()
             .map(String::as_str)
@@ -194,11 +205,21 @@ impl Tree {
     /// Everything built on local branch `branch`: its children, theirs, and
     /// so on, each once, every branch before its children (`branch` itself
     /// not included; safe on cycles a hand-edited config may hold, T4).
-    #[allow(dead_code)] // used as the tree's streams land (the views)
     pub fn subtree(&self, branch: &str) -> Vec<&str> {
+        self.built_on(&[local(branch)])
+    }
+
+    /// `subtree` of several branches at once, given by full ref (local or
+    /// remote-tracking), in their order: each branch once, those among
+    /// `refs` not included.
+    pub fn built_on(&self, refs: &[String]) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        let mut seen = std::collections::HashSet::from([branch]);
-        let mut stack: Vec<&str> = self.children(branch).into_iter().rev().collect();
+        let mut seen: std::collections::HashSet<&str> = (refs.iter())
+            .filter_map(|r| r.strip_prefix("refs/heads/"))
+            .collect();
+        let mut stack: Vec<&str> = (refs.iter().rev())
+            .flat_map(|r| self.children_of(r).into_iter().rev())
+            .collect();
         while let Some(next) = stack.pop() {
             if seen.insert(next) {
                 out.push(next);
@@ -316,6 +337,8 @@ mod tests {
         assert_eq!(t.subtree("api"), ["ui", "css", "web"]);
         assert_eq!(t.subtree("main"), ["api", "ui", "css", "web"]);
         assert!(t.subtree("css").is_empty());
+        let main = ["refs/heads/main", "refs/remotes/origin/main"].map(String::from);
+        assert_eq!(t.built_on(&main), ["api", "ui", "css", "web", "cli"]);
         assert_eq!(short("refs/remotes/origin/main"), "origin/main");
     }
 

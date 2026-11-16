@@ -21,6 +21,7 @@
 //! - `names`: telling the kernel when names in the root or a namespace changed.
 //! - `removal`: removing a workspace or snapshot while mounted.
 //! - `stats`: operation counters.
+//! - `views`: the read-only views of a branch and those built on it.
 
 mod content;
 mod names;
@@ -28,6 +29,9 @@ mod removal;
 mod snapshots;
 mod stats;
 mod view;
+// Served by the mount once the views land there (stream-views, V2).
+#[allow(dead_code)]
+mod views;
 pub mod workspace;
 mod workspaces;
 
