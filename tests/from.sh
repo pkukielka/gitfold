@@ -18,7 +18,7 @@ gf() { local out rc; out=$("$BIN" -C "$REPO" "$@" 2>&1); rc=$?; echo "$rc ${out/
 says() { local code=$1 text=$2; shift 2; local r; r=$(gf "$@"); [[ $r == "$code "* && $r == *"$text"* ]] || { echo "  got: $r"; false; }; }
 
 # Branch $1 off $2 with a commit writing $4 into file $3.
-work() { R branch "$1" "$2"; R worktree add -q "$T/wt-$1" "$1"; echo "$4" >"$T/wt-$1/$3"; G "$T/wt-$1" add -A; G "$T/wt-$1" commit -qm "$1: $3"; R worktree remove "$T/wt-$1"; }
+work() { R branch "$1" "$2"; R worktree add -q "$T/wt-$1" "$1"; mkdir -p "$(dirname "$T/wt-$1/$3")"; echo "$4" >"$T/wt-$1/$3"; G "$T/wt-$1" add -A; G "$T/wt-$1" commit -qm "$1: $3"; R worktree remove "$T/wt-$1"; }
 # What `git merge REV…` makes on a branch at $2 for branch name $1: the
 # commit's parents, tree and whole message (or "same" if it didn't move).
 git_merge() {
@@ -85,8 +85,18 @@ check "two sources: renames followed (ort, git's default)" says 0 "at a merge of
 eq "  as git merge does" "$(git_merge two ren edit)" "$(made two)"
 check "an octopus follows no renames: refused before the last, as git" says 1 "Should not be doing an octopus" branch o2 --from ren --from edit --from x
 check "  git refuses it too" git_refuses ren edit x
-eq "  no index of the steps left" "" "$(ls -A "$COMMON/gitfold" | grep merge-index)"
 check "  nothing left behind" fails R rev-parse --verify -q refs/heads/o2
+eq "  no index of the steps left" "" "$(ls -A "$COMMON" | grep merge-index)"
+check "  nothing of gitfold's made in a repository never mounted" test ! -e "$COMMON/gitfold"
+R checkout -q -b bins main; printf 'a\0b' >"$REPO/bin.dat"; R add bin.dat; R commit -qm bin; R checkout -q main
+work bin1 bins bin.dat "$(printf 'one\001')"; work bin2 bins bin.dat "$(printf 'two\001')"
+check "binary files changed in both, before the last: refused, as git" says 1 "Should not be doing an octopus" branch b1 --from bin1 --from bin2 --from x
+check "  git refuses it too" git_refuses bin1 bin2 x
+check "binary files changed in both, last: a conflict (not implemented yet)" says 1 "not implemented yet" branch b2 --from x --from bin1 --from bin2
+work df1 main q file; work df2 main q/f file
+check "a file in one, a directory in another, last: a conflict (not implemented yet)" says 1 "not implemented yet" branch d1 --from x --from df1 --from df2
+check "  git conflicts too" git_refuses x df1 df2
+check "  nothing left behind" fails R rev-parse --verify -q refs/heads/d1
 }
 
 merge_ff() {

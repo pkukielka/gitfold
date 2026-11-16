@@ -51,7 +51,12 @@ pub fn output_or_no(git_dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
 
 /// `output`, with `input` on git's stdin.
 pub fn output_with_input(git_dir: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-    let out = exec(command(git_dir), args, input)?;
+    checked(command(git_dir), args, input)
+}
+
+/// `exec`, failing if git does.
+pub fn checked(git: Command, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+    let out = exec(git, args, input)?;
     if !out.status.success() {
         return Err(failed(args, &out));
     }

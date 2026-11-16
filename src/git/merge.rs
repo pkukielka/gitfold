@@ -10,7 +10,9 @@
 //! fmt-merge-msg`'s message.
 
 use std::collections::BTreeMap;
+use std::ffi::OsStr;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -136,7 +138,7 @@ fn octopus(
     remotes: &[usize],
     sources: &[Source],
 ) -> Result<Option<String>> {
-    let index = TempIndex::new(common_dir)?;
+    let index = TempIndex::new(common_dir);
     // The commits merged so far (`MRC`) and the tree of their merge (`MRT`).
     let mut merged = vec![head.id.as_str()];
     let mut tree = format!("{}^{{tree}}", head.id);
@@ -178,25 +180,26 @@ struct TempIndex {
 }
 
 impl TempIndex {
-    fn new(common_dir: &Path) -> Result<TempIndex> {
-        let dir = crate::state::state_root(common_dir);
-        fs::create_dir_all(&dir)?;
-        let path = dir.join(format!(".merge-index-{}", std::process::id()));
-        Ok(TempIndex {
+    /// In the git directory itself, as git's own `index.lock`: nothing else
+    /// (gitfold's state directory) is made for it.
+    fn new(common_dir: &Path) -> TempIndex {
+        let name = format!("gitfold-merge-index-{}", std::process::id());
+        TempIndex {
             common_dir: common_dir.to_path_buf(),
-            path,
-        })
+            path: common_dir.join(name),
+        }
+    }
+
+    /// git with this index, to run.
+    fn command(&self) -> std::process::Command {
+        let mut git = cmd::command(&self.common_dir);
+        git.env("GIT_INDEX_FILE", &self.path);
+        git
     }
 
     /// Runs git with `args` on this index; what it printed.
-    fn git(&self, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-        let mut git = cmd::command(&self.common_dir);
-        git.env("GIT_INDEX_FILE", &self.path);
-        let out = cmd::exec(git, args, input)?;
-        match out.status.success() {
-            true => Ok(out.stdout),
-            false => Err(cmd::failed(args, &out)),
-        }
+    fn git(&self, args: &[&str]) -> Result<Vec<u8>> {
+        cmd::checked(self.command(), args, b"")
     }
 
     /// One step of the octopus: `ours` and `theirs` (trees) merged with
@@ -206,11 +209,11 @@ impl TempIndex {
         let mut args = vec!["read-tree", "-m", "--aggressive"];
         args.extend(bases.iter().map(String::as_str));
         args.extend([ours, theirs]);
-        self.git(&args, b"")?;
+        self.git(&args)?;
         // What read-tree left unmerged, by path: stages 1 (base), 2 (ours) and
         // 3 (theirs), as (mode, id).
         let mut unmerged: BTreeMap<Vec<u8>, [Option<Entry>; 3]> = BTreeMap::new();
-        for entry in self.git(&["ls-files", "-u", "-z"], b"")?.split(|&b| b == 0) {
+        for entry in self.git(&["ls-files", "-u", "-z"])?.split(|&b| b == 0) {
             let Some(tab) = entry.iter().position(|&b| b == b'\t') else {
                 continue;
             };
@@ -224,25 +227,26 @@ impl TempIndex {
             let stages = unmerged.entry(entry[tab + 1..].to_vec()).or_default();
             stages[stage - 1] = Some((mode.to_string(), id.to_string()));
         }
-        let mut info = Vec::new();
+        // In index order, each as merge-one-file updates it: a path that is a
+        // file in one source and a directory in another is refused there, a
+        // conflict.
         for (path, stages) in &unmerged {
             let Some(resolved) = merge_one_file(&self.common_dir, stages)? else {
                 return Ok(None);
             };
-            // Every stage of the path goes, then the resolution comes in.
-            info.extend_from_slice(b"0 0000000000000000000000000000000000000000\t");
-            info.extend_from_slice(path);
-            info.push(0);
-            if let Some((mode, id)) = resolved {
-                info.extend_from_slice(format!("{mode} {id} 0\t").as_bytes());
-                info.extend_from_slice(path);
-                info.push(0);
+            let mut git = self.command();
+            git.arg("update-index");
+            match resolved {
+                Some((mode, id)) => git.args(["--add", "--cacheinfo", &mode, &id]),
+                None => git.args(["--force-remove", "--"]),
+            };
+            let out = git.arg(OsStr::from_bytes(path)).output()?;
+            if !out.status.success() {
+                return Ok(None);
             }
         }
-        if !info.is_empty() {
-            self.git(&["update-index", "-z", "--index-info"], &info)?;
-        }
-        Ok(first_line(&self.git(&["write-tree"], b"")?))
+        let tree = first_line(&self.git(&["write-tree"])?);
+        Ok(Some(tree.context("git write-tree printed no tree")?))
     }
 }
 
@@ -285,16 +289,14 @@ fn merge_one_file(common_dir: &Path, stages: &[Option<Entry>; 3]) -> Result<Opti
             if special(&o.0) || special(&t.0) || o.0 != t.0 {
                 return Ok(None);
             }
+            // Any failure is a conflict, as for merge-one-file (binary files).
             let args = ["merge-file", "--object-id", &o.1, &b.1, &t.1];
             let out = cmd::command(common_dir).args(args).output()?;
-            match out.status.code() {
-                Some(0) => {
-                    let merged = first_line(&out.stdout).context("git merge-file: no id")?;
-                    Ok(Some(Some((o.0.clone(), merged))))
-                }
-                Some(1..=127) => Ok(None),
-                _ => Err(cmd::failed(&args, &out)),
+            if !out.status.success() {
+                return Ok(None);
             }
+            let merged = first_line(&out.stdout).context("git merge-file printed no id")?;
+            Ok(Some(Some((o.0.clone(), merged))))
         }
         _ => Ok(None),
     }
