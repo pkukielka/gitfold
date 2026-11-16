@@ -171,11 +171,16 @@ out=$("$BIN" -C "$REPO" changes -- d 2>"$T/err"); rc=$?
 eq "a branch git can't diff (no history shared with its parent): skipped, said, the rest kept" "0 api	uncommitted	d/c.txt
 mv	committed	d/c.txt yes" "$rc $out $(grep -q 'skipping branch api' "$T/err" && echo yes)"
 R config --unset branch.api.gitfoldParent; R branch -D -q unrel
+check "overlaps with a global pathspec setting of git's: no literal-pathspec clash" sh -c "GIT_GLOB_PATHSPECS=1 '$BIN' -C '$REPO' overlaps api; [ \$? != 1 ]"
 eq "a file with a trailing slash: nothing, committed or not, as git" "" "$(gfc -- a.txt/)"
 echo n >"$MNT/api/n"; mkdir "$MNT/ui/n"; echo m >"$MNT/ui/n/m"
 eq "a file in one workspace, a directory of that name in another" "api	uncommitted	n
 ui	uncommitted	n/m" "$(gfc -- n)"
 eq "and with a trailing slash, only the directory's" "ui	uncommitted	n/m" "$(gfc -- n/)"
+R config core.splitIndex true
+gfc -- n >/dev/null
+eq "a split index configured: nothing written into the repository" "" "$(ls "$COMMON" | grep sharedindex)"
+R config --unset core.splitIndex
 out=$("$BIN" -C "$REPO" changes -- ../x 2>&1); rc=$?
 eq "outside the work tree: refused by git, once" "1 0" "$rc $(grep -c 'skipping' <<<"$out")"
 unmount_fs

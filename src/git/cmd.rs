@@ -39,15 +39,16 @@ pub fn run(git_dir: &Path, args: &[&str]) -> Result<()> {
 /// Runs git with `args`, returning what it printed; a failure's error holds
 /// what git said.
 pub fn output(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
-    output_of(command(git_dir).args(args), args, None)
+    output_of(&mut command(git_dir), args, None)
 }
 
-/// Runs `command` (git, as `command` or `here` made it, `args` added), with
+/// Runs `command` (git, as `command` or `here` made it) with `args`, and
 /// `input` on its stdin if given; what it printed. A failure's error holds
 /// `args` and what git said.
 pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
-    let out = match input {
-        None => command.stdin(Stdio::null()).output()?,
+    command.args(args);
+    let (out, written) = match input {
+        None => (command.stdin(Stdio::null()).output()?, Ok(())),
         Some(input) => {
             let mut child = (command.stdin(Stdio::piped()))
                 .stdout(Stdio::piped())
@@ -57,10 +58,10 @@ pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -
             // A thread of its own: git may print before it has read it all.
             let writer = std::thread::spawn(move || stdin.write_all(&input));
             let out = child.wait_with_output()?;
-            writer.join().expect("the stdin writer")?;
-            out
+            (out, writer.join().expect("the stdin writer"))
         }
     };
+    // git's failure first: one that stopped reading leaves a broken pipe.
     if !out.status.success() {
         bail!(
             "git {} failed ({}): {}",
@@ -69,5 +70,6 @@ pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
+    written?;
     Ok(out.stdout)
 }

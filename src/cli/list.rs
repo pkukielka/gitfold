@@ -158,14 +158,16 @@ fn committed(
             "--name-only",
             "--no-relative",
             "-z",
+            "--no-renames",
+            &range,
+            "--",
         ];
         let args: Vec<&str> = (diff.into_iter())
-            .chain(["--no-renames", range.as_str(), "--"])
             .chain(typed.iter().map(String::as_str))
             .collect();
         // One branch git can't diff (no history shared with its parent)
         // doesn't hide the others.
-        match git::cmd::output_of(git::cmd::here().args(&args), &args, None) {
+        match git::cmd::output_of(&mut git::cmd::here(), &args, None) {
             Ok(out) => {
                 for path in out.split(|b| *b == 0).filter(|p| !p.is_empty()) {
                     lines.insert((path.to_vec(), branch.to_string(), "committed"));
@@ -190,9 +192,23 @@ fn matching<'a>(
     }
     let empty = git::with_repo(|repo| gix::ObjectId::empty_blob(repo.object_hash()));
     let entry = format!("100644 {empty} 0\t");
-    let update = ["--literal-pathspecs", "update-index", "-z", "--index-info"];
-    let list: Vec<&str> = ["--literal-pathspecs", "ls-files", "-z", "--full-name", "--"]
+    // A plain index, whatever the repository's are like: nothing of it
+    // (a split index's shared part) is written into the repository.
+    let plain = [
+        "-c",
+        "core.splitIndex=false",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.untrackedCache=false",
+        "--literal-pathspecs",
+    ];
+    let update: Vec<&str> = plain
         .into_iter()
+        .chain(["update-index", "-z", "--index-info"])
+        .collect();
+    let list: Vec<&str> = (plain.into_iter())
+        .chain(["ls-files", "-z", "--full-name", "--"])
         .chain(typed.iter().map(String::as_str))
         .collect();
     let dir = TempDir::new()?;
@@ -207,13 +223,13 @@ fn matching<'a>(
                 info.extend(*path);
                 info.push(0);
             }
-            let command = &mut git::cmd::here();
-            command.args(update).env("GIT_INDEX_FILE", &file);
-            git::cmd::output_of(command, &update, Some(info))?;
+            let mut command = git::cmd::here();
+            command.env("GIT_INDEX_FILE", &file);
+            git::cmd::output_of(&mut command, &update, Some(info))?;
         }
-        let command = &mut git::cmd::here();
-        command.args(&list).env("GIT_INDEX_FILE", &file);
-        let out = git::cmd::output_of(command, &list, None)?;
+        let mut command = git::cmd::here();
+        command.env("GIT_INDEX_FILE", &file);
+        let out = git::cmd::output_of(&mut command, &list, None)?;
         matching.extend(
             out.split(|b| *b == 0)
                 .filter(|p| !p.is_empty())
