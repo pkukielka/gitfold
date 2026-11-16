@@ -60,14 +60,21 @@ pub struct ParentArgs {
 /// `gitfold parent`: its exit code.
 pub fn parent(repo: &Path, args: ParentArgs) -> Result<i32> {
     let name = super::branch_or_current(args.branch, repo)?;
-    git::init(repo)?;
+    let common_dir = git::init(repo)?;
     for branch in std::iter::once(&name).chain(&args.set) {
         check_name(branch)?;
         git::require_branch(branch)?;
     }
-    if args.set.as_ref() == Some(&name) {
-        eprintln!("gitfold parent: a branch can't be its own parent");
-        return Ok(2);
+    if let Some(parent) = &args.set {
+        if *parent == name {
+            eprintln!("gitfold parent: a branch can't be its own parent");
+            return Ok(2);
+        }
+        let tree = crate::tree::Tree::read(&crate::settings::Local::read(&common_dir));
+        if tree.would_cycle(&name, parent) {
+            eprintln!("gitfold parent: {parent} is built on {name}: that would be a cycle");
+            return Ok(2);
+        }
     }
     Err(not_implemented("gitfold parent"))
 }

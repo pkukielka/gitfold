@@ -15,6 +15,7 @@ mod settings;
 mod shell;
 mod state;
 mod store;
+mod tree;
 
 use std::path::PathBuf;
 

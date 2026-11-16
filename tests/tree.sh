@@ -48,6 +48,9 @@ check "--none and --follow: refused" says 2 "cannot be used with" parent api --n
 check "--yes needs --update" says 2 "--update" parent api --yes
 check "--update and --set: refused" says 2 "cannot be used with" parent api --update --set main
 check "its own parent: refused" says 2 "can't be its own parent" parent api --set api
+R branch ui; R config branch.ui.gitfoldParent api
+check "a cycle: refused" says 2 "would be a cycle" parent api --set ui
+check "not a cycle: not implemented yet" says 1 "not implemented yet" parent ui --set main
 check "outside a workspace, the branch must be named" says 1 "not in a gitfold workspace" parent
 check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
 check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.txt

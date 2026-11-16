@@ -187,21 +187,10 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     Ok(if lines.is_empty() { 0 } else { FOUND })
 }
 
-/// The remote's default branch (`origin/HEAD`, normally `origin/main`), else
-/// `main`. Not the branch's upstream: after `git push -u` that is its own
-/// remote branch, which its work is ahead of.
+/// The main branch (`tree::main_branch`), or a hint to name a target.
 fn default_target(common_dir: &Path) -> Result<String> {
-    let out = git::cmd::command(common_dir)
-        .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
-        .output()?;
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if out.status.success() && !name.is_empty() && name != "origin/HEAD" {
-        return Ok(name);
-    }
-    match git::resolve("refs/heads/main") {
-        Ok(_) => Ok("main".to_string()),
-        Err(_) => bail!("no origin/HEAD and no branch main: name a target with --against"),
-    }
+    crate::tree::main_branch(common_dir)
+        .map_err(|e| anyhow::anyhow!("{e}: name a target with --against"))
 }
 
 /// Target `rev`: what it changed since it diverged from `base`, and, for a
@@ -240,7 +229,7 @@ pub struct OverlapsArgs {
     /// The workspace's branch (default: the workspace you are in).
     pub branch: Option<String>,
     /// What to compare with (repeatable; default: origin/HEAD, the remote's
-    /// default branch, else main).
+    /// default branch, else main, else master).
     #[arg(long, value_name = "REV")]
     pub against: Vec<String>,
     /// Compare with every other workspace (instead of the default target;
