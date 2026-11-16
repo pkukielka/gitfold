@@ -229,6 +229,9 @@ R remote add origin /nonexistent; R update-ref refs/remotes/origin/main main
 check "a remote-tracking parent" says 0 "created branch rt on origin/main" branch rt --parent origin/main
 check "  sets no upstream: no branch.rt.remote" fails R config branch.rt.remote
 check "  nor branch.rt.merge" fails R config branch.rt.merge
+R config branch.autoSetupMerge always
+check "a local parent with branch.autoSetupMerge=always" says 0 "created branch lt on main" branch lt --parent main
+check "  sets no upstream either" fails R config branch.lt.remote
 # Settings a deleted branch left (T2) don't carry over to a new one.
 R update-ref -d refs/heads/ui
 check "N5: following on, whatever a deleted branch of its name left" says 0 "created branch ui on main (following it)" branch ui --parent main
