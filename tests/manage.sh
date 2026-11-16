@@ -122,6 +122,78 @@ R update-ref -m commit refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m again
 eq "a commit alone (the branch's reflog) counts" yes "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print ($6 ~ /^[0-9]+s$/ ? "yes" : $6) }')"
 }
 
+# Commits on branch $1, without a work tree: $2 = PATH=CONTENT to write,
+# -PATH to delete, each in turn.
+commit_to() {
+    local b=$1 idx=$T/commit-index blob change; shift
+    GIT_INDEX_FILE=$idx R read-tree "$b"
+    for change in "$@"; do
+        case $change in
+            -*) GIT_INDEX_FILE=$idx R update-index --force-remove "${change#-}" ;;
+            *) blob=$(printf '%s\n' "${change#*=}" | R hash-object -w --stdin)
+               GIT_INDEX_FILE=$idx R update-index --add --cacheinfo "100644,$blob,${change%%=*}" ;;
+        esac
+    done
+    R update-ref "refs/heads/$b" "$(R commit-tree "$(GIT_INDEX_FILE=$idx R write-tree)" -p "$b" -m c)"
+}
+
+changes_of_paths() {
+R branch done; commit_to done d/c.txt=merged; R merge -q --ff-only done
+R branch api; commit_to api d/b.txt=api dx=x 's*r=glob' sar=s
+R branch ui api; R config branch.ui.gitfoldParent refs/heads/api; commit_to ui a.txt=ui
+R branch mv; commit_to mv -d/c.txt e/c.txt=merged
+R branch old; commit_to old x.txt=old; R branch orphan old; commit_to orphan y.txt=o
+R config branch.orphan.gitfoldParent refs/heads/old; R branch -D -q old
+mount_fs
+echo more >>"$MNT/api/d/c.txt"; echo more >>"$MNT/ui/a.txt"
+gfc() { "$BIN" -C "$REPO" changes "$@" 2>&1; }
+eq "a directory: everything below it, committed and uncommitted, by path (not dx; done is merged)" "api	committed	d/b.txt
+api	uncommitted	d/c.txt
+mv	committed	d/c.txt" "$(gfc -- d)"
+eq "a child: only its own commits (not api's d/b.txt), and its workspace" "ui	committed	a.txt
+ui	uncommitted	a.txt" "$(gfc -- a.txt d/b.txt | grep '^ui')"
+eq "a parent gone: its commits count against main" "orphan	committed	x.txt
+orphan	committed	y.txt" "$(gfc -- x.txt y.txt)"
+eq "a rename: both sides" "api	uncommitted	d/c.txt
+mv	committed	d/c.txt
+mv	committed	e/c.txt" "$(gfc -- d/c.txt e)"
+eq "paths taken literally" "api	committed	s*r" "$(gfc -- 's*r')"
+eq "relative to the current directory, in a workspace" "api	committed	d/b.txt" "$(cd "$MNT/api/d" && "$BIN" changes -- b.txt 2>&1)"
+eq "and in the repository's work tree" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- ../d/b.txt 2>&1)"
+eq "an absolute path" "api	committed	d/b.txt" "$(cd "$MNT/api/d" && "$BIN" changes -- "$MNT/api/d/b.txt" 2>&1)"
+eq "the root: everything" 11 "$(gfc -- . | wc -l)"
+eq "the root from a subdirectory" 11 "$(cd "$MNT/api/d" && "$BIN" changes -- .. 2>&1 | wc -l)"
+eq "a directory with a trailing slash" "$(gfc -- d)" "$(gfc -- d/)"
+eq "-z: NUL-terminated" "api	committed	d/b.txt|" "$(gfc -z -- d/b.txt | tr '\0' '|')"
+R update-ref refs/heads/unrel "$(R commit-tree "$(R mktree </dev/null)" -m unrelated)"
+R config branch.api.gitfoldParent refs/heads/unrel
+out=$("$BIN" -C "$REPO" changes -- d 2>"$T/err"); rc=$?
+eq "no history shared, silently: unrel with main (no parent, gh-pages style), api with its parent unrel" "0 api	uncommitted	d/c.txt
+mv	committed	d/c.txt " "$rc $out $(cat "$T/err")"
+R config --unset branch.api.gitfoldParent; R branch -D -q unrel
+check "overlaps with a global pathspec setting of git's: no literal-pathspec clash" sh -c "GIT_GLOB_PATHSPECS=1 '$BIN' -C '$REPO' overlaps api; [ \$? != 1 ]"
+eq "a file with a trailing slash: nothing, committed or not, as git" "" "$(gfc -- a.txt/)"
+echo n >"$MNT/api/n"; mkdir "$MNT/ui/n"; echo m >"$MNT/ui/n/m"
+eq "a file in one workspace, a directory of that name in another" "api	uncommitted	n
+ui	uncommitted	n/m" "$(gfc -- n)"
+eq "and with a trailing slash, only the directory's" "ui	uncommitted	n/m" "$(gfc -- n/)"
+R config core.splitIndex true
+gfc -- n >/dev/null
+eq "a split index configured: nothing written into the repository" "" "$(ls "$COMMON" | grep sharedindex)"
+R config --unset core.splitIndex
+out=$("$BIN" -C "$REPO" changes -- ../x 2>&1); rc=$?
+eq "outside the work tree: refused with git's own words only" "1 1 fatal: no" "$rc $(wc -l <<<"$out") ${out%% *} $(grep -qE 'ls-files|core\.|Error' <<<"$out" && echo yes || echo no)"
+unmount_fs
+git clone -q --depth 1 --no-single-branch "file://$REPO" "$T/shallow" 2>/dev/null; git -C "$T/shallow" branch -q api origin/api
+eq "a shallow clone: no history in common may be cut off, so said" yes "$("$BIN" -C "$T/shallow" changes -- d 2>&1 | grep -q 'skipping branch api' && echo yes)"
+R config core.worktree "$REPO"
+eq "core.worktree set, from a subdirectory" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- b.txt 2>&1)"
+R config --unset core.worktree
+R branch -m main trunk
+out=$("$BIN" -C "$REPO" changes -- a.txt 2>"$T/err"); rc=$?
+eq "no main branch: a note, then uncommitted changes only (unmounted)" "0 ui	uncommitted	a.txt yes" "$rc $out $(grep -q 'no main branch' "$T/err" && echo yes)"
+}
+
 branch_with_changes_a_fork() {
 R branch fk; R branch nv; R branch sl/x
 mount_fs
@@ -349,6 +421,7 @@ check "remove ec2 --force" "$BIN" -C "$REPO" remove ec2 --force
 
 section "branch, list, the current directory, remove, prune" story
 section "changes: edge cases" changes_edge_cases
+section "changes -- PATH: who is changing it" changes_of_paths
 section "branch --with-changes (a fork)" branch_with_changes_a_fork
 section "leftover state of a deleted branch" leftover_state_of_a_deleted_branch
 section "the lock leaves nothing behind" the_lock_leaves_nothing_behind
