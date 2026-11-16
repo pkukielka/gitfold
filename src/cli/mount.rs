@@ -21,6 +21,11 @@ use crate::{mount_table, prewarm, procs, settings};
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
 
+/// Set for the daemon `gitfold mount` starts in the background: the mount
+/// point and flags are recorded by that command, before it returns, not by
+/// the daemon at an unknown moment after (see `mount`).
+const RECORDED_BY_PARENT: &str = "GITFOLD_RECORDED_BY_MOUNT";
+
 /// The default log file of a mount at `mountpoint`:
 /// `$XDG_STATE_HOME/gitfold/<escaped mount point>.log`, by default under
 /// `~/.local/state`.
@@ -171,7 +176,10 @@ fn mount_again(common_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result
 pub fn mount(args: MountArgs) -> Result<()> {
     let mountpoint = daemon::check(&args.mountpoint)?;
     if args.foreground {
-        let flags = args.flags();
+        // Started by `gitfold mount` in the background: that one records.
+        let flags = std::env::var_os(RECORDED_BY_PARENT)
+            .is_none()
+            .then(|| args.flags());
         return serve::run(serve::Options {
             repo: args.repo,
             mountpoint,
@@ -184,11 +192,20 @@ pub fn mount(args: MountArgs) -> Result<()> {
             flags,
         });
     }
-    let log = match args.log {
+    let log = match &args.log {
         Some(log) => std::path::absolute(log)?,
         None => default_log(&mountpoint)?,
     };
     start(&mountpoint, &log)?;
+    // Recorded before returning, once the mount answers: a caller (one
+    // mounting it again) writes the config only after.
+    let recorded = std::path::absolute(&args.repo)
+        .map_err(anyhow::Error::from)
+        .and_then(|repo| crate::git::init(&repo))
+        .and_then(|common_dir| settings::set_mountpoint(&common_dir, &mountpoint, &args.flags()));
+    if let Err(e) = recorded {
+        eprintln!("warning: recording the mount point in the git config: {e:#}");
+    }
     println!(
         "mounted at {} (log: {})",
         mountpoint.display(),
@@ -214,6 +231,7 @@ fn start(mountpoint: &Path, log: &Path) -> Result<()> {
     let mut command = Command::new(std::env::current_exe()?);
     command
         .args(daemon_args(std::env::args_os().skip(1)))
+        .env(RECORDED_BY_PARENT, "1")
         .stdin(Stdio::null())
         .stdout(out.try_clone()?)
         .stderr(out);
