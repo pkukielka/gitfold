@@ -38,11 +38,11 @@ check "bare --on: the hint" says 2 "--parent P" branch c --on
 check "bare --merge: the hint" says 2 "--from A --from B" branch c --merge
 check "parent: shown" says 0 "api has no parent" parent api
 check "--none: done" says 0 "api has no parent" parent api --none
-check "--set: not implemented yet" says 1 "gitfold parent: not implemented yet" parent c --set main
-check "--update: not implemented yet" says 1 "gitfold parent: not implemented yet" parent c --update
-check "--update --yes: not implemented yet" says 1 "not implemented yet" parent api --update --yes
-check "--update --no-follow: not implemented yet, following unchanged" says 1 "not implemented yet" parent c --update --no-follow
-check "  (still following)" says 0 "c is built on api, following it" parent c
+check "--update" says 0 "c is up to date with api" parent c --update
+check "--update without a parent (exit 2)" says 2 "api has no parent to follow" parent api --update --yes
+check "--update --no-follow: following off, then updated" says 0 "c is up to date with api" parent c --update --no-follow
+check "  (not following)" says 0 "c is built on api, not following it" parent c
+check "--set" says 0 "c is now built on main" parent c --set main
 check "--set and --none: refused" says 2 "cannot be used with" parent api --set main --none
 check "--follow and --no-follow: refused" says 2 "cannot be used with" parent api --follow --no-follow
 check "--none and --follow: refused" says 2 "cannot be used with" parent api --none --follow
@@ -76,7 +76,8 @@ R switch -q w; echo w >>"$REPO/a.txt"; R commit -qam w; R switch -q main
 echo m >>"$REPO/a.txt"; R commit -qam m
 check "compare: local main" says 6 "W	main	a.txt" overlaps w
 check "R4: root: main" says 2 "main is the root of the tree" parent main --set w
-check "S7: building on the root: allowed (--set not implemented yet)" says 1 "not implemented yet" parent w --set main
+check "S7: building on the root: allowed (a conflict here: nothing moved, exit 4)" says 4 "w's commits conflict with main's on a.txt" parent w --set main
+R config --unset branch.w.gitfoldParent
 # A clone: origin/main at main, origin/HEAD pointing at it; local main
 # gets an unpushed commit of its own.
 remote_main
@@ -111,18 +112,19 @@ the_root() {
 R branch api; R branch develop
 R update-ref refs/remotes/origin/develop develop; R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/develop
 check "R2: origin/HEAD -> origin/develop: develop is the root" says 2 "develop is the root of the tree" parent develop --set api
-check "R2: and local main is an ordinary branch" says 1 "not implemented yet" parent main --set api
+check "R2: and local main is an ordinary branch (checked out here: not moved, exit 5)" says 5 "main is checked out in" parent main --set api
 }
 
 parent_names() {
 R branch api
-check "P1: a local branch" says 1 "not implemented yet" parent api --set main
+check "P1: a local branch" says 0 "api is now built on main" parent api --set main
 R remote add origin /nonexistent; remote_main; R update-ref refs/remotes/origin/feat main
-check "P2: a remote-tracking branch" says 1 "not implemented yet" parent api --set origin/feat
-check "P3: a full ref" says 1 "not implemented yet" parent api --set refs/remotes/origin/feat
+check "P2: a remote-tracking branch" says 0 "api is now built on origin/feat" parent api --set origin/feat
+check "P3: a full ref" says 0 "api is built on origin/feat already" parent api --set refs/remotes/origin/feat
 check "P3: a full ref that doesn't exist" says 3 "no branch refs/heads/nope" parent api --set refs/heads/nope
 R branch origin/feat main
-check "P4: local and remote-tracking of one name: the local branch, as in git" says 1 "not implemented yet" parent api --set origin/feat
+check "P4: local and remote-tracking of one name: the local branch, as in git" says 0 "api is now built on origin/feat" parent api --set origin/feat
+eq "  stored as the local branch" "refs/heads/origin/feat" "$(R config branch.api.gitfoldParent)"
 R branch -D -q origin/feat
 check "P5: only origin/feat: both ways out (exit 3)" says 3 "no branch feat (only origin/feat exists). Either: " parent api --set feat
 check "P5: naming both commands" says 3 "git branch feat origin/feat" parent api --set feat
@@ -132,15 +134,15 @@ R tag v1 main
 check "P6: a tag is no branch" says 3 "no branch v1: git takes it for refs/tags/v1" parent api --set v1
 R branch v1 main
 check "P6: a tag shadows a branch of its name, as in git" says 3 "no branch v1: git takes it for refs/tags/v1" parent api --set v1
-check "P3: the full ref names the branch" says 1 "not implemented yet" parent api --set refs/heads/v1
+check "P3: the full ref names the branch" says 0 "api is now built on v1" parent api --set refs/heads/v1
 R switch -q --orphan unborn
 check "P5: never origin/HEAD for HEAD (unborn HEAD)" lacks 3 "only origin" parent api --set HEAD
 R switch -q main
 # Names stand for what git takes them for: symbolic refs followed.
-check "origin/HEAD stands for origin/main" says 1 "not implemented yet" parent api --set origin/HEAD
-check "origin stands for origin/main, as in git" says 1 "not implemented yet" parent api --set origin
+check "origin/HEAD stands for origin/main" says 0 "api is now built on origin/main" parent api --set origin/HEAD
+check "origin stands for origin/main, as in git" says 0 "api is built on origin/main already" parent api --set origin
 R symbolic-ref refs/heads/trunk refs/heads/main
-check "an alias stands for its branch" says 1 "not implemented yet" parent api --set trunk
+check "an alias stands for its branch" says 0 "api is now built on main" parent api --set trunk
 check "S4: an alias of the root is the root" says 2 "main is the root of the tree" parent trunk --set api
 # P5 looks at configured remotes only, by name.
 R remote add team/a /nonexistent; R update-ref refs/remotes/team/a/x main
@@ -157,7 +159,7 @@ check "P5: not origin/fix/test for test" lacks 3 "only" parent api --set test
 }
 
 parent_set() {
-R branch api; R branch ui; R config branch.ui.gitfoldParent refs/heads/api
+R branch api; R branch ui; R branch web; R config branch.ui.gitfoldParent refs/heads/api
 check "S1: B doesn't exist (exit 3)" says 3 "gitfold parent: no branch nope" parent nope --set api
 check "S1: and nothing was created" fails R rev-parse -q --verify refs/heads/nope
 check "S1: without --set too (exit 3)" says 3 "gitfold parent: no branch nope" parent nope
@@ -165,12 +167,12 @@ check "S2: P doesn't resolve (exit 3)" says 3 "gitfold parent: no branch nope" p
 check "S4: B is the root (exit 2)" says 2 "main is the root of the tree" parent main --set api
 check "S5: P is B (exit 2)" says 2 "a branch can't be its own parent" parent api --set api
 check "S6: a cycle (exit 2)" says 2 "ui is built on api: that would be a cycle" parent api --set ui
-check "S7: accepted (not implemented yet)" says 1 "gitfold parent: not implemented yet" parent ui --set main
-check "S7: the root as a parent, accepted" says 1 "not implemented yet" parent api --set main
+check "S7: accepted" says 0 "ui is now built on main" parent ui --set main
+check "S7: the root as a parent, accepted" says 0 "web is now built on main" parent web --set main
 check "F6: --follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --follow
 check "F6: --no-follow without a parent (exit 2)" says 2 "api has no parent to follow" parent api --no-follow
-check "F6: with a parent: --no-follow accepted" says 0 "ui doesn't follow api" parent ui --no-follow
-check "F6: with a parent: --follow accepted" says 0 "ui follows api" parent ui --follow
+check "F6: with a parent: --no-follow accepted" says 0 "ui doesn't follow main" parent ui --no-follow
+check "F6: with a parent: --follow accepted" says 0 "ui follows main" parent ui --follow
 check "F6 on the root: the root has no parent (S4)" says 2 "main is the root of the tree" parent main --follow
 }
 
@@ -249,12 +251,188 @@ stored_tree() {
 R branch api; R branch ui
 R config branch.main.gitfoldParent refs/heads/ui
 R config branch.ui.gitfoldParent refs/heads/api
-check "T1: a parent stored on the root is ignored (no cycle through it)" says 1 "not implemented yet" parent api --set main
+check "T1: a parent stored on the root is ignored (no cycle through it)" says 0 "api is now built on main" parent api --set main
 R config branch.api.gitfoldParent refs/heads/ui
 check "T4: a hand-made cycle: walks stop, joining it refused" says 2 "would be a cycle" parent api --set ui
 R config --unset branch.api.gitfoldParent
 printf '[branch "x"\n' >>"$REPO/.git/config"
 check "T5: an unreadable config fails (exit 1)" says 1 "configuration could not be loaded" parent api --set main
+}
+
+# Moves of branches without a workspace (spec sections 2 and 3): git rebase
+# does them, in a worktree of its own.
+# A commit on branch $1 (not checked out after) appending $3 to file $2.
+on() { R switch -q "$1"; echo "$3" >>"$REPO/$2"; R add "$2"; R commit -qm "$1: $3"; R switch -q main; }
+own() { R rev-list --count "$1..$2"; }
+# git rebase commits: it needs a committer, as anywhere.
+identity() { R config user.name t; R config user.email t@t; }
+
+moves() {
+identity; on main f.txt base
+R branch api
+check "branch --parent records where its own commits start" says 0 "created branch ui on api" branch ui --parent api
+eq "  at P's tip" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/ui)"
+on ui u.txt one; on ui u.txt two; on api a.txt new
+check "--update: moved onto the parent's new commits" says 0 "moved 2 commits of ui onto api" parent ui --update
+check "  ui sits on api" R merge-base --is-ancestor api ui
+eq "  with its own commits only" "2" "$(own api ui)"
+eq "  its base recorded" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/ui)"
+check "  no move left behind" fails R config branch.ui.gitfoldMoving
+check "  nor a worktree" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
+check "up to date" says 0 "ui is up to date with api" parent ui --update
+# api takes one of ui's changes as it is: git rebase drops it from ui.
+R switch -q api; R cherry-pick -x ui~1 >/dev/null; R switch -q main
+check "a commit already in the parent: dropped, as git rebase does" says 0 "(1 commit already in api: dropped)" parent ui --update
+eq "  one own commit left" "1" "$(own api ui)"
+# api rewritten (its last commit amended): only ui's own commit moves.
+R switch -q api; R commit -q --amend -m "api: amended"; R switch -q main
+check "a parent rewritten: only its own commits move" says 0 "moved 1 commit of ui onto api" parent ui --update
+eq "  one own commit" "1" "$(own api ui)"
+# A conflict: nothing moves, recorded until api changes again.
+on api u.txt theirs; on ui u.txt mine
+before=$(R rev-parse ui)
+check "a conflict: exit 4, the paths named, the rebase to run by hand" says 4 "ui's commits conflict with api's on u.txt. Rebase by hand (git rebase api ui)" parent ui --update
+eq "  nothing moved" "$before" "$(R rev-parse ui)"
+check "  no rebase left anywhere" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
+check "  shown by parent" says 0 "following paused: ui's commits conflict with api's on u.txt" parent ui
+R switch -q api; R revert --no-edit HEAD >/dev/null; R switch -q main
+check "  forgotten once the parent changed" lacks 0 "conflict" parent ui
+check "  and the move goes through" says 0 "moved 2 commits of ui onto api" parent ui --update
+check "  the record cleared" fails R config branch.ui.gitfoldConflict
+# api takes one of ui's commits, then changes the same line again: git
+# rebase skips the commit by patch id (replayed, it would conflict).
+on ui g.txt mine; on ui h.txt other
+R switch -q api; R cherry-pick -x ui~1 >/dev/null; echo again >>"$REPO/g.txt"; R commit -qam "api: again"; R switch -q main
+check "a commit the parent has, changed since: skipped by patch id" says 0 "(1 commit already in api: dropped)" parent ui --update
+# ui takes api's new commits by hand (a merge, fast-forward here, of api),
+# then api moves on: api's commits aren't ui's own.
+on api a.txt more; R switch -q ui; R rebase -q api; R switch -q main
+own_before=$(own api ui)
+on api a.txt evenmore
+check "commits taken by hand: only its own move" says 0 "moved $own_before commits of ui onto api" parent ui --update
+# gitfold run with git's environment set (from a hook): its rebase still
+# acts on the branch, not on the checkout the environment points at.
+on api a.txt hooked; head=$(R rev-parse HEAD)
+check "git's environment set: moved all the same" sh -c "cd / && GIT_DIR='$REPO/.git' GIT_WORK_TREE='$REPO' GIT_INDEX_FILE='$REPO/.git/index' '$BIN' -C '$REPO' parent ui --update"
+eq "  the checkout untouched" "$head refs/heads/main" "$(R rev-parse HEAD) $(R symbolic-ref HEAD)"
+check "  and clean" sh -c "[ -z \"\$(git -C '$REPO' status --porcelain)\" ]"
+check "moves don't make the repository look used with mounts" test ! -e "$REPO/.git/gitfold"
+# A merge in the parent's history isn't one of the branch's own commits.
+R branch side main; on side s.txt s
+R switch -q api; R merge -q --no-ff --no-edit side; R switch -q main
+R branch plain api; on plain p.txt p; on api a.txt after
+check "a merge in the parent's history: moved all the same" says 0 "moves 1 commit of plain onto api" parent plain --set api
+# Conflicting paths are said and recorded as git quotes them.
+"$BIN" -C "$REPO" branch q --parent api >/dev/null
+on q 'n"q.txt' mine; on api 'n"q.txt' theirs
+check "a conflict on a path git quotes: quoted" says 4 'conflict with api'"'"'s on "n\"q.txt"' parent q --update
+eq "  recorded so" '"n\"q.txt"' "$(R config branch.q.gitfoldConflict | sed -n 2p)"
+check "  shown as a pause while following" says 0 "following paused" parent q
+R config branch.q.gitfoldFollow false
+check "  not while not following" lacks 0 "paused" parent q
+}
+
+pushed() {
+identity; on main f.txt base
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+on ui u.txt one; on ui u.txt two
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui~1
+on api a.txt new
+before=$(R rev-parse ui)
+check "pushed commits: not moved" says 1 "1 commit is pushed. \`gitfold parent ui --update --yes\` moves them; then force-push with: git push --force-with-lease=ui:$(R rev-parse ui~1) origin ui" parent ui --update
+eq "  nothing moved" "$before" "$(R rev-parse ui)"
+check "  shown by parent" says 0 "following paused: 1 commit is pushed" parent ui
+check "--yes moves them, and says how to push" says 0 "force-push with: git push --force-with-lease=ui:$(R rev-parse ui~1) origin ui" parent ui --update --yes
+check "  moved" R merge-base --is-ancestor api ui
+# Only its same-name branch counts: not its upstream (here another branch).
+R update-ref -d refs/remotes/origin/ui
+R update-ref refs/remotes/origin/other ui; R config branch.ui.remote origin; R config branch.ui.merge refs/heads/other
+on api a.txt newer
+check "never compared with its upstream" says 0 "moved 2 commits of ui onto api" parent ui --update
+# --set with pushed commits: built on the new parent, following paused.
+R update-ref refs/remotes/origin/ui ui
+check "--set with pushed commits: the parent set, the move paused" says 0 "ui is now built on main; following paused: 2 commits are pushed" parent ui --set main
+eq "  stored" "refs/heads/main" "$(R config branch.ui.gitfoldParent)"
+check "  then --update --yes moves only its own commits" says 0 "moved 2 commits of ui onto main" parent ui --update --yes
+eq "  api's commits gone from it" "2" "$(own main ui)"
+# A branch built on its own remote branch: its commits there aren't
+# "pushed" ones to protect (they are its parent's).
+R update-ref refs/remotes/origin/feat main; "$BIN" -C "$REPO" branch feat --parent origin/feat >/dev/null
+# Pushed, then a collaborator's commit on top of it, fetched; then one more
+# of its own.
+on feat x.txt mine; R update-ref refs/remotes/origin/feat feat
+R switch -q --detach feat; echo theirs >"$REPO/y.txt"; R add y.txt; R commit -qm theirs
+R update-ref refs/remotes/origin/feat HEAD; R switch -q main
+on feat z.txt mine2
+check "built on its own remote branch: not paused" says 0 "moved 1 commit of feat onto origin/feat" parent feat --update
+}
+
+not_moved() {
+identity; on main f.txt base
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+on ui u.txt one; on api a.txt new
+# A merge among its own commits.
+R branch side main; on side s.txt s
+R switch -q ui; R merge -q --no-ff --no-edit side; R switch -q main
+check "a merge among its own commits: not moved" says 1 "ui's own commits include a merge" parent ui --update
+R branch elsewhere main; on elsewhere e.txt e
+check "--set with such a merge: refused" says 1 "ui's own commits include a merge" parent ui --set elsewhere
+eq "  its parent unchanged" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
+check "--set where it sits already, merge and all: up to date" says 0 "ui is now built on main" parent ui --set main
+R config branch.ui.gitfoldParent refs/heads/api
+R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
+# Checked out in a git worktree: never moved by gitfold.
+R worktree add -q "$T/wt" ui
+check "checked out in a git worktree: refused (exit 5)" says 5 "ui is checked out in $T/wt" parent ui --update
+R worktree remove "$T/wt"
+# A workspace's branch: not yet.
+mkdir -p "$REPO/.git/gitfold/ui"
+check "a workspace's branch: not implemented yet" says 1 "gitfold parent --update for a workspace's branch: not implemented yet" parent ui --update
+rmdir "$REPO/.git/gitfold/ui"
+# A move a crash interrupted after git moved the branch: its base recorded.
+R update-ref refs/gitfold-base/ui main~1
+R config branch.ui.gitfoldMoving "$(R rev-parse main~1) $(R rev-parse api~1)"
+check "an interrupted move: finished by the next move" says 0 "moved 1 commit of ui onto api" parent ui --update
+eq "  only its own commit moved (its base was recorded first)" "1" "$(own api ui)"
+check "  the record gone" fails R config branch.ui.gitfoldMoving
+# A move recorded that never happened (the branch is where it was, though
+# on the target's history): forgotten, nothing written.
+R config branch.ui.gitfoldMoving "$(R rev-parse ui) $(R rev-parse main~1)"
+check "a recorded move that didn't happen: forgotten" says 0 "ui is up to date with api" parent ui --update
+eq "  its base unchanged" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/ui)"
+check "  the record gone" fails R config branch.ui.gitfoldMoving
+# A record that can't be read: reported, and left for the user.
+R config branch.ui.gitfoldMoving "not a record"
+check "a record that can't be read: reported (exit 1)" says 1 "branch.ui.gitfoldMoving holds \"not a record\"" parent ui --update
+check "  and left" R config branch.ui.gitfoldMoving
+R config --unset branch.ui.gitfoldMoving
+# --set that conflicts: nothing moves; built on P all the same, following
+# paused by the conflict recorded (back is --set the old parent).
+R branch other main; on other u.txt other-side
+before=$(R rev-parse ui)
+check "--set with a conflict: nothing moves (exit 4), built on P, paused" says 4 "ui is now built on other; following paused" parent ui --set other
+eq "  built on other" "refs/heads/other" "$(R config branch.ui.gitfoldParent)"
+eq "  nothing moved" "$before" "$(R rev-parse ui)"
+check "  shown paused" says 0 "following paused: ui's commits conflict with other's" parent ui
+check "  back by --set the old parent" says 0 "ui is now built on api" parent ui --set api
+# The tree changes one --set at a time.
+mkdir -p "$REPO/.git/gitfold-moves"
+check "another --set changing the tree: refused (exit 5)" sh -c "flock '$REPO/.git/gitfold-moves/.tree.lock' sh -c \"GITFOLD_TEST_TREE_WAIT=0 '$BIN' -C '$REPO' parent ui --set main; [ \\\$? = 5 ]\""
+# A move's worktree a dead process left: cleaned up by the next move.
+on api a.txt newer
+R -c worktree.useRelativePaths=true worktree add -q --no-checkout "$REPO/.git/gitfold-moves/gitfold-move-ui" ui
+check "a dead move's worktree: cleaned up" says 0 "moved 1 commit of ui onto api" parent ui --update
+check "  gone" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
+# --set: its own commits onto another parent.
+check "--set: says what moves" says 0 "moves 1 commit of ui onto main" parent ui --set main
+eq "  only its own commits" "1" "$(own main ui)"
+check "  api's commits gone from it" fails R merge-base --is-ancestor api ui
+check "--set --no-follow: following off" says 0 "ui is now built on api" parent ui --set api --no-follow
+eq "  stored" "false" "$(R config branch.ui.gitfoldFollow)"
+check "--set the same parent --follow: only following changes" says 0 "ui is built on api already" parent ui --set api --follow
+check "  on" fails R config branch.ui.gitfoldFollow
+check "--none: the base forgotten" says 0 "ui no longer has a parent" parent ui --none
+check "  the ref gone" fails R rev-parse -q --verify refs/gitfold-base/ui
 }
 
 section "tree: the command-line contract" the_contract
@@ -265,4 +443,7 @@ section "tree: rules S, F (parent --set)" parent_set
 section "tree: rules N (branch --parent)" branch_parent
 section "tree: rules T (the stored tree)" stored_tree
 section "tree: the relation (F, T)" relation
+section "tree: moves (--update, --set)" moves
+section "tree: pushed commits" pushed
+section "tree: what isn't moved, and crashes" not_moved
 finish

@@ -92,14 +92,16 @@ fn write_gitdir(dir: &Path, gitfile: &Path) -> std::io::Result<()> {
 /// not otherwise referenced once its branch moves on). Goes through `git
 /// update-ref`, which handles every ref backend (files, packed, reftable).
 pub fn pin(common_dir: &Path, name: &str, commit: &ObjectId) -> Result<()> {
-    let commit = commit.to_string();
-    super::cmd::run(
-        common_dir,
-        &["update-ref", "-m", "gitfold: workspace base", name, &commit],
-    )
+    set_ref(common_dir, name, commit, "gitfold: workspace base")
 }
 
-/// Deletes ref `name` (a workspace's base pin), if it exists.
+/// Points ref `name` at `commit`, with reflog message `why`.
+pub fn set_ref(common_dir: &Path, name: &str, commit: &ObjectId, why: &str) -> Result<()> {
+    let commit = commit.to_string();
+    super::cmd::output(common_dir, &["update-ref", "-m", why, name, &commit]).map(drop)
+}
+
+/// Deletes ref `name` (a workspace's base pin, say), if it exists.
 pub fn unpin(common_dir: &Path, name: &str) -> Result<()> {
     if crate::git::resolve(name).is_err() {
         return Ok(());
@@ -168,6 +170,52 @@ impl std::fmt::Display for GitBusy {
             GitBusy::RefLocked => write!(f, "a ref is locked"),
         }
     }
+}
+
+/// Where `branch` is checked out, but in the worktree with admin directory
+/// `except`: git allows one checkout per branch. A worktree in the middle
+/// of a rebase or bisect of the branch (detached meanwhile) counts too, as
+/// for git. Said as "the main worktree" or the worktree's path (its name if
+/// that can't be read).
+pub fn checked_out(common_dir: &Path, branch: &str, except: Option<&Path>) -> Option<String> {
+    let full = format!("refs/heads/{branch}");
+    let head = format!("ref: {full}");
+    let reads = |dir: &Path, file: &str, want: &str| {
+        fs::read_to_string(dir.join(file)).is_ok_and(|s| s.trim() == want)
+    };
+    let is_ours = |dir: &Path| {
+        reads(dir, "HEAD", &head)
+            || reads(dir, "rebase-merge/head-name", &full)
+            || reads(dir, "rebase-apply/head-name", &full)
+            || reads(dir, "BISECT_START", branch)
+    };
+    // A bare repository's HEAD names a branch but checks nothing out.
+    if !crate::git::is_bare() && is_ours(common_dir) {
+        return Some("the main worktree".into());
+    }
+    let worktrees = fs::read_dir(common_dir.join("worktrees")).ok()?;
+    worktrees.flatten().find_map(|w| {
+        let name = w.file_name().to_string_lossy().into_owned();
+        (Some(w.path().as_path()) != except && is_ours(&w.path())).then(|| {
+            // Relative to the registration with `worktree.useRelativePaths`
+            // (resolved by name only: no filesystem access, which on a
+            // workspace's path would be a request to this very mount).
+            fs::read_to_string(w.path().join("gitdir")).map_or(name, |g| {
+                let mut path = PathBuf::new();
+                for part in w.path().join(g.trim()).components() {
+                    match part {
+                        std::path::Component::ParentDir => {
+                            path.pop();
+                        }
+                        std::path::Component::CurDir => {}
+                        part => path.push(part),
+                    }
+                }
+                path.pop(); // the `.git` file
+                path.to_string_lossy().into_owned()
+            })
+        })
+    })
 }
 
 /// Whether `name` (in `<common>/worktrees/`) is a snapshot registration
