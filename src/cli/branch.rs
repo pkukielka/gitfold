@@ -153,54 +153,75 @@ fn merged(
     git::cmd::output(repo, &["branch", "--no-track", "--", name, first])?;
     let at = git::branch_tip(name)?.id.to_string();
     let workspace = mount.join(name);
-    // Looking it up opens it. git run as in a shell there: nothing of a
-    // caller's repository (a hook's) in its environment.
-    let merge = fs::metadata(&workspace)
-        .with_context(|| format!("opening workspace {}", workspace.display()))
-        .and_then(|_| {
-            let status = Command::new("git")
-                .current_dir(&workspace)
-                .env_remove("GIT_DIR")
-                .env_remove("GIT_WORK_TREE")
-                .env_remove("GIT_INDEX_FILE")
-                .env_remove("GIT_COMMON_DIR")
-                .args(["merge", "--end-of-options"])
-                .args(others)
-                .status();
-            status.context("running git merge")
-        });
-    let admin = StateDir::of(common_dir, name).admin;
-    let in_progress =
-        || git::cmd::output(&admin, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
+    // Before the workspace opens: it opens with them.
+    let merge = set_branch_settings(repo, name, prewarm, track_reads)
+        // Looking it up opens it.
+        .and_then(|()| {
+            fs::metadata(&workspace)
+                .with_context(|| format!("opening workspace {}", workspace.display()))
+        })
+        .and_then(|_| run_merge(common_dir, &workspace, others));
     match merge {
-        Ok(status) if status.success() => {
-            set_branch_settings(repo, name, prewarm, track_reads)?;
+        Ok(true) => {
             println!("created branch {name}; open it as {}", workspace.display());
             Ok(())
         }
-        Ok(_) if in_progress() => {
-            set_branch_settings(repo, name, prewarm, track_reads)?;
+        // Stopped by a conflict, or by a hook or an empty message: git says.
+        Ok(false)
+            if StateDir::of(common_dir, name)
+                .admin
+                .join("MERGE_HEAD")
+                .is_file() =>
+        {
             bail!(
-                "created branch {name} with its merge in progress: resolve the conflicts in \
-                 {}, then `git merge --continue` there (or `git merge --abort`)",
+                "created branch {name} with its merge in progress (see above): finish it in {} \
+             with `git merge --continue`, or `git merge --abort`",
                 workspace.display()
             )
         }
         failed => {
+            let failed = match failed {
+                Ok(_) => anyhow::anyhow!("git merge failed"),
+                Err(e) => e,
+            };
             // Created here, and git put it back as it was: nothing to keep.
-            if let Err(e) = super::remove::remove_once(common_dir, name, true, false) {
-                log::warn!("removing the workspace of {name} again: {e:#}");
+            // The branch goes last: without it, its workspace couldn't be
+            // removed.
+            let state = StateDir::of(common_dir, name);
+            let opened = state.dir.exists() || state.admin.exists();
+            if let Err(e) = opened
+                .then(|| super::remove::remove_once(common_dir, name, true, false))
+                .transpose()
+            {
+                return Err(failed.context(format!(
+                    "branch {name} created, but removing its workspace failed ({e:#}): \
+                     `gitfold remove --force {name}`, then `git branch -D {name}`"
+                )));
             }
+            settings::forget_workspace(repo, name)?;
             let branch = format!("refs/heads/{name}");
-            if let Err(e) = git::cmd::output(common_dir, &["update-ref", "-d", &branch, &at]) {
-                log::warn!("deleting branch {name} again: {e:#}");
-            }
-            match failed {
-                Ok(status) => bail!("git merge failed ({status}): branch {name} not created"),
-                Err(e) => Err(e.context(format!("branch {name} not created"))),
-            }
+            git::cmd::output(common_dir, &["update-ref", "-d", &branch, &at])?;
+            Err(failed.context(format!("branch {name} not created")))
         }
     }
+}
+
+/// Runs `git merge` of `revs` in workspace `workspace`, its messages the
+/// user's; whether it made the merge. As in a shell there: none of the
+/// variables that tie git to another repository (a hook's caller), as `git
+/// rev-parse --local-env-vars` lists them.
+fn run_merge(common_dir: &Path, workspace: &Path, revs: &[String]) -> Result<bool> {
+    let local = git::cmd::output(common_dir, &["rev-parse", "--local-env-vars"])?;
+    let mut git = Command::new("git");
+    for var in String::from_utf8_lossy(&local).lines() {
+        git.env_remove(var);
+    }
+    let status = (git.current_dir(workspace))
+        .args(["merge", "--end-of-options"])
+        .args(revs)
+        .status()
+        .context("running git merge")?;
+    Ok(status.success())
 }
 
 /// Refuses `name` if git doesn't take it as a branch name, as `git branch`

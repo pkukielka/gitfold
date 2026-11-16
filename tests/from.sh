@@ -55,7 +55,8 @@ setup() {
 
 clean_merges() {
 setup
-check "two sources: created, git saying how" says 0 "created branch c; open it as $MNT/c" branch c --from api --from ui
+check "two sources: created, git saying how" says 0 "created branch c; open it as $MNT/c" branch c --from api --from ui --prewarm none
+eq "  with its setting" none "$(R config --get branch.c.gitfoldPrewarm)"
 eq "  as git merge makes it" "$(git_merge c api ui)" "$(made c)"
 eq "  its workspace shows it, clean" "api ui " "$(cat "$MNT/c/api.txt" "$MNT/c/ui.txt" | tr '\n' ' ')$(W c status --porcelain)"
 check "three: an octopus" says 0 "Merge made by the 'octopus' strategy." branch c3 --from api --from ui --from x
@@ -73,7 +74,7 @@ R config merge.ff false
 check "merge.ff=false: a merge, as git" says 0 "created branch n" branch n --from main --from api
 eq "  as git merge makes it" "$(git_merge n main api)" "$(made n)"
 R config --unset merge.ff
-eq "no relation afterwards" "" "$(R config --get-regexp '^branch\.(c|c3)\.' || true)"
+eq "no relation afterwards" "" "$(R config --get-regexp '^branch\.(c|c3)\.(remote|merge|gitfoldparent)' || true)"
 }
 
 refused() {
@@ -94,6 +95,8 @@ check "  nothing left behind" nothing_of c
 check "an unknown first revision: git branch's refusal" says 1 "not a valid object name" branch c --from nosuch --from api
 check "  nothing left behind" nothing_of c
 check "an existing branch" says 1 "a branch named 'ui' already exists" branch ui --from api --from x
+check "refused with --prewarm: the setting goes too" says 1 "refusing to merge unrelated histories" branch c --from api --from lone --prewarm none
+eq "  no setting left" "" "$(R config --get branch.c.gitfoldPrewarm)"
 check "-w with several: not implemented yet" says 1 "not implemented yet" branch c -w --from api --from ui
 check "  nothing left behind" nothing_of c
 }
@@ -101,7 +104,7 @@ check "  nothing left behind" nothing_of c
 conflicts() {
 setup
 work clash main api.txt clash; work clash2 main ui.txt clash2
-check "a conflict: exit 1, git's merge in progress" says 1 "created branch c with its merge in progress: resolve the conflicts in $MNT/c, then \`git merge --continue\`" branch c --from api --from clash
+check "a conflict: exit 1, git's merge in progress" says 1 "created branch c with its merge in progress (see above): finish it in $MNT/c with \`git merge --continue\`, or \`git merge --abort\`" branch c --from api --from clash
 eq "  git status says so" "AA api.txt" "$(W c status --porcelain)"
 check "  the markers in the file" grep -q '^<<<<<<< HEAD' "$MNT/c/api.txt"
 echo resolved >"$MNT/c/api.txt"; W c add api.txt
@@ -116,6 +119,10 @@ check "unmounted, remounted: still in progress" says 1 "merge in progress" branc
 unmount_fs; mount_fs
 eq "  git status says so" "AA api.txt" "$(W c4 status --porcelain)"
 check "  git merge --abort" W c4 merge --abort
+printf '#!/bin/sh\nexit 1\n' >"$COMMON/hooks/pre-merge-commit"; chmod +x "$COMMON/hooks/pre-merge-commit"
+check "stopped by a hook: in progress, no conflict claimed" says 1 "merge in progress (see above)" branch h --from api --from ui
+eq "  nothing conflicts" "" "$(W h diff --name-only --diff-filter=U)"
+rm "$COMMON/hooks/pre-merge-commit"
 }
 
 unmounted() {
