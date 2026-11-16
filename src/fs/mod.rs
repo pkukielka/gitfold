@@ -618,11 +618,13 @@ impl Filesystem for GitFold {
     // kernel stops asking the whole mount after one ENOSYS.
     fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
         bump(&self.counters.xattr);
-        match self.conflict(ino.0) {
-            Some(value) if name.as_bytes() == views::shown::CONFLICT_XATTR => {
-                reply_xattr(value.as_bytes(), size, reply)
-            }
-            _ => reply.error(Errno::ENODATA),
+        // The name first: `ls -l` asks every file for `security.selinux`.
+        let value = (name.as_bytes() == views::shown::CONFLICT_XATTR)
+            .then(|| self.conflict(ino.0))
+            .flatten();
+        match value {
+            Some(value) => reply_xattr(value.as_bytes(), size, reply),
+            None => reply.error(Errno::ENODATA),
         }
     }
 

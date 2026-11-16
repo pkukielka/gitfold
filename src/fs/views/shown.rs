@@ -8,12 +8,12 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use gix::objs::tree::EntryKind;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 
 use super::build::{self, Entry, View};
 use super::members::Note;
 use crate::inode;
-use crate::state::{ancestors, join};
+use crate::state::{ancestors, join, parent};
 use crate::store::{Lower, Store};
 
 /// The summary file at a view's root: every conflict and note, one per line
@@ -34,6 +34,24 @@ pub enum Obj {
     Summary(Arc<Vec<u8>>),
 }
 
+/// The type of file an `Obj` is, as the kernel sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Kind {
+    Dir,
+    Symlink,
+    File,
+}
+
+impl Obj {
+    pub fn kind(&self, store: &Store) -> Kind {
+        match self {
+            Obj::Dir => Kind::Dir,
+            Obj::File(e) if matches!(e.kind(store), Ok(EntryKind::Link)) => Kind::Symlink,
+            Obj::File(_) | Obj::Summary(_) => Kind::File,
+        }
+    }
+}
+
 pub struct Shown {
     pub view: View,
     /// Directories that hold only the overlay's files.
@@ -44,14 +62,12 @@ pub struct Shown {
     conflicts: HashMap<Vec<u8>, String>,
     summary: Arc<Vec<u8>>,
     times: Times,
-    /// When this was made: the time of the directories and the summary.
-    pub made: SystemTime,
 }
 
 /// When a view's paths last changed (those not here: never, they show
 /// `inode::file_time`), shared by the views it was built as, so each refresh
 /// adds to it rather than copying it.
-pub type Times = Arc<Mutex<HashMap<Vec<u8>, SystemTime>>>;
+pub type Times = Arc<RwLock<HashMap<Vec<u8>, SystemTime>>>;
 
 impl Shown {
     /// `view` as shown, after `before` (none: the first): with the paths
@@ -94,16 +110,23 @@ impl Shown {
             conflicts,
             summary: Arc::new(summary),
             times: times.clone(),
-            made,
         };
         let changed = match before {
             Some(before) => changed(store, before, &shown),
             None => Vec::new(),
         };
-        let mut times = times.lock();
+        // The root keeps the time it was first built at: its attributes are
+        // also read outside the view (`@committed`'s listing).
+        let mut times = times.write();
+        times.entry(Vec::new()).or_insert(made);
         let first = before.is_none().then(|| shown.view.overlay.keys());
         for path in changed.iter().chain(first.into_iter().flatten()) {
             times.insert(path.clone(), made);
+            // Its directory's listing changed.
+            let dir = parent(path);
+            if !dir.is_empty() {
+                times.insert(dir.to_vec(), made);
+            }
         }
         drop(times);
         (shown, changed)
@@ -199,7 +222,7 @@ impl Shown {
 
     /// When `path` last changed.
     pub fn time(&self, path: &[u8]) -> SystemTime {
-        (self.times.lock().get(path).copied()).unwrap_or_else(inode::file_time)
+        (self.times.read().get(path).copied()).unwrap_or_else(inode::file_time)
     }
 }
 

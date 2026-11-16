@@ -32,9 +32,9 @@ impl Item {
     /// `obj` at `path` of `shown`.
     fn of(shown: &Shown, obj: &Obj, path: &[u8]) -> Item {
         match obj {
-            Obj::Dir => Item::Dir(shown.made),
+            Obj::Dir => Item::Dir(shown.time(path)),
             Obj::File(entry) => Item::File(entry.clone(), shown.time(path)),
-            Obj::Summary(data) => Item::Summary(data.clone(), shown.made),
+            Obj::Summary(data) => Item::Summary(data.clone(), shown.time(path)),
         }
     }
 }
@@ -71,23 +71,26 @@ impl ViewDir {
     /// changed (a file now a directory) gets a node of its own: the kernel's
     /// inode keeps its type.
     pub fn swap(&self, store: &Store, shown: Shown, changed: &[Vec<u8>]) {
-        {
-            let mut current = self.shown.write();
-            let mut nodes = self.nodes.lock();
-            let kind = |s: &Shown, p: &[u8]| s.obj(store, p).map(|o| matches!(o, Obj::Dir));
-            for path in changed {
-                let was = kind(&current, path);
-                if was.is_some()
-                    && was != kind(&shown, path)
-                    && let Some(dir) = held(&nodes, parent(path))
-                {
-                    nodes.orphan(dir, name(path));
-                }
+        // Only the watch swaps: the current one can be read unlocked.
+        let current = self.shown();
+        let kind = |s: &Shown, p: &[u8]| s.obj(store, p).map(|o| o.kind(store));
+        let retyped: Vec<&Vec<u8>> = (changed.iter())
+            .filter(|p| {
+                let was = kind(&current, p);
+                was.is_some() && was != kind(&shown, p)
+            })
+            .collect();
+        // No request is served meanwhile: none can claim a node from the old
+        // view and answer with the old kind.
+        let _gate = self.gate.write();
+        let mut nodes = self.nodes.lock();
+        for path in retyped {
+            if let Some(dir) = held(&nodes, parent(path)) {
+                nodes.orphan(dir, name(path));
             }
-            *current = Arc::new(shown);
-            self.listings.lock().clear();
         }
-        drop(self.gate.write());
+        *self.shown.write() = Arc::new(shown);
+        self.listings.lock().clear();
     }
 
     /// Held while a request in it is served and replied to (`swap`).
