@@ -6,9 +6,10 @@
 //! F, T); the tree owns them: only existing branches, the root has no
 //! parent, no branch is its own parent, no cycles (`Tree::check`,
 //! `Tree::check_new`), and parent names resolve one way (`resolve_parent`).
-//! Writing parents and following comes with `gitfold parent` (stream 4).
+//! Parents and following are written with `settings::set_parent`,
+//! `set_follow` and `forget_parent`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::Result;
@@ -26,6 +27,8 @@ pub struct Tree {
     children: BTreeMap<String, Vec<String>>,
     /// The root (`git::root_branch`), if known.
     root: Option<String>,
+    /// The branches of `parents` whose following is set off.
+    unfollowed: BTreeSet<String>,
 }
 
 /// Why a parent can't be given or set.
@@ -117,12 +120,17 @@ impl Tree {
     /// The tree of the repository of `common_dir` (`git::init` done); an
     /// unreadable config fails (T5).
     pub fn read(common_dir: &Path) -> Result<Tree> {
-        let parents = Local::read_checked(common_dir)?.parents();
-        Ok(Tree::of(
-            parents,
+        let local = Local::read_checked(common_dir)?;
+        let mut tree = Tree::of(
+            local.parents(),
             git::root_branch(common_dir),
             git::branch_exists,
-        ))
+        );
+        tree.unfollowed = (tree.parents.keys())
+            .filter(|branch| local.follow(branch) == Some(false))
+            .cloned()
+            .collect();
+        Ok(tree)
     }
 
     /// The tree of `stored` (branch to the parent as stored) rooted at
@@ -153,12 +161,25 @@ impl Tree {
             parents,
             children,
             root,
+            unfollowed: BTreeSet::new(),
         }
     }
 
     /// The parent of local branch `branch`, as a full ref, if it has one.
     pub fn parent(&self, branch: &str) -> Option<&str> {
         self.parents.get(branch).map(String::as_str)
+    }
+
+    /// Whether local branch `branch` takes its parent's new commits by
+    /// itself: it has a parent (F2), and following isn't set off (F1).
+    pub fn follows(&self, branch: &str) -> bool {
+        self.parents.contains_key(branch) && !self.unfollowed.contains(branch)
+    }
+
+    /// Whether the parent of local branch `branch` no longer exists (T3).
+    pub fn parent_gone(&self, branch: &str) -> bool {
+        self.parent(branch)
+            .is_some_and(|parent| git::full_ref(parent).is_none())
     }
 
     /// The local branches whose parent is local branch `branch`, by name.
@@ -227,13 +248,18 @@ impl Tree {
     /// Whether local branch `branch` has a parent to follow (F6): it isn't
     /// the root (S4), and it has a parent. (Following needs no root.)
     pub fn check_follow(&self, branch: &str) -> Result<(), Refused> {
-        if self.root.as_deref() == Some(branch) {
+        if self.is_root(branch) {
             return Err(Refused::Root);
         }
         match self.parent(branch) {
             Some(_) => Ok(()),
             None => Err(Refused::NoParent),
         }
+    }
+
+    /// Whether local branch `branch` is the root of the tree.
+    pub fn is_root(&self, branch: &str) -> bool {
+        self.root.as_deref() == Some(branch)
     }
 
     fn check_root(&self, branch: &str) -> Result<(), Refused> {
@@ -258,6 +284,16 @@ mod tests {
 
     fn tree(pairs: &[(&str, &str)]) -> Tree {
         Tree::of(stored(pairs), Some("main".to_string()), |_| true)
+    }
+
+    #[test]
+    fn f1_f2_who_follows() {
+        let mut t = tree(&[("api", "main"), ("ui", "api")]);
+        t.unfollowed.insert("ui".to_string());
+        assert!(t.follows("api"), "F1: never set: follows");
+        assert!(!t.follows("ui"), "set off");
+        assert!(!t.follows("web"), "F2: no parent: doesn't follow");
+        assert!(!t.follows("main"), "the root has no parent");
     }
 
     #[test]
