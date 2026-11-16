@@ -389,19 +389,26 @@ R config branch.ui.gitfoldMoving "$(R rev-parse main~1) $(R rev-parse api~1)"
 check "an interrupted move: finished by the next move" says 0 "moved 1 commit of ui onto api" parent ui --update
 eq "  only its own commit moved (its base was recorded first)" "1" "$(own api ui)"
 check "  the record gone" fails R config branch.ui.gitfoldMoving
-# A --set a crash interrupted after git moved the branch: its new parent
-# and following written by the next move (main is no parent of ui yet).
-R branch other api; R config branch.ui.gitfoldMoving "$(R rev-parse main~1) $(R rev-parse api) false refs/heads/other"
-check "an interrupted --set: shown as finished" says 0 "ui is built on other, not following it" parent ui
-eq "  its parent and following written" "refs/heads/other false" "$(R config branch.ui.gitfoldParent) $(R config branch.ui.gitfoldFollow)"
-check "  the record gone" fails R config branch.ui.gitfoldMoving
-R config branch.ui.gitfoldParent refs/heads/api; R config --unset branch.ui.gitfoldFollow
 # A move recorded that never happened (the branch is where it was, though
-# on the target's history): forgotten.
-R config branch.ui.gitfoldMoving "$(R rev-parse ui) $(R rev-parse main~1) true refs/heads/main"
-check "a recorded move that didn't happen: forgotten" says 0 "ui is built on api, following it" parent ui
-eq "  its parent unchanged" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
+# on the target's history): forgotten, nothing written.
+R config branch.ui.gitfoldMoving "$(R rev-parse ui) $(R rev-parse main~1)"
+check "a recorded move that didn't happen: forgotten" says 0 "ui is up to date with api" parent ui --update
+eq "  its base unchanged" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/ui)"
 check "  the record gone" fails R config branch.ui.gitfoldMoving
+# A record that can't be read: reported, and left for the user.
+R config branch.ui.gitfoldMoving "not a record"
+check "a record that can't be read: reported (exit 1)" says 1 "branch.ui.gitfoldMoving holds \"not a record\"" parent ui --update
+check "  and left" R config branch.ui.gitfoldMoving
+R config --unset branch.ui.gitfoldMoving
+# --set that conflicts: nothing moves, the old parent taken back.
+R branch other main; on other u.txt other-side
+before=$(R rev-parse ui)
+check "--set with a conflict: nothing moves (exit 4)" says 4 "ui's commits conflict with other's" parent ui --set other
+eq "  the old parent and following back" "refs/heads/api " "$(R config branch.ui.gitfoldParent) $(R config branch.ui.gitfoldFollow)"
+eq "  nothing moved" "$before" "$(R rev-parse ui)"
+# The tree changes one --set at a time.
+mkdir -p "$REPO/.git/gitfold-moves"
+check "another --set changing the tree: refused (exit 5)" sh -c "flock '$REPO/.git/gitfold-moves/.tree.lock' sh -c \"'$BIN' -C '$REPO' parent ui --set main; [ \\\$? = 5 ]\""
 # A move's worktree a dead process left: cleaned up by the next move.
 on api a.txt newer
 R -c worktree.useRelativePaths=true worktree add -q --no-checkout "$REPO/.git/gitfold-moves/gitfold-move-ui" ui

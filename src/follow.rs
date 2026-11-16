@@ -10,14 +10,18 @@
 //!   more), git's fork point of the parent (`merge-base --fork-point`, from
 //!   the parent's reflog), else their merge base. A branch without a parent
 //!   owns what isn't on the root (local or remote-tracking).
-//! - **Crash safety:** before the rebase, one record (`gitfoldMoving`, see
-//!   `settings::set_moving`) holds the whole outcome: where the branch was,
-//!   the commit it moves onto, and for `--set` the new parent and
-//!   following. After, they are written (`finish`) and it goes. One left
-//!   behind (`recover`, before any `gitfold parent` reads the tree) means
-//!   the move was interrupted: if git moved the branch from where it was
-//!   onto that commit, the outcome is written then; else nothing moved, and
-//!   it goes.
+//! - **Crash safety:** before the rebase, a record (`gitfoldMoving`, see
+//!   `settings::set_moving`) holds where the branch was and the commit it
+//!   moves onto; after, that commit is its base and the record goes. One
+//!   left behind (`recover`, by the next move of the branch) means the move
+//!   was interrupted: if git moved the branch from where it was onto that
+//!   commit, the base is recorded then; else nothing moved, and it goes.
+//!   `--set` writes the new parent before it moves (see `cli::tree`): a
+//!   move cut short leaves a branch whose parent's commits are yet to be
+//!   taken, as any following does.
+//! - **The tree** changes under one lock (`tree_lock`): checking a new
+//!   parent (no cycle) and writing it, so two `--set`s at once can't make a
+//!   cycle.
 //! - **Pushed commits** (on the branch's same-name branch of its push
 //!   remote, never main or its upstream) are moved only when asked
 //!   (`--yes`); gitfold prints the force-push and never pushes.
@@ -126,79 +130,62 @@ fn clear_conflict(common_dir: &Path, branch: &str) -> Result<()> {
     }
 }
 
-/// The outcome of a move, recorded before it (see the module doc).
-pub struct Outcome {
-    /// The branch's tip before: still there, nothing moved (git moves a
-    /// branch only when its rebase finishes).
-    pub from: ObjectId,
-    /// What it moves onto: its base after.
-    pub onto: ObjectId,
-    /// For `--set`: the new parent (a full ref) and whether it follows it.
-    pub parent: Option<(String, bool)>,
+/// Takes the lock under which the tree changes (see the module doc), or
+/// fails if another command holds it.
+pub fn tree_lock(common_dir: &Path) -> Result<crate::lock::Lock> {
+    rebase::tree_lock(common_dir)
 }
 
-impl Outcome {
+/// A move under way, recorded before it (see the module doc).
+struct Moving {
+    /// The branch's tip before: still there, nothing moved (git moves a
+    /// branch only when its rebase finishes).
+    from: ObjectId,
+    /// What it moves onto: its base after.
+    onto: ObjectId,
+}
+
+impl Moving {
     fn encode(&self) -> String {
-        let (from, onto) = (self.from, self.onto);
-        match &self.parent {
-            None => format!("{from} {onto}"),
-            Some((parent, follow)) => format!("{from} {onto} {follow} {parent}"),
-        }
+        format!("{} {}", self.from, self.onto)
     }
 
-    fn decode(text: &str) -> Option<Outcome> {
-        let mut words = text.split(' ');
-        let mut id = || ObjectId::from_hex(words.next()?.as_bytes()).ok();
-        let (from, onto) = (id()?, id()?);
-        let parent = match (words.next(), words.next()) {
-            (Some(follow), Some(parent)) => Some((parent.to_string(), follow.parse().ok()?)),
+    fn decode(text: &str) -> Option<Moving> {
+        let mut words = text
+            .split(' ')
+            .map(|w| ObjectId::from_hex(w.as_bytes()).ok());
+        match (words.next()??, words.next()??, words.next()) {
+            (from, onto, None) => Some(Moving { from, onto }),
             _ => None,
-        };
-        Some(Outcome { from, onto, parent })
+        }
     }
 
-    /// Writes it for `branch`, which git moved (or, with commits pushed,
-    /// that is built on a new parent without the move): its base, its
-    /// parent, then the record goes.
-    pub fn finish(&self, common_dir: &Path, branch: &str) -> Result<()> {
+    /// Records it done for `branch`, which git moved: its base, then the
+    /// record goes.
+    fn finish(&self, common_dir: &Path, branch: &str) -> Result<()> {
         set_base(common_dir, branch, self.onto)?;
-        if let Some((parent, follow)) = &self.parent {
-            settings::set_parent(common_dir, branch, parent)?;
-            settings::set_follow(common_dir, branch, *follow)?;
-        }
         settings::set_moving(common_dir, branch, None)
     }
 }
 
-/// Finishes or forgets the outcome of a move of `branch` a crash
+/// Finishes or forgets the record of a move of `branch` a crash
 /// interrupted (see the module doc): finished if git moved the branch from
-/// where it was onto the target, else forgotten.
+/// where it was onto the target, else forgotten. One it can't read is
+/// reported, and stays.
 fn recover(common_dir: &Path, branch: &str) -> Result<()> {
     let Some(text) = Local::read_checked(common_dir)?.moving(branch) else {
         return Ok(());
     };
+    let Some(moving) = Moving::decode(&text) else {
+        bail!(
+            "branch.{branch}.gitfoldMoving holds {text:?}, not the record of a move (two \
+             commits); remove it once {branch} is as you want it"
+        );
+    };
     let tip = git::branch_tip(branch)?.id;
-    match Outcome::decode(&text) {
-        Some(outcome) if tip != outcome.from && is_ancestor(common_dir, outcome.onto, tip)? => {
-            outcome.finish(common_dir, branch)
-        }
-        _ => settings::set_moving(common_dir, branch, None),
-    }
-}
-
-/// Finishes the record of a move of `branch` a crash interrupted, unless a
-/// move of it is running (then that one sees to it): for commands that
-/// read the tree before they act.
-pub fn settle(common_dir: &Path, branch: &str) -> Result<()> {
-    if Local::read_checked(common_dir)?.moving(branch).is_none() {
-        return Ok(());
-    }
-    match rebase::lock(common_dir, branch) {
-        Ok(_lock) => {
-            rebase::clean_up(common_dir, branch)?;
-            recover(common_dir, branch)
-        }
-        Err(_) => Ok(()),
+    match tip != moving.from && is_ancestor(common_dir, moving.onto, tip)? {
+        true => moving.finish(common_dir, branch),
+        false => settings::set_moving(common_dir, branch, None),
     }
 }
 
@@ -399,25 +386,22 @@ impl Plan {
         }))
     }
 
-    /// Moves it (see the module doc): its base recorded and, for `--set`,
-    /// its new `parent` (a full ref) and following; a conflict cleared, or
-    /// recorded when following its parent (not for `--set`). Not with a
-    /// merge among its own commits, nor commits already pushed unless
-    /// `yes`. `moving` is called once it is sure to try. The caller holds
-    /// `lock`.
+    /// Moves it (see the module doc): its base recorded, a conflict
+    /// cleared, or with `record` recorded (following its parent; not for
+    /// `--set`, which takes its parent back). Not with a merge among its own
+    /// commits, nor commits already pushed unless `yes`. `moving` is called
+    /// once it is sure to try. The caller holds `lock`.
     pub fn run(
         &self,
         common_dir: &Path,
         yes: bool,
-        parent: Option<(String, bool)>,
+        record: bool,
         moving: impl FnOnce(),
     ) -> Result<Moved> {
         let branch = &self.branch;
-        let record = parent.is_none();
-        let outcome = Outcome {
+        let outcome = Moving {
             from: self.tip,
             onto: self.onto,
-            parent,
         };
         if self.up_to_date(common_dir)? {
             // Sits on it already (rebased by hand, say).

@@ -103,21 +103,19 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         return Err(refused("gitfold parent", &given, "", r));
     };
     let refuse = |parent: &str, r| refused("gitfold parent", &name, parent, r);
-    // A move a crash interrupted is finished first: the tree as it left it.
-    follow::settle(&common_dir, &name)?;
-    let tree = Tree::read(&common_dir)?;
     if let Some(parent) = &args.set {
-        let full = tree.check(&name, parent).map_err(|r| refuse(parent, r))?;
         // Following on with a new parent unless --no-follow (F4); the same
         // parent changes nothing but what a flag says (F3).
         let follow = (args.follow || args.no_follow).then_some(args.follow);
-        return set(&common_dir, &tree, &name, &full, follow);
-    } else if args.follow || args.no_follow || args.update {
+        return set(&common_dir, &name, parent, follow);
+    }
+    let tree = Tree::read(&common_dir)?;
+    if args.follow || args.no_follow || args.update {
         tree.check_follow(&name).map_err(|r| refuse("", r))?;
     }
     let parent = tree.parent(&name).map(crate::tree::short);
     if args.update {
-        update(&common_dir, &name, args.yes)?;
+        update(&common_dir, &tree, &name, args.yes)?;
         // Changed only once the update went through.
         if args.follow || args.no_follow {
             settings::set_follow(&common_dir, &name, args.follow)?;
@@ -214,15 +212,13 @@ fn movable(common_dir: &Path, name: &str, what: &str) -> Result<()> {
 
 /// `gitfold parent NAME --update [--yes]`: its parent's new commits taken
 /// now (`follow::Plan::run`).
-fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
+fn update(common_dir: &Path, tree: &Tree, name: &str, yes: bool) -> Result<()> {
+    let Some(parent) = tree.parent(name) else {
+        return Err(refused("gitfold parent", name, "", Refused::NoParent));
+    };
+    let short = crate::tree::short(parent);
     movable(common_dir, name, "--update")?;
     let _moving = follow::lock(common_dir, name)?;
-    // Read once an interrupted move is finished (it may have set a parent).
-    let tree = Tree::read(common_dir)?;
-    let parent = tree
-        .parent(name)
-        .expect("check_follow: a branch with a parent");
-    let short = crate::tree::short(parent);
     if tree.parent_gone(name) {
         bail!(
             "{name}'s parent {short} is gone: no new commits to take (`gitfold parent {name} \
@@ -230,7 +226,7 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
         );
     }
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    match plan.run(common_dir, yes, None, || {})? {
+    match plan.run(common_dir, yes, true, || {})? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
             Ok(())
@@ -239,51 +235,91 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
     }
 }
 
-/// `gitfold parent NAME --set P` (P's full ref `full`): its own commits
-/// moved onto P's tip, then P its parent, following it unless `follow`
-/// says otherwise (F3, F4). With commits already pushed, P becomes its
-/// parent without the move (following paused until `--update --yes`).
-fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str, follow: Option<bool>) -> Result<()> {
-    let short = crate::tree::short(full);
-    if tree.parent(name) == Some(full) {
+/// `gitfold parent NAME --set P` (P as `given`): P its parent, following it
+/// unless `follow` says otherwise (F3, F4), written first (with where its
+/// own commits start, on the old parent), under the tree's lock with the
+/// check that it makes no cycle (S1-S6); then its own commits moved onto
+/// P's tip. A move cut short leaves it built on P with P's commits to take
+/// (`--update`). With commits already pushed, it stays built on P without
+/// the move (following paused until `--update --yes`). A conflict or a
+/// merge moves nothing, and the old parent is taken back.
+fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Result<()> {
+    let refuse = |r| refused("gitfold parent", name, given, r);
+    // Refused as the table says before anything else (a branch checked out
+    // elsewhere, say).
+    let tree = Tree::read(common_dir)?;
+    let full = tree.check(name, given).map_err(refuse)?;
+    let short = crate::tree::short(&full);
+    if tree.parent(name) == Some(full.as_str()) {
         if let Some(on) = follow {
             settings::set_follow(common_dir, name, on)?;
         }
         println!("{name} is built on {short} already");
         return Ok(());
     }
+    let old = tree.parent(name).map(String::from);
+    let before = settings::Local::read_checked(common_dir)?.follow(name);
     movable(common_dir, name, "--set")?;
     let _moving = follow::lock(common_dir, name)?;
-    // Read once an interrupted move is finished (it may have set a parent).
-    let tree = Tree::read(common_dir)?;
-    let plan = follow::Plan::new(common_dir, name, tree.parent(name), &tree.root_refs(), full)?;
-    // Says first what it moves, once it is sure to try.
-    // Built on P from now on, written with the move (one record of both).
-    let follow = follow.unwrap_or(true);
-    let moved = plan.run(common_dir, false, Some((full.to_string(), follow)), || {
+    let plan = {
+        let _tree = follow::tree_lock(common_dir)?;
+        let tree = Tree::read(common_dir)?;
+        tree.check(name, given).map_err(refuse)?;
+        if tree.parent(name) != old.as_deref() {
+            bail!("{name}'s parent changed meanwhile; retry");
+        }
+        let plan = follow::Plan::new(common_dir, name, old.as_deref(), &tree.root_refs(), &full)?;
+        // Its own commits start where they did on the old parent.
+        follow::set_base(common_dir, name, plan.base)?;
+        settings::set_parent(common_dir, name, &full)?;
+        settings::set_follow(common_dir, name, follow.unwrap_or(true))?;
+        settings::set_conflict(common_dir, name, None)?;
+        plan
+    };
+    let moved = plan.run(common_dir, false, false, || {
         println!("moves {} of {name} onto {short}", commits(plan.own))
     })?;
-    if matches!(moved, follow::Moved::Merge | follow::Moved::Conflict(_)) {
-        return said(name, short, &plan, moved);
+    match &moved {
+        follow::Moved::Merge | follow::Moved::Conflict(_) => {
+            take_back(common_dir, name, old.as_deref(), before)?;
+            said(name, short, &plan, moved)
+        }
+        follow::Moved::Pushed(pushed) => {
+            let paused = match follow.unwrap_or(true) {
+                true => "following paused: ",
+                false => "",
+            };
+            println!(
+                "{name} is now built on {short}; {paused}{}",
+                pushed_said(name, pushed)
+            );
+            Ok(())
+        }
+        _ => {
+            println!("{name} is now built on {short}");
+            said(name, short, &plan, moved)
+        }
     }
-    if let follow::Moved::Pushed(pushed) = &moved {
-        // Built on P without the move: its own commits start where they
-        // did, until `--update --yes` moves them.
-        let outcome = follow::Outcome {
-            from: plan.tip,
-            onto: plan.base,
-            parent: Some((full.to_string(), follow)),
-        };
-        outcome.finish(common_dir, name)?;
-        let paused = if follow { "following paused: " } else { "" };
-        println!(
-            "{name} is now built on {short}; {paused}{}",
-            pushed_said(name, pushed)
-        );
+}
+
+/// Builds `name` on its parent from before a `--set` that moved nothing
+/// (`old`, a full ref, following as stored `before`), under the tree's
+/// lock: unless that would close a cycle by now (another `--set` meanwhile),
+/// which is said, and the new parent stays.
+fn take_back(common_dir: &Path, name: &str, old: Option<&str>, before: Option<bool>) -> Result<()> {
+    let _tree = follow::tree_lock(common_dir)?;
+    let Some(old) = old else {
+        follow::drop_base(common_dir, name)?;
+        return settings::forget_parent(common_dir, name);
+    };
+    if let Err(r) = Tree::read(common_dir)?.check(name, old) {
+        let old = crate::tree::short(old);
+        let why = crate::tree::refusal(name, old, &r);
+        eprintln!("{name} stays built on its new parent: back on {old}, {why}");
         return Ok(());
     }
-    println!("{name} is now built on {short}");
-    said(name, short, &plan, moved)
+    settings::set_parent(common_dir, name, old)?;
+    settings::set_follow(common_dir, name, before.unwrap_or(true))
 }
 
 /// What a move of `name` onto `parent` (short) did, or why it didn't, said

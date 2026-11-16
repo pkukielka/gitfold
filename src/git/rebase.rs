@@ -30,6 +30,7 @@ use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 
 use crate::lock::Lock;
+use crate::refusal::Refusal;
 use crate::state::workspace_id;
 
 /// The sparse checkout: the top-level files, no directory.
@@ -52,7 +53,18 @@ pub fn lock(common_dir: &Path, branch: &str) -> Result<Lock> {
     let dir = moves_dir(common_dir);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join(format!("{}.lock", workspace_id(branch)));
-    crate::lock::try_file(&path)?.with_context(|| format!("another move of {branch} is running"))
+    crate::lock::try_file(&path)?
+        .ok_or_else(|| Refusal::InUse.error(format!("another move of {branch} is running")))
+}
+
+/// Takes the lock under which the tree of parents changes (one for the
+/// repository, beside the moves' locks), or fails if another holds it.
+pub fn tree_lock(common_dir: &Path) -> Result<Lock> {
+    let dir = moves_dir(common_dir);
+    fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    crate::lock::try_file(&dir.join(".tree.lock"))?.ok_or_else(|| {
+        Refusal::InUse.error("another gitfold command is changing the parents of branches; retry")
+    })
 }
 
 /// What `rebase` did.
