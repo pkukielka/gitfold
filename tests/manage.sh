@@ -168,7 +168,7 @@ eq "-z: NUL-terminated" "api	committed	d/b.txt|" "$(gfc -z -- d/b.txt | tr '\0' 
 R update-ref refs/heads/unrel "$(R commit-tree "$(R mktree </dev/null)" -m unrelated)"
 R config branch.api.gitfoldParent refs/heads/unrel
 out=$("$BIN" -C "$REPO" changes -- d 2>"$T/err"); rc=$?
-eq "branches with no history shared with their parent or main (gh-pages style): nothing, silently" "0 api	uncommitted	d/c.txt
+eq "no history shared, silently: unrel with main (no parent, gh-pages style), api with its parent unrel" "0 api	uncommitted	d/c.txt
 mv	committed	d/c.txt " "$rc $out $(cat "$T/err")"
 R config --unset branch.api.gitfoldParent; R branch -D -q unrel
 check "overlaps with a global pathspec setting of git's: no literal-pathspec clash" sh -c "GIT_GLOB_PATHSPECS=1 '$BIN' -C '$REPO' overlaps api; [ \$? != 1 ]"

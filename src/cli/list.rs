@@ -2,6 +2,7 @@
 //! changes` (one workspace's changed paths; with `-- PATH`, who is changing
 //! those paths).
 
+use std::cell::OnceCell;
 use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::Write;
@@ -148,6 +149,8 @@ fn committed(
     lines: &mut BTreeSet<(Vec<u8>, String, &str)>,
 ) -> Result<()> {
     let tree = crate::tree::Tree::read(common_dir)?;
+    // Whether the repository's history is whole (not a shallow clone).
+    let whole = OnceCell::new();
     let no_merged = format!("--no-merged={main}");
     let args = [
         "for-each-ref",
@@ -184,7 +187,7 @@ fn committed(
                     lines.insert((path.to_vec(), branch.to_string(), "committed"));
                 }
             }
-            Err(_) if unrelated(common_dir, from, &to) => {}
+            Err(_) if unrelated(common_dir, from, &to, &whole) => {}
             Err(e) => eprintln!("skipping branch {branch}: {e:#}"),
         }
     }
@@ -193,8 +196,9 @@ fn committed(
 
 /// Whether `a` and `b` have no history in common (`git merge-base` exits 1),
 /// in a repository whose history is whole: in a shallow clone the common
-/// part may just be cut off. False if git can't tell.
-fn unrelated(common_dir: &Path, a: &str, b: &str) -> bool {
+/// part may just be cut off (asked of git once, kept in `whole`). False if
+/// git can't tell.
+fn unrelated(common_dir: &Path, a: &str, b: &str, whole: &OnceCell<bool>) -> bool {
     let quiet = |args: &[&str]| {
         (git::cmd::command(common_dir).args(args))
             .stderr(std::process::Stdio::null())
@@ -203,8 +207,10 @@ fn unrelated(common_dir: &Path, a: &str, b: &str) -> bool {
     };
     let no_merge_base = quiet(&["merge-base", a, b]).is_some_and(|o| o.status.code() == Some(1));
     no_merge_base
-        && quiet(&["rev-parse", "--is-shallow-repository"])
-            .is_some_and(|o| o.status.success() && o.stdout.trim_ascii() == b"false")
+        && *whole.get_or_init(|| {
+            quiet(&["rev-parse", "--is-shallow-repository"])
+                .is_some_and(|o| o.status.success() && o.stdout.trim_ascii() == b"false")
+        })
 }
 
 /// Which of `paths` (from the root) match `typed`, as git matches them: they
