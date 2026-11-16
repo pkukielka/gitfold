@@ -76,13 +76,23 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
 /// and path, `BRANCH\tcommitted|uncommitted\tPATH`, sorted by path. git
 /// itself matches the paths, as typed (pathspecs taken literally, relative
 /// to the current directory), and the paths printed are from the
-/// repository's root, as `git diff --name-only` prints them. Committed: the
-/// branch's own commits (since it diverged from its parent, if that still
-/// exists, else from main: `git::default_compare_target`) on branches not
-/// merged into main; with no main branch, only uncommitted. Uncommitted:
-/// what `gitfold changes` says of each workspace.
+/// repository's root, as `git diff --name-only` prints them; paths git
+/// refuses are refused with what git says (exit 2). Committed: the branch's
+/// own commits (since it diverged from its parent, if that still exists,
+/// else from main: `git::default_compare_target`) on branches not merged
+/// into main; with no main branch, only uncommitted. Uncommitted: what
+/// `gitfold changes` says of each workspace.
 pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
+    // git checks the paths first, once: listing an empty index (one that
+    // doesn't exist).
+    let dir = TempDir::new()?;
+    if let Err(e) = ls_files(&dir.0.join("none"), &args.paths) {
+        return Err(match e.downcast::<git::cmd::Failed>() {
+            Ok(failed) => super::tree::Usage(failed.stderr.trim().to_string()).into(),
+            Err(e) => e,
+        });
+    }
     // Each workspace's uncommitted paths, and its note if any.
     let store = Store::default();
     let mut workspaces = Vec::new();
@@ -99,10 +109,8 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
             Err(e) => eprintln!("skipping workspace {}: {e:#}", w.branch),
         }
     }
-    // Before the branches: it also has git check the paths, once (a path
-    // outside the repository fails here, not once per branch).
     let all = workspaces.iter().flat_map(|(_, paths, _)| paths);
-    let matching = matching(all, &args.paths)?;
+    let matching = matching(all, &args.paths, &dir)?;
     let mut lines = BTreeSet::new();
     match git::default_compare_target(&common_dir)? {
         Some(main) => committed(&common_dir, &main, &args.paths, &mut lines)?,
@@ -129,7 +137,8 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
 
 /// Adds to `lines` the paths matching `typed` that each branch not merged
 /// into `main` changed in its own commits: since it diverged from its
-/// parent, if that still exists, else from `main`.
+/// parent, if that still exists, else from `main`. A branch with no history
+/// shared with that (as `gh-pages` often has) changes nothing there.
 fn committed(
     common_dir: &Path,
     main: &str,
@@ -148,10 +157,11 @@ fn committed(
     for branch in branches.split(|b| *b == b'\n').filter(|r| !r.is_empty()) {
         let branch = String::from_utf8_lossy(branch);
         let from = match tree.parent(&branch) {
-            Some(parent) if git::resolve(parent).is_ok() => parent,
+            Some(parent) if !tree.parent_gone(&branch) => parent,
             _ => main,
         };
-        let range = format!("{from}...refs/heads/{branch}");
+        let to = format!("refs/heads/{branch}");
+        let range = format!("{from}...{to}");
         let diff = [
             "--literal-pathspecs",
             "diff",
@@ -165,77 +175,57 @@ fn committed(
         let args: Vec<&str> = (diff.into_iter())
             .chain(typed.iter().map(String::as_str))
             .collect();
-        // One branch git can't diff (no history shared with its parent)
-        // doesn't hide the others.
+        // One branch git can't diff doesn't hide the others.
         match git::cmd::output_of(&mut git::cmd::here(), &args, None) {
             Ok(out) => {
                 for path in out.split(|b| *b == 0).filter(|p| !p.is_empty()) {
                     lines.insert((path.to_vec(), branch.to_string(), "committed"));
                 }
             }
+            Err(_) if !shares_history(common_dir, from, &to)? => {}
             Err(e) => eprintln!("skipping branch {branch}: {e:#}"),
         }
     }
     Ok(())
 }
 
+/// Whether `a` and `b` have a common ancestor: `git merge-base` exits 1 if
+/// they have none.
+fn shares_history(common_dir: &Path, a: &str, b: &str) -> Result<bool> {
+    let status = git::cmd::command(common_dir)
+        .args(["merge-base", a, b])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()?;
+    Ok(status.code() != Some(1))
+}
+
 /// Which of `paths` (from the root) match `typed`, as git matches them: they
-/// go into throwaway indexes (no objects written), which `git ls-files`
-/// lists; with no paths, an empty index, so that git still checks `typed`.
+/// go into throwaway indexes in `dir` (no objects written), which `git
+/// ls-files` lists.
 fn matching<'a>(
     paths: impl Iterator<Item = &'a Vec<u8>>,
     typed: &[String],
+    dir: &TempDir,
 ) -> Result<HashSet<Vec<u8>>> {
-    let mut indexes = without_clashes(paths);
-    if indexes.is_empty() {
-        indexes.push(BTreeSet::new());
-    }
     let empty = git::with_repo(|repo| gix::ObjectId::empty_blob(repo.object_hash()));
     let entry = format!("100644 {empty} 0\t");
-    // A plain index, whatever the repository's are like: nothing of it (a
-    // split index's shared part, a sparse index's trees) is written into
-    // the repository, and no hook hears of it.
-    let plain = [
-        "-c",
-        "core.splitIndex=false",
-        "-c",
-        "index.sparse=false",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "core.untrackedCache=false",
-        "-c",
-        "core.hooksPath=/dev/null",
-        "--literal-pathspecs",
-    ];
-    let update: Vec<&str> = plain
-        .into_iter()
+    let update: Vec<&str> = (PLAIN.into_iter())
         .chain(["update-index", "-z", "--index-info"])
         .collect();
-    let list: Vec<&str> = (plain.into_iter())
-        .chain(["ls-files", "-z", "--full-name", "--"])
-        .chain(typed.iter().map(String::as_str))
-        .collect();
-    let dir = TempDir::new()?;
     let mut matching = HashSet::new();
-    for (n, index) in indexes.iter().enumerate() {
-        // An index that doesn't exist is an empty one.
+    for (n, index) in without_clashes(paths).iter().enumerate() {
         let file = dir.0.join(format!("index{n}"));
-        let on_index = || {
-            let mut command = git::cmd::here();
-            command.env("GIT_INDEX_FILE", &file);
-            command
-        };
-        if !index.is_empty() {
-            let mut info = Vec::new();
-            for path in index {
-                info.extend(entry.as_bytes());
-                info.extend(*path);
-                info.push(0);
-            }
-            git::cmd::output_of(&mut on_index(), &update, Some(info))?;
+        let mut info = Vec::new();
+        for path in index {
+            info.extend(entry.as_bytes());
+            info.extend(*path);
+            info.push(0);
         }
-        let out = git::cmd::output_of(&mut on_index(), &list, None)?;
+        let mut command = git::cmd::here();
+        command.env("GIT_INDEX_FILE", &file);
+        git::cmd::output_of(&mut command, &update, Some(info))?;
+        let out = ls_files(&file, typed)?;
         matching.extend(
             out.split(|b| *b == 0)
                 .filter(|p| !p.is_empty())
@@ -243,6 +233,36 @@ fn matching<'a>(
         );
     }
     Ok(matching)
+}
+
+/// The options of git on a throwaway index: a plain index, whatever the
+/// repository's are like, so that nothing of it (a split index's shared
+/// part, a sparse index's trees) is written into the repository and no hook
+/// hears of it; paths taken literally.
+const PLAIN: [&str; 11] = [
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "index.sparse=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.untrackedCache=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "--literal-pathspecs",
+];
+
+/// `git ls-files` of the index at `index` (none there: an empty one), from
+/// the current directory: its paths matching `typed`, NUL-terminated.
+fn ls_files(index: &Path, typed: &[String]) -> Result<Vec<u8>> {
+    let args: Vec<&str> = (PLAIN.into_iter())
+        .chain(["ls-files", "-z", "--full-name", "--"])
+        .chain(typed.iter().map(String::as_str))
+        .collect();
+    let mut command = git::cmd::here();
+    command.env("GIT_INDEX_FILE", index);
+    git::cmd::output_of(&mut command, &args, None)
 }
 
 /// `paths` in sets that an index can hold: none with both a path and one

@@ -10,7 +10,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 
 use anyhow::{Result, bail};
 
@@ -63,13 +63,34 @@ pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -
     };
     // git's failure first: one that stopped reading leaves a broken pipe.
     if !out.status.success() {
-        bail!(
-            "git {} failed ({}): {}",
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        return Err(Failed {
+            args: args.join(" "),
+            status: out.status,
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }
+        .into());
     }
     written?;
     Ok(out.stdout)
 }
+
+/// git failed: what it was asked, how it ended, and what it said.
+#[derive(Debug)]
+pub struct Failed {
+    pub args: String,
+    pub status: ExitStatus,
+    pub stderr: String,
+}
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Failed {
+            args,
+            status,
+            stderr,
+        } = self;
+        write!(f, "git {args} failed ({status}): {}", stderr.trim())
+    }
+}
+
+impl std::error::Error for Failed {}

@@ -168,8 +168,8 @@ eq "-z: NUL-terminated" "api	committed	d/b.txt|" "$(gfc -z -- d/b.txt | tr '\0' 
 R update-ref refs/heads/unrel "$(R commit-tree "$(R mktree </dev/null)" -m unrelated)"
 R config branch.api.gitfoldParent refs/heads/unrel
 out=$("$BIN" -C "$REPO" changes -- d 2>"$T/err"); rc=$?
-eq "a branch git can't diff (no history shared with its parent): skipped, said, the rest kept" "0 api	uncommitted	d/c.txt
-mv	committed	d/c.txt yes" "$rc $out $(grep -q 'skipping branch api' "$T/err" && echo yes)"
+eq "branches with no history shared with their parent or main (gh-pages style): nothing, silently" "0 api	uncommitted	d/c.txt
+mv	committed	d/c.txt " "$rc $out $(cat "$T/err")"
 R config --unset branch.api.gitfoldParent; R branch -D -q unrel
 check "overlaps with a global pathspec setting of git's: no literal-pathspec clash" sh -c "GIT_GLOB_PATHSPECS=1 '$BIN' -C '$REPO' overlaps api; [ \$? != 1 ]"
 eq "a file with a trailing slash: nothing, committed or not, as git" "" "$(gfc -- a.txt/)"
@@ -182,7 +182,7 @@ gfc -- n >/dev/null
 eq "a split index configured: nothing written into the repository" "" "$(ls "$COMMON" | grep sharedindex)"
 R config --unset core.splitIndex
 out=$("$BIN" -C "$REPO" changes -- ../x 2>&1); rc=$?
-eq "outside the work tree: refused by git, once" "1 0" "$rc $(grep -c 'skipping' <<<"$out")"
+eq "outside the work tree: refused, exit 2, with git's own words only" "2 1 fatal:" "$rc $(wc -l <<<"$out") ${out%% *}"
 unmount_fs
 R config core.worktree "$REPO"
 eq "core.worktree set, from a subdirectory" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- b.txt 2>&1)"
