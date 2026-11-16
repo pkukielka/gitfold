@@ -122,6 +122,53 @@ R update-ref -m commit refs/heads/ch "$(R commit-tree "ch^{tree}" -p ch -m again
 eq "a commit alone (the branch's reflog) counts" yes "$("$BIN" -C "$REPO" list 2>&1 | awk '$1 == "ch" { print ($6 ~ /^[0-9]+s$/ ? "yes" : $6) }')"
 }
 
+# Commits on branch $1, without a work tree: $2 = PATH=CONTENT to write,
+# -PATH to delete, each in turn.
+commit_to() {
+    local b=$1 idx=$T/commit-index blob change; shift
+    GIT_INDEX_FILE=$idx R read-tree "$b"
+    for change in "$@"; do
+        case $change in
+            -*) GIT_INDEX_FILE=$idx R update-index --force-remove "${change#-}" ;;
+            *) blob=$(printf '%s\n' "${change#*=}" | R hash-object -w --stdin)
+               GIT_INDEX_FILE=$idx R update-index --add --cacheinfo "100644,$blob,${change%%=*}" ;;
+        esac
+    done
+    R update-ref "refs/heads/$b" "$(R commit-tree "$(GIT_INDEX_FILE=$idx R write-tree)" -p "$b" -m c)"
+}
+
+changes_of_paths() {
+R branch done; commit_to done d/c.txt=merged; R merge -q --ff-only done
+R branch api; commit_to api d/b.txt=api dx=x 's*r=glob' sar=s
+R branch ui api; R config branch.ui.gitfoldParent refs/heads/api; commit_to ui a.txt=ui
+R branch mv; commit_to mv -d/c.txt e/c.txt=merged
+R branch old; commit_to old x.txt=old; R branch orphan old; commit_to orphan y.txt=o
+R config branch.orphan.gitfoldParent refs/heads/old; R branch -D -q old
+mount_fs
+echo more >>"$MNT/api/d/c.txt"; echo more >>"$MNT/ui/a.txt"
+gfc() { "$BIN" -C "$REPO" changes "$@" 2>&1; }
+eq "a directory: everything below it, committed and uncommitted, by path (not dx; done is merged)" "api	committed	d/b.txt
+api	uncommitted	d/c.txt
+mv	committed	d/c.txt" "$(gfc -- d)"
+eq "a child: only its own commits (not api's d/b.txt), and its workspace" "ui	committed	a.txt
+ui	uncommitted	a.txt" "$(gfc -- a.txt d/b.txt | grep '^ui')"
+eq "a parent gone: its commits count against main" "orphan	committed	x.txt
+orphan	committed	y.txt" "$(gfc -- x.txt y.txt)"
+eq "a rename: both sides" "api	uncommitted	d/c.txt
+mv	committed	d/c.txt
+mv	committed	e/c.txt" "$(gfc -- d/c.txt e)"
+eq "paths taken literally" "api	committed	s*r" "$(gfc -- 's*r')"
+eq "relative to the current directory, in a workspace" "api	committed	d/b.txt" "$(cd "$MNT/api/d" && "$BIN" changes -- b.txt 2>&1)"
+eq "and in the repository's work tree" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- ../d/b.txt 2>&1)"
+eq "the root: everything" 11 "$(gfc -- . | wc -l)"
+eq "-z: NUL-terminated" "api	committed	d/b.txt|" "$(gfc -z -- d/b.txt | tr '\0' '|')"
+out=$(gfc -- ../x); eq "outside the work tree: refused" "1 yes" "$? $(grep -q 'outside the repository' <<<"$out" && echo yes)"
+unmount_fs
+R branch -m main trunk
+out=$("$BIN" -C "$REPO" changes -- a.txt 2>"$T/err"); rc=$?
+eq "no main branch: a note, then uncommitted changes only (unmounted)" "0 ui	uncommitted	a.txt yes" "$rc $out $(grep -q 'no main branch' "$T/err" && echo yes)"
+}
+
 branch_with_changes_a_fork() {
 R branch fk; R branch nv; R branch sl/x
 mount_fs
@@ -349,6 +396,7 @@ check "remove ec2 --force" "$BIN" -C "$REPO" remove ec2 --force
 
 section "branch, list, the current directory, remove, prune" story
 section "changes: edge cases" changes_edge_cases
+section "changes -- PATH: who is changing it" changes_of_paths
 section "branch --with-changes (a fork)" branch_with_changes_a_fork
 section "leftover state of a deleted branch" leftover_state_of_a_deleted_branch
 section "the lock leaves nothing behind" the_lock_leaves_nothing_behind
