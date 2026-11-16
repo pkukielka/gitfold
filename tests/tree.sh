@@ -23,7 +23,7 @@ the_contract() {
 R branch api
 check "branch --from one revision: as before" says 0 "created branch two" branch two --from main
 check "the name may come after --from" says 0 "created branch three" branch --from main three
-check "several --from: not implemented yet" says 1 "not implemented yet" branch c --from main --from api
+check "several --from: their merge (the same commit: up to date)" says 0 "created branch m at main (already up to date)" branch m --from main --from api
 check "--parent: not implemented yet, said plainly" says 1 "gitfold branch --parent: not implemented yet" branch c --parent api
 check "no Error: prefix on not implemented" fails sh -c "'$BIN' -C '$REPO' branch c --parent api 2>&1 | grep -q '^Error:'"
 check "--parent an unknown branch: exit 3" says 3 "no branch nosuch" branch c --parent nosuch
