@@ -261,9 +261,17 @@ pub fn read_blob(oid: ObjectId) -> Result<Vec<u8>> {
     let read = |repo: &gix::Repository| -> Result<Option<Vec<u8>>> {
         Ok(repo.try_find_object(oid)?.map(|o| o.detach().data))
     };
-    // Then with a look for packs added since (a fetch).
+    // Then with a look for packs added since: a fetch, or the private
+    // repository's garbage collection (which removes the loose objects it
+    // packed).
     let data = match here_or_private(read) {
-        Ok(None) => with_repo(read),
+        Ok(None) => match with_repo(read) {
+            Ok(None) => {
+                refresh_private();
+                with_private(read).unwrap_or(Ok(None))
+            }
+            found => found,
+        },
         found => found,
     }
     .and_then(|data| data.ok_or_else(|| anyhow!("object {oid} not found")));

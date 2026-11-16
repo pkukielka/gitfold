@@ -106,13 +106,21 @@ impl Private {
         Ok(private)
     }
 
-    /// git in the private repository: run there (merge drivers write their
-    /// files in the current directory), with no file system monitor and no
-    /// fetch of missing objects (gitfold fetches what a view needs first,
-    /// as for snapshots).
+    /// git in the private repository: run there, as its own work tree
+    /// whatever the included settings say (merge drivers write their files
+    /// in the current directory, never in the user's checkout), with no file
+    /// system monitor, no hooks and no fetch of missing objects (gitfold
+    /// fetches what a view needs first, as for snapshots).
     fn git(&self) -> Result<Command> {
         let mut git = git::cmd::command_in_other(&self.dir)?;
-        git.args(["-c", "core.fsmonitor=false"])
+        git.arg("--work-tree")
+            .arg(&self.dir)
+            .args([
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
             .current_dir(&self.dir)
             .env("GIT_NO_LAZY_FETCH", "1");
         Ok(git)
@@ -120,6 +128,16 @@ impl Private {
 
     fn run(&self, args: &[&str]) -> Result<Vec<u8>> {
         git::cmd::checked(self.git()?.args(args), args)
+    }
+
+    /// A commit of `tree`, with no parent (nothing of any history to keep),
+    /// unsigned whatever the settings.
+    fn commit(&self, tree: &ObjectId, message: &str) -> Result<ObjectId> {
+        let hex = tree.to_string();
+        let out = self.run(&["commit-tree", "--no-gpg-sign", &hex, "-m", message])?;
+        Ok(ObjectId::from_hex(
+            String::from_utf8_lossy(&out).trim().as_bytes(),
+        )?)
     }
 
     /// Runs `git update-ref --stdin` with `commands`.
@@ -196,11 +214,13 @@ impl Private {
                 conflicts.push(Conflict { kind, sides, path });
             }
             ours = label(branch, &ours, m.branch, i + 1, members);
-            let hex = tree.to_string();
-            let out = self.run(&["commit-tree", &hex, "-m", &ours])?;
-            commit = ObjectId::from_hex(String::from_utf8_lossy(&out).trim().as_bytes())?;
+            commit = self.commit(&tree, &ours)?;
             self.refs(format!("update refs/heads/{ours} {commit}\n"))?;
             made.insert(format!("refs/heads/{ours}"));
+        }
+        if members.is_empty() {
+            // Kept as a tree of its own, without the branch's history.
+            commit = self.commit(&tree, branch)?;
         }
         Ok(Merged {
             tree,
