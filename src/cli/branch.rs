@@ -86,6 +86,8 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             from: source.clone(),
             to: name.to_string(),
         };
+        // As the fork refuses it, before it would be refused as existing.
+        ensure!(source != name, "a branch can't be created from itself");
         // Before the fork gives it its source's settings.
         let left = Left::forget(repo, &common_dir, name)?;
         let forked = super::local_or_daemon(&common_dir, &request, "branch --with-changes", || {
@@ -230,12 +232,17 @@ struct Left {
 impl Left {
     /// Forgets them for branch `name`.
     fn forget(repo: &Path, common_dir: &Path, name: &str) -> Result<Left> {
+        // A branch of that name has them as its own: nothing is left over.
+        ensure!(
+            !git::branch_exists(name),
+            "a branch named '{name}' already exists"
+        );
         let base = format!("refs/gitfold-base/{name}");
         let at = git::cmd::output(common_dir, &["rev-parse", "--verify", "-q", &base])
             .ok()
             .map(|out| String::from_utf8_lossy(&out).trim().to_string());
         let left = Left {
-            settings: settings::Leftovers::forget(repo, common_dir, name)?,
+            settings: settings::Leftovers::forget(repo, name)?,
             base: at.map(|at| (base, at)),
         };
         if let Some((base, at)) = &left.base
@@ -248,11 +255,11 @@ impl Left {
 
     /// Puts them back: the branch wasn't made after all.
     fn put_back(&self, repo: &Path, common_dir: &Path) -> Result<()> {
-        self.settings.restore(repo)?;
-        match &self.base {
+        let settings = self.settings.restore(repo);
+        settings.and(match &self.base {
             Some((base, at)) => git::cmd::output(common_dir, &["update-ref", base, at]).map(drop),
             None => Ok(()),
-        }
+        })
     }
 
     /// `failed`, after putting them back (and saying if that failed too).

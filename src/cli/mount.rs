@@ -180,6 +180,10 @@ pub fn mount(args: MountArgs) -> Result<()> {
         let flags = std::env::var_os(RECORDED_BY_PARENT)
             .is_none()
             .then(|| args.flags());
+        // Not for what the daemon runs (git, hooks, a mount of another
+        // repository among them).
+        // SAFETY: no other thread yet: the daemon starts its own after.
+        unsafe { std::env::remove_var(RECORDED_BY_PARENT) };
         return serve::run(serve::Options {
             repo: args.repo,
             mountpoint,

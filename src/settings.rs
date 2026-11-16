@@ -228,33 +228,70 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 /// made after all.
 pub struct Leftovers {
     branch: String,
-    values: Vec<(&'static str, String)>,
+    /// Each key forgotten, with every value it had, as git read them.
+    values: Vec<(&'static str, Vec<String>)>,
 }
 
 impl Leftovers {
-    /// Forgets the settings left for `branch` in the repository of
-    /// `common_dir` (`git_dir`: its or a worktree's git directory).
-    pub fn forget(git_dir: &Path, common_dir: &Path, branch: &str) -> Result<Leftovers> {
-        let local = Local::read_checked(common_dir)?;
+    /// Forgets the settings left for `branch`, given the repository's or
+    /// one of its worktrees' git directory. If one can't be, those
+    /// forgotten already are put back.
+    pub fn forget(git_dir: &Path, branch: &str) -> Result<Leftovers> {
         let mut left = Leftovers {
             branch: branch.to_string(),
             values: Vec::new(),
         };
         for key in [PARENT, FOLLOW, PREWARM, TRACK_READS] {
-            if let Some(value) = local.branch(branch, key) {
-                unset_branch(git_dir, branch, key)?;
-                left.values.push((key, value));
+            let taken = get_all(git_dir, branch, key).and_then(|values| {
+                if !values.is_empty() {
+                    unset_branch(git_dir, branch, key)?;
+                    left.values.push((key, values));
+                }
+                Ok(())
+            });
+            if let Err(e) = taken {
+                return Err(match left.restore(git_dir) {
+                    Ok(()) => e,
+                    Err(back) => e.context(format!("and not put back: {back:#}")),
+                });
             }
         }
         Ok(left)
     }
 
-    /// Puts them back (`git_dir` as for `forget`).
+    /// Puts them back (`git_dir` as for `forget`): every one it can, the
+    /// first failure said.
     pub fn restore(&self, git_dir: &Path) -> Result<()> {
-        for (key, value) in &self.values {
-            set_branch(git_dir, &self.branch, key, value)?;
+        let mut first = Ok(());
+        for (key, values) in &self.values {
+            for value in values {
+                let key = branch_key(&self.branch, key);
+                let added = git::cmd::run(git_dir, &["config", "--local", "--add", &key, value]);
+                first = first.and(added);
+            }
         }
-        Ok(())
+        first
+    }
+}
+
+/// Every value of `branch.<branch>.<key>` in the repository's own config,
+/// as git reads them.
+fn get_all(git_dir: &Path, branch: &str, key: &str) -> Result<Vec<String>> {
+    let key = branch_key(branch, key);
+    let out = git::cmd::command(git_dir)
+        .args(["config", "--local", "-z", "--get-all", &key])
+        .output()?;
+    // Exit 1: not set.
+    match out.status.code() {
+        Some(0) => Ok(String::from_utf8_lossy(&out.stdout)
+            .split_terminator('\0')
+            .map(String::from)
+            .collect()),
+        Some(1) => Ok(Vec::new()),
+        _ => anyhow::bail!(
+            "git config --get-all {key}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
     }
 }
 

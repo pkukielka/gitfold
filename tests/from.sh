@@ -158,6 +158,11 @@ eq "  no parent, following or base ref" "" "$(R config --get-regexp '^branch\.lp
 R config branch.ls.gitfoldPrewarm none; R config branch.ls.gitfoldTrackReads true
 check "a deleted branch's workspace settings left: forgotten, but for those given" says 0 "created branch ls" branch ls --from api --from ui --track-reads off
 eq "  prewarm forgotten, read tracking as given" " false" "$(R config --get branch.ls.gitfoldPrewarm) $(R config --get branch.ls.gitfoldTrackReads)"
+R config branch.x.gitfoldParent refs/heads/api
+for how in "--from api" "-w --from api" "--from api --from ui"; do
+    check "an existing branch ($how): refused, its settings untouched" says 1 "a branch named 'x' already exists" branch x $how
+    eq "  its parent kept" refs/heads/api "$(R config --get branch.x.gitfoldParent)"
+done
 for how in "--from api" "-w --from api"; do
     R config branch.one.gitfoldParent refs/heads/ui; R config branch.one.gitfoldPrewarm none
     R config branch.one.gitfoldTrackReads true; R update-ref refs/gitfold-base/one api
