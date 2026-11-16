@@ -39,14 +39,14 @@ pub enum Obj {
 
 /// The type of file an `Obj` is, as the kernel sees it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Kind {
+enum Kind {
     Dir,
     Symlink,
     File,
 }
 
 impl Obj {
-    pub fn kind(&self, store: &Store) -> Kind {
+    fn kind(&self, store: &Store) -> Kind {
         match self {
             Obj::Dir => Kind::Dir,
             Obj::File(id) if store.file(*id).is_some_and(|f| f.kind == EntryKind::Link) => {
@@ -82,7 +82,7 @@ pub struct Changed {
 
 pub struct Shown {
     /// The merged tree, in the store.
-    pub tree: u32,
+    tree: u32,
     summary: Arc<Vec<u8>>,
     times: Times,
 }

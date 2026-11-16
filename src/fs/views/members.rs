@@ -93,7 +93,7 @@ pub struct Refs {
     pub own: Tip,
     /// Each member and its tip and parent's commit; skipped members aren't
     /// here (`notes`).
-    pub members: Vec<(String, Tip, ObjectId)>,
+    pub members: Vec<(String, ObjectId, ObjectId)>,
     pub notes: Vec<Note>,
 }
 
@@ -181,7 +181,7 @@ pub fn refs(
             None => None,
         };
         if why.is_none() {
-            match tip(&full).and_then(|t| Ok((t, tip(&m.parent)?.0))) {
+            match tip(&full).and_then(|t| Ok((t.0, tip(&m.parent)?.0))) {
                 Ok((at, parent)) => out.push((m.branch.clone(), at, parent)),
                 // Deleted meanwhile: as if it had been gone.
                 Err(_) if !exists(&full) => why = Some(format!("no branch {}", m.branch)),

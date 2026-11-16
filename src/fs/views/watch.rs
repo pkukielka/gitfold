@@ -97,28 +97,23 @@ impl Watch {
         {
             return Ok(None);
         }
-        let mut inputs = Vec::with_capacity(refs.members.len());
-        for (member, (tip, _), parent) in &refs.members {
-            let base = self.bases.get(*tip, *parent)?;
-            inputs.push(Member {
-                branch: member,
-                tip: *tip,
-                base,
-            });
-        }
+        let bases = &mut self.bases;
+        let inputs = (refs.members.iter())
+            .map(|(branch, tip, parent)| {
+                let base = bases.get(*tip, *parent)?;
+                Ok(Member {
+                    branch,
+                    tip: *tip,
+                    base,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         self.bases.next_round();
-        // No lock the requests need is held meanwhile: git may read the mount.
-        let merged = ctx.private.merge(branch, (branch, refs.own.0), &inputs)?;
+        // No lock the requests need is held meanwhile.
+        let merged = ctx.private.merge(branch, refs.own, &inputs)?;
         let tree = ctx.store.load_tree(merged.tree)?;
-        let notes = &refs.notes;
-        let next = Shown::next(
-            &ctx.store,
-            tree,
-            &merged.conflicts,
-            notes,
-            before,
-            &self.times,
-        );
+        let (conflicts, notes) = (&merged.conflicts, &refs.notes);
+        let next = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);
         self.built = Some((members, refs, config));
         Ok(Some(next))
     }

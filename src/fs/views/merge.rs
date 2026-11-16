@@ -6,29 +6,23 @@
 //!
 //! Everything git writes goes into a private bare repository,
 //! `<git dir>/gitfold/.views.git`, which borrows the repository's objects
-//! (`objects/info/alternates`) and which gitfold reads too
-//! (`git::open_private`): no object, ref or commit lands in the repository.
-//! Its refs name the sides of each merge, so conflict markers read
-//! `<<<<<<< api+ui` and `>>>>>>> web`; `refs/gitfold/views/<view>` keeps each
-//! view's tree. It is made anew at each mount, and garbage-collected when it
-//! holds more loose objects than git's own `gc.auto` (6,700): what the views
-//! no longer show goes.
+//! (`objects/info/alternates`), settings (`include.path`) and attributes
+//! (`info/attributes`), and which gitfold reads too (`git::open_private`): no
+//! object, ref or commit lands in the repository. During a merge, its refs
+//! name the sides, so conflict markers read `<<<<<<< api+ui` and
+//! `>>>>>>> web`; after it, only `refs/gitfold/views/<view>` stays, keeping
+//! each view's tree. It is made anew at each mount, and garbage-collected as
+//! git's `gc --auto` decides (more loose objects than `gc.auto`'s default):
+//! what no view shows goes.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use gix::ObjectId;
-use log::info;
 use parking_lot::Mutex;
 
 use crate::git;
-
-/// Git's `gc.auto`: more loose objects than this, and the private repository
-/// is garbage-collected.
-const LOOSE_LIMIT: usize = 6700;
-/// How many merges between two counts of its loose objects.
-const COUNT_EVERY: usize = 100;
 
 /// A branch merged into a view: its tip, and its merge point with its parent
 /// (none: unrelated histories).
@@ -57,8 +51,8 @@ pub struct Merged {
 /// The private repository.
 pub struct Private {
     dir: PathBuf,
-    /// Held by each merge and the garbage collection: they use the same refs.
-    lock: Mutex<usize>,
+    /// Held by each merge and its garbage collection: they use the same refs.
+    lock: Mutex<()>,
 }
 
 impl Private {
@@ -66,44 +60,41 @@ impl Private {
     /// (an earlier mount's objects dropped) and opened for reads.
     pub fn create(common_dir: &Path) -> Result<Private> {
         let dir = crate::state::state_root(common_dir).join(".views.git");
-        match std::fs::remove_dir_all(&dir) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(e).with_context(|| format!("removing {}", dir.display()));
-            }
-            _ => {}
-        }
+        crate::state::retire::remove_dir(&dir)?;
         std::fs::create_dir_all(&dir)?;
         let mut init = Command::new("git");
         git::cmd::in_other_worktree(&mut init)?;
         git::cmd::checked(init.args(["init", "-q", "--bare"]).arg(&dir), &["init"])?;
-        let objects = common_dir.join("objects").canonicalize()?;
-        let alternates = dir.join("objects/info/alternates");
-        std::fs::write(&alternates, format!("{}\n", objects.display()))?;
-        // The repository's settings (`merge.conflictStyle`, merge drivers),
-        // as a merge in it would read them.
-        let config = common_dir.join("config").canonicalize()?;
-        let mut include = git::cmd::command_in_other(&dir)?;
-        let args = ["config", "include.path"];
-        git::cmd::checked(include.args(args).arg(&config), &args)?;
-        git::open_private(&dir)?;
-        Ok(Private {
+        let real = |p: &str| common_dir.join(p);
+        let objects = real("objects").canonicalize()?;
+        std::fs::write(
+            dir.join("objects/info/alternates"),
+            format!("{}\n", objects.display()),
+        )?;
+        // The repository's attributes, as it changes them (also when it has
+        // none yet).
+        std::os::unix::fs::symlink(
+            common_dir.canonicalize()?.join("info/attributes"),
+            dir.join("info/attributes"),
+        )?;
+        let private = Private {
             dir,
-            lock: Mutex::new(0),
-        })
+            lock: Mutex::new(()),
+        };
+        // The repository's settings, as a merge in it would read them, then
+        // the private repository's own (after: they win).
+        let config = real("config").canonicalize()?;
+        private.run(&["config", "include.path", &config.to_string_lossy()])?;
+        private.run(&["config", "--add", "user.name", "gitfold"])?;
+        private.run(&["config", "--add", "user.email", "gitfold@localhost"])?;
+        git::open_private(&private.dir)?;
+        Ok(private)
     }
 
-    /// git in the private repository: the repository's own settings (its
-    /// config is the private one's, which has none), no file system monitor.
+    /// git in the private repository, with no file system monitor.
     fn git(&self) -> Result<Command> {
         let mut git = git::cmd::command_in_other(&self.dir)?;
-        git.args([
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "user.name=gitfold",
-            "-c",
-            "user.email=gitfold@localhost",
-        ]);
+        git.args(["-c", "core.fsmonitor=false"]);
         Ok(git)
     }
 
@@ -111,78 +102,86 @@ impl Private {
         git::cmd::checked(self.git()?.args(args), args)
     }
 
-    /// Points private ref `name` at `commit`.
-    fn point(&self, name: &str, commit: &ObjectId) -> Result<()> {
-        self.run(&["update-ref", name, &commit.to_string()])
-            .map(drop)
+    /// Runs `git update-ref --stdin` with `commands`.
+    fn refs(&self, commands: String) -> Result<()> {
+        let args = ["update-ref", "--stdin"];
+        git::cmd::output_of(&mut self.git()?, &args, Some(commands.into_bytes())).map(drop)
     }
 
-    /// The view `view` (a name for its ref): `own` (the branch and its
-    /// commit) with `members` merged in turn.
-    pub fn merge(&self, view: &str, own: (&str, ObjectId), members: &[Member]) -> Result<Merged> {
-        let mut merges = self.lock.lock();
-        let (mut ours, mut commit) = (own.0.to_string(), own.1);
-        self.point(&format!("refs/heads/{ours}"), &commit)?;
-        let mut tree = None;
+    /// The view of `branch`: its commit `own` with `members` merged in turn.
+    pub fn merge(
+        &self,
+        branch: &str,
+        own: (ObjectId, ObjectId),
+        members: &[Member],
+    ) -> Result<Merged> {
+        let _lock = self.lock.lock();
+        // The sides' names, for git's labels.
+        let mut sides = format!("update refs/heads/{branch} {}\n", own.0);
+        for m in members {
+            sides.push_str(&format!("update refs/heads/{} {}\n", m.branch, m.tip));
+        }
+        self.refs(sides)?;
+        let (mut ours, mut commit, mut tree) = (branch.to_string(), own.0, own.1);
+        let mut made = vec![format!("refs/heads/{branch}")];
+        made.extend(members.iter().map(|m| format!("refs/heads/{}", m.branch)));
         let mut conflicts = Vec::new();
         for m in members {
-            self.point(&format!("refs/heads/{}", m.branch), &m.tip)?;
             let base = m
                 .base
                 .unwrap_or_else(|| ObjectId::empty_tree(gix::hash::Kind::Sha1));
             let base = format!("--merge-base={base}");
             // Attributes (`merge=union`) from the view so far, as a merge in a
             // checkout reads them from it.
-            let attributes = format!("attr.tree=refs/heads/{ours}");
+            let attributes = format!("attr.tree={tree}");
             let args = ["merge-tree", "--write-tree", "-z", &base, &ours, m.branch];
-            let out = self.git()?.args(["-c", &attributes]).args(args).output()?;
+            let out = (self.git()?.args(["-c", &attributes]).args(args))
+                .stdin(Stdio::null())
+                .output()?;
             // 1: conflicts, which the output says.
             if !matches!(out.status.code(), Some(0 | 1)) {
-                bail!(
-                    "git {} failed ({}): {}",
-                    args.join(" "),
-                    out.status,
-                    String::from_utf8_lossy(&out.stderr).trim()
-                );
+                return Err(git::cmd::Failed {
+                    args: args.join(" "),
+                    status: out.status,
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                }
+                .into());
             }
-            let (merged, found) = parse(&out.stdout)?;
+            let found;
+            (tree, found) = parse(&out.stdout)?;
             for (kind, path) in found {
                 let sides = [ours.clone(), m.branch.to_string()];
                 conflicts.push(Conflict { kind, sides, path });
             }
             ours = format!("{ours}+{}", m.branch);
-            let hex = merged.to_string();
-            let made = self.run(&["commit-tree", &hex, "-m", &ours])?;
-            commit = ObjectId::from_hex(String::from_utf8_lossy(&made).trim().as_bytes())?;
-            self.point(&format!("refs/heads/{ours}"), &commit)?;
-            tree = Some(merged);
+            let hex = tree.to_string();
+            let out = self.run(&["commit-tree", &hex, "-m", &ours])?;
+            commit = ObjectId::from_hex(String::from_utf8_lossy(&out).trim().as_bytes())?;
+            self.refs(format!("update refs/heads/{ours} {commit}\n"))?;
+            made.push(format!("refs/heads/{ours}"));
         }
-        self.point(&format!("refs/gitfold/views/{view}"), &commit)?;
-        let tree = match tree {
-            Some(tree) => tree,
-            None => git::resolve(&commit.to_string())?.tree,
-        };
-        *merges += 1;
-        if (*merges).is_multiple_of(COUNT_EVERY) {
-            self.tidy()?;
+        // Only the view's tree stays referenced: garbage collection walks no
+        // branch's history.
+        let mut after = format!("update refs/gitfold/views/{branch} {commit}\n");
+        for name in made {
+            after.push_str(&format!("delete {name}\n"));
         }
+        self.refs(after)?;
+        // As git decides it, whatever the repository's own gc settings.
+        self.run(&[
+            "-c",
+            "gc.auto=6700",
+            "-c",
+            "gc.autoDetach=false",
+            "-c",
+            "gc.pruneExpire=now",
+            "gc",
+            "--auto",
+            "--quiet",
+        ])?;
+        // Packs it may have made.
+        git::refresh_private();
         Ok(Merged { tree, conflicts })
-    }
-
-    /// Garbage-collects the private repository if it holds more loose
-    /// objects than git's `gc.auto`: what no view shows goes (each view's
-    /// tree is kept by its ref).
-    fn tidy(&self) -> Result<()> {
-        let counts = String::from_utf8(self.run(&["count-objects", "-v"])?)?;
-        let loose = (counts.lines())
-            .find_map(|l| l.strip_prefix("count: "))
-            .and_then(|n| n.trim().parse::<usize>().ok())
-            .unwrap_or(0);
-        if loose > LOOSE_LIMIT {
-            info!("views: {loose} loose objects, garbage-collecting them");
-            self.run(&["gc", "--quiet", "--prune=now"])?;
-        }
-        Ok(())
     }
 }
 
@@ -242,7 +241,14 @@ mod tests {
             })
             .collect();
         private()
-            .merge(n, (n, id(&run(&["rev-parse", n]))), &inputs)
+            .merge(
+                n,
+                (
+                    id(&run(&["rev-parse", n])),
+                    id(&run(&["rev-parse", &format!("{n}^{{tree}}")])),
+                ),
+                &inputs,
+            )
             .unwrap()
     }
 
