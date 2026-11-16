@@ -138,3 +138,30 @@ pub fn command_in_other(git_dir: &Path) -> Result<Command> {
     in_other_worktree(&mut git)?;
     Ok(git)
 }
+
+/// git run in worktree `dir` (a workspace), as in a shell there (see
+/// `in_other_worktree`).
+pub fn in_workspace(dir: &Path) -> Result<Command> {
+    let mut git = Command::new("git");
+    in_other_worktree(&mut git)?;
+    git.current_dir(dir);
+    Ok(git)
+}
+
+/// The options of git on a throwaway index: a plain index, whatever the
+/// repository's are like, so that nothing of it (a split index's shared
+/// part, a sparse index's trees) is written into the repository and no hook
+/// hears of it; paths taken literally.
+pub const PLAIN_INDEX: [&str; 11] = [
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "index.sparse=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.untrackedCache=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "--literal-pathspecs",
+];

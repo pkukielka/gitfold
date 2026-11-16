@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::builder::BoolishValueParser;
@@ -66,8 +65,15 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
     if from.len() > 1 {
-        let settings = (prewarm, track_reads);
-        return merged(repo, &common_dir, name, &from, with_changes, settings);
+        return merged(
+            repo,
+            &common_dir,
+            name,
+            &from,
+            with_changes,
+            prewarm,
+            track_reads,
+        );
     }
     let from = from.into_iter().next();
     if with_changes {
@@ -133,7 +139,8 @@ fn merged(
     name: &str,
     from: &[String],
     with_changes: bool,
-    (prewarm, track_reads): (Option<Prewarm>, Option<bool>),
+    prewarm: Option<Prewarm>,
+    track_reads: Option<bool>,
 ) -> Result<()> {
     check_branch_name(common_dir, name)?;
     ensure!(
@@ -157,9 +164,10 @@ fn merged(
             common_dir.display()
         )
     };
-    let changes = match with_changes {
-        true => Changes::take(common_dir, &mount, &sources)?,
-        false => Changes::default(),
+    let changes = if with_changes {
+        Changes::take(common_dir, &mount, &sources)?
+    } else {
+        Changes::default()
     };
     let (first, others) = sources.split_first().expect("several --from");
     // Without an upstream: no relation afterwards.
@@ -366,21 +374,24 @@ impl Changes {
         crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
         fs::copy(state.index(), index).context("copying its git index")?;
         let workspace = mount.join(branch);
+        // On the copy, as a plain index (nothing of it written into the
+        // repository).
         let git = |args: &[&str]| -> Result<String> {
-            let mut git = Command::new("git");
-            git::cmd::in_other_worktree(&mut git)?;
-            git.current_dir(&workspace).env("GIT_INDEX_FILE", index);
-            let out = git::cmd::output_of(&mut git, args, None)?;
+            let mut git = git::cmd::in_workspace(&workspace)?;
+            git.env("GIT_INDEX_FILE", index);
+            let args: Vec<&str> = git::cmd::PLAIN_INDEX.iter().chain(args).copied().collect();
+            let out = git::cmd::output_of(&mut git, &args, None)?;
             Ok(String::from_utf8_lossy(&out).trim().to_string())
         };
         git(&["add", "-A"])?;
         let tree = git(&["write-tree"])?;
-        if tree == git(&["rev-parse", "--verify", "HEAD^{tree}"])? {
+        let head = git(&["rev-parse", "HEAD^{commit}", "HEAD^{tree}"])?;
+        let (head, head_tree) = head.split_once('\n').context("git rev-parse: no HEAD")?;
+        if tree == head_tree {
             return Ok(None);
         }
-        let head = git(&["rev-parse", "--verify", "HEAD^{commit}"])?;
         let message = format!("uncommitted changes of {branch}");
-        git(&["commit-tree", &tree, "-p", &head, "-m", &message]).map(Some)
+        git(&["commit-tree", &tree, "-p", head, "-m", &message]).map(Some)
     }
 
     fn is_empty(&self) -> bool {
@@ -391,29 +402,36 @@ impl Changes {
     /// does (a conflict between them left in the files as markers), then
     /// unstages them (`git reset`). Refused if git refuses one.
     fn apply(&self, workspace: &Path) -> Result<()> {
-        let git = || -> Result<Command> {
-            let mut git = Command::new("git");
-            git::cmd::in_other_worktree(&mut git)?;
-            git.current_dir(workspace);
-            Ok(git)
-        };
+        let git = || git::cmd::in_workspace(workspace);
         let mut conflicts = Vec::new();
-        for (branch, commit) in &self.0 {
+        for (n, (branch, commit)) in self.0.iter().enumerate() {
             // git's messages the user's, as for the merge.
             let args = ["cherry-pick", "-n", "--end-of-options", commit];
-            if !git()?.args(args).status()?.success() {
-                // A conflict leaves unmerged paths; a refusal, none.
-                let unmerged = git::cmd::output_of(&mut git()?, &["ls-files", "-u"], None)?;
-                ensure!(
-                    !unmerged.is_empty(),
-                    "git cherry-pick of the uncommitted changes of {branch} failed"
-                );
-                conflicts.push(branch.as_str());
+            if git()?.args(args).status()?.success() {
+                continue;
             }
-            // Staged, so the next one merges with them.
-            git::cmd::output_of(&mut git()?, &["add", "-A"], None)?;
+            // A conflict leaves unmerged paths; a refusal, none.
+            let args = ["diff", "--name-only", "-z", "--diff-filter=U"];
+            let unmerged = git::cmd::output_of(&mut git()?, &args, None)?;
+            ensure!(
+                !unmerged.is_empty(),
+                "git cherry-pick of the uncommitted changes of {branch} failed"
+            );
+            conflicts.push(branch.as_str());
+            // Staged with their markers, so the next one merges with them
+            // (`cherry-pick -n` staged the rest).
+            if n + 1 < self.0.len() {
+                let args = [
+                    "--literal-pathspecs",
+                    "add",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ];
+                git::cmd::output_of(&mut git()?, &args, Some(unmerged))?;
+            }
         }
-        git::cmd::output_of(&mut git()?, &["reset", "-q"], None)?;
+        // Unstaged; only the index is reset (no refresh of every file).
+        git::cmd::output_of(&mut git()?, &["reset", "-q", "--no-refresh"], None)?;
         if !conflicts.is_empty() {
             println!(
                 "the uncommitted changes of {} conflict: in the files as markers",
@@ -437,9 +455,7 @@ fn and_list(names: &[&str]) -> String {
 /// user's, as in a shell there (`git::cmd::in_other_worktree`); whether it
 /// made the merge.
 fn run_merge(workspace: &Path, revs: &[String]) -> Result<bool> {
-    let mut git = Command::new("git");
-    let status = (git::cmd::in_other_worktree(&mut git)?)
-        .current_dir(workspace)
+    let status = (git::cmd::in_workspace(workspace)?)
         .args(["merge", "--end-of-options"])
         .args(revs)
         .status()

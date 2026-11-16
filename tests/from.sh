@@ -205,6 +205,9 @@ echo "a by api" >"$MNT/api/a.txt"; echo "a by ui" >"$MNT/ui/a.txt"
 check "-w: changes that conflict: in the files as markers" says 0 "the uncommitted changes of ui conflict" branch w2 -w --from api --from ui
 check "  the markers" grep -q '^<<<<<<< HEAD' "$MNT/w2/a.txt"
 eq "  unstaged" "" "$(git -C "$MNT/w2" diff --cached --name-only)"
+echo "x changed" >"$MNT/x/x.txt"
+check "-w: a conflict before the last source's changes" says 0 "the uncommitted changes of ui conflict" branch w6 -w --from api --from ui --from x
+eq "  the markers, and the last one's changes after them" "1 x changed" "$(grep -c '^<<<<<<< ' "$MNT/w6/a.txt") $(cat "$MNT/w6/x.txt")"
 work clash main api.txt clash
 check "-w, the branches conflicting: git refuses the changes, nothing left" says 1 "not created" branch w3 -w --from api --from clash
 check "  nothing left behind" nothing_of w3
