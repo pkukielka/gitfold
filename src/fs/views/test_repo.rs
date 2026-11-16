@@ -122,6 +122,16 @@ pub fn branch(name: &str, commit: &str) -> String {
     commit.to_string()
 }
 
+/// Points remote-tracking branch `name` (`origin/x`) at `commit`.
+pub fn remote_branch(name: &str, commit: &str) {
+    git(
+        repo(),
+        &["update-ref", &format!("refs/remotes/{name}"), commit],
+        None,
+        None,
+    );
+}
+
 /// The repository's git directory.
 pub fn git_dir() -> PathBuf {
     repo().join(".git")

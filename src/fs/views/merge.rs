@@ -1,6 +1,13 @@
 //! The three-way merge of one file's content, as `git merge-file` does it:
 //! conflicts kept in the file with git's markers, named by branch. All a view
 //! needs of a content merge (`build`), so another merge can replace it.
+//!
+//! Known differences from git's merge (accepted 2026-11-16):
+//! - `.gitattributes` merge settings (`merge=union`, `-merge`/`binary`,
+//!   `conflict-marker-size`, merge drivers) aren't applied. gix applies them
+//!   only with attributes from an index (the repository's), so a view would
+//!   need its own attribute stack over its tree and overlay;
+//! - the diff3 styles name the base `base`, not the merge base's commit.
 
 use std::path::Path;
 

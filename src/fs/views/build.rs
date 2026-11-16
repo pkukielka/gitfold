@@ -9,7 +9,10 @@
 //! `git merge-file` does (`merge`), conflicts kept as markers named by
 //! branch. Where no markers can show a conflict, a changed file wins over a
 //! deletion and otherwise the side merged earlier stays; every conflict is
-//! recorded (`Conflict`). Renames aren't followed.
+//! recorded (`Conflict`). Unlike git's merge (accepted 2026-11-16): renames
+//! aren't followed, a merge point is one merge base (no virtual base for
+//! criss-cross histories), and submodules changed on both sides conflict
+//! even when one is a fast-forward of the other.
 //!
 //! A view is the branch's tree (`View::lower`, a store tree) and the paths
 //! where it differs (`View::overlay`): files only, a directory being the files
@@ -470,8 +473,9 @@ mod tests {
             .map(|(c, p)| (c.to_string(), format!("refs/heads/{p}")))
             .collect();
         let tree = Tree::of(stored, Some("main".into()), |_| true);
-        let (files, members) = committed(store, n, &members(&tree, n, None, |_| true)).unwrap();
-        build(store, n, files, &members, ConflictStyle::Merge).unwrap()
+        let c = committed(store, n, None, &members(&tree, n, None, |_| true)).unwrap();
+        assert!(c.skipped.is_empty());
+        build(store, n, c.files, &c.members, ConflictStyle::Merge).unwrap()
     }
 
     /// What `view` shows at `path`, as text.
