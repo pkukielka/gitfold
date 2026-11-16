@@ -93,16 +93,16 @@ impl MountArgs {
         }
         // Recorded one flag per line, as text: a log file path that can't be
         // isn't recorded (mounting again logs where it does by default).
-        let log = (self.log.as_ref())
-            .and_then(|log| std::path::absolute(log).ok())
-            .filter(|log| log.to_str().is_some_and(|l| !l.contains('\n')));
-        match (log, &self.log) {
-            (Some(log), _) => flags.push(format!("--log={}", log.display())),
-            (None, Some(log)) => log::warn!(
-                "not recording the log file {} to mount again with: not a path in plain text",
-                log.display()
-            ),
-            (None, None) => {}
+        if let Some(log) = &self.log {
+            let absolute = std::path::absolute(log).ok();
+            match absolute.as_ref().and_then(|l| l.to_str()) {
+                Some(text) if !text.contains('\n') => flags.push(format!("--log={text}")),
+                _ => log::warn!(
+                    "not recording the log file {} to mount again with: not a path in plain \
+                     text",
+                    log.display()
+                ),
+            }
         }
         flags
     }
@@ -154,11 +154,14 @@ fn mount_again(common_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result
     match mount_table::mount_of(common_dir)? {
         Some(mount) => Ok(mount),
         None => bail!(
-            "{} isn't mounted, and mounting it at {} with the flags it last had ({}) failed \
-             ({status}); `gitfold mount` it (that records its flags anew)",
+            "{} isn't mounted, and mounting it at {} with {} failed ({status}); `gitfold \
+             mount` it (that records its flags anew)",
             common_dir.display(),
             mountpoint.display(),
-            flags.join(" ")
+            match flags {
+                [] => "the default flags (none recorded)".to_string(),
+                _ => format!("the flags it last had ({})", flags.join(" ")),
+            }
         ),
     }
 }

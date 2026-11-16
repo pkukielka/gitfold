@@ -268,13 +268,12 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
     let value = mountpoint
         .to_str()
         .context("a mount point that isn't UTF-8")?;
-    // The flags first: a mount point recorded never goes with an older
-    // mount's flags (the reverse, if the second write fails, is milder:
-    // the right flags at the old place).
-    let key = format!("gitfold.{MOUNT_OPTIONS}");
-    git::cmd::run(git_dir, &["config", "--local", &key, &flags.join("\n")])?;
+    // Each written even if the other can't be (the config locked meanwhile).
     let key = format!("gitfold.{MOUNTPOINT}");
-    git::cmd::run(git_dir, &["config", "--local", &key, value])
+    let place = git::cmd::run(git_dir, &["config", "--local", &key, value]);
+    let key = format!("gitfold.{MOUNT_OPTIONS}");
+    let options = git::cmd::run(git_dir, &["config", "--local", &key, &flags.join("\n")]);
+    place.and(options)
 }
 
 /// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
