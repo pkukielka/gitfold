@@ -243,15 +243,31 @@ impl Plan {
         let tip = git::branch_tip(branch)?.id;
         let base = own_base(common_dir, branch, from, roots, tip)?;
         let onto_id = git::resolve(onto)?.id;
-        Ok(Plan {
+        let on_history = is_ancestor(common_dir, base, onto_id)?;
+        let mut plan = Plan {
             branch: branch.to_string(),
             tip,
             base,
             onto: onto_id,
             onto_ref: onto.to_string(),
-            own: count(common_dir, &[&tip.to_string(), &format!("^{base}")])?,
-            on_history: is_ancestor(common_dir, base, onto_id)?,
-        })
+            own: 0,
+            on_history,
+        };
+        let [tip, from] = plan.own_range();
+        plan.own = count(common_dir, &[&tip, &from])?;
+        Ok(plan)
+    }
+
+    /// `rev-list` arguments for the commits the move replays: on its
+    /// parent's history those `git rebase <onto>` takes (not in `onto`),
+    /// else those after its base.
+    fn own_range(&self) -> [String; 2] {
+        let from = if self.on_history {
+            self.onto
+        } else {
+            self.base
+        };
+        [self.tip.to_string(), format!("^{from}")]
     }
 
     /// Whether it sits on `onto` already, with nothing of its old parent's
@@ -281,9 +297,8 @@ impl Plan {
         let remote = git::with_repo(|repo| {
             match repo.branch_remote_name(branch.as_str(), gix::remote::Direction::Push) {
                 Some(name) => name.as_symbol().map(String::from),
-                None => {
-                    (repo.remote_default_name(gix::remote::Direction::Push)).map(|n| n.to_string())
-                }
+                // As git: origin.
+                None => Some("origin".to_string()),
             }
         });
         let Some(remote) = remote else {
@@ -296,8 +311,8 @@ impl Plan {
         let Some(at) = rev(&theirs) else {
             return Ok(None);
         };
-        let (tip, base) = (self.tip.to_string(), format!("^{}", self.base));
-        let unpushed = count(common_dir, &[&tip, &base, &format!("^{at}")])?;
+        let [tip, from] = self.own_range();
+        let unpushed = count(common_dir, &[&tip, &from, &format!("^{at}")])?;
         Ok((self.own > unpushed).then(|| Pushed {
             count: self.own - unpushed,
             push: format!("git push --force-with-lease={branch}:{at} {remote} {branch}"),
@@ -323,8 +338,8 @@ impl Plan {
             clear_conflict(common_dir, branch)?;
             return Ok(Moved::UpToDate);
         }
-        let range = format!("{}..{}", self.base, self.tip);
-        if count(common_dir, &["--merges", &range])? > 0 {
+        let [tip, from] = self.own_range();
+        if count(common_dir, &["--merges", &tip, &from])? > 0 {
             return Ok(Moved::Merge);
         }
         let pushed = self.pushed(common_dir)?;

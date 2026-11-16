@@ -316,6 +316,11 @@ check "git's environment set: moved all the same" sh -c "cd / && GIT_DIR='$REPO/
 eq "  the checkout untouched" "$head refs/heads/main" "$(R rev-parse HEAD) $(R symbolic-ref HEAD)"
 check "  and clean" sh -c "[ -z \"\$(git -C '$REPO' status --porcelain)\" ]"
 check "moves don't make the repository look used with mounts" test ! -e "$REPO/.git/gitfold"
+# A merge in the parent's history isn't one of the branch's own commits.
+R branch side main; on side s.txt s
+R switch -q api; R merge -q --no-ff --no-edit side; R switch -q main
+R branch plain api; on plain p.txt p; on api a.txt after
+check "a merge in the parent's history: moved all the same" says 0 "moves 1 commit of plain onto api" parent plain --set api
 }
 
 pushed() {
@@ -378,7 +383,7 @@ eq "  only its own commit moved (its base was recorded first)" "1" "$(own api ui
 check "  the record gone" fails R rev-parse -q --verify refs/gitfold-moving/ui
 # A move's worktree a dead process left: cleaned up by the next move.
 on api a.txt newer
-R worktree add -q --no-checkout "$REPO/.git/gitfold-moves/gitfold-move-ui" ui
+R -c worktree.useRelativePaths=true worktree add -q --no-checkout "$REPO/.git/gitfold-moves/gitfold-move-ui" ui
 check "a dead move's worktree: cleaned up" says 0 "moved 1 commit of ui onto api" parent ui --update
 check "  gone" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
 # --set: its own commits onto another parent.

@@ -123,7 +123,10 @@ impl Scratch {
             return Ok(());
         }
         log::warn!("{branch}: cleaning up the worktree of an interrupted move");
-        if self.admin().is_ok_and(|a| a.join("rebase-merge").exists())
+        // Only in a worktree that is one (with its `.git` file): git would
+        // otherwise find the repository's own worktree above it.
+        if self.path.join(".git").is_file()
+            && self.admin().is_ok_and(|a| a.join("rebase-merge").exists())
             && let Err(e) = self.git(&["rebase", "--abort"])
         {
             log::warn!("{branch}: aborting the interrupted move: {e:#}");

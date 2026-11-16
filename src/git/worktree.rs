@@ -197,8 +197,23 @@ pub fn checked_out(common_dir: &Path, branch: &str, except: Option<&Path>) -> Op
     worktrees.flatten().find_map(|w| {
         let name = w.file_name().to_string_lossy().into_owned();
         (Some(w.path().as_path()) != except && is_ours(&w.path())).then(|| {
-            fs::read_to_string(w.path().join("gitdir"))
-                .map_or(name, |g| g.trim().trim_end_matches("/.git").to_string())
+            // Relative to the registration with `worktree.useRelativePaths`
+            // (resolved by name only: no filesystem access, which on a
+            // workspace's path would be a request to this very mount).
+            fs::read_to_string(w.path().join("gitdir")).map_or(name, |g| {
+                let mut path = PathBuf::new();
+                for part in w.path().join(g.trim()).components() {
+                    match part {
+                        std::path::Component::ParentDir => {
+                            path.pop();
+                        }
+                        std::path::Component::CurDir => {}
+                        part => path.push(part),
+                    }
+                }
+                path.pop(); // the `.git` file
+                path.to_string_lossy().into_owned()
+            })
         })
     })
 }
