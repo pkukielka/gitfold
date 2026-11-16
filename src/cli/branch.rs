@@ -224,6 +224,8 @@ fn merged(
 /// base ref. A new branch has no relation, and only the settings it is
 /// given.
 struct Left {
+    /// The branch they were left for.
+    name: String,
     settings: settings::Leftovers,
     /// The base ref and what it pointed at.
     base: Option<(String, String)>,
@@ -242,6 +244,7 @@ impl Left {
             .ok()
             .map(|out| String::from_utf8_lossy(&out).trim().to_string());
         let left = Left {
+            name: name.to_string(),
             settings: settings::Leftovers::forget(repo, name)?,
             base: at.map(|at| (base, at)),
         };
@@ -269,6 +272,11 @@ impl Left {
         common_dir: &Path,
         failed: anyhow::Error,
     ) -> anyhow::Error {
+        // Made after all (the failure came after it was, or another command
+        // made it meanwhile): they are no leftovers any more.
+        if git::branch_exists(&self.name) {
+            return failed;
+        }
         match self.put_back(repo, common_dir) {
             Ok(()) => failed,
             Err(e) => failed.context(format!(
