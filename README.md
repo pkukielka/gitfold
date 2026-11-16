@@ -150,7 +150,8 @@ gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
 gitfold branch <BRANCH> [-w] [--from <REV>]... [--prewarm <MODE>] [--track-reads on|off]
                                               # create a branch for a workspace
                                               # (-w: with a workspace's changes;
-                                              # several --from: merged, not yet)
+                                              # several --from: at their merge, as
+                                              # git merge makes it; conflicts not yet)
 gitfold branch <BRANCH> --parent <P> [--no-follow]
                                               # a branch built on P (not yet)
 gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
@@ -193,7 +194,11 @@ name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
 Three commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
 `inbox --claude-hook rewake` (2, to wake the session).
-`gitfold branch` starts the branch at HEAD unless `--from` says otherwise.
+`gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
+several `--from`, it starts where `git merge` of the others on a branch at the
+first would leave it: a merge commit, or a fast-forward, or the first itself if
+it contains the others. A conflicting merge is not built yet. The branch keeps no
+relation to them.
 
 Names below the mount point:
 
