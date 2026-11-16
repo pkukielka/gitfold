@@ -86,16 +86,26 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             from: source.clone(),
             to: name.to_string(),
         };
-        let done = super::local_or_daemon(&common_dir, &request, "branch --with-changes", || {
+        // Before the fork gives it its source's settings.
+        let left = Left::forget(repo, &common_dir, name)?;
+        let forked = super::local_or_daemon(&common_dir, &request, "branch --with-changes", || {
             fork::fork(&common_dir, &source, name, None, |dst| {
                 fork::copy_stored(&common_dir, &source, dst)
             })
-        })?;
+        });
+        let done = forked.map_err(|e| left.put_back_after(repo, &common_dir, e))?;
         set_branch_settings(repo, name, prewarm, track_reads)?;
         println!("{done}; open it as <mountpoint>/{name}");
         return Ok(());
     }
-    create(repo, name, from.as_deref())?;
+    match from.as_deref() {
+        // What a deleted branch of that name left isn't the new one's.
+        Some(from) => {
+            let left = Left::forget(repo, &common_dir, name)?;
+            create(repo, name, Some(from)).map_err(|e| left.put_back_after(repo, &common_dir, e))?
+        }
+        None => create(repo, name, None)?,
+    }
     set_branch_settings(repo, name, prewarm, track_reads)?;
     println!("created branch {name}; open it as <mountpoint>/{name}");
     Ok(())
@@ -153,19 +163,24 @@ fn merged(
         )
     };
     let (first, others) = sources.split_first().expect("several --from");
+    // What a deleted branch of that name left isn't NEW's; put back if NEW
+    // isn't made after all.
+    let left = Left::forget(repo, common_dir, name)?;
     // Without an upstream: no relation afterwards.
-    git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.id])?;
+    if let Err(e) = git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.id]) {
+        return Err(left.put_back_after(repo, common_dir, e));
+    }
     let made = Made {
         name,
         at: &first.id,
         prewarm: prewarm.is_some(),
         track_reads: track_reads.is_some(),
+        left,
     };
     let state = StateDir::of(common_dir, name);
     let workspace = mount.join(name);
-    let merge = no_leftovers(repo, common_dir, name, prewarm, track_reads)
-        // Before the workspace opens: it opens with them.
-        .and_then(|()| set_branch_settings(repo, name, prewarm, track_reads))
+    // Before the workspace opens: it opens with them.
+    let merge = set_branch_settings(repo, name, prewarm, track_reads)
         // Looking it up opens it.
         .and_then(|()| {
             let meta = fs::metadata(&workspace)
@@ -196,60 +211,103 @@ fn merged(
                 .unwrap_or_else(|| anyhow::anyhow!("git merge failed"));
             Err(match made.undo(repo, common_dir, &state) {
                 Ok(()) => failed.context(format!("branch {name} not created")),
-                Err(e) => failed.context(format!("branch {name} created, but {e:#}")),
+                Err(e) => failed.context(format!("branch {name} {e:#}")),
             })
         }
     }
 }
 
-/// Forgets what a deleted branch `name` left: what would relate the new one
-/// to another (its parent, following, base ref; `--from` makes none), and
-/// its workspace settings, but for those given now (`prewarm`,
-/// `track_reads`).
-fn no_leftovers(
-    repo: &Path,
-    common_dir: &Path,
-    name: &str,
-    prewarm: Option<Prewarm>,
-    track_reads: Option<bool>,
-) -> Result<()> {
-    settings::forget_parent(repo, name)?;
-    settings::forget_workspace(repo, name, prewarm.is_none(), track_reads.is_none())?;
-    git::worktree::unpin(common_dir, &format!("refs/gitfold-base/{name}"))
+/// What a deleted branch left for a new branch of its name: its settings
+/// (`settings::Leftovers`: parent, following, prewarm, read tracking) and its
+/// base ref. A new branch has no relation, and only the settings it is
+/// given.
+struct Left {
+    settings: settings::Leftovers,
+    /// The base ref and what it pointed at.
+    base: Option<(String, String)>,
 }
 
-/// What `merged` made: branch `name` at `at`, and which settings it stored.
+impl Left {
+    /// Forgets them for branch `name`.
+    fn forget(repo: &Path, common_dir: &Path, name: &str) -> Result<Left> {
+        let base = format!("refs/gitfold-base/{name}");
+        let at = git::cmd::output(common_dir, &["rev-parse", "--verify", "-q", &base])
+            .ok()
+            .map(|out| String::from_utf8_lossy(&out).trim().to_string());
+        let left = Left {
+            settings: settings::Leftovers::forget(repo, common_dir, name)?,
+            base: at.map(|at| (base, at)),
+        };
+        if let Some((base, at)) = &left.base
+            && let Err(e) = git::cmd::output(common_dir, &["update-ref", "-d", base, at])
+        {
+            return Err(left.put_back_after(repo, common_dir, e));
+        }
+        Ok(left)
+    }
+
+    /// Puts them back: the branch wasn't made after all.
+    fn put_back(&self, repo: &Path, common_dir: &Path) -> Result<()> {
+        self.settings.restore(repo)?;
+        match &self.base {
+            Some((base, at)) => git::cmd::output(common_dir, &["update-ref", base, at]).map(drop),
+            None => Ok(()),
+        }
+    }
+
+    /// `failed`, after putting them back (and saying if that failed too).
+    fn put_back_after(
+        &self,
+        repo: &Path,
+        common_dir: &Path,
+        failed: anyhow::Error,
+    ) -> anyhow::Error {
+        match self.put_back(repo, common_dir) {
+            Ok(()) => failed,
+            Err(e) => failed.context(format!(
+                "what a deleted branch of that name left not put back ({e:#})"
+            )),
+        }
+    }
+}
+
+/// What `merged` made: branch `name` at `at`, the settings it stored, and
+/// what it found left by a deleted branch of that name.
 struct Made<'a> {
     name: &'a str,
     at: &'a str,
     prewarm: bool,
     track_reads: bool,
+    left: Left,
 }
 
 impl Made<'_> {
     /// Removes it again: the workspace if it opened (retried while busy, as
     /// `gitfold remove --wait`), the settings it stored, then the branch
-    /// (without it, its workspace couldn't be removed). An error says what is
-    /// left, and how to remove it.
+    /// (without it, its workspace couldn't be removed); and puts back what
+    /// was left. An error says what is left, and how to remove it.
     fn undo(&self, repo: &Path, common_dir: &Path, state: &StateDir) -> Result<()> {
         let name = self.name;
         if state.dir.exists() || state.admin.exists() {
             super::remove::remove_waiting(common_dir, name, true, false, UNDO_WAIT).with_context(
                 || {
                     format!(
-                        "not removed again: `gitfold remove --force {name}`, then `git branch \
-                         -D {name}`"
+                        "created, but not removed again: `gitfold remove --force {name}`, then \
+                         `git branch -D {name}`"
                     )
                 },
             )?;
         }
-        let branch_left = || format!("not deleted again: `git branch -D {name}`");
+        let branch_left = || format!("created, but not deleted again: `git branch -D {name}`");
         settings::forget_workspace(repo, name, self.prewarm, self.track_reads)
             .with_context(branch_left)?;
         let branch = format!("refs/heads/{name}");
         git::cmd::output(common_dir, &["update-ref", "-d", &branch, self.at])
-            .with_context(branch_left)
-            .map(drop)
+            .with_context(branch_left)?;
+        (self.left.put_back(repo, common_dir)).context(
+            "not created, but what a deleted branch of that name left (its settings, base ref) \
+             not put back",
+        )
     }
 }
 

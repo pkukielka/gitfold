@@ -222,6 +222,42 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
+/// The gitfold settings a deleted branch left (its parent, following,
+/// prewarm mode, read tracking): forgotten for a new branch of its name
+/// (which has no relation and settings of its own), and put back if it isn't
+/// made after all.
+pub struct Leftovers {
+    branch: String,
+    values: Vec<(&'static str, String)>,
+}
+
+impl Leftovers {
+    /// Forgets the settings left for `branch` in the repository of
+    /// `common_dir` (`git_dir`: its or a worktree's git directory).
+    pub fn forget(git_dir: &Path, common_dir: &Path, branch: &str) -> Result<Leftovers> {
+        let local = Local::read_checked(common_dir)?;
+        let mut left = Leftovers {
+            branch: branch.to_string(),
+            values: Vec::new(),
+        };
+        for key in [PARENT, FOLLOW, PREWARM, TRACK_READS] {
+            if let Some(value) = local.branch(branch, key) {
+                unset_branch(git_dir, branch, key)?;
+                left.values.push((key, value));
+            }
+        }
+        Ok(left)
+    }
+
+    /// Puts them back (`git_dir` as for `forget`).
+    pub fn restore(&self, git_dir: &Path) -> Result<()> {
+        for (key, value) in &self.values {
+            set_branch(git_dir, &self.branch, key, value)?;
+        }
+        Ok(())
+    }
+}
+
 /// Forgets the workspace settings of `branch` asked for: its prewarm mode,
 /// its read tracking (a branch made and deleted again by one command).
 pub fn forget_workspace(
