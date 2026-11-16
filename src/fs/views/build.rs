@@ -266,27 +266,28 @@ impl Acc<'_> {
             self.record(path, ConflictKind::Kind, branches);
             return Ok(());
         };
-        // As git: a symlink's target as the base, nothing for a submodule.
+        // As git: a base that wasn't a regular file merges as none (two-way).
         let base = match (&before, before_kind) {
-            (Some(e), Some(k)) if is_blob(k) || k == EntryKind::Link => e.bytes(store)?,
+            (Some(e), Some(k)) if is_blob(k) => e.bytes(store)?,
             _ => Cow::Borrowed(&[][..]),
         };
+        let ours_label = branches[..branches.len() - 1].join(" + ");
+        let (mine, theirs) = (ours.bytes(store)?, after.bytes(store)?);
+        let (data, markers) =
+            match merge::merge3(&base, &mine, &theirs, &ours_label, name, self.style) {
+                Merged::Binary => {
+                    self.record(path, ConflictKind::Binary, branches);
+                    return Ok(());
+                }
+                Merged::Markers(data) => (data, true),
+                Merged::Clean(data) => (data, false),
+            };
         if modes_conflict {
             self.record(path.clone(), ConflictKind::Mode, branches.clone());
         }
-        let ours_label = branches[..branches.len() - 1].join(" + ");
-        let (mine, theirs) = (ours.bytes(store)?, after.bytes(store)?);
-        let data = match merge::merge3(&base, &mine, &theirs, &ours_label, name, self.style) {
-            Merged::Binary => {
-                self.record(path, ConflictKind::Binary, branches);
-                return Ok(());
-            }
-            Merged::Markers(data) => {
-                self.record(path.clone(), ConflictKind::Markers, branches);
-                data
-            }
-            Merged::Clean(data) => data,
-        };
+        if markers {
+            self.record(path.clone(), ConflictKind::Markers, branches);
+        }
         let entry = Entry::Merged {
             data: Arc::new(data),
             kind,
@@ -299,8 +300,12 @@ impl Acc<'_> {
     /// nothing is and sit above or below other files: that is recorded
     /// instead. Whether it was set.
     fn take(&mut self, name: &str, path: Vec<u8>, entry: Option<Entry>) -> bool {
-        if entry.is_some() && self.entry(&path).is_none() && self.clashes(&path) {
-            let branches = self.involved(&path, name);
+        if entry.is_some()
+            && self.entry(&path).is_none()
+            && let Some(clash) = self.clash(&path)
+        {
+            // The branches of what is there, then this one.
+            let branches = self.involved(&clash, name);
             self.record(path, ConflictKind::FileDirectory, branches);
             return false;
         }
@@ -312,30 +317,32 @@ impl Acc<'_> {
         true
     }
 
-    /// Whether a file at `path` would sit below a file the view holds, or
-    /// above files it holds.
-    fn clashes(&self, path: &[u8]) -> bool {
-        if ancestors(path).any(|above| self.entry(above).is_some()) {
-            return true;
+    /// A file the view holds that a file at `path` would sit below, or one
+    /// it would sit above, if any.
+    fn clash(&self, path: &[u8]) -> Option<Vec<u8>> {
+        if let Some(above) = ancestors(path).find(|above| self.entry(above).is_some()) {
+            return Some(above.to_vec());
         }
         let prefix = [path, b"/"].concat();
         let below = (Bound::Included(&prefix[..]), Bound::Unbounded);
         let overlaid = (self.overlay.range::<[u8], _>(below))
             .take_while(|(p, _)| p.starts_with(&prefix))
-            .any(|(_, e)| e.is_some());
-        overlaid
-            || tree_at(self.store, self.lower, path)
-                .is_some_and(|tree| self.any_shown_below(path, tree))
+            .find(|(_, e)| e.is_some());
+        if let Some((p, _)) = overlaid {
+            return Some(p.clone());
+        }
+        let tree = tree_at(self.store, self.lower, path)?;
+        self.shown_below(path, tree)
     }
 
-    /// Whether a file of `lower`'s tree `tree` at `dir` isn't deleted.
-    fn any_shown_below(&self, dir: &[u8], tree: u32) -> bool {
+    /// A file of `lower`'s tree `tree` at `dir` that isn't deleted, if any.
+    fn shown_below(&self, dir: &[u8], tree: u32) -> Option<Vec<u8>> {
         let table = self.store.tree(tree);
-        table.entries().iter().any(|e| {
+        table.entries().iter().find_map(|e| {
             let path = join(dir, table.name(e));
             match e.kind {
-                EntryKind::Tree => self.any_shown_below(&path, e.id),
-                _ => self.overlay.get(&path) != Some(&None),
+                EntryKind::Tree => self.shown_below(&path, e.id),
+                _ => (self.overlay.get(&path) != Some(&None)).then_some(path),
             }
         })
     }
@@ -605,7 +612,7 @@ mod tests {
             got,
             [
                 conflict("bin", ConflictKind::Binary, &both),
-                conflict("d/x", ConflictKind::FileDirectory, &["t4-api", "t4-web"]),
+                conflict("d/x", ConflictKind::FileDirectory, &both),
                 conflict("gone", ConflictKind::ModifiedDeleted, &both),
                 conflict("kept", ConflictKind::ModifiedDeleted, &both),
                 conflict("link", ConflictKind::Kind, &both),
@@ -637,8 +644,12 @@ mod tests {
             "t7-api",
             &[("t7-ui", "t7-api"), ("t7-web", "t7-api")],
         );
-        // A symlink made a file on both sides: its target is the base.
-        assert_eq!(show(&store, &v, "l").unwrap(), "UI\n2\n3\n4\nWEB\n");
+        // A symlink made a file on both sides: merged without a base, as git.
+        assert!(
+            show(&store, &v, "l")
+                .unwrap()
+                .starts_with("<<<<<<< t7-api + t7-ui\n")
+        );
         // Added on both sides with different executable bits: the content
         // merged, the earlier side's bit kept, a conflict recorded.
         assert_eq!(show(&store, &v, "x").unwrap(), "a\nb\n");
@@ -651,6 +662,7 @@ mod tests {
         assert_eq!(
             got,
             [
+                conflict("l", ConflictKind::Markers, &both),
                 conflict("m", ConflictKind::Mode, &both),
                 conflict("m", ConflictKind::Markers, &both),
                 conflict("x", ConflictKind::Mode, &both),
