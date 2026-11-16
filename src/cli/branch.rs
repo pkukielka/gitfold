@@ -8,6 +8,7 @@ use clap::builder::BoolishValueParser;
 
 use crate::daemon::control;
 use crate::git;
+use crate::git::merge::{self, Merged};
 use crate::prewarm::Prewarm;
 use crate::refusal::Refusal;
 use crate::settings;
@@ -34,14 +35,20 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         super::tree::check_new_parent(repo, name, parent)?;
         return Err(super::tree::not_implemented("gitfold branch --parent"));
     }
-    if from.len() > 1 {
+    if from.len() > 1 && with_changes {
         return Err(super::tree::not_implemented(
-            "gitfold branch with several --from",
+            "gitfold branch --with-changes with several --from",
         ));
     }
-    let from = from.into_iter().next();
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
+    if from.len() > 1 {
+        let done = merged(repo, &common_dir, name, &from)?;
+        set_branch_settings(repo, name, prewarm, track_reads)?;
+        println!("{done}; open it as <mountpoint>/{name}");
+        return Ok(());
+    }
+    let from = from.into_iter().next();
     if with_changes {
         // `git branch` checks names itself; `update-ref` would take `HEAD`, and
         // refuse other bad names only after the copy.
@@ -88,6 +95,63 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
     Ok(())
+}
+
+/// Creates branch `name` at the merge of revisions `from` (several), as `git
+/// merge` would make it on a branch at the first (see `git::merge`); says
+/// where. The branch keeps no relation to them. A conflict, which would
+/// leave a merge in progress, isn't built yet.
+fn merged(repo: &Path, common_dir: &Path, name: &str, from: &[String]) -> Result<String> {
+    // Checked before merging; `git branch` checks again at the end.
+    let valid = git::cmd::output(common_dir, &["check-ref-format", "--branch", name]);
+    ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
+    ensure!(
+        !git::branch_exists(name),
+        "a branch named '{name}' already exists"
+    );
+    let sources = (from.iter())
+        .map(|rev| merge::source(common_dir, rev))
+        .collect::<Result<Vec<_>>>()?;
+    // The names of the sources but those at commit `except`, each once.
+    let names = |except: Option<&str>| {
+        let mut names: Vec<&str> = Vec::new();
+        for s in &sources {
+            if Some(s.id.as_str()) != except && !names.contains(&s.name.as_str()) {
+                names.push(&s.name);
+            }
+        }
+        and_list(&names)
+    };
+    // Where the branch is, at source `at`, and why.
+    let at = |at: usize, why: &str| {
+        let source = &sources[at];
+        let done = match names(Some(&source.id)) {
+            others if others.is_empty() => format!("at {} ({why})", source.name),
+            others => format!("at {} ({why}: it contains {others})", source.name),
+        };
+        (source.id.clone(), done)
+    };
+    let (at, done) = match merge::merge(common_dir, name, &sources)? {
+        Merged::UpToDate => at(0, "already up to date"),
+        Merged::FastForward(i) => at(i, "a fast-forward"),
+        Merged::Merge { id } => (id, format!("at a merge of {}", names(None))),
+        Merged::Conflict => {
+            return Err(super::tree::not_implemented(
+                "gitfold branch with several --from that conflict",
+            ));
+        }
+    };
+    create(repo, name, Some(&at))?;
+    Ok(format!("created branch {name} {done}"))
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 /// Creates branch `name` at `from`, or at HEAD of the worktree of `repo` (its
