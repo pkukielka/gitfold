@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end test of the read-only views `<mount>/@committed/N/`: branch N
 # merged with the branches built on it, kept current as their commits and
-# the tree of branches change, with conflicts in the files, an attribute
-# and the summary file; the reserved names under `@`.
+# the tree of branches change, with conflicts in the files and the
+# summary file; the reserved names under `@`.
 # usage: tests/views.sh (or with the others: tests/run.sh); sections as in
 # tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -70,12 +70,6 @@ eq "markers named by branch" $'<<<<<<< api + ui\nui\n=======\nweb\n>>>>>>> web' 
 eq "a change wins over a deletion" "web" "$(cat "$MNT/$V/gone.txt")"
 eq "the summary" $'markers\tapi, ui, web\ta.txt\nmodified-deleted\tapi, ui, web\tgone.txt' \
     "$(cat "$MNT/$V/.gitfold-conflicts")"
-if command -v getfattr >/dev/null; then
-    eq "the attribute" "modified-deleted: api, ui, web" \
-        "$(getfattr --only-values -n user.gitfold.conflict "$MNT/$V/gone.txt" 2>/dev/null)"
-    check "none where nothing conflicts" fails getfattr -n user.gitfold.conflict "$MNT/$V/d/b.txt"
-    eq "listed" "user.gitfold.conflict" "$(getfattr -d --absolute-names "$MNT/$V/a.txt" 2>/dev/null | sed -n 's/=.*//p')"
-fi
 }
 
 kept_current() {

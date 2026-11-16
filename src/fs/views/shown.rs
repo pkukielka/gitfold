@@ -1,7 +1,6 @@
 //! A view as the mount shows it: its content (`build::View`) as directories
-//! and files, its conflicts (an attribute on each file, and a summary file at
-//! its root), and what changed since the view before it (`Shown::next`), to
-//! tell the kernel about.
+//! and files, its conflicts (a summary file at its root), and what changed
+//! since the view before it (`Shown::next`), to tell the kernel about.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -20,10 +19,6 @@ use crate::store::{Lower, Store};
 /// (`<kind>\t<branches or ref>\t<path or why>`). A file of the branches with
 /// that name doesn't show.
 pub const SUMMARY: &[u8] = b".gitfold-conflicts";
-
-/// The attribute naming a file's conflicts (`<kind>: <branches>`, several
-/// separated by `; `).
-pub const CONFLICT_XATTR: &[u8] = b"user.gitfold.conflict";
 
 /// What a path of a view is.
 #[derive(Clone, Debug, PartialEq)]
@@ -58,8 +53,6 @@ pub struct Shown {
     added: BTreeSet<Vec<u8>>,
     /// Directories of `view.lower` whose files are all gone.
     emptied: BTreeSet<Vec<u8>>,
-    /// Each conflicting path's attribute.
-    conflicts: HashMap<Vec<u8>, String>,
     summary: Arc<Vec<u8>>,
     times: Times,
 }
@@ -98,17 +91,12 @@ impl Shown {
             }
         }
         let emptied = emptied(store, &view, &added);
-        let mut conflicts: HashMap<Vec<u8>, String> = HashMap::new();
         let mut summary = Vec::new();
         for c in &view.conflicts {
             let (kind, branches) = (c.kind.name(), c.branches.join(", "));
             summary.extend_from_slice(format!("{kind}\t{branches}\t").as_bytes());
             summary.extend_from_slice(&c.path);
             summary.push(b'\n');
-            let said = format!("{kind}: {branches}");
-            (conflicts.entry(c.path.clone()))
-                .and_modify(|s| *s = format!("{s}; {said}"))
-                .or_insert(said);
         }
         for n in notes {
             summary.extend_from_slice(format!("{}\t{}\t{}\n", n.kind, n.what, n.why).as_bytes());
@@ -117,7 +105,6 @@ impl Shown {
             view,
             added,
             emptied,
-            conflicts,
             summary: Arc::new(summary),
             times: times.clone(),
         };
@@ -231,11 +218,6 @@ impl Shown {
             out.insert(SUMMARY.to_vec(), Obj::Summary(self.summary.clone()));
         }
         Some(out.into_iter().collect())
-    }
-
-    /// The conflict attribute of `path`, if it has one.
-    pub fn conflict(&self, path: &[u8]) -> Option<&str> {
-        self.conflicts.get(path).map(String::as_str)
     }
 
     /// When `path` last changed.
@@ -425,7 +407,6 @@ mod tests {
             why: "no branch web".into(),
         };
         let (s, _) = Shown::next(&store, v, &[note], None, &Times::default());
-        assert_eq!(s.conflict(b"a"), Some("mode: api, ui; markers: api, ui"));
         assert_eq!(
             String::from_utf8(s.summary.to_vec()).unwrap(),
             "mode\tapi, ui\ta\nmarkers\tapi, ui\ta\nskipped\tweb\tno branch web\n"

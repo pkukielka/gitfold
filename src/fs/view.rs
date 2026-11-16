@@ -229,15 +229,6 @@ impl GitFold {
         })
     }
 
-    /// The conflict attribute of inode `ino`, if it is a view's file with
-    /// one.
-    pub(super) fn conflict(&self, ino: u64) -> Option<String> {
-        match inode::decode(ino)? {
-            Ino::View { slot, local } => self.views.get(slot).ok()?.conflict(local),
-            _ => None,
-        }
-    }
-
     pub(super) fn is_file(&self, ino: INodeNo) -> Result<bool, Errno> {
         Ok(self.attr(ino.0)?.kind != FileType::Directory)
     }

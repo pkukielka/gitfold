@@ -25,8 +25,6 @@ pub struct Counters {
     /// unlink, rmdir.
     pub remove: AtomicU64,
     pub rename: AtomicU64,
-    /// getxattr, listxattr.
-    pub xattr: AtomicU64,
     /// Time spent in read handlers, and peak concurrency of those.
     io_ns: AtomicU64,
     inflight: AtomicU64,
@@ -41,7 +39,7 @@ impl Counters {
     pub fn log(&self, store: store::Stats) {
         let get = |a: &AtomicU64| a.load(Ordering::Relaxed);
         info!(
-            "ops: lookup={} getattr={} open={} read={} opendir={} readdir={} readlink={} write={} setattr={} create={} remove={} rename={} xattr={} io_ms={} \
+            "ops: lookup={} getattr={} open={} read={} opendir={} readdir={} readlink={} write={} setattr={} create={} remove={} rename={} io_ms={} \
              max_inflight={} blob_ms={} blob_mb={}; store: {} trees, {} entries, {} files",
             get(&self.lookup),
             get(&self.getattr),
@@ -55,7 +53,6 @@ impl Counters {
             get(&self.create),
             get(&self.remove),
             get(&self.rename),
-            get(&self.xattr),
             get(&self.io_ns) / 1_000_000,
             get(&self.max_inflight),
             git::BLOB_NS.load(Ordering::Relaxed) / 1_000_000,

@@ -868,15 +868,6 @@ the repository (deltas walk only differing subtrees; merge bases are cached
 by the two commits). Waiting for the requests in flight: one that read the
 old view and replied after the kernel was told would be cached for good.
 
-**Extended attributes:** a conflict no marker can show is an attribute on the
-file (`user.gitfold.conflict`), so the mount answers `getxattr` and `listxattr`
-(`ENODATA`, an empty list, everywhere else): the kernel would stop asking the
-whole mount after one `ENOSYS`. That costs a request per file `ls -l` lists (it
-asks for `security.selinux`, which the kernel doesn't cache) and one per file
-first written. `FUSE_HANDLE_KILLPRIV_V2` keeps later writes free: without it the
-kernel asks for `security.capability` before every write (measured: 1,000
-appends, 1,000 requests; with it, 1).
-
 ### Prewarm instead of tricks
 
 **What:** right after opening a snapshot or workspace, the daemon starts a

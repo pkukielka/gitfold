@@ -168,12 +168,6 @@ impl ViewDir {
     pub fn forget(&self, local: u64, n: u64) {
         self.nodes.lock().forget(local, n);
     }
-
-    /// The conflict attribute of node `local`, if it has one.
-    pub fn conflict(&self, local: u64) -> Option<String> {
-        let path = self.path(local).ok()?;
-        self.shown().conflict(&path).map(String::from)
-    }
 }
 
 /// The node held for `path` in `nodes`, if any.

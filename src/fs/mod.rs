@@ -46,7 +46,7 @@ use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, Filesystem, FopenFlags, Generation,
     INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
     ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
+    ReplyWrite, Request, TimeOrNow, WriteFlags,
 };
 use log::info;
 
@@ -232,16 +232,6 @@ fn time(t: TimeOrNow) -> SystemTime {
     }
 }
 
-/// Replies with an attribute's value (or a list of names): its size if
-/// `size` is 0, else the value if it fits.
-fn reply_xattr(value: &[u8], size: u32, reply: ReplyXattr) {
-    match size {
-        0 => reply.size(value.len() as u32),
-        n if (n as usize) < value.len() => reply.error(Errno::ERANGE),
-        _ => reply.data(value),
-    }
-}
-
 fn reply_empty(result: Result<(), Errno>, reply: ReplyEmpty) {
     match result {
         Ok(()) => reply.ok(),
@@ -256,12 +246,6 @@ impl Filesystem for GitFold {
             InitFlags::FUSE_PARALLEL_DIROPS,
             InitFlags::FUSE_CACHE_SYMLINKS,
             InitFlags::FUSE_NO_OPENDIR_SUPPORT,
-            // With extended attributes answered (`getxattr`), the kernel would
-            // otherwise ask for `security.capability` before every write.
-            // Clearing set-id bits on writes is left to us: upper files are
-            // written by this process, so their file system does it (as long as
-            // gitfold runs without `CAP_FSETID`, as a user).
-            InitFlags::FUSE_HANDLE_KILLPRIV_V2,
         ];
         if self.no_open {
             flags.push(InitFlags::FUSE_NO_OPEN_SUPPORT);
@@ -611,30 +595,6 @@ impl Filesystem for GitFold {
         {
             view.forget(local, nlookup);
         }
-    }
-
-    // Extended attributes: only a view's conflicting files have one
-    // (`views::shown::CONFLICT_XATTR`). Answered for every inode, as the
-    // kernel stops asking the whole mount after one ENOSYS.
-    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        bump(&self.counters.xattr);
-        // The name first: `ls -l` asks every file for `security.selinux`.
-        let value = (name.as_bytes() == views::shown::CONFLICT_XATTR)
-            .then(|| self.conflict(ino.0))
-            .flatten();
-        match value {
-            Some(value) => reply_xattr(value.as_bytes(), size, reply),
-            None => reply.error(Errno::ENODATA),
-        }
-    }
-
-    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        bump(&self.counters.xattr);
-        let names = match self.conflict(ino.0) {
-            Some(_) => [views::shown::CONFLICT_XATTR, b"\0"].concat(),
-            None => Vec::new(),
-        };
-        reply_xattr(&names, size, reply)
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {

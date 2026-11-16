@@ -487,8 +487,7 @@ change is its files against where it left its parent, merged path by path as
 git's merge does (renames aren't followed, `.gitattributes` merge settings
 aren't applied). Conflicts show as git's markers named by branch; where no
 markers can show one (a change against a deletion, binary files, a file and a
-directory), the file carries the attribute `user.gitfold.conflict`
-(`<kind>: <branches>`), and `.gitfold-conflicts` at the view's root lists
+directory), the earlier side shows. `.gitfold-conflicts` at the view's root lists
 every conflict, one per line (`<kind>\t<branches>\t<path>`), and the branches
 left out (`skipped`) or refs that couldn't be read (`unread`). The view follows
 new commits and changes to the tree within about a second. `@live` (with
