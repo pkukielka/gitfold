@@ -278,6 +278,9 @@ impl Source {
         // `--verify -q`: exit 1 for what names no commit (anything else
         // that fails dies, 128).
         if out.status.code() == Some(1) {
+            // What git said first (an ambiguous short id's candidates), as
+            // `git merge` shows it.
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
             bail!("{rev} - not something we can merge");
         }
         ensure!(

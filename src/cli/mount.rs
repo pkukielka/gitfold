@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 
 use crate::daemon::control;
 use crate::daemon::{self, serve};
@@ -78,7 +78,7 @@ impl MountArgs {
     /// (`gitfold.mountOptions`): those mount takes the daemon's options from,
     /// the log file absolute; a flag added to `MountArgs` belongs here too.
     /// Not the hidden `--kernel-open`, for benchmarks only.
-    fn flags(&self) -> Result<Vec<String>> {
+    fn flags(&self) -> Vec<String> {
         let mut flags = vec![
             format!("--prewarm={}", self.prewarm),
             format!("--prewarm-walks={}", self.prewarm_walks),
@@ -91,14 +91,20 @@ impl MountArgs {
         if self.track_reads {
             flags.push("--track-reads".into());
         }
-        if let Some(log) = &self.log {
-            let log = std::path::absolute(log)?;
-            let log = log.to_str().context("a log file path that isn't UTF-8")?;
-            // Recorded one flag per line.
-            ensure!(!log.contains('\n'), "a log file path with a newline");
-            flags.push(format!("--log={log}"));
+        // Recorded one flag per line, as text: a log file path that can't be
+        // isn't recorded (mounting again logs where it does by default).
+        let log = (self.log.as_ref())
+            .and_then(|log| std::path::absolute(log).ok())
+            .filter(|log| log.to_str().is_some_and(|l| !l.contains('\n')));
+        match (log, &self.log) {
+            (Some(log), _) => flags.push(format!("--log={}", log.display())),
+            (None, Some(log)) => log::warn!(
+                "not recording the log file {} to mount again with: not a path in plain text",
+                log.display()
+            ),
+            (None, None) => {}
         }
-        Ok(flags)
+        flags
     }
 }
 
@@ -148,9 +154,11 @@ fn mount_again(common_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result
     match mount_table::mount_of(common_dir)? {
         Some(mount) => Ok(mount),
         None => bail!(
-            "{} isn't mounted, and mounting it at {} failed ({status})",
+            "{} isn't mounted, and mounting it at {} with the flags it last had ({}) failed \
+             ({status}); `gitfold mount` it (that records its flags anew)",
             common_dir.display(),
-            mountpoint.display()
+            mountpoint.display(),
+            flags.join(" ")
         ),
     }
 }
@@ -160,7 +168,7 @@ fn mount_again(common_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result
 pub fn mount(args: MountArgs) -> Result<()> {
     let mountpoint = daemon::check(&args.mountpoint)?;
     if args.foreground {
-        let flags = args.flags()?;
+        let flags = args.flags();
         return serve::run(serve::Options {
             repo: args.repo,
             mountpoint,
