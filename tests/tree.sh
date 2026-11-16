@@ -74,11 +74,16 @@ check "main: chosen" says 6 "W	main	a.txt" overlaps w
 R update-ref refs/remotes/origin/main main
 R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
 check "origin/HEAD: its branch chosen" says 6 "W	origin/main	a.txt" overlaps w
-R branch origin/main main
-check "a local branch named like it: still origin/main" says 6 "W	origin/main	a.txt" overlaps w
+R branch origin/main main~1
+echo m2 >>"$REPO/c.txt"; R add c.txt; R commit -qm m2; R update-ref refs/remotes/origin/main main
+check "a stale local branch named like it: origin/main still compared" says 6 "W	origin/main	a.txt" overlaps w
+check "and its newer change seen (the remote's, not the stale branch's)" sh -c "'$BIN' -C '$REPO' overlaps w --writes | grep -q 'W	origin/main	a.txt'"
 R branch -D -q origin/main; R update-ref -d refs/remotes/origin/main
 check "origin/HEAD pointing nowhere: main" says 6 "W	main	a.txt" overlaps w
 R update-ref -d --no-deref refs/remotes/origin/HEAD
+R update-ref refs/remotes/origin/main main; R branch -m main mn
+check "no origin/HEAD, no main or master, origin/main: chosen" says 6 "W	origin/main	a.txt" overlaps w
+R branch -m mn main; R update-ref -d refs/remotes/origin/main
 R branch -m main master
 check "no main, master: chosen" says 6 "W	master	a.txt" overlaps w
 R branch -m master trunk

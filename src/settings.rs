@@ -138,8 +138,7 @@ impl Local {
             .flatten()
             .filter_map(|section| Some(section.header().subsection_name()?.to_string()));
         branches
-            .filter_map(|branch| Some((self.branch(&branch, PARENT)?, branch)))
-            .map(|(parent, branch)| (branch, parent))
+            .filter_map(|branch| Some((branch.clone(), self.branch(&branch, PARENT)?)))
             .collect()
     }
 
@@ -204,17 +203,17 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 }
 
 /// Makes `parent` the parent of `branch` (`gitfoldParent`), or with `None`
-/// forgets it; either way following goes back to its default (on). Unchecked:
-/// `tree::set_parent` refuses self-parents and cycles first.
+/// forgets it; then following goes back to its default (on). The parent is
+/// written first: a failure between the two leaves a not-following setting
+/// (no moves unasked), never following turned back on for the old parent.
+/// Unchecked, and unconditional: `tree::set_parent` refuses self-parents
+/// and cycles, and leaves an unchanged parent alone.
 pub fn write_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
-    // A new relation follows unless told otherwise (`set_follow`); none has
-    // nothing to follow. Unset first: a stray setting left by a failure
-    // between the two is then the default.
-    unset_branch(git_dir, branch, FOLLOW)?;
     match parent {
-        Some(parent) => set_branch(git_dir, branch, PARENT, parent),
-        None => unset_branch(git_dir, branch, PARENT),
+        Some(parent) => set_branch(git_dir, branch, PARENT, parent)?,
+        None => unset_branch(git_dir, branch, PARENT)?,
     }
+    unset_branch(git_dir, branch, FOLLOW)
 }
 
 /// Stores whether `branch` takes its parent's new commits by itself (see

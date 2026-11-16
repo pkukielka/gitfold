@@ -228,42 +228,68 @@ pub fn branch_tip(name: &str) -> Result<Commit> {
     resolve(&format!("refs/heads/{name}"))
 }
 
-/// The repository's main branch, what work lands in: the remote's default
-/// branch (`origin/HEAD`, normally `origin/main`), else the local branch
-/// `main`, else `master`. Not a branch's upstream: after `git push -u` that
-/// is its own remote branch.
-pub fn main_branch(common_dir: &Path) -> Result<String> {
-    // The full name, not `--short` or `rev-parse --abbrev-ref`: those give
-    // `remotes/origin/main` when a local branch is named `origin/main`.
-    if let Ok(out) = cmd::output(
-        common_dir,
-        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
-    ) {
-        let full = String::from_utf8_lossy(&out).trim().to_string();
-        // Pointing at a branch that exists: a clone's can dangle.
-        if let Some(name) = full.strip_prefix("refs/remotes/")
-            && resolve(&full).is_ok()
-        {
-            return Ok(name.to_string());
+/// The repository's main branch, what work lands in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MainBranch {
+    /// Its full ref (`refs/remotes/origin/main`, `refs/heads/main`): what
+    /// to resolve, as a short name can mean a local branch of that name.
+    pub refname: String,
+    /// Its short name, to show (`origin/main`, `main`).
+    pub name: String,
+}
+
+impl MainBranch {
+    fn of(refname: &str) -> MainBranch {
+        let name = (refname.strip_prefix("refs/heads/"))
+            .or_else(|| refname.strip_prefix("refs/remotes/"))
+            .unwrap_or(refname);
+        MainBranch {
+            refname: refname.to_string(),
+            name: name.to_string(),
         }
     }
-    for name in ["main", "master"] {
-        if branch_exists(name) {
-            return Ok(name.to_string());
+
+    /// The local branch it is, or for `refs/remotes/origin/<b>`, `<b>`.
+    pub fn local(&self) -> Option<&str> {
+        (self.refname.strip_prefix("refs/heads/"))
+            .or_else(|| self.refname.strip_prefix("refs/remotes/origin/"))
+    }
+
+    /// Whether local branch `branch` is the main branch (`main` for
+    /// `origin/main` too).
+    #[allow(dead_code)] // used as the tree's streams land (the tree's root)
+    pub fn is(&self, branch: &str) -> bool {
+        self.local() == Some(branch)
+    }
+}
+
+/// The repository's main branch: the remote's default branch
+/// (`origin/HEAD`'s target, normally `origin/main`), else the local branch
+/// `main`, else `master`, else `origin/main`, else `origin/master` (a
+/// remote added by hand has no `origin/HEAD`). Each only if it exists: a
+/// clone's `origin/HEAD` can point nowhere. Not a branch's upstream: after
+/// `git push -u` that is its own remote branch.
+pub fn main_branch(common_dir: &Path) -> Result<MainBranch> {
+    let head = cmd::output(
+        common_dir,
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+    )
+    .map(|out| String::from_utf8_lossy(&out).trim().to_string());
+    let candidates = head.into_iter().chain(
+        [
+            "refs/heads/main",
+            "refs/heads/master",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/master",
+        ]
+        .map(String::from),
+    );
+    for refname in candidates {
+        if refname.starts_with("refs/") && resolve(&refname).is_ok() {
+            return Ok(MainBranch::of(&refname));
         }
     }
     bail!("no main branch: no origin/HEAD, and no branch main or master")
-}
-
-/// Whether local branch `name` is the main branch `main` (as `main_branch`
-/// gives it): the same name, or its remote-tracking branch (`main` for
-/// `origin/main`).
-#[allow(dead_code)] // used as the tree's streams land (the tree's root)
-pub fn is_main(name: &str, main: &str) -> bool {
-    name == main
-        || main
-            .split_once('/')
-            .is_some_and(|(_, branch)| branch == name)
 }
 
 /// Whether `refs/heads/<name>` exists.
@@ -373,10 +399,22 @@ mod tests {
 
     #[test]
     fn the_main_branch_by_name() {
-        assert!(is_main("main", "main"));
-        assert!(is_main("main", "origin/main"));
-        assert!(!is_main("origin", "origin/main"));
-        assert!(!is_main("api", "origin/main"));
-        assert!(is_main("master", "master"));
+        let remote = MainBranch::of("refs/remotes/origin/main");
+        assert_eq!(
+            (remote.name.as_str(), remote.local()),
+            ("origin/main", Some("main"))
+        );
+        assert!(remote.is("main"));
+        assert!(!remote.is("origin/main"));
+        assert!(!remote.is("origin"));
+        let local = MainBranch::of("refs/heads/master");
+        assert_eq!(
+            (local.name.as_str(), local.local()),
+            ("master", Some("master"))
+        );
+        assert!(local.is("master"));
+        let other = MainBranch::of("refs/remotes/upstream/main");
+        assert_eq!(other.local(), None);
+        assert!(!other.is("main"));
     }
 }

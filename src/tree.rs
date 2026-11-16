@@ -117,11 +117,16 @@ impl Tree {
 
 /// Makes `parent` the parent of `branch`, or with `None` forgets it,
 /// refusing a parent `Tree::check_parent` refuses: the one way to set it.
+/// A changed parent follows (its following setting reset); the same parent
+/// again changes nothing, an earlier `--no-follow` included.
 #[allow(dead_code)] // used as the tree's streams land (`gitfold parent`)
 pub fn set_parent(common_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
+    let tree = Tree::read(&Local::read(common_dir));
+    if tree.parent(branch) == parent {
+        return Ok(());
+    }
     if let Some(parent) = parent {
-        Tree::read(&Local::read(common_dir))
-            .check_parent(branch, parent)
+        tree.check_parent(branch, parent)
             .map_err(|refused| anyhow::anyhow!("{}", refusal(branch, parent, &refused)))?;
     }
     settings::write_parent(common_dir, branch, parent)
