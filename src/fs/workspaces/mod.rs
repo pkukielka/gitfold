@@ -353,16 +353,7 @@ impl Workspaces {
             if let Some(ino) = views.existing(path) {
                 return Ok(ino);
             }
-            if branch.split('/').any(|c| c.starts_with('.')) {
-                return Err(Errno::ENOENT);
-            }
-            if git::branch_exists(branch) {
-                return views.open(path, branch);
-            }
-            if git::any_ref_under(&[format!("refs/heads/{branch}/")]) {
-                return Ok(self.namespace(path));
-            }
-            return Err(Errno::ENOENT);
+            return self.branch_or_namespace(path, branch, || views.open(path, branch));
         }
         if let Some(spec) = path.strip_prefix('@') {
             if let Some(ino) = snapshots.existing(path.as_bytes()) {
@@ -377,18 +368,31 @@ impl Workspaces {
             }
             return snapshots.resolve(store, path.as_bytes());
         }
-        // Git forbids ref components starting with `.`; this skips the ref lookups
-        // for the `.git`, `.ignore`, ... probes tools send to every directory.
-        if path.split('/').any(|c| c.starts_with('.')) {
-            return Err(Errno::ENOENT);
-        }
-        if git::branch_exists(path) {
+        self.branch_or_namespace(path, path, || {
             // Cheap refusals first: before loading (and fetching) its trees.
             self.refuse_open(path)?;
             self.preload(store, path)?;
-            return self.open_workspace(store, path);
+            self.open_workspace(store, path)
+        })
+    }
+
+    /// `open()` if `branch` (named `path` below the mount root) is a branch,
+    /// else a namespace directory if branches are below it, else ENOENT.
+    fn branch_or_namespace(
+        &self,
+        path: &str,
+        branch: &str,
+        open: impl FnOnce() -> Result<u64, Errno>,
+    ) -> Result<u64, Errno> {
+        // Git forbids ref components starting with `.`; this skips the ref lookups
+        // for the `.git`, `.ignore`, ... probes tools send to every directory.
+        if branch.split('/').any(|c| c.starts_with('.')) {
+            return Err(Errno::ENOENT);
         }
-        if git::any_ref_under(&[format!("refs/heads/{path}/")]) {
+        if git::branch_exists(branch) {
+            return open();
+        }
+        if git::any_ref_under(&[format!("refs/heads/{branch}/")]) {
             return Ok(self.namespace(path));
         }
         Err(Errno::ENOENT)

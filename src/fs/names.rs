@@ -28,16 +28,18 @@ impl NameChanges {
         let _ = self.notifier.set(notifier);
     }
 
-    /// The session's notifier, once mounted (the views tell the kernel what
-    /// changed in them).
-    pub fn notifier(&self) -> Option<&Notifier> {
-        self.notifier.get()
-    }
-
     /// Name `name` in directory `parent` (the root or a namespace) was removed.
     /// Not to be called while serving a request in `parent`: invalidating an
     /// entry takes the directory's lock, which the request holds.
     pub fn removed(&self, parent: u64, name: &[u8]) {
+        self.entry(parent, name);
+        self.changed(&[parent]);
+    }
+
+    /// What name `name` in directory `parent` is changed (a view's path):
+    /// the kernel drops its entry. As for `removed`, not while serving a
+    /// request in `parent`.
+    pub fn entry(&self, parent: u64, name: &[u8]) {
         let Some(notifier) = self.notifier.get() else {
             return;
         };
@@ -45,10 +47,10 @@ impl NameChanges {
         if let Err(e) = notifier.inval_entry(INodeNo(parent), name) {
             debug!("invalidating {name:?} in inode {parent}: {e}");
         }
-        self.changed(&[parent]);
     }
 
-    /// The names in directories `inodes` changed.
+    /// The names in directories `inodes` changed (or, for a view's files,
+    /// their attributes and content).
     pub fn changed(&self, inodes: &[u64]) {
         let Some(notifier) = self.notifier.get() else {
             return;

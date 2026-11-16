@@ -13,10 +13,11 @@ use super::build::{self, Entry, View};
 use super::members::Note;
 use crate::inode;
 use crate::state::{ancestors, join};
-use crate::store::Store;
+use crate::store::{Lower, Store};
 
 /// The summary file at a view's root: every conflict and note, one per line
-/// (`<kind>\t<branches or ref>\t<path or why>`).
+/// (`<kind>\t<branches or ref>\t<path or why>`). A file of the branches with
+/// that name doesn't show.
 pub const SUMMARY: &[u8] = b".gitfold-conflicts";
 
 /// The attribute naming a file's conflicts (`<kind>: <branches>`, several
@@ -28,6 +29,8 @@ pub const CONFLICT_XATTR: &[u8] = b"user.gitfold.conflict";
 pub enum Obj {
     Dir,
     File(Entry),
+    /// The summary file, with its content.
+    Summary(Arc<Vec<u8>>),
 }
 
 pub struct Shown {
@@ -38,10 +41,10 @@ pub struct Shown {
     emptied: BTreeSet<Vec<u8>>,
     /// Each conflicting path's attribute.
     conflicts: HashMap<Vec<u8>, String>,
-    pub summary: Arc<Vec<u8>>,
-    /// When paths last changed (those not here: never, `inode::file_time`).
+    summary: Arc<Vec<u8>>,
+    /// When the overlay's paths last changed (others: `inode::file_time`).
     times: HashMap<Vec<u8>, SystemTime>,
-    /// When this was made: the time of the directories.
+    /// When this was made: the time of the directories and the summary.
     pub made: SystemTime,
 }
 
@@ -65,16 +68,14 @@ impl Shown {
         let mut conflicts: HashMap<Vec<u8>, String> = HashMap::new();
         let mut summary = Vec::new();
         for c in &view.conflicts {
-            let said = format!("{}: {}", c.kind.name(), c.branches.join(", "));
+            let (kind, branches) = (c.kind.name(), c.branches.join(", "));
+            summary.extend_from_slice(format!("{kind}\t{branches}\t").as_bytes());
+            summary.extend_from_slice(&c.path);
+            summary.push(b'\n');
+            let said = format!("{kind}: {branches}");
             (conflicts.entry(c.path.clone()))
                 .and_modify(|s| *s = format!("{s}; {said}"))
                 .or_insert(said);
-            summary.extend_from_slice(c.kind.name().as_bytes());
-            summary.push(b'\t');
-            summary.extend_from_slice(c.branches.join(", ").as_bytes());
-            summary.push(b'\t');
-            summary.extend_from_slice(&c.path);
-            summary.push(b'\n');
         }
         for n in notes {
             summary.extend_from_slice(format!("{}\t{}\t{}\n", n.kind, n.what, n.why).as_bytes());
@@ -88,17 +89,18 @@ impl Shown {
             times: HashMap::new(),
             made,
         };
-        let Some(before) = before else {
-            for path in shown.view.overlay.keys() {
-                shown.times.insert(path.clone(), made);
-            }
-            return (shown, Vec::new());
+        let changed = match before {
+            Some(before) => changed(store, before, &shown),
+            None => Vec::new(),
         };
-        let changed = changed(store, before, &shown);
-        shown.times = before.times.clone();
-        for path in &changed {
-            shown.times.insert(path.clone(), made);
-        }
+        let overlay = &shown.view.overlay;
+        shown.times = (overlay.keys())
+            .map(|p| {
+                let unchanged = before.filter(|_| changed.binary_search(p).is_err());
+                let time = unchanged.and_then(|b| b.times.get(p).copied());
+                (p.clone(), time.unwrap_or(made))
+            })
+            .collect();
         (shown, changed)
     }
 
@@ -107,20 +109,20 @@ impl Shown {
         if path.is_empty() || self.added.contains(path) {
             return Some(Obj::Dir);
         }
-        let entry = match self.view.overlay.get(path) {
-            Some(entry) => entry.clone()?,
-            None => {
-                let e = store.tree_entry_at(self.view.lower, path)?;
-                if e.kind == EntryKind::Tree {
-                    return (!self.emptied.contains(path)).then_some(Obj::Dir);
-                }
-                Entry::Stored(e.id)
-            }
-        };
-        Some(self.of(store, entry))
+        if path == SUMMARY {
+            return Some(Obj::Summary(self.summary.clone()));
+        }
+        match self.view.overlay.get(path) {
+            Some(entry) => Some(self.of(store, entry.clone()?)),
+            None => match store.entry_at(self.view.lower, path)? {
+                Lower::Tree(_) => (!self.emptied.contains(path)).then_some(Obj::Dir),
+                Lower::Gitlink => Some(Obj::Dir),
+                Lower::File(id) => Some(Obj::File(Entry::Stored(id))),
+            },
+        }
     }
 
-    /// A file's entry as shown: submodules are empty directories, as in
+    /// An overlay entry as shown: submodules are empty directories, as in
     /// snapshots.
     fn of(&self, store: &Store, entry: Entry) -> Obj {
         match entry.kind(store) {
@@ -134,47 +136,53 @@ impl Shown {
         if self.obj(store, dir)? != Obj::Dir {
             return None;
         }
-        let mut out: BTreeMap<Vec<u8>, Obj> = BTreeMap::new();
-        let lower = match dir.is_empty() {
-            true => Some(self.view.lower),
-            false => (store.tree_entry_at(self.view.lower, dir))
-                .filter(|e| e.kind == EntryKind::Tree)
-                .map(|e| e.id),
-        };
-        if let Some(tree) = lower.filter(|_| !self.emptied.contains(dir)) {
-            let table = store.tree(tree);
-            for e in table.entries() {
-                let name = table.name(e);
-                let path = join(dir, name);
-                if self.view.overlay.contains_key(&path) || self.added.contains(&path) {
-                    continue; // below
-                }
-                let obj = match e.kind {
-                    EntryKind::Tree if self.emptied.contains(&path) => continue,
-                    EntryKind::Tree => Obj::Dir,
-                    _ => self.of(store, Entry::Stored(e.id)),
-                };
-                out.insert(name.to_vec(), obj);
-            }
-        }
         let prefix = match dir.is_empty() {
             true => Vec::new(),
             false => [dir, b"/"].concat(),
         };
-        let direct = |p: &[u8]| p.starts_with(&prefix) && !p[prefix.len()..].contains(&b'/');
-        for (path, entry) in (self.view.overlay.range(prefix.clone()..))
-            .take_while(|(p, _)| p.starts_with(&prefix))
-            .filter(|(p, _)| direct(p))
+        let below = |p: &&Vec<u8>| p.starts_with(&prefix);
+        let direct = |p: &[u8]| !p[prefix.len()..].contains(&b'/');
+        let overlaid: Vec<(&Vec<u8>, &Option<Entry>)> = (self.view.overlay.range(prefix.clone()..))
+            .take_while(|(p, _)| below(p))
+            .collect();
+        let added: Vec<&Vec<u8>> = (self.added.range(prefix.clone()..))
+            .take_while(below)
+            .collect();
+        let mut out: BTreeMap<Vec<u8>, Obj> = BTreeMap::new();
+        if let Some(Lower::Tree(tree)) = store.entry_at(self.view.lower, dir)
+            && !self.emptied.contains(dir)
         {
+            // Most directories have nothing over them.
+            let touched = !overlaid.is_empty() || !added.is_empty();
+            let table = store.tree(tree);
+            for e in table.entries() {
+                let name = table.name(e);
+                if touched {
+                    let path = join(dir, name);
+                    if self.view.overlay.contains_key(&path)
+                        || self.added.contains(&path)
+                        || (e.kind == EntryKind::Tree && self.emptied.contains(&path))
+                    {
+                        continue; // below, or gone
+                    }
+                }
+                let obj = match Lower::of(e) {
+                    Lower::Tree(_) | Lower::Gitlink => Obj::Dir,
+                    Lower::File(id) => Obj::File(Entry::Stored(id)),
+                };
+                out.insert(name.to_vec(), obj);
+            }
+        }
+        for (path, entry) in overlaid.into_iter().filter(|(p, _)| direct(p)) {
             if let Some(entry) = entry {
                 out.insert(path[prefix.len()..].to_vec(), self.of(store, entry.clone()));
             }
         }
-        for path in (self.added.range(prefix.clone()..))
-            .take_while(|p| p.starts_with(&prefix))
-            .filter(|p| direct(p))
-        {
+        for path in added.into_iter().filter(|p| direct(p)) {
             out.insert(path[prefix.len()..].to_vec(), Obj::Dir);
+        }
+        if dir.is_empty() {
+            out.insert(SUMMARY.to_vec(), Obj::Summary(self.summary.clone()));
         }
         Some(out.into_iter().collect())
     }
@@ -208,13 +216,10 @@ fn emptied(store: &Store, view: &View, added: &BTreeSet<Vec<u8>>) -> BTreeSet<Ve
         if added.contains(dir) {
             continue;
         }
-        let Some(e) = store.tree_entry_at(view.lower, dir) else {
+        let Some(Lower::Tree(tree)) = store.entry_at(view.lower, dir) else {
             continue;
         };
-        if e.kind != EntryKind::Tree {
-            continue;
-        }
-        let table = store.tree(e.id);
+        let table = store.tree(tree);
         let any = table.entries().iter().any(|e| {
             let path = join(dir, table.name(e));
             match e.kind {
@@ -229,13 +234,12 @@ fn emptied(store: &Store, view: &View, added: &BTreeSet<Vec<u8>>) -> BTreeSet<Ve
     out
 }
 
-/// The paths whose files or directories differ between `a` and `b`, sorted.
+/// The paths whose files or directories (or the summary) differ between `a`
+/// and `b`, sorted.
 fn changed(store: &Store, a: &Shown, b: &Shown) -> Vec<Vec<u8>> {
     let mut paths: BTreeSet<Vec<u8>> = BTreeSet::new();
     paths.extend(a.view.overlay.keys().cloned());
     paths.extend(b.view.overlay.keys().cloned());
-    paths.extend(a.added.iter().chain(&b.added).cloned());
-    paths.extend(a.emptied.iter().chain(&b.emptied).cloned());
     let mut lower = BTreeMap::new();
     build::delta(
         store,
@@ -246,10 +250,12 @@ fn changed(store: &Store, a: &Shown, b: &Shown) -> Vec<Vec<u8>> {
     );
     paths.extend(lower.into_keys());
     // Directories that appear or go with their files.
-    let all: Vec<Vec<u8>> = paths.iter().cloned().collect();
-    for path in &all {
-        paths.extend(ancestors(path).map(<[u8]>::to_vec));
-    }
+    let dirs: Vec<Vec<u8>> = (paths.iter())
+        .flat_map(|p| ancestors(p))
+        .map(<[u8]>::to_vec)
+        .collect();
+    paths.extend(dirs);
+    paths.insert(SUMMARY.to_vec());
     (paths.into_iter())
         .filter(|p| a.obj(store, p) != b.obj(store, p))
         .collect()
@@ -277,7 +283,7 @@ mod tests {
                 let n = String::from_utf8(n).unwrap();
                 match o {
                     Obj::Dir => format!("{n}/"),
-                    Obj::File(_) => n,
+                    Obj::File(_) | Obj::Summary(_) => n,
                 }
             })
             .collect()
@@ -314,7 +320,10 @@ mod tests {
         );
         let (s, changed) = Shown::next(&store, v, &[], None);
         assert!(changed.is_empty());
-        assert_eq!(names(s.list(&store, b"")), ["f", "g", "n/"]);
+        assert_eq!(
+            names(s.list(&store, b"")),
+            [".gitfold-conflicts", "f", "g", "n/"]
+        );
         assert_eq!(s.obj(&store, b"d"), None);
         assert_eq!(s.obj(&store, b"d/e"), None);
         assert_eq!(names(s.list(&store, b"n")), ["m/"]);
@@ -334,7 +343,12 @@ mod tests {
             .collect();
         assert_eq!(changed, ["d", "d/x", "n", "n/m", "n/m/k"]);
         assert_eq!(names(s2.list(&store, b"d")), ["x"]);
-        assert!(s2.time(b"d/x") > inode::file_time());
+        assert_eq!(s2.time(b"g"), s.time(b"g"), "unchanged: its time kept");
+        assert_eq!(
+            s2.time(b"d/x"),
+            inode::file_time(),
+            "the branch's own file again"
+        );
     }
 
     #[test]

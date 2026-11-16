@@ -1,8 +1,8 @@
-//! Keeping a view current: every second, its members' refs are read (and
-//! the tree of branches again when the repository's config or the set of
-//! workspaces changed); if they moved, the view is built again and the
-//! kernel told which paths changed, so its long-cached entries, attributes and
-//! pages stay right.
+//! Keeping a view current: every second, its members' refs are read (the
+//! tree of branches again when the repository's config changed, or every
+//! 30 s; for the root's view, which workspaces are opened); if anything
+//! moved, the view is built again and the kernel told which paths changed, so
+//! its long-cached entries, attributes and pages stay right.
 
 use std::collections::HashSet;
 use std::fs;
@@ -12,24 +12,23 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use fuser::{INodeNo, Notifier};
-use log::{debug, error};
+use log::error;
 
 use super::build;
 use super::members::{self, Bases, BuiltOn, Refs};
 use super::merge;
-use super::serve::{SUMMARY_LOCAL, ViewDir};
+use super::serve::ViewDir;
 use super::shown::Shown;
 use crate::fs::NameChanges;
 use crate::inode;
-use crate::state::{self, parent};
+use crate::state::{self, name, parent};
 use crate::store::Store;
 use crate::tree::Tree;
 
 /// How often a view's refs are read.
 const INTERVAL: Duration = Duration::from_secs(1);
-/// How often the tree is read again even when nothing says it changed (a
-/// new `origin/HEAD` moves the root without touching the config).
+/// How often the tree is read again even when the config didn't change (a
+/// new `origin/HEAD` moves the root without touching it).
 const TREE_EVERY: u32 = 30;
 /// When the kernel is told a second time: a lookup or listing in flight while
 /// the view was swapped can be cached after the first.
@@ -46,12 +45,11 @@ pub struct Context {
 /// What a view was last built from.
 #[derive(Default)]
 pub struct Watch {
-    /// The config file's and the workspaces' directory's change stamps the
-    /// tree was read at, and how many reads since.
-    stamps: Option<(Stamp, Stamp)>,
+    /// The config file's change stamp the tree was read at, and how many
+    /// rounds since.
+    config: Option<Stamp>,
     reads: u32,
     tree: Tree,
-    opened: HashSet<String>,
     built: Option<(Vec<BuiltOn>, Refs)>,
     bases: Bases,
     last_error: String,
@@ -67,33 +65,34 @@ fn stamp(path: &Path) -> Stamp {
 
 impl Watch {
     /// The view again, if its refs moved since it was last built (or it
-    /// wasn't yet): what it shows, and the paths that changed.
+    /// wasn't yet), after `before`: what it shows, and the paths that
+    /// changed.
     pub fn next(
         &mut self,
         ctx: &Context,
         before: Option<&Shown>,
     ) -> Result<Option<(Shown, Vec<Vec<u8>>)>> {
-        let stamps = (
-            stamp(&ctx.common_dir.join("config")),
-            stamp(&state::state_root(&ctx.common_dir)),
-        );
-        if self.stamps != Some(stamps) || self.reads >= TREE_EVERY {
+        let config = stamp(&ctx.common_dir.join("config"));
+        if self.config != Some(config) || self.reads >= TREE_EVERY {
             self.tree = Tree::read(&ctx.common_dir)?;
-            self.opened = (state::list(&ctx.common_dir)?.into_iter())
-                .filter(|s| s.state.opened())
-                .map(|s| s.branch)
-                .collect();
-            self.stamps = Some(stamps);
+            self.config = Some(config);
             self.reads = 0;
         }
         self.reads += 1;
         let branch = &ctx.branch;
+        // Only the root's view depends on which workspaces are opened.
+        let opened: HashSet<String> = match self.tree.root() == Some(branch) {
+            true => (state::list(&ctx.common_dir)?.into_iter())
+                .filter(|s| s.state.opened())
+                .map(|s| s.branch)
+                .collect(),
+            false => HashSet::new(),
+        };
         let origin = members::origin_root(&self.tree, branch);
-        let opened = |b: &str| self.opened.contains(b);
+        let opened = |b: &str| opened.contains(b);
         let members = members::members(&self.tree, branch, origin.as_deref(), opened);
         let refs = members::refs(branch, origin.as_deref(), &members, &mut self.bases)?;
-        if before.is_some()
-            && let Some((m, r)) = &self.built
+        if let Some((m, r)) = &self.built
             && (m, r) == (&members, &refs)
         {
             return Ok(None);
@@ -117,15 +116,13 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
             let Some(view) = view.upgrade() else { return };
             let before = view.shown();
             match watch.next(&ctx, Some(&before)) {
-                Ok(None) => watch.last_error.clear(),
-                Ok(Some((shown, changed))) => {
+                Ok(next) => {
                     watch.last_error.clear();
-                    let summary = shown.summary != before.summary;
-                    view.swap(shown);
-                    if let Some(notifier) = ctx.names.notifier() {
-                        tell(notifier, &view, &changed, summary);
+                    if let Some((shown, changed)) = next {
+                        view.swap(shown);
+                        tell(&ctx.names, &view, &changed);
                         thread::sleep(AGAIN_AFTER);
-                        tell(notifier, &view, &changed, summary);
+                        tell(&ctx.names, &view, &changed);
                     }
                 }
                 Err(e) => {
@@ -144,36 +141,24 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
     }
 }
 
-/// Tells the kernel that `changed` paths of `view` (and its summary, if
-/// `summary`) changed: their entries in their directories, the directories'
-/// listings, their attributes and pages. Only for what it holds.
-fn tell(notifier: &Notifier, view: &ViewDir, changed: &[Vec<u8>], summary: bool) {
-    let ino = |local: u64| INodeNo(inode::view(view.slot, local));
-    let inval_inode = |local: u64| {
-        if let Err(e) = notifier.inval_inode(ino(local), 0, 0) {
-            debug!("view {}: invalidating {local}: {e}", view.name);
-        }
-    };
+/// Tells the kernel that `changed` paths of `view` changed: their entries in
+/// their directories, the directories' listings, their attributes and pages.
+/// Only for what it holds.
+fn tell(names: &NameChanges, view: &ViewDir, changed: &[Vec<u8>]) {
+    let ino = |local: u64| inode::view(view.slot, local);
     // The root's time is the view's: its attributes change every time.
-    inval_inode(0);
-    if summary {
-        inval_inode(SUMMARY_LOCAL);
-    }
-    let mut dirs = HashSet::new();
+    let mut inodes = vec![ino(0)];
+    let mut dirs = HashSet::from([0]);
     for path in changed {
-        let dir = parent(path);
-        let name = &path[dir.len() + usize::from(!dir.is_empty())..];
-        if let Some(dir) = view.held(dir) {
-            let name = <std::ffi::OsStr as std::os::unix::ffi::OsStrExt>::from_bytes(name);
-            if let Err(e) = notifier.inval_entry(ino(dir), name) {
-                debug!("view {}: invalidating an entry: {e}", view.name);
-            }
-            if dirs.insert(dir) && dir != 0 {
-                inval_inode(dir);
+        if let Some(dir) = view.held(parent(path)) {
+            names.entry(ino(dir), name(path));
+            if dirs.insert(dir) {
+                inodes.push(ino(dir));
             }
         }
         if let Some(local) = view.held(path) {
-            inval_inode(local);
+            inodes.push(ino(local));
         }
     }
+    names.changed(&inodes);
 }

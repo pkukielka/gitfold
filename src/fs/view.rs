@@ -332,8 +332,8 @@ impl GitFold {
         }
     }
 
-    /// Lists a view's directory `local`: `.`, `..`, its entries, and at the
-    /// view's root its summary.
+    /// Lists a view's directory `local`: `.`, `..` and its entries (at the
+    /// view's root, its summary among them).
     fn emit_view(
         &self,
         view: &ViewDir,
@@ -344,36 +344,26 @@ impl GitFold {
     ) -> Result<(), Errno> {
         let ino = |local: u64| inode::view(view.slot, local);
         let listing = view.listing(&self.store, local)?;
-        let mut head = vec![
-            (ino(local), b".".to_vec(), self.attr(ino(local))?),
-            (inode::ROOT, b"..".to_vec(), self.attr(inode::ROOT)?),
-        ];
-        let summary = super::views::shown::SUMMARY;
-        if local == 0 {
-            let summary_ino = ino(super::views::SUMMARY_LOCAL);
-            head.push((summary_ino, summary.to_vec(), self.attr(summary_ino)?));
-        }
-        let total = (head.len() + listing.entries.len()) as u64;
+        let total = 2 + listing.entries.len() as u64;
         if offset >= total {
             // The kernel's closing request past the end.
             view.listed(local);
             return Ok(());
         }
-        for (i, (ino, name, attr)) in head.iter().enumerate().skip(offset as usize) {
-            if emit(i as u64 + 1, *ino, name, *attr) {
-                return Ok(());
+        if offset < 2 {
+            let dots = [(ino(local), &b"."[..]), (inode::ROOT, &b".."[..])];
+            for (i, (ino, name)) in dots.into_iter().enumerate().skip(offset as usize) {
+                if emit(i as u64 + 1, ino, name, self.attr(ino)?) {
+                    return Ok(());
+                }
             }
         }
-        let first = (offset as usize).saturating_sub(head.len());
+        let first = (offset as usize).saturating_sub(2);
         for (j, (name, obj)) in listing.entries.iter().enumerate().skip(first) {
-            if local == 0 && name.as_slice() == summary {
-                continue; // shadowed by the summary
-            }
-            let i = head.len() + j;
             let (child, item) = view.entry(&listing, local, name, obj, plus);
             let full = self
                 .view_attr(ino(child), &item)
-                .map(|attr| emit(i as u64 + 1, ino(child), name, attr));
+                .map(|attr| emit(j as u64 + 3, ino(child), name, attr));
             if !matches!(full, Ok(false)) {
                 if plus {
                     view.forget(child, 1);

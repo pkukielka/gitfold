@@ -250,7 +250,8 @@ impl Filesystem for GitFold {
             // With extended attributes answered (`getxattr`), the kernel would
             // otherwise ask for `security.capability` before every write.
             // Clearing set-id bits on writes is left to us: upper files are
-            // written by this process, so their file system does it.
+            // written by this process, so their file system does it (as long as
+            // gitfold runs without `CAP_FSETID`, as a user).
             InitFlags::FUSE_HANDLE_KILLPRIV_V2,
         ];
         if self.no_open {

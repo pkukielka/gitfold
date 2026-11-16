@@ -21,4 +21,4 @@ pub mod shown;
 mod test_repo;
 mod watch;
 
-pub use serve::{Item, SUMMARY_LOCAL, ViewDir, Views};
+pub use serve::{Item, ViewDir, Views};

@@ -31,7 +31,7 @@ use gix::objs::tree::EntryKind;
 
 use super::merge::{self, ConflictStyle, Merged};
 use crate::git;
-use crate::state::{ancestors, join};
+use crate::state::{ancestors, join, name};
 use crate::store::{EMPTY_TREE, Store, TEntry};
 
 /// What a path holds: a file, a symlink or a submodule.
@@ -340,10 +340,9 @@ impl Acc<'_> {
     /// it would sit above, if any.
     fn clash(&self, path: &[u8]) -> Option<Vec<u8>> {
         // One walk down `lower` along `path`.
-        let last = |p: &[u8]| -> usize { p.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1) };
         let mut tree = Some(self.lower);
         for above in ancestors(path).chain([path]) {
-            let lower = tree.and_then(|t| self.store.tree(t).find(&above[last(above)..]).copied());
+            let lower = tree.and_then(|t| self.store.tree(t).find(name(above)).copied());
             tree = lower.filter(|e| e.kind == EntryKind::Tree).map(|e| e.id);
             if above.len() == path.len() {
                 break;
