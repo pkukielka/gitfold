@@ -11,6 +11,7 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
 
@@ -46,7 +47,16 @@ pub fn output(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 /// `input` on its stdin if given; what it printed. A failure's error holds
 /// `args` and what git said.
 pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
-    command.args(args);
+    finish(command.args(args), args, input)
+}
+
+/// Runs `git`, a command its `args` are already added to, returning what it
+/// printed; a failure's error holds `args` and what git said.
+pub fn checked(git: &mut Command, args: &[&str]) -> Result<Vec<u8>> {
+    finish(git, args, None)
+}
+
+fn finish(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
     let (out, written) = match input {
         None => (command.stdin(Stdio::null()).output()?, Ok(())),
         Some(input) => {
@@ -94,3 +104,45 @@ impl std::fmt::Display for Failed {
 }
 
 impl std::error::Error for Failed {}
+
+/// `git`, run in another worktree or repository than the one gitfold was
+/// started in (a new workspace): without the variables that tie git to a
+/// repository, which a caller (a git hook, a script run by git) may have
+/// set for its own, as `git rev-parse --local-env-vars` lists them (git
+/// itself drops them for a submodule); but for the configuration given in
+/// the environment (`git -c`, `GIT_CONFIG_COUNT`), which applies anywhere.
+/// The rule for every such git call gitfold makes.
+pub fn in_other_worktree(git: &mut Command) -> Result<&mut Command> {
+    static LOCAL: OnceLock<Vec<String>> = OnceLock::new();
+    let local = match LOCAL.get() {
+        Some(local) => local,
+        None => {
+            let out = checked(
+                Command::new("git").args(["rev-parse", "--local-env-vars"]),
+                &["rev-parse", "--local-env-vars"],
+            )?;
+            let vars = String::from_utf8_lossy(&out)
+                .lines()
+                .map(String::from)
+                .collect();
+            LOCAL.get_or_init(|| vars)
+        }
+    };
+    let config = |var: &str| {
+        matches!(var, "GIT_CONFIG_PARAMETERS" | "GIT_CONFIG_COUNT")
+            || var.starts_with("GIT_CONFIG_KEY_")
+            || var.starts_with("GIT_CONFIG_VALUE_")
+    };
+    for var in local.iter().filter(|v| !config(v)) {
+        git.env_remove(var);
+    }
+    Ok(git)
+}
+
+/// `command`, for a worktree or repository other than gitfold's own (see
+/// `in_other_worktree`).
+pub fn command_in_other(git_dir: &Path) -> Result<Command> {
+    let mut git = command(git_dir);
+    in_other_worktree(&mut git)?;
+    Ok(git)
+}
