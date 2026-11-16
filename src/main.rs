@@ -80,8 +80,8 @@ enum Command {
     /// path per line, `A` added, `M` modified, `D` deleted, quoted as git quotes
     /// paths. Read from the workspace's stored state, mounted or not. With --
     /// PATH...: instead, who is changing those paths, on every branch
-    /// (committed: its own commits, since its parent if it has one, else not
-    /// yet in main) and in every workspace (uncommitted).
+    /// (committed: its own commits, since its parent if it has one that still
+    /// exists, else not yet in main) and in every workspace (uncommitted).
     Changes(cli::list::ChangesArgs),
     /// List what a workspace read or changed that changed elsewhere since.
     ///

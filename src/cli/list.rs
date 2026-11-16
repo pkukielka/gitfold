@@ -99,8 +99,8 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
             Err(e) => eprintln!("skipping workspace {}: {e:#}", w.branch),
         }
     }
-    // First: it also has git check the paths, once (a path outside the
-    // repository fails here, not once per branch).
+    // Before the branches: it also has git check the paths, once (a path
+    // outside the repository fails here, not once per branch).
     let all = workspaces.iter().flat_map(|(_, paths, _)| paths);
     let matching = matching(all, &args.paths)?;
     let mut lines = BTreeSet::new();
@@ -419,8 +419,8 @@ pub struct ChangesArgs {
     #[arg(long, conflicts_with = "paths")]
     pub stat: bool,
     /// Instead: who is changing these paths, on every branch (committed:
-    /// its own commits, since its parent if it has one, else not yet in
-    /// main) and in every workspace (uncommitted).
+    /// its own commits, since its parent if it has one that still exists,
+    /// else not yet in main) and in every workspace (uncommitted).
     #[arg(last = true, value_name = "PATH")]
     pub paths: Vec<String>,
 }
