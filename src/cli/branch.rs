@@ -1,13 +1,16 @@
 //! `gitfold branch` (a fork with `-w`), and a workspace's settings:
 //! `gitfold prewarm`, `gitfold track-reads`.
 
+use std::fs;
 use std::path::Path;
+use std::process::Command;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use clap::builder::BoolishValueParser;
 
 use crate::daemon::control;
 use crate::git;
+use crate::mount_table;
 use crate::prewarm::Prewarm;
 use crate::refusal::Refusal;
 use crate::settings;
@@ -56,14 +59,17 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         );
         return Ok(());
     }
-    if from.len() > 1 {
+    if from.len() > 1 && with_changes {
         return Err(super::tree::not_implemented(
-            "gitfold branch with several --from",
+            "gitfold branch --with-changes with several --from",
         ));
     }
-    let from = from.into_iter().next();
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
+    if from.len() > 1 {
+        return merged(repo, &common_dir, name, &from, prewarm, track_reads);
+    }
+    let from = from.into_iter().next();
     if with_changes {
         // `git branch` checks names itself; `update-ref` would take `HEAD`, and
         // refuse other bad names only after the copy.
@@ -109,6 +115,92 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
     Ok(())
+}
+
+/// `gitfold branch NEW --from A --from B …`: NEW at A, then `git merge B …`
+/// run in NEW's workspace, through the mount, so git merges as it does
+/// (strategy, octopus, message, `merge.ff`, `merge.log`, signing, hooks),
+/// saying so itself. A conflict leaves NEW with git's merge in progress
+/// (exit 1); git refusing leaves nothing: NEW's workspace and branch go
+/// again. Unmounted, the repository is mounted again where it last was;
+/// never mounted, refused. No relation to the sources afterwards.
+fn merged(
+    repo: &Path,
+    common_dir: &Path,
+    name: &str,
+    from: &[String],
+    prewarm: Option<Prewarm>,
+    track_reads: Option<bool>,
+) -> Result<()> {
+    check_branch_name(common_dir, name)?;
+    ensure!(
+        !git::branch_exists(name),
+        "a branch named '{name}' already exists"
+    );
+    let mount = match mount_table::mount_of(common_dir)? {
+        Some(mount) => mount,
+        None => match settings::Local::read(common_dir).mountpoint() {
+            Some(last) => super::mount::mount_again(common_dir, &last)?,
+            None => bail!(
+                "{} isn't mounted: mount it first (`gitfold mount`); git merges several \
+                 --from in the new branch's workspace",
+                common_dir.display()
+            ),
+        },
+    };
+    let (first, others) = from.split_first().expect("several --from");
+    // As `git branch` takes it, without an upstream: no relation afterwards.
+    git::cmd::output(repo, &["branch", "--no-track", "--", name, first])?;
+    let at = git::branch_tip(name)?.id.to_string();
+    let workspace = mount.join(name);
+    // Looking it up opens it. git run as in a shell there: nothing of a
+    // caller's repository (a hook's) in its environment.
+    let merge = fs::metadata(&workspace)
+        .with_context(|| format!("opening workspace {}", workspace.display()))
+        .and_then(|_| {
+            let status = Command::new("git")
+                .current_dir(&workspace)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
+                .args(["merge", "--end-of-options"])
+                .args(others)
+                .status();
+            status.context("running git merge")
+        });
+    let admin = StateDir::of(common_dir, name).admin;
+    let in_progress =
+        || git::cmd::output(&admin, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).is_ok();
+    match merge {
+        Ok(status) if status.success() => {
+            set_branch_settings(repo, name, prewarm, track_reads)?;
+            println!("created branch {name}; open it as {}", workspace.display());
+            Ok(())
+        }
+        Ok(_) if in_progress() => {
+            set_branch_settings(repo, name, prewarm, track_reads)?;
+            bail!(
+                "created branch {name} with its merge in progress: resolve the conflicts in \
+                 {}, then `git merge --continue` there (or `git merge --abort`)",
+                workspace.display()
+            )
+        }
+        failed => {
+            // Created here, and git put it back as it was: nothing to keep.
+            if let Err(e) = super::remove::remove_once(common_dir, name, true, false) {
+                log::warn!("removing the workspace of {name} again: {e:#}");
+            }
+            let branch = format!("refs/heads/{name}");
+            if let Err(e) = git::cmd::output(common_dir, &["update-ref", "-d", &branch, &at]) {
+                log::warn!("deleting branch {name} again: {e:#}");
+            }
+            match failed {
+                Ok(status) => bail!("git merge failed ({status}): branch {name} not created"),
+                Err(e) => Err(e.context(format!("branch {name} not created"))),
+            }
+        }
+    }
 }
 
 /// Refuses `name` if git doesn't take it as a branch name, as `git branch`
