@@ -160,9 +160,12 @@ mv	committed	e/c.txt" "$(gfc -- d/c.txt e)"
 eq "paths taken literally" "api	committed	s*r" "$(gfc -- 's*r')"
 eq "relative to the current directory, in a workspace" "api	committed	d/b.txt" "$(cd "$MNT/api/d" && "$BIN" changes -- b.txt 2>&1)"
 eq "and in the repository's work tree" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- ../d/b.txt 2>&1)"
+eq "an absolute path" "api	committed	d/b.txt" "$(cd "$MNT/api/d" && "$BIN" changes -- "$MNT/api/d/b.txt" 2>&1)"
 eq "the root: everything" 11 "$(gfc -- . | wc -l)"
+eq "the root from a subdirectory" 11 "$(cd "$MNT/api/d" && "$BIN" changes -- .. 2>&1 | wc -l)"
+eq "a directory with a trailing slash" "$(gfc -- d)" "$(gfc -- d/)"
 eq "-z: NUL-terminated" "api	committed	d/b.txt|" "$(gfc -z -- d/b.txt | tr '\0' '|')"
-out=$(gfc -- ../x); eq "outside the work tree: refused" "1 yes" "$? $(grep -q 'outside the repository' <<<"$out" && echo yes)"
+out=$(gfc -- ../x); eq "outside the work tree: refused" "1 yes" "$? $(grep -q 'leaves the repository' <<<"$out" && echo yes)"
 unmount_fs
 R branch -m main trunk
 out=$("$BIN" -C "$REPO" changes -- a.txt 2>"$T/err"); rc=$?

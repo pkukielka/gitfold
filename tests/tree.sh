@@ -49,7 +49,7 @@ check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.tx
 eq "changes -z -- PATH: nobody changes it (exit 0)" "0 " "$(gf changes -z -- a.txt)"
 check "changes --stat -- PATH: refused" says 2 "cannot be used with" changes --stat -- a.txt
 eq "changes without PATH: as before (no workspace yet: nothing, exit 0)" "0 " "$(gf changes api)"
-check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a 2>&1 | grep -q 'not implemented'"
+check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a && '$BIN' changes -- a 2>&1 | grep -q 'no git repository'"
 for g in sync pull restack rebase; do
     check "$g: a hint" says 2 "gitfold parent --update" "$g" --whatever x
     check "$g --help: the hint too" says 2 "gitfold parent --update" "$g" --help
