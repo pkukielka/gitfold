@@ -49,18 +49,6 @@ pub enum Refused {
     NoParent,
 }
 
-impl Refused {
-    /// gitfold's exit code for it: 3 not found, 1 no root, 2 the command as
-    /// typed is invalid.
-    pub fn exit_code(&self) -> i32 {
-        match self {
-            Refused::Unknown(_) | Refused::OnlyRemote { .. } => 3,
-            Refused::NoRoot => 1,
-            _ => 2,
-        }
-    }
-}
-
 /// How `refused` reads for `parent` as the parent of `branch`.
 pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
     match refused {
@@ -86,6 +74,11 @@ pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
     }
 }
 
+/// The full ref of local branch `name`.
+fn local(name: &str) -> String {
+    format!("refs/heads/{name}")
+}
+
 /// A full ref as shown: `api` for `refs/heads/api`, `origin/main` for
 /// `refs/remotes/origin/main`.
 pub fn short(full: &str) -> &str {
@@ -96,23 +89,23 @@ pub fn short(full: &str) -> &str {
 
 /// The full ref a parent named `name` is (P1-P6): a local branch, a
 /// remote-tracking branch, or a full ref as given.
-pub fn resolve_parent(name: &str) -> Result<String, Refused> {
+fn resolve_parent(name: &str) -> Result<String, Refused> {
     if name.starts_with("refs/heads/") || name.starts_with("refs/remotes/") {
         return match git::ref_exists(name) {
             true => Ok(name.to_string()),
             false => Err(Refused::Unknown(name.to_string())),
         };
     }
-    let local = git::branch_exists(name);
+    let is_local = git::branch_exists(name);
     let remote = git::ref_exists(&format!("refs/remotes/{name}"));
-    match (local, remote) {
+    match (is_local, remote) {
         (true, true) => Err(Refused::Ambiguous(name.to_string())),
-        (true, false) => Ok(format!("refs/heads/{name}")),
+        (true, false) => Ok(local(name)),
         (false, true) => Ok(format!("refs/remotes/{name}")),
-        (false, false) => match git::remote_tracking(name).first() {
+        (false, false) => match git::remote_tracking(name) {
             Some(remote) => Err(Refused::OnlyRemote {
                 name: name.to_string(),
-                remote: short(remote).to_string(),
+                remote: short(&remote).to_string(),
             }),
             None => Err(Refused::Unknown(name.to_string())),
         },
@@ -145,7 +138,7 @@ impl Tree {
             .filter(|(branch, _)| exists(branch) && Some(branch) != root.as_ref())
             .map(|(branch, parent)| match parent.starts_with("refs/") {
                 true => (branch, parent),
-                false => (branch, format!("refs/heads/{parent}")),
+                false => (branch, local(&parent)),
             })
             .collect();
         let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -169,7 +162,7 @@ impl Tree {
 
     /// The local branches whose parent is local branch `branch`, by name.
     pub fn children(&self, branch: &str) -> Vec<&str> {
-        (self.children.get(&format!("refs/heads/{branch}")))
+        (self.children.get(&local(branch)))
             .into_iter()
             .flatten()
             .map(String::as_str)
@@ -193,12 +186,19 @@ impl Tree {
         out
     }
 
-    /// Whether the parent of local branch `branch` may become `parent` (a
-    /// full ref, `resolve_parent`): a root is known and `branch` isn't it,
-    /// `parent` isn't `branch`, nor built on it (S3-S6).
-    pub fn check(&self, branch: &str, parent: &str) -> Result<(), Refused> {
+    /// The full ref of the parent named `parent`, if the parent of local
+    /// branch `branch` may become it: the name resolves (S2), a root is known
+    /// and `branch` isn't it, `parent` isn't `branch`, nor built on it
+    /// (S3-S6).
+    pub fn check(&self, branch: &str, parent: &str) -> Result<String, Refused> {
+        let full = resolve_parent(parent)?;
+        self.check_ancestry(branch, &full)?;
+        Ok(full)
+    }
+
+    fn check_ancestry(&self, branch: &str, parent: &str) -> Result<(), Refused> {
         self.check_root(branch)?;
-        let own = format!("refs/heads/{branch}");
+        let own = local(branch);
         if parent == own {
             return Err(Refused::Own);
         }
@@ -213,11 +213,22 @@ impl Tree {
         }
     }
 
-    /// Whether a new local branch `branch` may be created built on a parent
-    /// (N3, N4): a root is known and `branch` isn't its name. Nothing else
-    /// can go wrong for a branch that doesn't exist yet: it has no children.
-    pub fn check_new(&self, branch: &str) -> Result<(), Refused> {
-        self.check_root(branch)
+    /// The full ref of the parent named `parent`, if a new local branch
+    /// `branch` may be created built on it (N2-N4): the name resolves, a root
+    /// is known and `branch` isn't its name. Nothing else can go wrong for a
+    /// branch that doesn't exist yet: it has no children.
+    pub fn check_new(&self, branch: &str, parent: &str) -> Result<String, Refused> {
+        let full = resolve_parent(parent)?;
+        self.check_root(branch)?;
+        Ok(full)
+    }
+
+    /// Whether local branch `branch` has a parent to follow or not (F6).
+    pub fn check_follow(&self, branch: &str) -> Result<(), Refused> {
+        match self.parent(branch) {
+            Some(_) => Ok(()),
+            None => Err(Refused::NoParent),
+        }
     }
 
     fn check_root(&self, branch: &str) -> Result<(), Refused> {
@@ -287,23 +298,34 @@ mod tests {
     #[test]
     fn checks() {
         let t = tree(&[("api", "refs/heads/main"), ("ui", "refs/heads/api")]);
-        assert_eq!(t.check("main", "refs/heads/api"), Err(Refused::Root));
-        assert_eq!(t.check("api", "refs/heads/api"), Err(Refused::Own));
-        assert_eq!(t.check("api", "refs/heads/ui"), Err(Refused::Cycle));
-        assert_eq!(t.check("ui", "refs/heads/main"), Ok(()));
-        assert_eq!(t.check("ui", "refs/remotes/origin/main"), Ok(()));
-        assert_eq!(t.check_new("main"), Err(Refused::Root));
-        assert_eq!(t.check_new("web"), Ok(()));
+        assert_eq!(
+            t.check_ancestry("main", "refs/heads/api"),
+            Err(Refused::Root)
+        );
+        assert_eq!(t.check_ancestry("api", "refs/heads/api"), Err(Refused::Own));
+        assert_eq!(
+            t.check_ancestry("api", "refs/heads/ui"),
+            Err(Refused::Cycle)
+        );
+        assert_eq!(t.check_ancestry("ui", "refs/heads/main"), Ok(()));
+        assert_eq!(t.check_ancestry("ui", "refs/remotes/origin/main"), Ok(()));
+        assert_eq!(t.check_root("main"), Err(Refused::Root));
+        assert_eq!(t.check_root("web"), Ok(()));
+        assert_eq!(t.check_follow("ui"), Ok(()));
+        assert_eq!(t.check_follow("main"), Err(Refused::NoParent));
         let rootless = Tree::of(BTreeMap::new(), None, |_| true);
-        assert_eq!(rootless.check("ui", "refs/heads/api"), Err(Refused::NoRoot));
-        assert_eq!(rootless.check_new("web"), Err(Refused::NoRoot));
+        assert_eq!(
+            rootless.check_ancestry("ui", "refs/heads/api"),
+            Err(Refused::NoRoot)
+        );
+        assert_eq!(rootless.check_root("web"), Err(Refused::NoRoot));
         // T4: a cycle already in the config: no endless loop.
         let looped = Tree::of(
             stored(&[("a", "refs/heads/b"), ("b", "refs/heads/a")]),
             Some("main".to_string()),
             |_| true,
         );
-        assert_eq!(looped.check("c", "refs/heads/a"), Ok(()));
+        assert_eq!(looped.check_ancestry("c", "refs/heads/a"), Ok(()));
         assert_eq!(looped.subtree("a"), ["b"]);
     }
 }

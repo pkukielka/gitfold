@@ -290,10 +290,7 @@ pub fn root_branch(common_dir: &Path) -> Option<String> {
 
 /// Whether `refs/heads/<name>` exists.
 pub fn branch_exists(name: &str) -> bool {
-    with_repo(|repo| {
-        repo.try_find_reference(format!("refs/heads/{name}").as_str())
-            .is_ok_and(|r| r.is_some())
-    })
+    ref_exists(&format!("refs/heads/{name}"))
 }
 
 /// Whether reference `name` (a full name, `refs/...`) exists.
@@ -301,27 +298,21 @@ pub fn ref_exists(name: &str) -> bool {
     with_repo(|repo| repo.try_find_reference(name).is_ok_and(|r| r.is_some()))
 }
 
-/// The remote-tracking branches named `<remote>/<branch>`, as full refs,
-/// `origin`'s first.
-pub fn remote_tracking(branch: &str) -> Vec<String> {
-    let mut found: Vec<String> = with_repo(|repo| {
-        let Ok(platform) = repo.references() else {
-            return Vec::new();
-        };
-        let Ok(refs) = platform.prefixed("refs/remotes/") else {
-            return Vec::new();
-        };
-        refs.filter_map(Result::ok)
+/// A remote-tracking branch named `<remote>/<branch>`, as a full ref,
+/// `origin`'s if there is one.
+pub fn remote_tracking(branch: &str) -> Option<String> {
+    with_repo(|repo| {
+        let platform = repo.references().ok()?;
+        (platform.prefixed("refs/remotes/").ok()?)
+            .filter_map(Result::ok)
             .map(|r| r.name().as_bstr().to_string())
             .filter(|name| {
                 name.strip_prefix("refs/remotes/")
                     .and_then(|rest| rest.split_once('/'))
                     .is_some_and(|(_, b)| b == branch)
             })
-            .collect()
-    });
-    found.sort_by_key(|name| !name.starts_with("refs/remotes/origin/"));
-    found
+            .min_by_key(|name| !name.starts_with("refs/remotes/origin/"))
+    })
 }
 
 /// Whether any reference starts with one of `prefixes` (e.g. `refs/heads/feature/`).

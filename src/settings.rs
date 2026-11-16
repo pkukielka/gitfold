@@ -51,8 +51,7 @@ pub struct Local(Option<gix::config::File>);
 impl Local {
     /// The repository's config file as it is now.
     pub fn read(common_dir: &Path) -> Local {
-        let path = common_dir.join("config");
-        Local(gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok())
+        Local::read_checked(common_dir).unwrap_or(Local(None))
     }
 
     /// The repository's config file as it is now, failing (naming it) if it
