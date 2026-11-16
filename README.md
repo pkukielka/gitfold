@@ -152,10 +152,10 @@ gitfold branch <BRANCH> [-w] [--from <REV>]... [--prewarm <MODE>] [--track-reads
                                               # (-w: with a workspace's changes;
                                               # several --from: merged, not yet)
 gitfold branch <BRANCH> --parent <P> [--no-follow]
-                                              # a branch built on P (not yet)
+                                              # a branch built on P
 gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
                                               # show or change what it is built
-                                              # on (not yet)
+                                              # on (--set, --update: not yet)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold changes -- <PATH>...                  # who is changing them (not yet)
@@ -470,8 +470,12 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
 A branch can be built on another branch, its parent: its own commits sit on
 the parent's, and it takes the parent's new commits. Branches built on
-branches form a tree. The command-line contract is in place; the commands
-marked "not yet" above parse their arguments, then say `not implemented yet`
+branches form a tree. `gitfold branch NEW --parent P` creates a branch at
+P's tip built on P, following it unless `--no-follow`; `gitfold parent`
+shows a branch's parent and whether it follows it, forgets it (`--none`:
+the history stays as it is) or turns following on and off. Nothing moves
+commits yet: following itself is still to come. The command-line contract
+is in place; the commands marked "not yet" above parse their arguments, then say `not implemented yet`
 (exit 1). Commands people guess (`gitfold sync`, `pull`, `restack`,
 `rebase`, `branch --on`, `branch --merge`) exit 2 naming the right one.
 

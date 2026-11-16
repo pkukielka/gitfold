@@ -3,10 +3,10 @@
 //! - per branch, `branch.<branch>.<key>`, which git keeps with the branch
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
 //!   mode), `gitfoldTrackReads` (whether it records reads), `gitfoldParent`
-//!   (the branch it is built on, see `tree`; read here, written by `gitfold
-//!   parent` as it lands). A parent is a setting of the child: renaming or
-//!   deleting the parent with git leaves the child naming the old branch
-//!   ("parent gone");
+//!   (the branch it is built on, a full ref, see `tree`) and `gitfoldFollow`
+//!   (whether it takes its parent's new commits by itself; on unless set
+//!   false). A parent is a setting of the child: renaming or deleting the
+//!   parent with git leaves the child naming the old branch ("parent gone");
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again).
@@ -30,6 +30,8 @@ const PREWARM: &str = "gitfoldPrewarm";
 const TRACK_READS: &str = "gitfoldTrackReads";
 /// `branch.<branch>.gitfoldParent`: the branch it is built on.
 const PARENT: &str = "gitfoldParent";
+/// `branch.<branch>.gitfoldFollow`: a boolean; unset means on.
+const FOLLOW: &str = "gitfoldFollow";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -151,6 +153,12 @@ impl Local {
             .collect()
     }
 
+    /// Whether `branch` takes its parent's new commits by itself
+    /// (`gitfoldFollow`): on unless set false (F1).
+    pub fn follow(&self, branch: &str) -> bool {
+        self.branch_bool(branch, FOLLOW).unwrap_or(true)
+    }
+
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
     fn branch(&self, branch: &str, key: &str) -> Option<String> {
         let config = self.0.as_ref()?;
@@ -204,6 +212,28 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
+/// Makes `parent` (a full ref) the parent of `branch`, following it unless
+/// `follow` is false (see `set_branch`).
+pub fn set_parent(git_dir: &Path, branch: &str, parent: &str, follow: bool) -> Result<()> {
+    set_branch(git_dir, branch, PARENT, parent)?;
+    set_follow(git_dir, branch, follow)
+}
+
+/// Forgets the parent of `branch`, and whether it follows it (F5).
+pub fn forget_parent(git_dir: &Path, branch: &str) -> Result<()> {
+    unset_branch(git_dir, branch, PARENT)?;
+    unset_branch(git_dir, branch, FOLLOW)
+}
+
+/// Stores whether `branch` takes its parent's new commits by itself; on is
+/// the default, so it is stored as unset.
+pub fn set_follow(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
+    match on {
+        true => unset_branch(git_dir, branch, FOLLOW),
+        false => set_branch(git_dir, branch, FOLLOW, "false"),
+    }
+}
+
 /// Records `mountpoint` as where the repository is mounted
 /// (`gitfold.mountpoint`), given its git directory or one of its worktrees'.
 pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path) -> Result<()> {
@@ -222,6 +252,22 @@ fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()
         git_dir,
         &["config", "--local", &branch_key(branch, key), value],
     )
+}
+
+/// Removes `branch.<branch>.<key>` (every value it has), if set.
+fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
+    let key = branch_key(branch, key);
+    let out = git::cmd::command(git_dir)
+        .args(["config", "--local", "--unset-all", &key])
+        .output()?;
+    // Exit 5: it wasn't set.
+    match out.status.code() {
+        Some(0 | 5) => Ok(()),
+        _ => anyhow::bail!(
+            "git config --unset-all {key}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
 }
 
 /// Gives branch `to` the settings set for branch `from` (a fork); one that

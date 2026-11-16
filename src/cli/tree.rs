@@ -10,6 +10,7 @@ use anyhow::Result;
 
 use crate::git;
 use crate::refusal::Refusal;
+use crate::settings;
 use crate::state::retire::check_name;
 use crate::tree::{Refused, Tree};
 
@@ -85,8 +86,9 @@ pub struct ParentArgs {
     pub yes: bool,
 }
 
-/// `gitfold parent`: the checks of the rules table (S1-S6, F6), then not
-/// implemented yet.
+/// `gitfold parent`: the checks of the rules table (S1-S6, F6), then shows
+/// the parent (`show`), forgets it (`--none`, F5) or turns following on or
+/// off; `--set` and `--update` are not implemented yet.
 pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     let given = super::branch_or_current(args.branch, repo)?;
     let common_dir = git::init(repo)?;
@@ -104,13 +106,62 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     } else if args.follow || args.no_follow {
         tree.check_follow(&name).map_err(|r| refuse("", r))?;
     }
-    Err(not_implemented("gitfold parent"))
+    if args.set.is_some() || args.update {
+        return Err(not_implemented("gitfold parent"));
+    }
+    let parent = tree.parent(&name).map(crate::tree::short);
+    match parent {
+        // The rules table's F5; a parent stored on the root or a deleted
+        // branch (T1, T2) goes too.
+        _ if args.none => {
+            settings::forget_parent(&common_dir, &name)?;
+            match parent {
+                Some(parent) => println!("{name} no longer has a parent (it was {parent})"),
+                None => println!("{name} has no parent"),
+            }
+        }
+        // `check_follow` let only a branch with a parent through (F6).
+        Some(parent) if args.follow || args.no_follow => {
+            settings::set_follow(&common_dir, &name, args.follow)?;
+            match args.follow {
+                true => println!("{name} follows {parent}"),
+                false => println!(
+                    "{name} no longer follows {parent}: `gitfold parent {name} --update` takes \
+                     its new commits"
+                ),
+            }
+        }
+        _ => println!("{}", show(&common_dir, &tree, &name)?),
+    }
+    Ok(())
+}
+
+/// What `gitfold parent` says of local branch `name`: its parent, whether
+/// it follows it, and whether the parent is gone (T3).
+fn show(common_dir: &Path, tree: &Tree, name: &str) -> Result<String> {
+    let Some(parent) = tree.parent(name) else {
+        return Ok(match tree.is_root(name) {
+            true => format!("{name} is the root of the tree; it has no parent"),
+            false => format!("{name} has no parent"),
+        });
+    };
+    let follows = settings::Local::read_checked(common_dir)?.follow(name);
+    let short = crate::tree::short(parent);
+    let gone = match git::resolve(parent) {
+        Ok(_) => "",
+        Err(_) => " (parent gone)",
+    };
+    Ok(match follows {
+        true => format!("{name} is built on {short}{gone}, following it"),
+        false => format!("{name} is built on {short}{gone}, not following it"),
+    })
 }
 
 /// Checks `gitfold branch NEW --parent P` (in the repository of `repo`):
 /// NEW doesn't exist yet (N1, refused as `branch` refuses an existing
-/// branch), P resolves (N2), and the tree's rules for a new branch (N3, N4).
-pub fn check_new_parent(repo: &Path, branch: &str, parent: &str) -> Result<()> {
+/// branch), P resolves (N2), and the tree's rules for a new branch (N3, N4):
+/// P's full ref.
+pub fn check_new_parent(repo: &Path, branch: &str, parent: &str) -> Result<String> {
     let common_dir = git::init(repo)?;
     super::branch::check_new(&common_dir, branch)?;
     anyhow::ensure!(
@@ -119,8 +170,7 @@ pub fn check_new_parent(repo: &Path, branch: &str, parent: &str) -> Result<()> {
     );
     let tree = Tree::read(&common_dir)?;
     tree.check_new(branch, parent)
-        .map_err(|r| refused("gitfold branch", branch, parent, r))?;
-    Ok(())
+        .map_err(|r| refused("gitfold branch", branch, parent, r))
 }
 
 // The arguments of a command people guess (`gitfold sync`, `pull`, `restack`,

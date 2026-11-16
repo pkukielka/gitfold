@@ -6,7 +6,7 @@
 //! F, T); the tree owns them: only existing branches, the root has no
 //! parent, no branch is its own parent, no cycles (`Tree::check`,
 //! `Tree::check_new`), and parent names resolve one way (`resolve_parent`).
-//! Writing parents and following comes with `gitfold parent` (stream 4).
+//! Parents and following are written with `settings::set_parent`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -227,13 +227,18 @@ impl Tree {
     /// Whether local branch `branch` has a parent to follow (F6): it isn't
     /// the root (S4), and it has a parent. (Following needs no root.)
     pub fn check_follow(&self, branch: &str) -> Result<(), Refused> {
-        if self.root.as_deref() == Some(branch) {
+        if self.is_root(branch) {
             return Err(Refused::Root);
         }
         match self.parent(branch) {
             Some(_) => Ok(()),
             None => Err(Refused::NoParent),
         }
+    }
+
+    /// Whether local branch `branch` is the root of the tree.
+    pub fn is_root(&self, branch: &str) -> bool {
+        self.root.as_deref() == Some(branch)
     }
 
     fn check_root(&self, branch: &str) -> Result<(), Refused> {

@@ -22,7 +22,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         with_changes,
         from,
         parent,
-        no_follow: _,
+        no_follow,
         prewarm,
         track_reads,
         claude_hook: _,
@@ -31,8 +31,19 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     } = args;
     let name = name.as_deref().context("name the branch")?;
     if let Some(parent) = &parent {
-        super::tree::check_new_parent(repo, name, parent)?;
-        return Err(super::tree::not_implemented("gitfold branch --parent"));
+        // N5: created at P's tip, as `git branch NEW P` creates it, then
+        // built on P.
+        let full = super::tree::check_new_parent(repo, name, parent)?;
+        create(repo, name, Some(&full))?;
+        settings::set_parent(repo, name, &full, !no_follow)?;
+        set_branch_settings(repo, name, prewarm, track_reads)?;
+        let following = match no_follow {
+            true => "not following it",
+            false => "following it",
+        };
+        let parent = crate::tree::short(&full);
+        println!("created branch {name} on {parent} ({following}); open it as <mountpoint>/{name}");
+        return Ok(());
     }
     if from.len() > 1 {
         return Err(super::tree::not_implemented(
