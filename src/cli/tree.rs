@@ -106,16 +106,21 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     let tree = Tree::read(&common_dir)?;
     if let Some(parent) = &args.set {
         let full = tree.check(&name, parent).map_err(|r| refuse(parent, r))?;
-        return set(&common_dir, &tree, &name, &full);
+        // Following on with a new parent unless --no-follow (F4); the same
+        // parent changes nothing but what a flag says (F3).
+        let follow = (args.follow || args.no_follow).then_some(args.follow);
+        return set(&common_dir, &tree, &name, &full, follow);
     } else if args.follow || args.no_follow || args.update {
         tree.check_follow(&name).map_err(|r| refuse("", r))?;
     }
     let parent = tree.parent(&name).map(crate::tree::short);
     if args.update {
+        update(&common_dir, &tree, &name, args.yes)?;
+        // Changed only once the update went through.
         if args.follow || args.no_follow {
             settings::set_follow(&common_dir, &name, args.follow)?;
         }
-        return update(&common_dir, &tree, &name, args.yes);
+        return Ok(());
     }
     if args.none {
         follow::drop_base(&common_dir, &name)?;
@@ -177,7 +182,7 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
     if let Some(paths) = plan.conflict(common_dir, &local)? {
         return Ok(Some(format!(
             "following paused: {}",
-            conflict_said(name, short, plan.base, &paths)
+            conflict_said(name, short, &plan, &paths)
         )));
     }
     let pushed = plan.pushed(common_dir)?;
@@ -215,9 +220,8 @@ fn update(common_dir: &Path, tree: &Tree, name: &str, yes: bool) -> Result<()> {
     }
     movable(common_dir, name, "--update")?;
     let _moving = follow::lock(common_dir, name)?;
-    follow::recover(common_dir, name)?;
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    match plan.run(common_dir, yes, true)? {
+    match plan.run(common_dir, yes, true, || {})? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
             Ok(())
@@ -227,40 +231,31 @@ fn update(common_dir: &Path, tree: &Tree, name: &str, yes: bool) -> Result<()> {
 }
 
 /// `gitfold parent NAME --set P` (P's full ref `full`): its own commits
-/// moved onto P's tip, then P its parent, following it (F3, F4). With
-/// commits already pushed, P becomes its parent without the move (following
-/// paused until `--update --yes`).
-fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str) -> Result<()> {
+/// moved onto P's tip, then P its parent, following it unless `follow`
+/// says otherwise (F3, F4). With commits already pushed, P becomes its
+/// parent without the move (following paused until `--update --yes`).
+fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str, follow: Option<bool>) -> Result<()> {
     let short = crate::tree::short(full);
     if tree.parent(name) == Some(full) {
+        if let Some(on) = follow {
+            settings::set_follow(common_dir, name, on)?;
+        }
         println!("{name} is built on {short} already");
         return Ok(());
     }
     movable(common_dir, name, "--set")?;
     let _moving = follow::lock(common_dir, name)?;
-    follow::recover(common_dir, name)?;
     let plan = follow::Plan::new(common_dir, name, tree.parent(name), &tree.root_refs(), full)?;
     // Says first what it moves, once it is sure to try.
-    let up_to_date = plan.up_to_date(common_dir)?;
-    let blocked = match up_to_date {
-        true => None,
-        false => plan.blocked(common_dir, false)?,
-    };
-    let moved = match blocked {
-        Some(blocked) => blocked,
-        None => {
-            if !up_to_date {
-                println!("moves {} of {name} onto {short}", commits(plan.own));
-            }
-            plan.run(common_dir, false, false)?
-        }
-    };
+    let moved = plan.run(common_dir, false, false, || {
+        println!("moves {} of {name} onto {short}", commits(plan.own))
+    })?;
     if matches!(moved, follow::Moved::Merge | follow::Moved::Conflict(_)) {
         return said(name, short, &plan, moved);
     }
-    // Built on P from now on, following it (F4).
+    // Built on P from now on.
     settings::set_parent(common_dir, name, full)?;
-    settings::set_follow(common_dir, name, true)?;
+    settings::set_follow(common_dir, name, follow.unwrap_or(true))?;
     if let follow::Moved::Pushed(pushed) = &moved {
         // Not moved: its own commits start where they did.
         follow::set_base(common_dir, name, plan.base)?;
@@ -295,12 +290,12 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
         follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),
         follow::Moved::Merge => bail!(
             "{name}'s own commits include a merge, which gitfold doesn't move: rebase it by hand \
-             (git rebase --onto {parent} {} {name})",
-            plan.base
+             ({})",
+            plan.by_hand(parent)
         ),
         follow::Moved::Conflict(paths) => Err(Refusal::Changes.error(format!(
             "nothing moved: {}",
-            conflict_said(name, parent, plan.base, &paths)
+            conflict_said(name, parent, plan, &paths)
         ))),
     }
 }
@@ -316,13 +311,14 @@ fn pushed_said(name: &str, pushed: &follow::Pushed) -> String {
     )
 }
 
-/// Why `name` doesn't move onto `parent`: its commits after `base` conflict
-/// on `paths`.
-fn conflict_said(name: &str, parent: &str, base: gix::ObjectId, paths: &[String]) -> String {
+/// Why `name` doesn't move onto `parent` as `plan` says: its commits
+/// conflict on `paths`.
+fn conflict_said(name: &str, parent: &str, plan: &follow::Plan, paths: &[String]) -> String {
     format!(
-        "{name}'s commits conflict with {parent}'s on {}. Rebase by hand (git rebase --onto \
-         {parent} {base} {name}), or wait for {parent} to change",
-        paths.join(", ")
+        "{name}'s commits conflict with {parent}'s on {}. Rebase by hand ({}), or wait for \
+         {parent} to change",
+        paths.join(", "),
+        plan.by_hand(parent)
     )
 }
 

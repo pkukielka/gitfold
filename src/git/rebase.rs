@@ -92,11 +92,7 @@ pub fn rebase(
     onto: ObjectId,
     upstream: Option<ObjectId>,
 ) -> Result<Rebased> {
-    let scratch = Scratch {
-        path: moves_dir(common_dir).join(format!("gitfold-move-{}", workspace_id(branch))),
-        common_dir: common_dir.to_path_buf(),
-    };
-    scratch.clean_up(branch)?;
+    let scratch = Scratch::of(common_dir, branch);
     let rebased = scratch
         .make(branch)
         .and_then(|()| scratch.rebase(branch, tip, onto, upstream));
@@ -106,10 +102,22 @@ pub fn rebase(
     Ok(rebased)
 }
 
+/// Removes the worktree a move of `branch` that died left, its rebase
+/// aborted first, as git would. (A rebase moves the branch only when it
+/// finishes, so dropping the worktree alone also leaves the branch where it
+/// was.) The caller holds `lock`.
+pub fn clean_up(common_dir: &Path, branch: &str) -> Result<()> {
+    Scratch::of(common_dir, branch).clean_up(branch)
+}
+
 impl Scratch {
-    /// Removes the worktree a move that died left, its rebase aborted first,
-    /// as git would. (A rebase moves the branch only when it finishes, so
-    /// dropping the worktree alone also leaves the branch where it was.)
+    fn of(common_dir: &Path, branch: &str) -> Scratch {
+        Scratch {
+            path: moves_dir(common_dir).join(format!("gitfold-move-{}", workspace_id(branch))),
+            common_dir: common_dir.to_path_buf(),
+        }
+    }
+
     fn clean_up(&self, branch: &str) -> Result<()> {
         if !self.path.exists() {
             return Ok(());
@@ -167,6 +175,9 @@ impl Scratch {
             .args(["-c", "core.sparseCheckout=true"])
             .args(["-c", "core.sparseCheckoutCone=true"])
             .args(["-c", "index.sparse=true"])
+            // A conflict here is reported, not resolved, and records no
+            // resolution of its own.
+            .args(["-c", "rerere.enabled=false"])
             .stdin(Stdio::null());
         command
     }

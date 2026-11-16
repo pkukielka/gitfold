@@ -87,10 +87,15 @@ fn drop_ref(common_dir: &Path, name: &str) -> Result<()> {
     git::worktree::unpin(common_dir, name)
 }
 
-/// Takes the lock of the moves of `branch` (see `git::rebase::lock`): held
-/// from `recover` to the end of the move.
+/// Takes the lock of the moves of `branch` (see `git::rebase::lock`), held
+/// to the end of the move, and cleans up what a move that died left: its
+/// worktree (its rebase aborted, which may put the branch back), then the
+/// record of where it was moving (`recover`).
 pub fn lock(common_dir: &Path, branch: &str) -> Result<crate::lock::Lock> {
-    rebase::lock(common_dir, branch)
+    let lock = rebase::lock(common_dir, branch)?;
+    rebase::clean_up(common_dir, branch)?;
+    recover(common_dir, branch)?;
+    Ok(lock)
 }
 
 /// Records that the own commits of `branch` start after `at`.
@@ -113,7 +118,7 @@ fn clear_conflict(common_dir: &Path, branch: &str) -> Result<()> {
 
 /// Finishes the record of a move of `branch` a crash interrupted (see the
 /// module doc).
-pub fn recover(common_dir: &Path, branch: &str) -> Result<()> {
+fn recover(common_dir: &Path, branch: &str) -> Result<()> {
     let Some(onto) = rev(&moving_ref(branch)) else {
         return Ok(());
     };
@@ -219,6 +224,9 @@ pub struct Plan {
     onto_ref: String,
     /// How many own commits it has.
     pub own: usize,
+    /// Whether its base is on `onto`'s history (the parent only gained
+    /// commits since).
+    on_history: bool,
 }
 
 impl Plan {
@@ -234,21 +242,34 @@ impl Plan {
     ) -> Result<Plan> {
         let tip = git::branch_tip(branch)?.id;
         let base = own_base(common_dir, branch, from, roots, tip)?;
+        let onto_id = git::resolve(onto)?.id;
         Ok(Plan {
             branch: branch.to_string(),
             tip,
             base,
-            onto: git::resolve(onto)?.id,
+            onto: onto_id,
             onto_ref: onto.to_string(),
             own: count(common_dir, &[&tip.to_string(), &format!("^{base}")])?,
+            on_history: is_ancestor(common_dir, base, onto_id)?,
         })
     }
 
     /// Whether it sits on `onto` already, with nothing of its old parent's
     /// on top of `onto` (its own commits start on `onto`'s history).
     pub fn up_to_date(&self, common_dir: &Path) -> Result<bool> {
-        Ok(is_ancestor(common_dir, self.base, self.onto)?
-            && is_ancestor(common_dir, self.onto, self.tip)?)
+        Ok(self.on_history && is_ancestor(common_dir, self.onto, self.tip)?)
+    }
+
+    /// The `git rebase` that moves it, as run in its own worktree: on its
+    /// parent's history `git rebase <onto>` (which also skips commits the
+    /// parent has by patch id), else only its own commits, `--onto <onto>
+    /// <base>` (a parent rewritten, another parent). `onto` named as given.
+    pub fn by_hand(&self, onto: &str) -> String {
+        let branch = &self.branch;
+        match self.on_history {
+            true => format!("git rebase {onto} {branch}"),
+            false => format!("git rebase --onto {onto} {} {branch}", self.base),
+        }
     }
 
     /// Its own commits on its same-name branch of its push remote, as git
@@ -283,24 +304,18 @@ impl Plan {
         }))
     }
 
-    /// Why it can't move as it stands, if it can't: a merge among its own
-    /// commits, or (unless `yes`) commits already pushed.
-    pub fn blocked(&self, common_dir: &Path, yes: bool) -> Result<Option<Moved>> {
-        let range = format!("{}..{}", self.base, self.tip);
-        if count(common_dir, &["--merges", &range])? > 0 {
-            return Ok(Some(Moved::Merge));
-        }
-        match yes {
-            true => Ok(None),
-            false => Ok(self.pushed(common_dir)?.map(Moved::Pushed)),
-        }
-    }
-
-    /// Moves it (see the module doc), unless `blocked`: its base recorded, a
-    /// conflict cleared, or with `record` recorded (following its parent;
-    /// not for a move to another parent). `yes`: pushed commits move too.
-    /// The caller holds `lock`.
-    pub fn run(&self, common_dir: &Path, yes: bool, record: bool) -> Result<Moved> {
+    /// Moves it (see the module doc): its base recorded, a conflict
+    /// cleared, or with `record` recorded (following its parent; not for a
+    /// move to another parent). Not with a merge among its own commits, nor
+    /// commits already pushed unless `yes`. `moving` is called once it is
+    /// sure to try. The caller holds `lock`.
+    pub fn run(
+        &self,
+        common_dir: &Path,
+        yes: bool,
+        record: bool,
+        moving: impl FnOnce(),
+    ) -> Result<Moved> {
         let branch = &self.branch;
         if self.up_to_date(common_dir)? {
             // Sits on it already (rebased by hand, say).
@@ -308,25 +323,25 @@ impl Plan {
             clear_conflict(common_dir, branch)?;
             return Ok(Moved::UpToDate);
         }
-        if let Some(blocked) = self.blocked(common_dir, yes)? {
-            return Ok(blocked);
+        let range = format!("{}..{}", self.base, self.tip);
+        if count(common_dir, &["--merges", &range])? > 0 {
+            return Ok(Moved::Merge);
         }
         let pushed = self.pushed(common_dir)?;
-        // On its parent's history: `git rebase <onto>`, which also skips
-        // commits the parent has by patch id. Off it (a parent rewritten,
-        // another parent): only its own commits, `--onto <onto> <base>`.
-        let upstream = match is_ancestor(common_dir, self.base, self.onto)? {
-            true => None,
-            false => Some(self.base),
-        };
+        if !yes && let Some(pushed) = pushed {
+            return Ok(Moved::Pushed(pushed));
+        }
+        moving();
+        let upstream = (!self.on_history).then_some(self.base);
         set_ref(common_dir, &moving_ref(branch), self.onto)?;
-        let rebased = rebase::rebase(common_dir, branch, self.tip, self.onto, upstream);
-        // Its base is recorded before the record of the move goes.
-        if let Ok(rebase::Rebased::Moved(_)) = rebased {
+        let rebased = rebase::rebase(common_dir, branch, self.tip, self.onto, upstream)?;
+        // Its base recorded before the record of the move goes; on an error
+        // (git may have moved it) the record stays, for `recover`.
+        if let rebase::Rebased::Moved(_) = rebased {
             set_base(common_dir, branch, self.onto)?;
         }
         drop_ref(common_dir, &moving_ref(branch))?;
-        Ok(match rebased? {
+        Ok(match rebased {
             rebase::Rebased::Moved(tip) => {
                 clear_conflict(common_dir, branch)?;
                 let kept = count(common_dir, &[&tip.to_string(), &format!("^{}", self.onto)])?;

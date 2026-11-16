@@ -290,7 +290,7 @@ eq "  one own commit" "1" "$(own api ui)"
 # A conflict: nothing moves, recorded until api changes again.
 on api u.txt theirs; on ui u.txt mine
 before=$(R rev-parse ui)
-check "a conflict: exit 4, the paths named" says 4 "ui's commits conflict with api's on u.txt" parent ui --update
+check "a conflict: exit 4, the paths named, the rebase to run by hand" says 4 "ui's commits conflict with api's on u.txt. Rebase by hand (git rebase api ui)" parent ui --update
 eq "  nothing moved" "$before" "$(R rev-parse ui)"
 check "  no rebase left anywhere" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
 check "  shown by parent" says 0 "following paused: ui's commits conflict with api's on u.txt" parent ui
@@ -385,6 +385,10 @@ check "  gone" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
 check "--set: says what moves" says 0 "moves 1 commit of ui onto main" parent ui --set main
 eq "  only its own commits" "1" "$(own main ui)"
 check "  api's commits gone from it" fails R merge-base --is-ancestor api ui
+check "--set --no-follow: following off" says 0 "ui is now built on api" parent ui --set api --no-follow
+eq "  stored" "false" "$(R config branch.ui.gitfoldFollow)"
+check "--set the same parent --follow: only following changes" says 0 "ui is built on api already" parent ui --set api --follow
+check "  on" fails R config branch.ui.gitfoldFollow
 check "--none: the base forgotten" says 0 "ui no longer has a parent" parent ui --none
 check "  the ref gone" fails R rev-parse -q --verify refs/gitfold-base/ui
 }
