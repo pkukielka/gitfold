@@ -44,7 +44,9 @@ impl std::error::Error for Usage {}
 fn refused(what: &str, branch: &str, parent: &str, refused: Refused) -> anyhow::Error {
     let message = format!("{what}: {}", crate::tree::refusal(branch, parent, &refused));
     match refused {
-        Refused::Unknown(_) | Refused::OnlyRemote { .. } => Refusal::NotFound.error(message),
+        Refused::Unknown(_) | Refused::NotBranch { .. } | Refused::OnlyRemote { .. } => {
+            Refusal::NotFound.error(message)
+        }
         Refused::NoRoot => anyhow::anyhow!(message),
         Refused::Root | Refused::Own | Refused::Cycle | Refused::NoParent => Usage(message).into(),
     }

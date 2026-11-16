@@ -297,36 +297,37 @@ pub fn branch_exists(name: &str) -> bool {
 }
 
 /// The full ref that `name` stands for, as git takes it: a short name by
-/// git's order (gitrevisions: as given, then under `refs/tags/`,
-/// `refs/heads/`, `refs/remotes/`, then `refs/remotes/<name>/HEAD`), and a
-/// symbolic ref followed to the ref it points at (`origin/HEAD` stands for
-/// `refs/remotes/origin/main`, as `git rev-parse --symbolic-full-name` says).
+/// git's rules (gitrevisions, "<refname>": `$GIT_DIR/<name>`, then
+/// `refs/<name>`, `refs/tags/<name>`, `refs/heads/<name>`,
+/// `refs/remotes/<name>`, `refs/remotes/<name>/HEAD`, the first that
+/// exists), and a symbolic ref followed to the ref it points at
+/// (`origin/HEAD` stands for `refs/remotes/origin/main`, as `git rev-parse
+/// --symbolic-full-name` says).
 pub fn full_ref(name: &str) -> Option<String> {
-    with_repo(|repo| {
-        let mut reference = repo.try_find_reference(name).ok()??;
-        // git gives up on longer chains of symbolic refs too.
-        for _ in 0..5 {
-            match reference.follow() {
-                None => return Some(reference.name().as_bstr().to_string()),
-                Some(next) => reference = next.ok()?,
-            }
+    with_repo(|repo| followed(repo, name))
+}
+
+fn followed(repo: &gix::Repository, name: &str) -> Option<String> {
+    let mut reference = repo.try_find_reference(name).ok()??;
+    // git gives up on longer chains of symbolic refs too.
+    for _ in 0..5 {
+        match reference.follow() {
+            None => return Some(reference.name().as_bstr().to_string()),
+            Some(next) => reference = next.ok()?,
         }
-        None
-    })
+    }
+    None
 }
 
 /// The remote-tracking branch `<remote>/<branch>` of a configured remote, as
-/// a full ref (`origin`'s if there are several), if it exists.
+/// a full ref (`origin`'s if there are several), if it exists and is a
+/// branch itself (`origin/HEAD` is a symbolic ref, not one).
 pub fn remote_tracking(branch: &str) -> Option<String> {
     with_repo(|repo| {
         (repo.remote_names().iter())
-            .map(|remote| remote.to_string())
-            .filter(|remote| {
-                repo.try_find_reference(format!("refs/remotes/{remote}/{branch}").as_str())
-                    .is_ok_and(|r| r.is_some())
-            })
-            .min_by_key(|remote| remote != "origin")
             .map(|remote| format!("refs/remotes/{remote}/{branch}"))
+            .filter(|full| followed(repo, full).as_ref() == Some(full))
+            .min_by_key(|full| !full.starts_with("refs/remotes/origin/"))
     })
 }
 

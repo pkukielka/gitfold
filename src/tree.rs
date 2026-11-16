@@ -33,6 +33,8 @@ pub struct Tree {
 pub enum Refused {
     /// No such branch (P6, S1).
     Unknown(String),
+    /// A name git takes for a ref that isn't a branch: a tag (P6).
+    NotBranch { name: String, full: String },
     /// No branch of that name, but a remote-tracking one of a configured
     /// remote (P5).
     OnlyRemote { name: String, remote: String },
@@ -52,6 +54,7 @@ pub enum Refused {
 pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
     match refused {
         Refused::Unknown(name) => format!("no branch {name}"),
+        Refused::NotBranch { name, full } => format!("no branch {name}: git takes it for {full}"),
         Refused::OnlyRemote { name, remote } => format!(
             "no branch {name} (only {remote} exists). Either: `git branch {name} {remote}` (a \
              local {name}), then retry; or retry with {remote} (build on the remote-tracking \
@@ -89,7 +92,10 @@ fn resolve_parent(name: &str) -> Result<String, Refused> {
         Some(full) if full.starts_with("refs/heads/") || full.starts_with("refs/remotes/") => {
             Ok(full)
         }
-        Some(_) => Err(Refused::Unknown(name.to_string())),
+        Some(full) => Err(Refused::NotBranch {
+            name: name.to_string(),
+            full,
+        }),
         None => match git::remote_tracking(name) {
             Some(remote) => Err(Refused::OnlyRemote {
                 name: name.to_string(),

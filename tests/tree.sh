@@ -124,7 +124,13 @@ check "P5: naming both commands" says 3 "git branch feat origin/feat" parent api
 check "P5 for branch --parent too" says 3 "only origin/feat exists" branch c --parent feat
 check "P6: nothing of that name (exit 3)" says 3 "no branch nope" parent api --set nope
 R tag v1 main
-check "P6: a tag is no branch" says 3 "no branch v1" parent api --set v1
+check "P6: a tag is no branch" says 3 "no branch v1: git takes it for refs/tags/v1" parent api --set v1
+R branch v1 main
+check "P6: a tag shadows a branch of its name, as in git" says 3 "no branch v1: git takes it for refs/tags/v1" parent api --set v1
+check "P3: the full ref names the branch" says 1 "not implemented yet" parent api --set refs/heads/v1
+R switch -q --orphan unborn
+check "P5: never origin/HEAD for HEAD (unborn HEAD)" lacks 3 "only origin" parent api --set HEAD
+R switch -q main
 # Names stand for what git takes them for: symbolic refs followed.
 check "origin/HEAD stands for origin/main" says 1 "not implemented yet" parent api --set origin/HEAD
 check "origin stands for origin/main, as in git" says 1 "not implemented yet" parent api --set origin
