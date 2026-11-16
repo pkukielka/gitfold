@@ -30,7 +30,8 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         merge: _,
     } = args;
     let name = name.as_deref().context("name the branch")?;
-    if parent.is_some() {
+    if let Some(parent) = &parent {
+        super::tree::check_parent(repo, parent)?;
         return Err(super::tree::not_implemented("gitfold branch --parent"));
     }
     if from.len() > 1 {
@@ -175,8 +176,8 @@ pub fn track_reads(repo: &Path, args: TrackReadsArgs) -> Result<()> {
 pub struct BranchArgs {
     #[arg(required_unless_present = "claude_hook")]
     pub branch: Option<String>,
-    /// Copy the uncommitted changes of the workspace --from names, or of the
-    /// one you are in.
+    /// Copy the uncommitted changes of the workspaces --from names (each
+    /// one's, with several), or of the one you are in.
     #[arg(short = 'w', long)]
     pub with_changes: bool,
     /// Start point (default: HEAD of the worktree you are in, as for `git
@@ -194,11 +195,11 @@ pub struct BranchArgs {
     #[arg(long, requires = "parent")]
     pub no_follow: bool,
     /// Not a flag: `--parent` (a hint says so).
-    #[arg(long, hide = true, num_args = 1.., value_name = "P")]
-    pub on: Vec<String>,
+    #[arg(long, hide = true, num_args = 0.., value_name = "P")]
+    pub on: Option<Vec<String>>,
     /// Not a flag: repeated `--from` (a hint says so).
-    #[arg(long, hide = true, num_args = 1.., value_name = "REV")]
-    pub merge: Vec<String>,
+    #[arg(long, hide = true, num_args = 0.., value_name = "REV")]
+    pub merge: Option<Vec<String>>,
     /// Prewarm mode for this workspace, kept across remounts (in git
     /// config, branch.<BRANCH>.gitfoldPrewarm); a mount's `--prewarm none`
     /// still wins.

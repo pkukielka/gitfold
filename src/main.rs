@@ -31,6 +31,9 @@ struct Cli {
     command: Command,
 }
 
+/// The help of the commands people guess (`gitfold help sync`).
+const GUESSED: &str = "No such command. To take your parent's new commits: gitfold parent --update";
+
 #[derive(Subcommand)]
 enum Command {
     /// Mount a repository: its revisions and branches as folders.
@@ -54,7 +57,8 @@ enum Command {
     ///
     /// The workspace is <MOUNTPOINT>/<BRANCH>. With --with-changes, the branch
     /// starts at the tip of the workspace --from names (default: the one you are
-    /// in), and its workspace with a copy of that one's uncommitted changes and
+    /// in; with several --from, their merge and each one's changes), and its
+    /// workspace with a copy of that one's uncommitted changes and
     /// staged state: the same files and the same `git status`, from then on each
     /// on its own. Only the changes are copied, so it costs what they weigh, not
     /// the tree. Exit codes: 3 no such branch, 4 a git operation in progress in
@@ -73,7 +77,9 @@ enum Command {
     /// Against its base, untracked files included and ignored ones not, whatever
     /// is staged (as `git add -A` and `git diff --cached --name-status`): one
     /// path per line, `A` added, `M` modified, `D` deleted, quoted as git quotes
-    /// paths. Read from the workspace's stored state, mounted or not.
+    /// paths. Read from the workspace's stored state, mounted or not. With --
+    /// PATH...: instead, who is changing those paths, on every branch
+    /// (committed, not yet in main) and in every workspace (uncommitted).
     Changes(cli::list::ChangesArgs),
     /// List what a workspace read or changed that changed elsewhere since.
     ///
@@ -130,13 +136,13 @@ enum Command {
     /// followed. Exit codes: 3 no such branch, 1 other errors (also: not
     /// implemented yet), 2 usage errors.
     Parent(cli::tree::ParentArgs),
-    #[command(hide = true)]
+    #[command(hide = true, disable_help_flag = true, about = GUESSED)]
     Sync(cli::tree::GuessArgs),
-    #[command(hide = true)]
+    #[command(hide = true, disable_help_flag = true, about = GUESSED)]
     Pull(cli::tree::GuessArgs),
-    #[command(hide = true)]
+    #[command(hide = true, disable_help_flag = true, about = GUESSED)]
     Restack(cli::tree::GuessArgs),
-    #[command(hide = true)]
+    #[command(hide = true, disable_help_flag = true, about = GUESSED)]
     Rebase(cli::tree::GuessArgs),
     /// Delete the snapshot registrations.
     ///
@@ -187,6 +193,10 @@ const LONG_VERSION: &str = env!("GITFOLD_LONG_VERSION");
 fn main() -> std::process::ExitCode {
     let code = match run() {
         Ok(code) => code,
+        Err(e) if e.is::<cli::tree::NotImplemented>() => {
+            eprintln!("{e}");
+            1
+        }
         Err(e) => {
             eprintln!("Error: {e:?}");
             refusal::Refusal::of(&e).map_or(1, |r| r.exit_code())
@@ -223,16 +233,17 @@ fn run() -> Result<i32> {
         // As hooks, they find the repository from Claude Code's input.
         Command::Branch(args) if args.claude_hook.is_some() => cli::claude::worktree_create()?,
         Command::Branch(args) => {
-            if let Some(hint) = cli::tree::branch_hint(&args.on, &args.merge) {
+            if let Some(hint) = cli::tree::branch_hint(args.on.as_deref(), args.merge.as_deref()) {
                 return usage(hint);
             }
             cli::branch::branch(&cli::repo()?, args)?
         }
         Command::List(args) => cli::list::list(&cli::repo()?, args)?,
         Command::Changes(args) if !args.paths.is_empty() => {
-            if let Some(hint) = cli::tree::changes_hint(&args.branch) {
+            if let Some(hint) = cli::tree::changes_hint(args.branch.is_some()) {
                 return usage(hint);
             }
+            cli::repo()?;
             return Err(cli::tree::not_implemented("gitfold changes -- PATH"));
         }
         Command::Changes(args) => cli::list::changes(&cli::repo()?, args)?,
@@ -244,7 +255,7 @@ fn run() -> Result<i32> {
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
-        Command::Parent(args) => cli::tree::parent(&cli::repo()?, args)?,
+        Command::Parent(args) => return cli::tree::parent(&cli::repo()?, args),
         Command::Sync(_) => return usage(cli::tree::guessed("sync")),
         Command::Pull(_) => return usage(cli::tree::guessed("pull")),
         Command::Restack(_) => return usage(cli::tree::guessed("restack")),

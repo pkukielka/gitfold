@@ -11,9 +11,22 @@ use anyhow::Result;
 use crate::git;
 use crate::state::retire::check_name;
 
+/// A command whose arguments parse but that isn't built yet: printed as
+/// `<command>: not implemented yet` (no `Error:` prefix), exit 1.
+#[derive(Debug)]
+pub struct NotImplemented(String);
+
+impl std::fmt::Display for NotImplemented {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: not implemented yet", self.0)
+    }
+}
+
+impl std::error::Error for NotImplemented {}
+
 /// The error of a command whose arguments parse but that isn't built yet.
 pub fn not_implemented(what: &str) -> anyhow::Error {
-    anyhow::anyhow!("{what}: not implemented yet")
+    NotImplemented(what.to_string()).into()
 }
 
 /// The arguments of `gitfold parent`.
@@ -44,19 +57,31 @@ pub struct ParentArgs {
     pub yes: bool,
 }
 
-/// `gitfold parent`.
-pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
+/// `gitfold parent`: its exit code.
+pub fn parent(repo: &Path, args: ParentArgs) -> Result<i32> {
     let name = super::branch_or_current(args.branch, repo)?;
     git::init(repo)?;
     for branch in std::iter::once(&name).chain(&args.set) {
         check_name(branch)?;
         git::require_branch(branch)?;
     }
+    if args.set.as_ref() == Some(&name) {
+        eprintln!("gitfold parent: a branch can't be its own parent");
+        return Ok(2);
+    }
     Err(not_implemented("gitfold parent"))
 }
 
-/// The arguments of a command people guess (`gitfold sync`, `pull`,
-/// `restack`, `rebase`): any, ignored.
+/// Checks `gitfold branch --parent P`'s P (in the repository of `repo`):
+/// a branch.
+pub fn check_parent(repo: &Path, parent: &str) -> Result<()> {
+    git::init(repo)?;
+    check_name(parent)?;
+    git::require_branch(parent)
+}
+
+// The arguments of a command people guess (`gitfold sync`, `pull`, `restack`,
+// `rebase`): any, ignored (`//`, not `///`: no help text of its own).
 #[derive(clap::Args)]
 pub struct GuessArgs {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true, hide = true)]
@@ -72,20 +97,21 @@ pub fn guessed(name: &str) -> String {
 
 /// The hint for `gitfold changes BRANCH -- PATH`: with paths it lists every
 /// branch.
-pub fn changes_hint(branch: &Option<String>) -> Option<String> {
-    branch
-        .as_ref()
-        .map(|_| "gitfold changes: with -- PATH it lists every branch; drop BRANCH".to_string())
+pub fn changes_hint(branch: bool) -> Option<String> {
+    branch.then(|| "gitfold changes: with -- PATH it lists every branch; drop BRANCH".into())
 }
 
 /// The hint for `gitfold branch` flags people guess (`--on`, `--merge`), if
 /// one was given.
-pub fn branch_hint(on: &[String], merge: &[String]) -> Option<String> {
-    if !on.is_empty() {
+pub fn branch_hint(on: Option<&[String]>, merge: Option<&[String]>) -> Option<String> {
+    if on.is_some() {
         return Some("gitfold branch: no --on; to build on a branch: --parent P".into());
     }
-    if !merge.is_empty() {
-        let froms: Vec<String> = merge.iter().map(|m| format!("--from {m}")).collect();
+    if let Some(merge) = merge {
+        let froms: Vec<String> = match merge {
+            [] => vec!["--from A".into(), "--from B".into()],
+            _ => merge.iter().map(|m| format!("--from {m}")).collect(),
+        };
         return Some(format!(
             "gitfold branch: no --merge; to start at several branches merged: {}",
             froms.join(" ")

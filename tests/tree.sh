@@ -22,13 +22,17 @@ R branch api
 check "branch --from one revision: as before" says 0 "created branch two" branch two --from main
 check "the name may come after --from" says 0 "created branch three" branch --from main three
 check "several --from: not implemented yet" says 1 "not implemented yet" branch c --from main --from api
-check "--parent: not implemented yet" says 1 "not implemented yet" branch c --parent api
+check "--parent: not implemented yet, said plainly" says 1 "gitfold branch --parent: not implemented yet" branch c --parent api
+check "no Error: prefix on not implemented" fails sh -c "'$BIN' -C '$REPO' branch c --parent api 2>&1 | grep -q '^Error:'"
+check "--parent an unknown branch: exit 3" says 3 "no branch nosuch" branch c --parent nosuch
 check "--parent --no-follow: not implemented yet" says 1 "not implemented yet" branch c --parent api --no-follow
 check "--no-follow needs --parent" says 2 "--parent" branch c --no-follow
 check "--from and --parent: refused" says 2 "cannot be used with" branch c --from main --parent api
 check "-w and --parent: refused" says 2 "cannot be used with" branch c -w --parent api
 check "--on: a hint" says 2 "to build on a branch: --parent P" branch c --on api
 check "--merge: a hint" says 2 "--from api --from main" branch c --merge api main
+check "bare --on: the hint" says 2 "--parent P" branch c --on
+check "bare --merge: the hint" says 2 "--from A --from B" branch c --merge
 check "parent: not implemented yet" says 1 "gitfold parent: not implemented yet" parent api
 check "parent of an unknown branch: exit 3, nothing created" says 3 "no branch nosuch" parent nosuch
 check "and nothing was created" fails R rev-parse -q --verify refs/heads/nosuch
@@ -43,12 +47,15 @@ check "--follow and --no-follow: refused" says 2 "cannot be used with" parent ap
 check "--none and --follow: refused" says 2 "cannot be used with" parent api --none --follow
 check "--yes needs --update" says 2 "--update" parent api --yes
 check "--update and --set: refused" says 2 "cannot be used with" parent api --update --set main
-check "outside a workspace, the branch must be named" says 1 "" parent
+check "its own parent: refused" says 2 "can't be its own parent" parent api --set api
+check "outside a workspace, the branch must be named" says 1 "not in a gitfold workspace" parent
 check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
 check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.txt
-check "changes without PATH: as before" says 0 "" changes api
+eq "changes without PATH: as before (no workspace yet: nothing, exit 0)" "0 " "$(gf changes api)"
+check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a 2>&1 | grep -q 'not implemented'"
 for g in sync pull restack rebase; do
     check "$g: a hint" says 2 "gitfold parent --update" "$g" --whatever x
+    check "$g --help: the hint too" says 2 "gitfold parent --update" "$g" --help
 done
 }
 
