@@ -7,10 +7,12 @@
 //! - `index`: the git index gitfold writes.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
+//! - `rebase`: moving a branch without a worktree with `git rebase`.
 
 pub mod cmd;
 pub mod index;
 pub mod promisor;
+pub mod rebase;
 pub mod worktree;
 
 use std::cell::RefCell;

@@ -40,11 +40,16 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         // Following set either way: a deleted branch's settings may be left
         // (T2). Without its settings the branch goes again, so the command
         // can be retried.
-        let set = settings::set_parent(repo, name, &full)
+        // Its own commits start at P's tip.
+        let set = crate::follow::tip(repo, name)
+            .and_then(|tip| crate::follow::set_base(repo, name, tip))
+            .and_then(|()| settings::set_parent(repo, name, &full))
             .and_then(|()| settings::set_follow(repo, name, !no_follow))
             .and_then(|()| set_branch_settings(repo, name, prewarm, track_reads));
         if let Err(e) = set {
-            if let Err(undo) = git::cmd::output(repo, &["branch", "-D", "--", name]) {
+            let undone = git::cmd::output(repo, &["branch", "-D", "--", name])
+                .and_then(|_| crate::follow::drop_base(repo, name));
+            if let Err(undo) = undone {
                 log::warn!("deleting branch {name} again: {undo:#}");
             }
             return Err(e);

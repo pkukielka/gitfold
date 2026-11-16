@@ -6,8 +6,9 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
+use crate::follow;
 use crate::git;
 use crate::refusal::Refusal;
 use crate::settings;
@@ -87,8 +88,10 @@ pub struct ParentArgs {
 }
 
 /// `gitfold parent`: the checks of the rules table (S1-S6, F6), then shows
-/// the parent (`show`), forgets it (`--none`, F5) or turns following on or
-/// off; `--set` and `--update` are not implemented yet.
+/// the parent (`show`), forgets it (`--none`, F5), turns following on or
+/// off, moves the branch onto another parent (`--set`) or onto its parent's
+/// new commits (`--update`); see `follow`. Moving a workspace's branch is
+/// not implemented yet.
 pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     let given = super::branch_or_current(args.branch, repo)?;
     let common_dir = git::init(repo)?;
@@ -102,15 +105,20 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     let refuse = |parent: &str, r| refused("gitfold parent", &name, parent, r);
     let tree = Tree::read(&common_dir)?;
     if let Some(parent) = &args.set {
-        tree.check(&name, parent).map_err(|r| refuse(parent, r))?;
-    } else if args.follow || args.no_follow {
+        let full = tree.check(&name, parent).map_err(|r| refuse(parent, r))?;
+        return set(&common_dir, &tree, &name, &full);
+    } else if args.follow || args.no_follow || args.update {
         tree.check_follow(&name).map_err(|r| refuse("", r))?;
     }
-    if args.set.is_some() || args.update {
-        return Err(not_implemented("gitfold parent"));
-    }
     let parent = tree.parent(&name).map(crate::tree::short);
+    if args.update {
+        if args.follow || args.no_follow {
+            settings::set_follow(&common_dir, &name, args.follow)?;
+        }
+        return update(&common_dir, &tree, &name, args.yes);
+    }
     if args.none {
+        follow::drop_base(&common_dir, &name)?;
         // F5; a parent stored on the root or a deleted branch (T1, T2) goes
         // too.
         settings::forget_parent(&common_dir, &name)?;
@@ -128,6 +136,11 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         }
     } else {
         println!("{}", show(&tree, &name, parent));
+        match paused(&common_dir, &tree, &name) {
+            Ok(Some(paused)) => println!("{paused}"),
+            Ok(None) => {}
+            Err(e) => log::warn!("{name}: whether it can take its parent's commits: {e:#}"),
+        }
     }
     Ok(())
 }
@@ -147,6 +160,185 @@ fn show(tree: &Tree, name: &str, parent: Option<&str>) -> String {
     };
     let following = following(tree.follows(name));
     format!("{name} is built on {parent}{gone}, {following}")
+}
+
+/// Why `name` doesn't take its parent's new commits, if it has some it
+/// can't take: a conflict recorded, or commits already pushed.
+fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> {
+    let Some(parent) = tree.parent(name).filter(|_| !tree.parent_gone(name)) else {
+        return Ok(None);
+    };
+    let plan = plan(common_dir, tree, name, tree.parent(name), parent)?;
+    if plan.up_to_date(common_dir)? {
+        return Ok(None);
+    }
+    let local = settings::Local::read_checked(common_dir)?;
+    let short = crate::tree::short(parent);
+    if let Some(paths) = follow::conflict(common_dir, &local, name, plan.onto, plan.tip)? {
+        return Ok(Some(format!(
+            "following paused: {}",
+            conflict_said(name, short, plan.base, &paths)
+        )));
+    }
+    let pushed = follow::pushed(common_dir, name, plan.base, plan.tip)?;
+    Ok(pushed.map(|p| format!("following paused: {}", pushed_said(name, &p))))
+}
+
+/// The move of `name` (built on `from`, a full ref, or on the root) onto
+/// the tip of `onto` (a full ref), with any interrupted move's record
+/// finished first.
+fn plan(
+    common_dir: &Path,
+    tree: &Tree,
+    name: &str,
+    from: Option<&str>,
+    onto: &str,
+) -> Result<follow::Plan> {
+    follow::recover(common_dir, name)?;
+    let tip = follow::tip(common_dir, name)?;
+    let roots = follow::root_refs(tree.root());
+    Ok(follow::Plan {
+        branch: name.to_string(),
+        tip,
+        base: follow::own_base(common_dir, name, from, &roots, tip)?,
+        onto: follow::commit(common_dir, onto)?,
+    })
+}
+
+/// Refuses moving `name` where gitfold doesn't move it (`what`: the flag):
+/// in a workspace (not yet), or checked out in another git worktree (never:
+/// git rebase there).
+fn movable(common_dir: &Path, name: &str, what: &str) -> Result<()> {
+    match follow::checked_out(common_dir, name)? {
+        None => Ok(()),
+        Some(follow::CheckedOut::Workspace) => Err(not_implemented(&format!(
+            "gitfold parent {what} for a workspace's branch"
+        ))),
+        Some(follow::CheckedOut::Worktree(path)) => Err(Refusal::InUse.error(format!(
+            "{name} is checked out in {path}: gitfold doesn't move it there; take the new \
+             commits with git rebase in it"
+        ))),
+    }
+}
+
+/// `gitfold parent NAME --update [--yes]`: its parent's new commits taken
+/// now (`follow::Plan::run`).
+fn update(common_dir: &Path, tree: &Tree, name: &str, yes: bool) -> Result<()> {
+    let parent = tree
+        .parent(name)
+        .expect("check_follow: a branch with a parent");
+    let short = crate::tree::short(parent);
+    if tree.parent_gone(name) {
+        bail!(
+            "{name}'s parent {short} is gone: no new commits to take (`gitfold parent {name} \
+             --none` keeps its history as it is)"
+        );
+    }
+    movable(common_dir, name, "--update")?;
+    let plan = plan(common_dir, tree, name, Some(parent), parent)?;
+    match plan.run(common_dir, yes, true)? {
+        follow::Moved::UpToDate => println!("{name} is up to date with {short}"),
+        moved => said(name, short, &plan, moved)?,
+    }
+    Ok(())
+}
+
+/// `gitfold parent NAME --set P` (P's full ref `full`): its own commits
+/// moved onto P's tip, then P its parent, following it (F3, F4). With
+/// commits already pushed, P becomes its parent without the move (following
+/// paused until `--update --yes`).
+fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str) -> Result<()> {
+    let short = crate::tree::short(full);
+    if tree.parent(name) == Some(full) {
+        println!("{name} is built on {short} already");
+        return Ok(());
+    }
+    movable(common_dir, name, "--set")?;
+    let plan = plan(common_dir, tree, name, tree.parent(name), full)?;
+    let own = plan.own(common_dir)?;
+    println!("moves {} of {name} onto {short}", commits(own));
+    let moved = plan.run(common_dir, false, false)?;
+    let built = |base| -> Result<()> {
+        settings::set_parent(common_dir, name, full)?;
+        settings::set_follow(common_dir, name, true)?;
+        follow::set_base(common_dir, name, base)
+    };
+    match moved {
+        follow::Moved::UpToDate => {
+            built(plan.onto)?;
+            println!("{name} is now built on {short}");
+        }
+        follow::Moved::Pushed(pushed) => {
+            built(plan.base)?;
+            println!(
+                "{name} is now built on {short}; following paused: {}",
+                pushed_said(name, &pushed)
+            );
+        }
+        follow::Moved::Done { .. } => {
+            built(plan.onto)?;
+            said(name, short, &plan, moved)?;
+        }
+        moved => said(name, short, &plan, moved)?,
+    }
+    Ok(())
+}
+
+/// What a move of `name` onto `parent` (short) did, or why it didn't, said
+/// (on standard output) or refused.
+fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> Result<()> {
+    match moved {
+        follow::Moved::UpToDate => Ok(()),
+        follow::Moved::Done { own, kept, push } => {
+            println!("moved {} of {name} onto {parent}", commits(kept));
+            if own > kept {
+                println!("({} already in {parent}: dropped)", commits(own - kept));
+            }
+            if let Some(push) = push {
+                println!("its history was rewritten; force-push with: {push}");
+            }
+            Ok(())
+        }
+        follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),
+        follow::Moved::Merge => bail!(
+            "{name}'s own commits include a merge, which gitfold doesn't move: rebase it by hand \
+             (git rebase --onto {parent} {} {name})",
+            plan.base
+        ),
+        follow::Moved::Conflict(paths) => Err(Refusal::Changes.error(format!(
+            "nothing moved: {}",
+            conflict_said(name, parent, plan.base, &paths)
+        ))),
+    }
+}
+
+/// Why `name` doesn't move: `pushed`.
+fn pushed_said(name: &str, pushed: &follow::Pushed) -> String {
+    let are = if pushed.count == 1 { "is" } else { "are" };
+    format!(
+        "{} {are} pushed. `gitfold parent {name} --update --yes` moves them; then force-push \
+         with: {}",
+        commits(pushed.count),
+        pushed.push
+    )
+}
+
+/// Why `name` doesn't move onto `parent`: its commits after `base` conflict
+/// on `paths`.
+fn conflict_said(name: &str, parent: &str, base: gix::ObjectId, paths: &[String]) -> String {
+    format!(
+        "{name}'s commits conflict with {parent}'s on {}. Rebase by hand (git rebase --onto \
+         {parent} {base} {name}), or wait for {parent} to change",
+        paths.join(", ")
+    )
+}
+
+/// `n commits`, `1 commit`.
+fn commits(n: usize) -> String {
+    match n {
+        1 => "1 commit".to_string(),
+        n => format!("{n} commits"),
+    }
 }
 
 /// How a branch's following reads after its parent's name.

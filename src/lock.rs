@@ -59,6 +59,17 @@ pub fn lock(common_dir: &Path) -> Result<Option<Lock>> {
     Ok(Some(Lock { _file: locked }))
 }
 
+/// An exclusive `flock` on file `path` (created if missing), if no one else
+/// holds it: for work on one branch at a time (`follow`).
+pub fn try_file(path: &Path) -> Result<Option<Lock>> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(flock(&file)?.then_some(Lock { _file: file }))
+}
+
 /// An exclusive, non-blocking `flock`: whether it was taken.
 fn flock(file: &fs::File) -> std::io::Result<bool> {
     let fd = std::os::fd::AsRawFd::as_raw_fd(file);

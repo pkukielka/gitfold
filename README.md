@@ -155,7 +155,8 @@ gitfold branch <BRANCH> --parent <P> [--no-follow]
                                               # a branch built on P
 gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
                                               # show or change what it is built
-                                              # on (--set, --update: not yet)
+                                              # on (a workspace's branch: not
+                                              # yet)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold changes -- <PATH>...                  # who is changing them (not yet)
@@ -471,10 +472,22 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 A branch can be built on another branch, its parent: its own commits sit on
 the parent's, and it takes the parent's new commits. Branches built on
 branches form a tree. `gitfold branch NEW --parent P` creates a branch at
-P's tip built on P, following it unless `--no-follow`; `gitfold parent`
+P's tip built on P, following it unless `--no-follow`. It has no upstream
+until you `git push -u` it: its parent isn't its upstream. `gitfold parent`
 shows a branch's parent and whether it follows it, forgets it (`--none`:
-the history stays as it is) or turns following on and off. Nothing moves
-commits yet: following itself is still to come. The command-line contract
+the history stays as it is) or turns following on and off.
+
+`gitfold parent --update` takes the parent's new commits now, and `--set P`
+moves the branch onto another parent: its own commits move, as `git rebase
+--onto` moves them (git rebase does it, in a temporary worktree that checks
+out only the top-level files; commits the parent has already are dropped,
+as git does). A conflict moves nothing: the paths are named, and the
+conflict is recorded until the parent changes again. Commits already on the
+branch's own remote branch are moved only with `--update --yes`, and
+gitfold prints the force-push (it never pushes). A merge among its own
+commits, or a branch checked out in a git worktree, is left for you to
+rebase. For now only branches without a workspace move; following by
+itself is still to come. The command-line contract
 is in place; the commands marked "not yet" above parse their arguments,
 then say `not implemented yet` (exit 1). Commands people guess (`gitfold
 sync`, `pull`, `restack`, `rebase`, `branch --on`, `branch --merge`) exit 2
