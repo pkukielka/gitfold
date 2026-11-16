@@ -129,21 +129,11 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     }
 
     let mut targets = Vec::new();
-    if against.is_empty() && !against_workspaces {
-        let main = git::main_branch(&common_dir)
-            .map_err(|e| anyhow::anyhow!("{e}: name a target with --against"))?;
-        anyhow::ensure!(!main.is(branch), "{branch} can't be compared with itself");
-        let workspace = main.refname.starts_with("refs/heads/");
-        targets.push(target_at(
-            &common_dir,
-            &store,
-            &base,
-            main.name,
-            &main.refname,
-            workspace,
-        )?);
+    let mut revs = against;
+    if revs.is_empty() && !against_workspaces {
+        revs.push(default_target(&common_dir)?);
     }
-    for rev in against {
+    for rev in revs {
         anyhow::ensure!(rev != *branch, "{branch} can't be compared with itself");
         targets.push(rev_target(&common_dir, &store, &base, rev)?);
     }
@@ -197,6 +187,11 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     Ok(if lines.is_empty() { 0 } else { FOUND })
 }
 
+/// What to compare with by default: `git::default_compare_target`.
+fn default_target(common_dir: &Path) -> Result<String> {
+    git::default_compare_target(common_dir)
+}
+
 /// Target `rev`: what it changed since it diverged from `base`, and, for a
 /// branch with a workspace, that workspace's uncommitted changes.
 fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) -> Result<Target> {
@@ -206,26 +201,13 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
         true => format!("refs/heads/{rev}"),
         false => rev.clone(),
     };
-    target_at(common_dir, store, base, rev, &spec, branch)
-}
-
-/// Target `name`, at `spec`: what it changed since it diverged from `base`,
-/// and, if `branch` (a local branch) has a workspace, its uncommitted changes.
-fn target_at(
-    common_dir: &Path,
-    store: &Store,
-    base: &ObjectId,
-    name: String,
-    spec: &str,
-    branch: bool,
-) -> Result<Target> {
-    let mut changed = diff(common_dir, &base.to_string(), spec)?;
-    let state = StateDir::of(common_dir, &name);
+    let mut changed = diff(common_dir, &base.to_string(), &spec)?;
+    let state = StateDir::of(common_dir, &rev);
     if branch && state.opened() {
         let s = status::status(store, &state)?;
         changed.extend(s.changed.into_iter().chain(s.deleted));
     }
-    Ok(Target::new(name, changed))
+    Ok(Target::new(rev, changed))
 }
 
 /// The paths `to` changed since it diverged from `from` (`git diff
@@ -246,8 +228,7 @@ pub struct OverlapsArgs {
     /// The workspace's branch (default: the workspace you are in).
     pub branch: Option<String>,
     /// What to compare with (repeatable; default: origin/HEAD, the remote's
-    /// default branch, else main, else master, else origin/main or
-    /// origin/master).
+    /// default branch, else main).
     #[arg(long, value_name = "REV")]
     pub against: Vec<String>,
     /// Compare with every other workspace (instead of the default target;

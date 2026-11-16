@@ -66,8 +66,8 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<i32> {
         git::require_branch(branch)?;
     }
     if let Some(parent) = &args.set {
-        let tree = crate::tree::Tree::read(&crate::settings::Local::read(&common_dir));
-        if let Err(refused) = crate::tree::check(&common_dir, &tree, &name, parent) {
+        let tree = crate::tree::Tree::read(&common_dir);
+        if let Err(refused) = tree.check(&name, parent) {
             eprintln!(
                 "gitfold parent: {}",
                 crate::tree::refusal(&name, parent, &refused)

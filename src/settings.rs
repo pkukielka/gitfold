@@ -204,10 +204,10 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 
 /// Makes `parent` the parent of `branch` (`gitfoldParent`), or with `None`
 /// forgets it; then following goes back to its default (on). The parent is
-/// written first: a failure between the two leaves a not-following setting
-/// (no moves unasked), never following turned back on for the old parent.
-/// Unchecked, and unconditional: `tree::set_parent` refuses self-parents
-/// and cycles, and leaves an unchanged parent alone.
+/// written first, so a failure between the two never leaves the old parent
+/// with its following changed. Unchecked, and unconditional:
+/// `tree::set_parent` applies `Tree::check` (unknown names, the root, the
+/// branch itself, cycles) and leaves an unchanged parent alone.
 pub fn write_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
     match parent {
         Some(parent) => set_branch(git_dir, branch, PARENT, parent)?,

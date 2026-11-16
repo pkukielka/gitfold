@@ -228,52 +228,47 @@ pub fn branch_tip(name: &str) -> Result<Commit> {
     resolve(&format!("refs/heads/{name}"))
 }
 
-/// The repository's main branch, what work lands in.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MainBranch {
-    /// Its full ref (`refs/remotes/origin/main`, `refs/heads/main`): what
-    /// to resolve, as a short name can mean a local branch of that name.
-    pub refname: String,
-    /// Its short name, to show (`origin/main`, `main`).
-    pub name: String,
-}
+// Two questions about "the main branch" that look alike but must stay
+// separate (layers-design/15-tree-spec.md, section 2):
+// - `default_compare_target`: which commit to compare a branch with by
+//   default (`overlaps`). Local `main` and `origin/main` are DIFFERENT
+//   commits here: unpushed work on local `main` counts.
+// - `root_branch`: which branch is the root of the tree of branches built on
+//   branches (`tree`). Local `main` and `origin/main` are the SAME root here.
+// Merging them into one function broke `overlaps main` in a clone
+// (2026-11-16): tests/tree.sh "two questions about main" pins the
+// difference.
 
-impl MainBranch {
-    fn of(refname: &str) -> MainBranch {
-        let name = (refname.strip_prefix("refs/heads/"))
-            .or_else(|| refname.strip_prefix("refs/remotes/"))
-            .unwrap_or(refname);
-        MainBranch {
-            refname: refname.to_string(),
-            name: name.to_string(),
-        }
+/// The ref to compare with by default (`gitfold overlaps`): the remote's
+/// default branch (`origin/HEAD`, normally `origin/main`), else `main`. Not
+/// the branch's upstream: after `git push -u` that is its own remote branch,
+/// which its work is ahead of. Not `root_branch` (see the note above).
+pub fn default_compare_target(common_dir: &Path) -> Result<String> {
+    let out = cmd::command(common_dir)
+        .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .output()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !name.is_empty() && name != "origin/HEAD" {
+        return Ok(name);
     }
-
-    /// The local branch it is, or for `refs/remotes/origin/<b>`, `<b>`.
-    pub fn local(&self) -> Option<&str> {
-        (self.refname.strip_prefix("refs/heads/"))
-            .or_else(|| self.refname.strip_prefix("refs/remotes/origin/"))
-    }
-
-    /// Whether local branch `branch` is the main branch (`main` for
-    /// `origin/main` too).
-    #[allow(dead_code)] // used as the tree's streams land (the tree's root)
-    pub fn is(&self, branch: &str) -> bool {
-        self.local() == Some(branch)
+    match resolve("refs/heads/main") {
+        Ok(_) => Ok("main".to_string()),
+        Err(_) => bail!("no origin/HEAD and no branch main: name a target with --against"),
     }
 }
 
-/// The repository's main branch: the remote's default branch
-/// (`origin/HEAD`'s target, normally `origin/main`), else the local branch
-/// `main`, else `master`, else `origin/main`, else `origin/master` (a
-/// remote added by hand has no `origin/HEAD`). Each only if it exists: a
-/// clone's `origin/HEAD` can point nowhere. Not a branch's upstream: after
-/// `git push -u` that is its own remote branch.
-pub fn main_branch(common_dir: &Path) -> Result<MainBranch> {
+/// The root of the tree of branches, as a local branch name: `origin/HEAD`'s
+/// branch (`main` for `origin/main`), else `main`, else `master`, else
+/// `origin/main`'s or `origin/master`'s name; each only if it exists (a
+/// clone's `origin/HEAD` can point nowhere). `None`: no known root. Local
+/// `main` and `origin/main` are the same root. Not `default_compare_target`
+/// (see the note above).
+pub fn root_branch(common_dir: &Path) -> Option<String> {
     let head = cmd::output(
         common_dir,
         &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
     )
+    .ok()
     .map(|out| String::from_utf8_lossy(&out).trim().to_string());
     let candidates = head.into_iter().chain(
         [
@@ -284,12 +279,13 @@ pub fn main_branch(common_dir: &Path) -> Result<MainBranch> {
         ]
         .map(String::from),
     );
-    for refname in candidates {
-        if refname.starts_with("refs/") && resolve(&refname).is_ok() {
-            return Ok(MainBranch::of(&refname));
-        }
-    }
-    bail!("no main branch: no origin/HEAD, and no branch main or master")
+    candidates
+        .filter(|refname| resolve(refname).is_ok())
+        .find_map(|refname| {
+            let name = (refname.strip_prefix("refs/heads/"))
+                .or_else(|| refname.strip_prefix("refs/remotes/origin/"))?;
+            Some(name.to_string())
+        })
 }
 
 /// Whether `refs/heads/<name>` exists.
@@ -391,30 +387,4 @@ pub fn discover(start: &Path) -> Result<PathBuf> {
     let (path, _trust) = gix::discover::upwards(&shown)
         .with_context(|| format!("no git repository at or above {}", shown.display()))?;
     Ok(path.into_repository_and_work_tree_directories().0)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_main_branch_by_name() {
-        let remote = MainBranch::of("refs/remotes/origin/main");
-        assert_eq!(
-            (remote.name.as_str(), remote.local()),
-            ("origin/main", Some("main"))
-        );
-        assert!(remote.is("main"));
-        assert!(!remote.is("origin/main"));
-        assert!(!remote.is("origin"));
-        let local = MainBranch::of("refs/heads/master");
-        assert_eq!(
-            (local.name.as_str(), local.local()),
-            ("master", Some("master"))
-        );
-        assert!(local.is("master"));
-        let other = MainBranch::of("refs/remotes/upstream/main");
-        assert_eq!(other.local(), None);
-        assert!(!other.is("main"));
-    }
 }

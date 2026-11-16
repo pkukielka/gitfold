@@ -68,32 +68,43 @@ for g in sync pull restack rebase; do
 done
 }
 
-# The main branch (git::main_branch), as overlaps' default target shows it:
-# origin/HEAD, else main, else master, else an error naming --against.
-the_main_branch() {
+# Two questions about "the main branch" that must stay separate (see the
+# note in src/git/mod.rs): which commit overlaps compares with by default
+# (local main and origin/main differ), and which branch is the tree's root
+# (local main and origin/main are the same). Each check below would fail if
+# the two were merged into one rule.
+two_questions_about_main() {
 R branch w
 R switch -q w; echo w >>"$REPO/a.txt"; R commit -qam w; R switch -q main
 echo m >>"$REPO/a.txt"; R commit -qam m
-check "main: chosen" says 6 "W	main	a.txt" overlaps w
+check "compare: local main" says 6 "W	main	a.txt" overlaps w
+check "root: main" says 2 "main is the root of the tree" parent main --set w
+# A clone: origin/main at main, origin/HEAD pointing at it; local main
+# gets an unpushed commit of its own.
 R update-ref refs/remotes/origin/main main
 R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
-check "origin/HEAD: its branch chosen" says 6 "W	origin/main	a.txt" overlaps w
-R branch origin/main main~1
-echo m2 >>"$REPO/c.txt"; R add c.txt; R commit -qm m2; R update-ref refs/remotes/origin/main main
-check "a stale local branch named like it: origin/main still compared" says 6 "W	origin/main	a.txt" overlaps w
-check "and its newer change seen (the remote's, not the stale branch's)" sh -c "'$BIN' -C '$REPO' overlaps w --writes | grep -q 'W	origin/main	a.txt'"
-R branch -D -q origin/main; R update-ref -d refs/remotes/origin/main
-check "origin/HEAD pointing nowhere: main" says 6 "W	main	a.txt" overlaps w
+echo u >"$REPO/u.txt"; R add u.txt; R commit -qm unpushed
+check "compare: origin/main, not local main" says 6 "W	origin/main	a.txt" overlaps w
+check "compare main with origin/main: allowed (they differ)" says 0 "" overlaps main
+check "root: local main still the root" says 2 "main is the root of the tree" parent main --set w
+# A stale local branch named origin/main (at the first commit).
+R branch origin/main main~2
+check "compare: still the remote's origin/main" says 6 "remotes/origin/main	a.txt" overlaps w
+R branch -D -q origin/main
+# origin/HEAD pointing nowhere: compare falls back to local main.
+R update-ref -d refs/remotes/origin/main
+check "dangling origin/HEAD: compare with local main" says 6 "W	main	a.txt" overlaps w
+check "dangling origin/HEAD: root is local main" says 2 "main is the root of the tree" parent main --set w
 R update-ref -d --no-deref refs/remotes/origin/HEAD
-R update-ref refs/remotes/origin/main main; R branch -m main mn
-check "no origin/HEAD, no main or master, origin/main: chosen" says 6 "W	origin/main	a.txt" overlaps w
-R branch -m mn main; R update-ref -d refs/remotes/origin/main
+# Only master: overlaps has no default (as on main); the tree's root is master.
 R branch -m main master
-check "no main, master: chosen" says 6 "W	master	a.txt" overlaps w
+check "only master: compare needs --against" says 1 "no origin/HEAD and no branch main: name a target with --against" overlaps w
+check "only master: root is master" says 2 "master is the root of the tree" parent master --set w
+# No main branch at all: no root, so no parents.
 R branch -m master trunk
-check "neither: an error naming --against" says 1 "no main branch: no origin/HEAD, and no branch main or master: name a target with --against" overlaps w
+check "no root: setting a parent refused" says 2 "the tree of branches has no root" parent w --set trunk
 }
 
 section "tree: the command-line contract" the_contract
-section "tree: the main branch" the_main_branch
+section "tree: two questions about main" two_questions_about_main
 finish
