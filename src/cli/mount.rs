@@ -172,7 +172,9 @@ fn mount_again(common_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result
 }
 
 /// `gitfold mount`: in the foreground, the daemon itself; else starts it in the
-/// background (see `start`) and says where it logs.
+/// background (see `start`), records where and with which flags it is mounted
+/// (`settings::set_mountpoint`; the daemon it starts doesn't: see
+/// `RECORDED_BY_PARENT`) before returning, and says where it logs.
 pub fn mount(args: MountArgs) -> Result<()> {
     let mountpoint = daemon::check(&args.mountpoint)?;
     if args.foreground {

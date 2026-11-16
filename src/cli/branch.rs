@@ -195,7 +195,7 @@ fn merged(
                 .unwrap_or_else(|| anyhow::anyhow!("git merge failed"));
             Err(match made.undo(repo, common_dir, &state) {
                 Ok(()) => failed.context(format!("branch {name} not created")),
-                Err(e) => failed.context(format!("branch {name} {e:#}")),
+                Err(e) => failed.context(format!("branch {name} created, but {e:#}")),
             })
         }
     }
@@ -220,13 +220,13 @@ impl Made<'_> {
             super::remove::remove_waiting(common_dir, name, true, false, UNDO_WAIT).with_context(
                 || {
                     format!(
-                        "created, but not removed again: `gitfold remove --force {name}`, then \
+                        "not removed again: `gitfold remove --force {name}`, then \
                          `git branch -D {name}`"
                     )
                 },
             )?;
         }
-        let branch_left = || format!("created, but not deleted again: `git branch -D {name}`");
+        let branch_left = || format!("not deleted again: `git branch -D {name}`");
         settings::forget_workspace(repo, name, self.prewarm, self.track_reads)
             .with_context(branch_left)?;
         let branch = format!("refs/heads/{name}");
