@@ -44,6 +44,9 @@ fn git(dir: &Path, args: &[&str], index: Option<&Path>, stdin: Option<&[u8]>) ->
         ("GIT_AUTHOR_EMAIL", "t@t"),
         ("GIT_COMMITTER_NAME", "t"),
         ("GIT_COMMITTER_EMAIL", "t@t"),
+        // Not the user's settings (`commit.gpgSign` would sign, or fail).
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
     ] {
         cmd.env(var, value);
     }
