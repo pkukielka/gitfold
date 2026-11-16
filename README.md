@@ -198,7 +198,7 @@ daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
 `inbox --claude-hook rewake` (2, to wake the session).
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
 several `--from`, it starts at the first, and `git merge` of the others runs in
-its workspace (mounting the repository again where it last was, if it isn't
+its workspace (mounting the repository again where and as it last was, if it isn't
 mounted): git merges, and says how, as it does. A conflict leaves the branch with
 git's merge in progress (exit 1): finish it with `git merge --continue` there, or
 `git merge --abort`. If git refuses, nothing is left. The branch keeps no

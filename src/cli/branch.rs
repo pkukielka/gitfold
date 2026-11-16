@@ -10,7 +10,6 @@ use clap::builder::BoolishValueParser;
 
 use crate::daemon::control;
 use crate::git;
-use crate::mount_table;
 use crate::prewarm::Prewarm;
 use crate::refusal::Refusal;
 use crate::settings;
@@ -144,29 +143,20 @@ fn merged(
     );
     // Where the user stands, before anything is made (or mounted). `-` is
     // the previous branch, as for `git merge -`, except as the start point.
+    // Only the merged ones go to git by name.
     let sources = (from.iter().enumerate())
-        .map(|(i, rev)| match rev.as_str() {
-            "-" if i > 0 => Source::resolve(repo, "@{-1}"),
-            rev => Source::resolve(repo, rev),
+        .map(|(i, rev)| {
+            let rev = if rev == "-" && i > 0 { "@{-1}" } else { rev };
+            Source::resolve(repo, rev, i > 0)
         })
         .collect::<Result<Vec<_>>>()?;
-    let mount = match mount_table::mount_of(common_dir)? {
-        Some(mount) => mount,
-        None => match settings::Local::read(common_dir).mountpoint() {
-            Some(last) => super::mount::mount_again(common_dir, &last)?,
-            None => bail!(
-                "{} isn't mounted: mount it first (`gitfold mount`); git merges several \
-                 --from in the new branch's workspace",
-                common_dir.display()
-            ),
-        },
-    };
-    fs::metadata(&mount).with_context(|| {
-        format!(
-            "the gitfold mount at {} doesn't answer (its daemon gone?); `gitfold unmount` it",
-            mount.display()
+    let Some(mount) = super::mount::mount_or_again(common_dir)? else {
+        bail!(
+            "{} isn't mounted: mount it first (`gitfold mount`); git merges several --from \
+             in the new branch's workspace",
+            common_dir.display()
         )
-    })?;
+    };
     let (first, others) = sources.split_first().expect("several --from");
     // Without an upstream: no relation afterwards.
     git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.id])?;
@@ -178,15 +168,16 @@ fn merged(
     };
     let state = StateDir::of(common_dir, name);
     let workspace = mount.join(name);
-    let merge = no_relation(repo, common_dir, name)
-        // Before the workspace opens: it opens with them.
-        .and_then(|()| set_branch_settings(repo, name, prewarm, track_reads))
+    // Before the workspace opens: it opens with them.
+    let merge = set_branch_settings(repo, name, prewarm, track_reads)
         // Looking it up opens it.
         .and_then(|()| {
-            fs::metadata(&workspace)
-                .with_context(|| format!("opening workspace {}", workspace.display()))
+            let meta = fs::metadata(&workspace)
+                .with_context(|| format!("opening workspace {}", workspace.display()))?;
+            ensure!(meta.is_dir(), "{} is not a workspace", workspace.display());
+            Ok(())
         })
-        .and_then(|_| {
+        .and_then(|()| {
             let revs = (others.iter())
                 .map(|s| s.as_in(&state.admin))
                 .collect::<Result<Vec<_>>>()?;
@@ -215,17 +206,6 @@ fn merged(
     }
 }
 
-/// Forgets what a deleted branch `name` left that would relate the new one
-/// to another (its parent, following, base ref): `--from` makes none.
-fn no_relation(repo: &Path, common_dir: &Path, name: &str) -> Result<()> {
-    settings::forget_parent(repo, name)?;
-    let base = format!("refs/gitfold-base/{name}");
-    if git::cmd::output(common_dir, &["rev-parse", "--verify", "-q", &base]).is_ok() {
-        git::cmd::output(common_dir, &["update-ref", "-d", &base])?;
-    }
-    Ok(())
-}
-
 /// What `merged` made: branch `name` at `at`, and which settings it stored.
 struct Made<'a> {
     name: &'a str,
@@ -245,8 +225,8 @@ impl Made<'_> {
             super::remove::remove_waiting(common_dir, name, true, false, UNDO_WAIT).with_context(
                 || {
                     format!(
-                        "not removed again: `gitfold remove --force {name}`, then `git branch \
-                         -D {name}`"
+                        "not removed again: `gitfold remove --force {name}`, then \
+                         `git branch -D {name}`"
                     )
                 },
             )?;
@@ -275,15 +255,20 @@ struct Source {
 }
 
 impl Source {
-    /// `rev` in the worktree of git directory `repo`; refused as `git merge`
-    /// refuses what isn't a commit; git's own error if it fails otherwise.
-    fn resolve(repo: &Path, rev: &str) -> Result<Source> {
+    /// `rev` in the worktree of git directory `repo`, and if `named`, the
+    /// ref it names; refused as `git merge` refuses what isn't a commit;
+    /// git's own error if it fails otherwise.
+    fn resolve(repo: &Path, rev: &str, named: bool) -> Result<Source> {
         let line = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
         let commit = format!("{rev}^{{commit}}");
         let args = ["rev-parse", "--verify", "-q", "--end-of-options", &commit];
         let out = git::cmd::command(repo).args(args).output()?;
-        // `--verify -q`: exit 1, silently, for what names no commit.
-        if out.status.code() == Some(1) && out.stderr.is_empty() {
+        // `--verify -q`: exit 1 for what names no commit (anything else
+        // that fails dies, 128).
+        if out.status.code() == Some(1) {
+            // What git said first (an ambiguous short id's candidates), as
+            // `git merge` shows it.
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
             bail!("{rev} - not something we can merge");
         }
         ensure!(
@@ -294,8 +279,9 @@ impl Source {
         );
         let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`).
-        let name = (!rev.starts_with('-'))
-            .then(|| git::cmd::output(repo, &["rev-parse", "--abbrev-ref", rev]).ok())
+        let args = ["rev-parse", "--verify", "-q", "--abbrev-ref", rev];
+        let name = (named && !rev.starts_with('-'))
+            .then(|| git::cmd::output(repo, &args).ok())
             .flatten()
             .map(line)
             .filter(|n| !n.is_empty() && n != "HEAD");

@@ -97,12 +97,6 @@ check "  nothing left behind" nothing_of c
 check "an existing branch" says 1 "a branch named 'ui' already exists" branch ui --from api --from x
 check "refused with --prewarm: the setting goes too" says 1 "refusing to merge unrelated histories" branch c --from api --from lone --prewarm none
 eq "  no setting left" "" "$(R config --get branch.c.gitfoldPrewarm)"
-R config branch.c.gitfoldTrackReads true
-check "refused without settings given: settings found there stay" says 1 "refusing to merge" branch c --from api --from lone
-eq "  still there" true "$(R config --get branch.c.gitfoldTrackReads)"
-check "refused with --prewarm only: the other setting found there stays" says 1 "refusing to merge" branch c --from api --from lone --prewarm none
-eq "  still there" "true " "$(R config --get branch.c.gitfoldTrackReads) $(R config --get branch.c.gitfoldPrewarm)"
-R config --unset branch.c.gitfoldTrackReads
 check "-w with several: not implemented yet" says 1 "not implemented yet" branch c -w --from api --from ui
 check "  nothing left behind" nothing_of c
 }
@@ -151,10 +145,11 @@ eq "  as git merge makes it" "$(git_merge g api ui)" "$(made g)"
 R checkout -q x; R checkout -q main
 check "- : the previous branch where the user stands, as git merge -" says 0 "created branch prev" branch prev --from api --from -
 eq "  named as git merge - names it" "Merge branch 'x' into prev" "$(R log -1 --format=%s prev --)"
-R config branch.lp.gitfoldParent refs/heads/api; R config branch.lp.gitfoldFollow false
-R update-ref refs/gitfold-base/lp api
-check "a deleted branch's relation left: forgotten" says 0 "created branch lp" branch lp --from api --from ui
-eq "  no parent, following or base ref" "" "$(R config --get-regexp '^branch\.lp\.gitfold(parent|follow)'; R rev-parse -q --verify refs/gitfold-base/lp)"
+R config branch.x.gitfoldParent refs/heads/api
+for how in "--from api" "-w --from api" "--from api --from ui"; do
+    check "an existing branch ($how): refused, its settings untouched" says 1 "exist" branch x $how
+    eq "  its parent kept" refs/heads/api "$(R config --get branch.x.gitfoldParent)"
+done
 }
 
 unmounted() {
@@ -168,9 +163,37 @@ eq "  as git merge makes it" "$(git_merge c api ui)" "$(made c)"
 "$BIN" unmount "$MNT" >/dev/null
 }
 
+# The flags gitfold mount recorded, on one line.
+mount_options() { R config --get gitfold.mountOptions | paste -sd" "; }
+# Waits (up to 5 s) until the mount recorded flags $1: it does so right after mounting.
+recorded() { for _ in $(seq 100); do [ "$(mount_options)" = "$1" ] && return; sleep 0.05; done; false; }
+
+remount_flags() {
+setup
+unmount_fs
+mount_fs --track-reads --prewarm none --log "$T/last.log"
+check "gitfold mount records its flags" recorded "--prewarm=none --prewarm-walks=2 --track-reads --log=$T/last.log"
+unmount_fs
+for i in 1 2 3; do
+    out=$("$BIN" -C "$REPO" branch "c$i" --from api --from ui 2>&1)
+    check "mounted again by branch --from ($i), no config locked meanwhile" eq_ok "$out" "created branch c$i"
+    "$BIN" unmount "$MNT" >/dev/null
+done
+check "  with the flags it last had: logging where it last did" grep -q "mounting" "$T/last.log"
+"$BIN" mount --prewarm content "$REPO" "$MNT" >/dev/null
+eq "gitfold mount in the background: its flags recorded before it returns" "--prewarm=content --prewarm-walks=2" "$(mount_options)"
+"$BIN" unmount "$MNT" >/dev/null
+mount_fs
+check "an explicit gitfold mount: its own flags, recorded" recorded "--prewarm=meta --prewarm-walks=2"
+unmount_fs
+}
+# Whether output $1 says $2 and nothing about a locked file.
+eq_ok() { [[ $1 == *"$2"* && $1 != *"lock"* ]] || { echo "  got: $1"; false; }; }
+
 section "from: clean merges, as git makes them" clean_merges
 section "from: refused: nothing left" refused
 section "from: conflicts: git's merge in progress" conflicts
 section "from: names, as where the user stands" names
 section "from: unmounted" unmounted
+section "from: mounted again with the last flags" remount_flags
 finish

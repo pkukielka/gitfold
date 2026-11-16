@@ -48,6 +48,9 @@ const TASKS_DIR: &str = "tasksDir";
 const INBOX: &str = "inbox";
 /// `gitfold.mountpoint`: where `gitfold mount` last mounted the repository.
 const MOUNTPOINT: &str = "mountpoint";
+/// `gitfold.mountOptions`: the flags `gitfold mount` last mounted it with,
+/// one per line (`--prewarm=meta`).
+const MOUNT_OPTIONS: &str = "mountOptions";
 /// The task folder's name unless `gitfold.taskDir` says otherwise.
 const DEFAULT_TASK_DIR: &str = ".task";
 /// The inbox's name unless `gitfold.inbox` says otherwise.
@@ -114,6 +117,13 @@ impl Local {
     /// (`gitfold.mountpoint`), if recorded.
     pub fn mountpoint(&self) -> Option<PathBuf> {
         self.repository(MOUNTPOINT).map(PathBuf::from)
+    }
+
+    /// The flags `gitfold mount` last mounted the repository with
+    /// (`gitfold.mountOptions`), if recorded.
+    pub fn mount_options(&self) -> Vec<String> {
+        let options = self.repository(MOUNT_OPTIONS).unwrap_or_default();
+        options.lines().map(String::from).collect()
     }
 
     /// The name of a task folder's inbox: `gitfold.inbox` if it is one plain
@@ -302,13 +312,18 @@ pub fn set_follow(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 }
 
 /// Records `mountpoint` as where the repository is mounted
-/// (`gitfold.mountpoint`), given its git directory or one of its worktrees'.
-pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path) -> Result<()> {
+/// (`gitfold.mountpoint`), with `flags`, the `gitfold mount` flags it was
+/// mounted with (`gitfold.mountOptions`, one per line), given its git
+/// directory or one of its worktrees'.
+pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result<()> {
+    // Each written even if the other can't be (the config locked meanwhile).
     let key = format!("gitfold.{MOUNTPOINT}");
-    let value = mountpoint
-        .to_str()
-        .context("a mount point that isn't UTF-8")?;
-    git::cmd::run(git_dir, &["config", "--local", &key, value])
+    let place = (mountpoint.to_str())
+        .context("a mount point that isn't UTF-8")
+        .and_then(|value| git::cmd::run(git_dir, &["config", "--local", &key, value]));
+    let key = format!("gitfold.{MOUNT_OPTIONS}");
+    let options = git::cmd::run(git_dir, &["config", "--local", &key, &flags.join("\n")]);
+    place.and(options)
 }
 
 /// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
