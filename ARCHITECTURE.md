@@ -158,7 +158,7 @@ Then, per request (`fs/workspace/`):
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process; the prewarm modes |
 | `src/cli/mod.rs` | what commands share: the repository (`repo`), the workspace the current directory is in (`branch_or_current`), printing paths as git quotes them (`quote`, `write_path`), the repository lock or a daemon request (`local_or_daemon`) |
 | `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
-| `src/cli/list.rs` | `list` and `changes` |
+| `src/cli/list.rs` | `list` and `changes` (with `-- PATH`: who is changing it, on every branch) |
 | `src/cli/remove.rs` | `remove` and `prune` |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |

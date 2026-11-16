@@ -80,7 +80,8 @@ enum Command {
     /// path per line, `A` added, `M` modified, `D` deleted, quoted as git quotes
     /// paths. Read from the workspace's stored state, mounted or not. With --
     /// PATH...: instead, who is changing those paths, on every branch
-    /// (committed, not yet in main) and in every workspace (uncommitted).
+    /// (committed: its own commits, since its parent if it has one that still
+    /// exists, else not yet in main) and in every workspace (uncommitted).
     Changes(cli::list::ChangesArgs),
     /// List what a workspace read or changed that changed elsewhere since.
     ///
@@ -248,8 +249,7 @@ fn run() -> Result<i32> {
             if let Some(hint) = cli::tree::changes_hint(args.branch.is_some()) {
                 return usage(hint);
             }
-            cli::repo()?;
-            return Err(cli::tree::not_implemented("gitfold changes -- PATH"));
+            return cli::list::who_changes(&cli::repo()?, args);
         }
         Command::Changes(args) => cli::list::changes(&cli::repo()?, args)?,
         Command::Overlaps(args) => return cli::overlaps::overlaps(&cli::repo()?, args),
