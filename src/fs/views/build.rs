@@ -127,10 +127,12 @@ pub enum ConflictKind {
     ModifiedDeleted,
     /// Changed on both sides, one of them binary: the earlier side shows.
     Binary,
-    /// Changed on both sides into kinds that can't merge (a file and a
-    /// symlink or submodule, or two executable bits added differently): the
-    /// earlier side shows.
+    /// Changed on both sides, not both into regular files (a symlink, a
+    /// submodule): the earlier side shows.
     Kind,
+    /// The executable bit changed differently on both sides: the content is
+    /// merged (and may hold markers too), with the earlier side's bit.
+    Mode,
     /// A file where the other side has files below it (or below where it
     /// has a file): the earlier side shows.
     FileDirectory,
@@ -259,14 +261,19 @@ impl Acc<'_> {
         let store = self.store;
         let before_kind = before.as_ref().map(|e| e.kind(store)).transpose()?;
         let branches = self.involved(&path, name);
-        let Some(kind) = merged_kind(before_kind, ours.kind(store)?, after.kind(store)?) else {
+        let merged = merged_kind(before_kind, ours.kind(store)?, after.kind(store)?);
+        let Some((kind, modes_conflict)) = merged else {
             self.record(path, ConflictKind::Kind, branches);
             return Ok(());
         };
-        let base = match &before {
-            Some(e) => e.bytes(store)?,
-            None => Cow::Borrowed(&[][..]),
+        // As git: a symlink's target as the base, nothing for a submodule.
+        let base = match (&before, before_kind) {
+            (Some(e), Some(k)) if is_blob(k) || k == EntryKind::Link => e.bytes(store)?,
+            _ => Cow::Borrowed(&[][..]),
         };
+        if modes_conflict {
+            self.record(path.clone(), ConflictKind::Mode, branches.clone());
+        }
         let ours_label = branches[..branches.len() - 1].join(" + ");
         let (mine, theirs) = (ours.bytes(store)?, after.bytes(store)?);
         let data = match merge::merge3(&base, &mine, &theirs, &ours_label, name, self.style) {
@@ -355,19 +362,28 @@ impl Acc<'_> {
     }
 }
 
+fn is_blob(kind: EntryKind) -> bool {
+    matches!(kind, EntryKind::Blob | EntryKind::BlobExecutable)
+}
+
 /// The kind a content merge of `ours` and `theirs` (changed from `before`)
-/// gets, if they can be merged: only regular files can; a change of the
-/// executable bit on one side wins, as in git.
-fn merged_kind(before: Option<EntryKind>, ours: EntryKind, theirs: EntryKind) -> Option<EntryKind> {
-    let blob = |k: EntryKind| matches!(k, EntryKind::Blob | EntryKind::BlobExecutable);
-    if !blob(ours) || !blob(theirs) || before.is_some_and(|b| !blob(b)) {
+/// gets, as git's merge decides it, and whether the executable bits
+/// conflict; `None` if they can't be merged: only two regular files can. A
+/// change of the executable bit on one side wins; changed differently on
+/// both, ours stays.
+fn merged_kind(
+    before: Option<EntryKind>,
+    ours: EntryKind,
+    theirs: EntryKind,
+) -> Option<(EntryKind, bool)> {
+    if !is_blob(ours) || !is_blob(theirs) {
         return None;
     }
-    match before {
-        Some(b) if theirs != b => Some(theirs),
-        Some(_) => Some(ours),
-        None => (ours == theirs).then_some(ours),
-    }
+    Some(if ours == theirs || before == Some(ours) {
+        (theirs, false)
+    } else {
+        (ours, before != Some(theirs))
+    })
 }
 
 /// What a change does to one path: from, to.
@@ -437,7 +453,7 @@ fn tree_at(store: &Store, tree: u32, path: &[u8]) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::super::members::{committed, members};
-    use super::super::test_repo::{branch, commit, tip};
+    use super::super::test_repo::{branch, commit, scratch, tip};
     use super::*;
     use crate::tree::Tree;
 
@@ -598,6 +614,51 @@ mod tests {
     }
 
     #[test]
+    fn modes_and_kinds_as_git_merges_them() {
+        let api = branch(
+            "t7-api",
+            &commit(None, &[("l", Some("link:1\n2\n3\n4\n5\n"))]),
+        );
+        let ui = [
+            ("l", Some("UI\n2\n3\n4\n5\n")),
+            ("x", Some("exec:a\nb\n")),
+            ("m", Some("exec:m\n")),
+        ];
+        branch("t7-ui", &commit(Some(&api), &ui));
+        let web = [
+            ("l", Some("1\n2\n3\n4\nWEB\n")),
+            ("x", Some("a\nb\n")),
+            ("m", Some("m\nweb\n")),
+        ];
+        branch("t7-web", &commit(Some(&api), &web));
+        let store = Store::default();
+        let v = view(
+            &store,
+            "t7-api",
+            &[("t7-ui", "t7-api"), ("t7-web", "t7-api")],
+        );
+        // A symlink made a file on both sides: its target is the base.
+        assert_eq!(show(&store, &v, "l").unwrap(), "UI\n2\n3\n4\nWEB\n");
+        // Added on both sides with different executable bits: the content
+        // merged, the earlier side's bit kept, a conflict recorded.
+        assert_eq!(show(&store, &v, "x").unwrap(), "a\nb\n");
+        let kind = |p: &str| v.entry(&store, p.as_bytes()).unwrap().kind(&store).unwrap();
+        assert_eq!(kind("x"), EntryKind::BlobExecutable);
+        assert_eq!(kind("m"), EntryKind::BlobExecutable);
+        let both = ["t7-api", "t7-ui", "t7-web"];
+        let mut got = v.conflicts;
+        got.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            got,
+            [
+                conflict("m", ConflictKind::Mode, &both),
+                conflict("m", ConflictKind::Markers, &both),
+                conflict("x", ConflictKind::Mode, &both),
+            ]
+        );
+    }
+
+    #[test]
     fn directory_replaced_by_a_file() {
         let api = branch(
             "t5-api",
@@ -625,8 +686,7 @@ mod tests {
         );
         let ui = commit(Some(&api), &[("a", Some("1\n2\nUI\n"))]);
         let store = Store::default();
-        let dir = std::env::temp_dir().join(format!("gitfold-t6-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = scratch("t6");
         let upper = |name: &str, data: &str| {
             let file = dir.join(name);
             fs::write(&file, data).unwrap();
@@ -659,7 +719,6 @@ mod tests {
         assert_eq!(show(&store, &v, "a").unwrap(), "API\n2\nUI\n");
         assert_eq!(show(&store, &v, "b"), None);
         assert_eq!(show(&store, &v, "new").unwrap(), "n\n");
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

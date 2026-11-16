@@ -13,7 +13,17 @@ static INDEXES: AtomicUsize = AtomicUsize::new(0);
 
 fn repo() -> &'static Path {
     REPO.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!("gitfold-views-{}", std::process::id()));
+        let tmp = std::env::temp_dir();
+        // Nothing removes a test process's repository when it ends: the next
+        // run removes those of processes gone.
+        for entry in std::fs::read_dir(&tmp).into_iter().flatten().flatten() {
+            let name = entry.file_name();
+            let pid = name.to_str().and_then(|n| n.strip_prefix("gitfold-views-"));
+            if pid.is_some_and(|pid| !Path::new("/proc").join(pid).exists()) {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+        let dir = tmp.join(format!("gitfold-views-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         git(&dir, &["init", "-q", "-b", "main"], None, None);
@@ -53,7 +63,7 @@ fn git(dir: &Path, args: &[&str], index: Option<&Path>, stdin: Option<&[u8]>) ->
 }
 
 /// A commit on `parent` (none: a root commit) with `files` set (`link:T`: a
-/// symlink to T) or deleted (`None`).
+/// symlink to T; `exec:D`: an executable file) or deleted (`None`).
 pub fn commit(parent: Option<&str>, files: &[(&str, Option<&str>)]) -> String {
     let dir = repo();
     let n = INDEXES.fetch_add(1, Ordering::Relaxed);
@@ -65,9 +75,12 @@ pub fn commit(parent: Option<&str>, files: &[(&str, Option<&str>)]) -> String {
     for (path, content) in files {
         match content {
             Some(content) => {
-                let (mode, data) = match content.strip_prefix("link:") {
-                    Some(target) => ("120000", target),
-                    None => ("100644", *content),
+                let (mode, data) = if let Some(target) = content.strip_prefix("link:") {
+                    ("120000", target)
+                } else if let Some(data) = content.strip_prefix("exec:") {
+                    ("100755", data)
+                } else {
+                    ("100644", *content)
                 };
                 let oid = run(&["hash-object", "-w", "--stdin"], Some(data.as_bytes()));
                 run(
@@ -109,6 +122,13 @@ pub fn branch(name: &str, commit: &str) -> String {
 /// The repository's git directory.
 pub fn git_dir() -> PathBuf {
     repo().join(".git")
+}
+
+/// A new directory `name` for a test's files, removed with the repository.
+pub fn scratch(name: &str) -> PathBuf {
+    let dir = git_dir().join(format!("test-{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
 }
 
 /// Sets `key` to `value` in the repository's config.

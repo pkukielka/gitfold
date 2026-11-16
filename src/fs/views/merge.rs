@@ -47,7 +47,8 @@ pub fn merge3(
                 .try_into()
                 .expect("non-zero"),
         },
-        ..Default::default()
+        // As git's merge (merge-ort) diffs, not `git merge-file` (Myers).
+        diff_algorithm: gix::diff::blob::Algorithm::Histogram,
     };
     match builtin_driver::text(&mut data, &mut input, labels, ours, base, theirs, options) {
         Resolution::Conflict => Merged::Markers(data),
