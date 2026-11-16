@@ -245,18 +245,16 @@ pub fn branch_tip(name: &str) -> Result<Commit> {
 /// default branch (`origin/HEAD`, normally `origin/main`), else `main`. Not
 /// the branch's upstream: after `git push -u` that is its own remote branch,
 /// which its work is ahead of. Not `root_branch` (see the note above).
-pub fn default_compare_target(common_dir: &Path) -> Result<String> {
+/// `None`: neither exists.
+pub fn default_compare_target(common_dir: &Path) -> Result<Option<String>> {
     let out = cmd::command(common_dir)
         .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
         .output()?;
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if out.status.success() && !name.is_empty() && name != "origin/HEAD" {
-        return Ok(name);
+        return Ok(Some(name));
     }
-    match resolve("refs/heads/main") {
-        Ok(_) => Ok("main".to_string()),
-        Err(_) => bail!("no origin/HEAD and no branch main: name a target with --against"),
-    }
+    Ok(resolve("refs/heads/main").ok().map(|_| "main".to_string()))
 }
 
 /// The root of the tree of branches, as a local branch name: `origin/HEAD`'s

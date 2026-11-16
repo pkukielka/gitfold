@@ -35,16 +35,6 @@ use crate::state::workspace_id;
 /// The sparse checkout: the top-level files, no directory.
 const PATTERNS: &str = "/*\n!/*/\n";
 
-/// What git's environment may point elsewhere (gitfold run from a hook):
-/// the worktree's git commands mustn't inherit them.
-const GIT_ENV: [&str; 5] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_COMMON_DIR",
-    "GIT_PREFIX",
-];
-
 /// Where the moves' worktrees are.
 fn moves_dir(common_dir: &Path) -> PathBuf {
     common_dir.join("gitfold-moves")
@@ -70,8 +60,9 @@ pub fn lock(common_dir: &Path, branch: &str) -> Result<Lock> {
 pub enum Rebased {
     /// The branch moved to this commit.
     Moved(ObjectId),
-    /// A commit conflicted on these paths; the branch didn't move.
-    Conflict(Vec<String>),
+    /// A commit conflicted on these paths (as stored); the branch didn't
+    /// move.
+    Conflict(Vec<Vec<u8>>),
 }
 
 /// The temporary worktree of a move.
@@ -141,14 +132,14 @@ impl Scratch {
     fn make(&self, branch: &str) -> Result<()> {
         let path = self.path.to_str().context("a path that isn't UTF-8")?;
         let args = ["worktree", "add", "-q", "--no-checkout", path, branch];
-        if let Err(e) = super::cmd::output(&self.common_dir, &args) {
+        if let Err(e) = self.git_here(&args) {
             let ours = super::worktree::checked_out(&self.common_dir, branch, None)
                 .is_some_and(|at| Path::new(&at) == self.path);
             if !ours {
                 return Err(e);
             }
             let forced = ["worktree", "add", "-q", "-f", "--no-checkout", path, branch];
-            super::cmd::output(&self.common_dir, &forced)?;
+            self.git_here(&forced)?;
         }
         let info = self.admin()?.join("info");
         fs::create_dir_all(&info)?;
@@ -164,14 +155,24 @@ impl Scratch {
 
     /// git in the worktree, sparse; fails if git does.
     fn git(&self, args: &[&str]) -> Result<Vec<u8>> {
-        super::cmd::output_of(self.command(), args)
+        super::cmd::output_of(&mut self.command()?, args, None)
     }
 
-    fn command(&self) -> Command {
+    /// git on the repository (`git worktree add`, `remove`): not the
+    /// caller's worktree either (see `cmd::in_other_worktree`).
+    fn git_here(&self, args: &[&str]) -> Result<Vec<u8>> {
+        super::cmd::output_of(
+            &mut super::cmd::command_in_other(&self.common_dir)?,
+            args,
+            None,
+        )
+    }
+
+    /// git in the worktree, as `cmd::in_other_worktree` runs git in another
+    /// worktree than the caller's.
+    fn command(&self) -> Result<Command> {
         let mut command = Command::new("git");
-        for var in GIT_ENV {
-            command.env_remove(var);
-        }
+        super::cmd::in_other_worktree(&mut command)?;
         command
             .arg("-C")
             .arg(&self.path)
@@ -182,7 +183,7 @@ impl Scratch {
             // resolution of its own.
             .args(["-c", "rerere.enabled=false"])
             .stdin(Stdio::null());
-        command
+        Ok(command)
     }
 
     fn rebase(
@@ -205,7 +206,7 @@ impl Scratch {
         // Only this branch moves, and only its own commits (whatever the
         // user's rebase.* settings say); an editor is never needed.
         let out = self
-            .command()
+            .command()?
             .env("GIT_EDITOR", ":")
             .args(["rebase", "-q", "--no-update-refs", "--no-autosquash"])
             .args([
@@ -230,7 +231,7 @@ impl Scratch {
             Ok(paths) if stopped && !paths.is_empty() => Ok(Rebased::Conflict(
                 (paths.split(|b| *b == 0))
                     .filter(|p| !p.is_empty())
-                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .map(<[u8]>::to_vec)
                     .collect(),
             )),
             _ => bail!(
@@ -249,7 +250,7 @@ impl Scratch {
     fn remove(&self) -> Result<()> {
         let path = self.path.to_str().context("a path that isn't UTF-8")?;
         let args = ["worktree", "remove", "--force", path];
-        if super::cmd::output(&self.common_dir, &args).is_err() && self.path.exists() {
+        if self.git_here(&args).is_err() && self.path.exists() {
             fs::remove_dir_all(&self.path)?;
         }
         Ok(())

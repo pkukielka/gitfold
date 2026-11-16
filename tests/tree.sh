@@ -23,9 +23,9 @@ the_contract() {
 R branch api
 check "branch --from one revision: as before" says 0 "created branch two" branch two --from main
 check "the name may come after --from" says 0 "created branch three" branch --from main three
-check "several --from: not implemented yet" says 1 "not implemented yet" branch c --from main --from api
-check "several --from: said plainly" says 1 "gitfold branch with several --from: not implemented yet" branch c --from main --from api
-check "no Error: prefix on not implemented" fails sh -c "'$BIN' -C '$REPO' branch c --from main --from api 2>&1 | grep -q '^Error:'"
+check "several --from, never mounted: refused, nothing made" says 1 "mount it first" branch c --from main --from api
+check "-w with several --from: said plainly" says 1 "gitfold branch --with-changes with several --from: not implemented yet" branch c -w --from main --from api
+check "no Error: prefix on not implemented" fails sh -c "'$BIN' -C '$REPO' branch c -w --from main --from api 2>&1 | grep -q '^Error:'"
 check "--parent: created on P, following it" says 0 "created branch c on api (following it)" branch c --parent api
 check "--parent an unknown branch: exit 3" says 3 "no branch nosuch" branch x --parent nosuch
 check "--parent --no-follow: created, not following" says 0 "created branch e on api (not following it)" branch e --parent api --no-follow
@@ -49,12 +49,12 @@ check "--none and --follow: refused" says 2 "cannot be used with" parent api --n
 check "--yes needs --update" says 2 "--update" parent api --yes
 check "--update and --set: refused" says 2 "cannot be used with" parent api --update --set main
 check "outside a workspace, the branch must be named" says 1 "not in a gitfold workspace" parent
-check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
+eq "changes -- PATH: nobody changes it (exit 0)" "0 " "$(gf changes -- a.txt)"
 check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.txt
-check "changes -z -- PATH: not implemented yet" says 1 "not implemented yet" changes -z -- a.txt
+eq "changes -z -- PATH: nobody changes it (exit 0)" "0 " "$(gf changes -z -- a.txt)"
 check "changes --stat -- PATH: refused" says 2 "cannot be used with" changes --stat -- a.txt
 eq "changes without PATH: as before (no workspace yet: nothing, exit 0)" "0 " "$(gf changes api)"
-check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a 2>&1 | grep -q 'not implemented'"
+check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a && '$BIN' changes -- a 2>&1 | grep -q 'no git repository'"
 for g in sync pull restack rebase; do
     check "$g: a hint" says 2 "gitfold parent --update" "$g" --whatever x
     check "$g --help: the hint too" says 2 "gitfold parent --update" "$g" --help
