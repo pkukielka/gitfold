@@ -86,7 +86,7 @@ eq "  as git merge does" "$(git_merge two ren edit)" "$(made two)"
 check "an octopus follows no renames: refused before the last, as git" says 1 "Should not be doing an octopus" branch o2 --from ren --from edit --from x
 check "  git refuses it too" git_refuses ren edit x
 check "  nothing left behind" fails R rev-parse --verify -q refs/heads/o2
-eq "  no index of the steps left" "" "$(ls -A "$COMMON" | grep merge-index)"
+eq "  nothing of the merge left in the git directory" "" "$(ls -A "$COMMON" | grep gitfold-merge)"
 check "  nothing of gitfold's made in a repository never mounted" test ! -e "$COMMON/gitfold"
 R checkout -q -b bins main; printf 'a\0b' >"$REPO/bin.dat"; R add bin.dat; R commit -qm bin; R checkout -q main
 work bin1 bins bin.dat "$(printf 'one\001')"; work bin2 bins bin.dat "$(printf 'two\001')"
@@ -99,13 +99,31 @@ check "  git conflicts too" git_refuses x df1 df2
 check "  nothing left behind" fails R rev-parse --verify -q refs/heads/d1
 }
 
+messages() {
+setup
+work feat main f.txt f
+echo m >"$REPO/m.txt"; R add m.txt; R commit -qm m; R branch rel
+check "a source the repository's HEAD contains, not the first: named" says 0 "at a merge of feat and rel" branch n --from feat --from rel
+eq "  as git merge does" "$(git_merge n feat rel)" "$(made n)"
+R config merge.log true
+check "merge.log: the shortlog" says 0 "created branch l" branch l --from api --from ui
+eq "  as git merge does" "$(git_merge l api ui)" "$(made l)"
+R config --unset merge.log
+R symbolic-ref HEAD refs/heads/unborn
+check "the repository's HEAD unborn: no matter" says 0 "created branch u" branch u --from api --from ui
+R symbolic-ref HEAD refs/heads/main
+eq "  as git merge does" "$(git_merge u api ui)" "$(made u)"
+}
+
 merge_ff() {
 setup
 R config merge.ff false
 check "merge.ff=false: a merge where a fast-forward would do" says 0 "at a merge of main and api" branch n --from main --from api
 eq "  as git merge does" "$(git_merge n main api)" "$(made n)"
 check "  already up to date stays so" says 0 "already up to date" branch n2 --from api --from main
-R config merge.ff only
+R config --add merge.ff bogus
+check "merge.ff: a value git doesn't know is skipped, as git skips it" says 0 "at a merge of main and api" branch n3 --from main --from api
+R config --unset-all merge.ff; R config merge.ff only
 check "merge.ff=only: a fast-forward" says 0 "a fast-forward" branch f --from main --from api
 check "merge.ff=only: no merge" says 1 "Not possible to fast-forward" branch m --from api --from ui
 check "  git refuses it too" git_refuses api ui
@@ -152,6 +170,7 @@ unmount_fs
 
 section "from: clean merges, as git makes them" clean_merges
 section "from: octopus steps, as git takes them" octopus_steps
+section "from: messages, as git writes them" messages
 section "from: merge.ff" merge_ff
 section "from: no merge needed" no_merge_needed
 section "from: refused, and conflicts" refused

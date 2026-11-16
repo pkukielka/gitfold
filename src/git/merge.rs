@@ -97,9 +97,10 @@ pub fn merge(common_dir: &Path, into: &str, sources: &[Source]) -> Result<Merged
         ff != FastForward::Only,
         "Not possible to fast-forward, aborting."
     );
+    let scratch = Scratch::new(common_dir, &head.id)?;
     let tree = match remotes[..] {
         [remote] => merge_tree(common_dir, &head.id, &sources[remote].id)?,
-        _ => octopus(common_dir, head, &remotes, sources)?,
+        _ => octopus(&scratch, head, &remotes, sources)?,
     };
     let Some(tree) = tree else {
         return Ok(Merged::Conflict);
@@ -111,34 +112,39 @@ pub fn merge(common_dir: &Path, into: &str, sources: &[Source]) -> Result<Merged
     parents.extend(&remotes);
     let ids: Vec<String> = parents.iter().map(|&p| sources[p].id.clone()).collect();
     let remotes: Vec<&Source> = remotes.iter().map(|&r| &sources[r]).collect();
-    let message = message(common_dir, into, &remotes)?;
+    let message = message(&scratch, into, &remotes)?;
     let id = commit_tree(common_dir, &tree, &ids, &message)?;
     Ok(Merged::Merge { id, parents })
 }
 
-/// `merge.ff` (default: allowed); a value git doesn't know is ignored, as
-/// git ignores it.
+/// `merge.ff` (default: allowed): its last value git knows, as git reads it
+/// (a value it doesn't know is skipped).
 fn fast_forward(common_dir: &Path) -> Result<FastForward> {
-    let args = ["config", "--type=bool-or-str", "--get", "merge.ff"];
+    let args = ["config", "--type=bool-or-str", "--get-all", "merge.ff"];
     // Exit 1: not set.
     let (_, out) = cmd::output_or_no(common_dir, &args)?;
-    Ok(match first_line(&out).as_deref() {
-        Some("false") => FastForward::No,
-        Some("only") => FastForward::Only,
-        _ => FastForward::Allow,
-    })
+    let mut ff = FastForward::Allow;
+    for value in lines(&out) {
+        ff = match value.as_str() {
+            "true" => FastForward::Allow,
+            "false" => FastForward::No,
+            "only" => FastForward::Only,
+            _ => ff,
+        };
+    }
+    Ok(ff)
 }
 
 /// git-merge-octopus.sh: merges the sources at `remotes` one after the other
 /// into `head`; the tree, or none if the last conflicts. One conflicting
 /// earlier is refused, as the octopus refuses it.
 fn octopus(
-    common_dir: &Path,
+    scratch: &Scratch,
     head: &Source,
     remotes: &[usize],
     sources: &[Source],
 ) -> Result<Option<String>> {
-    let index = TempIndex::new(common_dir);
+    let common_dir = &scratch.dir;
     // The commits merged so far (`MRC`) and the tree of their merge (`MRT`).
     let mut merged = vec![head.id.as_str()];
     let mut tree = format!("{}^{{tree}}", head.id);
@@ -156,7 +162,7 @@ fn octopus(
             continue;
         }
         non_ff = true;
-        match index.merge(&common, &tree, &remote.id)? {
+        match scratch.merge(&common, &tree, &remote.id)? {
             Some(next) => tree = next,
             None if i + 1 == remotes.len() => return Ok(None),
             None => bail!(
@@ -173,39 +179,39 @@ fn octopus(
 /// An index entry: its mode and object id, as git prints them.
 type Entry = (String, String);
 
-/// An index file of its own for the octopus's steps, deleted when dropped.
-struct TempIndex {
-    common_dir: PathBuf,
-    path: PathBuf,
+/// A git directory of the merge's own, deleted when dropped: the repository's
+/// objects and refs (`commondir`), with HEAD at the first source and an index
+/// of its own, as `git merge` has them on a branch at the first source. git
+/// commands that read HEAD (`fmt-merge-msg`) and the octopus's steps run
+/// there. In the repository's git directory, as git's own `index.lock`:
+/// nothing of gitfold's (its state directory) is made for it.
+struct Scratch {
+    dir: PathBuf,
 }
 
-impl TempIndex {
-    /// In the git directory itself, as git's own `index.lock`: nothing else
-    /// (gitfold's state directory) is made for it.
-    fn new(common_dir: &Path) -> TempIndex {
-        let name = format!("gitfold-merge-index-{}", std::process::id());
-        TempIndex {
-            common_dir: common_dir.to_path_buf(),
-            path: common_dir.join(name),
-        }
+impl Scratch {
+    fn new(common_dir: &Path, head: &str) -> Result<Scratch> {
+        let name = format!("gitfold-merge-{}", std::process::id());
+        let scratch = Scratch {
+            dir: common_dir.join(name),
+        };
+        // Left by a killed run of a process with the same id.
+        let _ = fs::remove_dir_all(&scratch.dir);
+        fs::create_dir(&scratch.dir)?;
+        fs::write(scratch.dir.join("commondir"), "..\n")?;
+        fs::write(scratch.dir.join("HEAD"), format!("{head}\n"))?;
+        Ok(scratch)
     }
 
-    /// git with this index, to run.
-    fn command(&self) -> std::process::Command {
-        let mut git = cmd::command(&self.common_dir);
-        git.env("GIT_INDEX_FILE", &self.path);
-        git
-    }
-
-    /// Runs git with `args` on this index; what it printed.
+    /// Runs git with `args` here; what it printed.
     fn git(&self, args: &[&str]) -> Result<Vec<u8>> {
-        cmd::checked(self.command(), args, b"")
+        cmd::output(&self.dir, args)
     }
 
     /// One step of the octopus: `ours` and `theirs` (trees) merged with
-    /// merge bases `bases`; the tree, or none on a conflict.
+    /// merge bases `bases`, in this index; the tree, or none on a conflict.
     fn merge(&self, bases: &[String], ours: &str, theirs: &str) -> Result<Option<String>> {
-        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_file(self.dir.join("index"));
         let mut args = vec!["read-tree", "-m", "--aggressive"];
         args.extend(bases.iter().map(String::as_str));
         args.extend([ours, theirs]);
@@ -231,10 +237,10 @@ impl TempIndex {
         // file in one source and a directory in another is refused there, a
         // conflict.
         for (path, stages) in &unmerged {
-            let Some(resolved) = merge_one_file(&self.common_dir, stages)? else {
+            let Some(resolved) = merge_one_file(&self.dir, stages)? else {
                 return Ok(None);
             };
-            let mut git = self.command();
+            let mut git = cmd::command(&self.dir);
             git.arg("update-index");
             match resolved {
                 Some((mode, id)) => git.args(["--add", "--cacheinfo", &mode, &id]),
@@ -250,9 +256,9 @@ impl TempIndex {
     }
 }
 
-impl Drop for TempIndex {
+impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let _ = fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -332,15 +338,14 @@ fn commit_tree(common_dir: &Path, tree: &str, parents: &[String], message: &str)
 }
 
 /// The message `git merge` gives the merge of `remotes` into branch `into`
-/// (`git fmt-merge-msg`, from the lines `git merge` writes for it).
-///
-/// Without `merge.log`'s shortlog: `fmt-merge-msg` takes it against the HEAD
-/// of the repository, not the branch made here.
-fn message(common_dir: &Path, into: &str, remotes: &[&Source]) -> Result<String> {
+/// (`git fmt-merge-msg`, from the lines `git merge` writes for it), with
+/// `scratch`'s HEAD at the first source: the sources it contains are left
+/// out, and `merge.log`'s shortlog is taken against it, as for git.
+fn message(scratch: &Scratch, into: &str, remotes: &[&Source]) -> Result<String> {
     let input: String = remotes.iter().map(|r| merge_name(r)).collect();
     let out = cmd::output_with_input(
-        common_dir,
-        &["fmt-merge-msg", "--no-log", "--into-name", into],
+        &scratch.dir,
+        &["fmt-merge-msg", "--into-name", into],
         input.as_bytes(),
     )?;
     Ok(String::from_utf8_lossy(&out).into_owned())

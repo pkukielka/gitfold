@@ -50,23 +50,9 @@ pub fn output_or_no(git_dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
 }
 
 /// `output`, with `input` on git's stdin.
+/// git reads `input` whole before it prints.
 pub fn output_with_input(git_dir: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-    checked(command(git_dir), args, input)
-}
-
-/// `exec`, failing if git does.
-pub fn checked(git: Command, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-    let out = exec(git, args, input)?;
-    if !out.status.success() {
-        return Err(failed(args, &out));
-    }
-    Ok(out.stdout)
-}
-
-/// Runs `git` (from `command`, to which it adds `args`) with `input` on its
-/// stdin, whatever its exit code; git reads it whole before it prints.
-pub fn exec(mut git: Command, args: &[&str], input: &[u8]) -> Result<Output> {
-    let mut child = (git.args(args))
+    let mut child = (command(git_dir).args(args))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -76,11 +62,15 @@ pub fn exec(mut git: Command, args: &[&str], input: &[u8]) -> Result<Output> {
         Err(e) if e.kind() == ErrorKind::BrokenPipe => {}
         written => written?,
     }
-    Ok(child.wait_with_output()?)
+    let out = child.wait_with_output()?;
+    if !out.status.success() {
+        return Err(failed(args, &out));
+    }
+    Ok(out.stdout)
 }
 
 /// The error of git run with `args` that ended as `out` says: with what it said.
-pub fn failed(args: &[&str], out: &Output) -> anyhow::Error {
+fn failed(args: &[&str], out: &Output) -> anyhow::Error {
     anyhow!(
         "git {} failed ({}): {}",
         args.join(" "),
