@@ -386,6 +386,13 @@ impl Plan {
         }))
     }
 
+    /// Whether a merge is among the commits it would replay (which aren't
+    /// moved).
+    pub fn merges(&self, common_dir: &Path) -> Result<bool> {
+        let [tip, from] = self.own_range();
+        Ok(count(common_dir, &["--merges", &tip, &from])? > 0)
+    }
+
     /// Moves it (see the module doc): its base recorded, a conflict
     /// cleared, or with `record` recorded (following its parent; not for
     /// `--set`, which takes its parent back). Not with a merge among its own
@@ -409,8 +416,7 @@ impl Plan {
             clear_conflict(common_dir, branch)?;
             return Ok(Moved::UpToDate);
         }
-        let [tip, from] = self.own_range();
-        if count(common_dir, &["--merges", &tip, &from])? > 0 {
+        if self.merges(common_dir)? {
             return Ok(Moved::Merge);
         }
         let pushed = self.pushed(common_dir)?;

@@ -58,14 +58,26 @@ pub fn lock(common_dir: &Path, branch: &str) -> Result<Lock> {
 }
 
 /// Takes the lock under which the tree of parents changes (one for the
-/// repository, beside the moves' locks), or fails if another holds it.
+/// repository, beside the moves' locks). It is held only to check and
+/// write settings, so it is waited for, up to `TREE_WAIT`.
 pub fn tree_lock(common_dir: &Path) -> Result<Lock> {
     let dir = moves_dir(common_dir);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    crate::lock::try_file(&dir.join(".tree.lock"))?.ok_or_else(|| {
-        Refusal::InUse.error("another gitfold command is changing the parents of branches; retry")
-    })
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(lock) = crate::lock::try_file(&dir.join(".tree.lock"))? {
+            return Ok(lock);
+        }
+        if started.elapsed() > TREE_WAIT {
+            return Err(Refusal::InUse
+                .error("another gitfold command is changing the parents of branches; retry"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
+
+/// How long `tree_lock` waits for another command's.
+const TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// What `rebase` did.
 #[derive(Debug, PartialEq, Eq)]

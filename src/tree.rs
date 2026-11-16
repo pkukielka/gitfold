@@ -254,19 +254,26 @@ impl Tree {
 
     fn check_ancestry(&self, branch: &str, parent: &str) -> Result<(), Refused> {
         self.check_root(branch)?;
-        let own = local(branch);
-        if parent == own {
+        if parent == local(branch) {
             return Err(Refused::Own);
         }
+        match self.would_cycle(branch, parent) {
+            true => Err(Refused::Cycle),
+            false => Ok(()),
+        }
+    }
+
+    /// Whether storing `parent` (a full ref, as stored) as the parent of
+    /// local branch `branch` would make it its own ancestor (S5, S6): for a
+    /// parent taken back as it was stored, which needn't resolve (T3).
+    pub fn would_cycle(&self, branch: &str, parent: &str) -> bool {
+        let own = local(branch);
         // Up the stored parents; a remote-tracking parent ends the walk, and
         // so does the bound, should a hand-edited config hold a cycle (T4).
         let ancestors = std::iter::successors(Some(parent), |at| {
             self.parent(at.strip_prefix("refs/heads/")?)
         });
-        match ancestors.take(self.parents.len() + 1).any(|at| at == own) {
-            true => Err(Refused::Cycle),
-            false => Ok(()),
-        }
+        ancestors.take(self.parents.len() + 1).any(|at| at == own)
     }
 
     /// The full ref of the parent named `parent`, if a new local branch

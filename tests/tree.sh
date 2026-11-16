@@ -374,6 +374,8 @@ on ui u.txt one; on api a.txt new
 R branch side main; on side s.txt s
 R switch -q ui; R merge -q --no-ff --no-edit side; R switch -q main
 check "a merge among its own commits: not moved" says 1 "ui's own commits include a merge" parent ui --update
+check "--set with such a merge: refused" says 1 "ui's own commits include a merge" parent ui --set main
+eq "  its parent unchanged" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
 R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
 # Checked out in a git worktree: never moved by gitfold.
 R worktree add -q "$T/wt" ui
