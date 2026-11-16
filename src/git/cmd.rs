@@ -6,11 +6,10 @@
 //! worktree's admin directory for what is per worktree (its HEAD, index and
 //! config).
 
-use std::io::{ErrorKind, Write};
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::Command;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 
 /// `git --git-dir <git_dir>`, to add arguments to.
 pub fn command(git_dir: &Path) -> Command {
@@ -33,48 +32,12 @@ pub fn run(git_dir: &Path, args: &[&str]) -> Result<()> {
 pub fn output(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let out = command(git_dir).args(args).output()?;
     if !out.status.success() {
-        return Err(failed(args, &out));
+        bail!(
+            "git {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(out.stdout)
-}
-
-/// `output`, with exit code 1 an answer too (git's "no" of `merge-base`, a
-/// conflict of `merge-tree`): whether git exited 0, and what it printed.
-pub fn output_or_no(git_dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
-    let out = command(git_dir).args(args).output()?;
-    match out.status.code() {
-        Some(0) => Ok((true, out.stdout)),
-        Some(1) => Ok((false, out.stdout)),
-        _ => Err(failed(args, &out)),
-    }
-}
-
-/// `output`, with `input` on git's stdin.
-/// git reads `input` whole before it prints.
-pub fn output_with_input(git_dir: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = (command(git_dir).args(args))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    match child.stdin.take().expect("piped").write_all(input) {
-        // git exited without reading it all: its own error says why.
-        Err(e) if e.kind() == ErrorKind::BrokenPipe => {}
-        written => written?,
-    }
-    let out = child.wait_with_output()?;
-    if !out.status.success() {
-        return Err(failed(args, &out));
-    }
-    Ok(out.stdout)
-}
-
-/// The error of git run with `args` that ended as `out` says: with what it said.
-fn failed(args: &[&str], out: &Output) -> anyhow::Error {
-    anyhow!(
-        "git {} failed ({}): {}",
-        args.join(" "),
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    )
 }

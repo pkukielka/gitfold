@@ -495,15 +495,26 @@ impl Lower {
 impl Store {
     /// The entry at `path` (`/`-separated) below tree `tree`, if any.
     pub fn entry_at(&self, tree: u32, path: &[u8]) -> Option<Lower> {
-        let mut cur = Lower::Tree(tree);
         if path.is_empty() {
-            return Some(cur);
+            return Some(Lower::Tree(tree));
         }
-        for comp in path.split(|b| *b == b'/') {
-            let Lower::Tree(tree) = cur else { return None };
-            let table = self.tree(tree);
-            cur = Lower::of(table.find(comp)?);
+        self.tree_entry_at(tree, path).as_ref().map(Lower::of)
+    }
+
+    /// The tree entry at `path` (`/`-separated, not empty) below tree `tree`,
+    /// if any.
+    pub fn tree_entry_at(&self, tree: u32, path: &[u8]) -> Option<TEntry> {
+        let mut at = tree;
+        let mut parts = path.split(|b| *b == b'/').peekable();
+        loop {
+            let e = *self.tree(at).find(parts.next()?)?;
+            if parts.peek().is_none() {
+                return Some(e);
+            }
+            if e.kind != EntryKind::Tree {
+                return None;
+            }
+            at = e.id;
         }
-        Some(cur)
     }
 }

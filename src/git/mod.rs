@@ -5,13 +5,11 @@
 //!
 //! - `cmd`: running git itself.
 //! - `index`: the git index gitfold writes.
-//! - `merge`: merging revisions as `git merge` would, without a worktree.
 //! - `worktree`: worktree registrations, base pins, git's busy state.
 //! - `promisor`: partial clones, fetching what loads miss.
 
 pub mod cmd;
 pub mod index;
-pub mod merge;
 pub mod promisor;
 pub mod worktree;
 
