@@ -130,22 +130,15 @@ impl Local {
 
     /// Every branch's parent (`gitfoldParent`), by branch.
     pub fn parents(&self) -> std::collections::BTreeMap<String, String> {
-        let mut out = std::collections::BTreeMap::new();
-        let Some(config) = self.0.as_ref() else {
-            return out;
-        };
-        let Some(sections) = config.sections_by_name("branch") else {
-            return out;
-        };
-        for section in sections {
-            let Some(branch) = section.header().subsection_name() else {
-                continue;
-            };
-            if let Some(parent) = section.value(PARENT).and_then(|v| non_empty(v.to_string())) {
-                out.insert(branch.to_string(), parent);
-            }
-        }
-        out
+        let branches = (self.0.as_ref())
+            .and_then(|config| config.sections_by_name("branch"))
+            .into_iter()
+            .flatten()
+            .filter_map(|section| Some(section.header().subsection_name()?.to_string()));
+        branches
+            .filter_map(|branch| Some((self.branch(&branch, PARENT)?, branch)))
+            .map(|(parent, branch)| (branch, parent))
+            .collect()
     }
 
     /// Whether `branch` takes its parent's new commits by itself
@@ -209,9 +202,9 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 }
 
 /// Makes `parent` the parent of `branch` (`gitfoldParent`), or with `None`
-/// forgets it, with its following setting (see `set_branch`).
-#[allow(dead_code)] // used as the tree's streams land (`gitfold parent`)
-pub fn set_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
+/// forgets it, with its following setting (see `set_branch`). Unchecked:
+/// `tree::set_parent` refuses self-parents and cycles first.
+pub fn write_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
     match parent {
         Some(parent) => set_branch(git_dir, branch, PARENT, parent),
         None => {
@@ -268,7 +261,8 @@ fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
 /// Gives branch `to` the settings set for branch `from` (a fork); one that
 /// can't be written is warned about.
 pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
-    // Every per-branch setting.
+    // Every per-branch setting but the parent and following: a fork starts
+    // at its source, with no relation to it.
     let copied = [
         (
             PREWARM,

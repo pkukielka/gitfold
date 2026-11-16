@@ -64,5 +64,17 @@ for g in sync pull restack rebase; do
 done
 }
 
+# The main branch (git::main_branch), as overlaps' default target shows it:
+# origin/HEAD, else main, else master, else an error naming --against.
+the_main_branch() {
+R branch w
+check "main: found" says 0 "" overlaps w
+R branch -m main master
+check "no main, master: found" says 0 "" overlaps w
+R branch -m master trunk
+check "neither: an error naming --against" says 1 "no main branch: no origin/HEAD, and no branch main or master: name a target with --against" overlaps w
+}
+
 section "tree: the command-line contract" the_contract
+section "tree: the main branch" the_main_branch
 finish

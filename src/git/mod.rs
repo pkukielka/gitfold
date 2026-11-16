@@ -228,6 +228,25 @@ pub fn branch_tip(name: &str) -> Result<Commit> {
     resolve(&format!("refs/heads/{name}"))
 }
 
+/// The repository's main branch, what work lands in: the remote's default
+/// branch (`origin/HEAD`, normally `origin/main`), else the local branch
+/// `main`, else `master`. Not a branch's upstream: after `git push -u` that
+/// is its own remote branch.
+pub fn main_branch(common_dir: &Path) -> Result<String> {
+    if let Ok(out) = cmd::output(common_dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
+        let name = String::from_utf8_lossy(&out).trim().to_string();
+        if !name.is_empty() && name != "origin/HEAD" {
+            return Ok(name);
+        }
+    }
+    for name in ["main", "master"] {
+        if branch_exists(name) {
+            return Ok(name.to_string());
+        }
+    }
+    bail!("no main branch: no origin/HEAD, and no branch main or master")
+}
+
 /// Whether `refs/heads/<name>` exists.
 pub fn branch_exists(name: &str) -> bool {
     with_repo(|repo| {

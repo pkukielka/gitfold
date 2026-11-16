@@ -1,22 +1,40 @@
 //! Branches built on branches: each branch's parent and whether it follows
-//! it (settings: `branch.<branch>.gitfoldParent`, `gitfoldFollow`), the tree
-//! the parents form, and which branch is main. Shared by `gitfold parent`,
-//! `branch --parent`, `list`, `changes -- PATH` and the views; see
-//! layers-design/15-tree-spec.md in the blog notes for the design.
+//! it (settings: `branch.<branch>.gitfoldParent`, `gitfoldFollow`), and the
+//! tree the parents form. Shared by `gitfold parent`, `branch --parent`,
+//! `list`, `changes -- PATH` and the views; see layers-design/15-tree-spec.md
+//! in the blog notes for the design. The main branch, the root, is
+//! `git::main_branch`.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
-use crate::git;
-use crate::settings::Local;
+use crate::settings::{self, Local};
 
 /// The parents of the repository's branches, as its config has them.
 #[derive(Debug, Default)]
 pub struct Tree {
     /// Branch to parent.
     parents: BTreeMap<String, String>,
+}
+
+/// Why a branch can't get a parent.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// The branch itself.
+    Own,
+    /// A branch built on it.
+    Cycle,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::Own => write!(f, "a branch can't be its own parent"),
+            Refused::Cycle => write!(f, "that would be a cycle"),
+        }
+    }
 }
 
 impl Tree {
@@ -34,74 +52,57 @@ impl Tree {
 
     /// The branches whose parent is `branch`, by name.
     pub fn children(&self, branch: &str) -> Vec<&str> {
-        let mut children: Vec<&str> = self
-            .parents
+        self.parents
             .iter()
             .filter(|(_, parent)| parent.as_str() == branch)
             .map(|(child, _)| child.as_str())
-            .collect();
-        children.sort_unstable();
-        children
+            .collect()
     }
 
     /// Everything built on `branch`: its children, theirs, and so on, each
-    /// once, parents before their children (`branch` itself not included;
-    /// safe on cycles a hand-edited config may hold).
+    /// once, every branch before its children (`branch` itself not
+    /// included; safe on cycles a hand-edited config may hold).
     #[allow(dead_code)] // used as the tree's streams land (the views)
     pub fn subtree(&self, branch: &str) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
-        let mut stack = self.children(branch);
-        stack.reverse();
+        let mut stack: Vec<&str> = self.children(branch).into_iter().rev().collect();
         while let Some(next) = stack.pop() {
-            if next == branch || out.contains(&next) {
-                continue;
+            if next != branch && !out.contains(&next) {
+                out.push(next);
+                stack.extend(self.children(next).into_iter().rev());
             }
-            out.push(next);
-            let mut children = self.children(next);
-            children.reverse();
-            stack.extend(children);
         }
         out
     }
 
-    /// Whether making `parent` the parent of `branch` would close a cycle:
-    /// `parent` is `branch`, or is built on it.
-    pub fn would_cycle(&self, branch: &str, parent: &str) -> bool {
-        let mut at = Some(parent);
-        let mut steps = 0;
-        while let Some(name) = at {
-            if name == branch {
-                return true;
-            }
-            // A cycle already in the config: stop rather than loop.
-            steps += 1;
-            if steps > self.parents.len() {
-                return false;
-            }
-            at = self.parent(name);
+    /// Whether `parent` may become the parent of `branch`: not `branch`
+    /// itself, nor built on it (a cycle).
+    pub fn check_parent(&self, branch: &str, parent: &str) -> Result<(), Refused> {
+        if parent == branch {
+            return Err(Refused::Own);
         }
-        false
+        // Bounded: a cycle already in a hand-edited config ends the walk.
+        let ancestors = std::iter::successors(Some(parent), |name| self.parent(name));
+        match ancestors
+            .take(self.parents.len() + 1)
+            .any(|name| name == branch)
+        {
+            true => Err(Refused::Cycle),
+            false => Ok(()),
+        }
     }
 }
 
-/// The repository's main branch, what work lands in: the remote's default
-/// branch (`origin/HEAD`, normally `origin/main`), else the local branch
-/// `main`, else `master`. Not a branch's upstream: after `git push -u` that
-/// is its own remote branch.
-pub fn main_branch(common_dir: &Path) -> Result<String> {
-    let out = git::cmd::command(common_dir)
-        .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
-        .output()?;
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if out.status.success() && !name.is_empty() && name != "origin/HEAD" {
-        return Ok(name);
+/// Makes `parent` the parent of `branch`, or with `None` forgets it,
+/// refusing a parent `Tree::check_parent` refuses: the one way to set it.
+#[allow(dead_code)] // used as the tree's streams land (`gitfold parent`)
+pub fn set_parent(common_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
+    if let Some(parent) = parent {
+        Tree::read(&Local::read(common_dir))
+            .check_parent(branch, parent)
+            .map_err(|refused| anyhow::anyhow!("{parent} as the parent of {branch}: {refused}"))?;
     }
-    for name in ["main", "master"] {
-        if git::branch_exists(name) {
-            return Ok(name.to_string());
-        }
-    }
-    bail!("no main branch: no origin/HEAD, and no branch main or master")
+    settings::write_parent(common_dir, branch, parent)
 }
 
 #[cfg(test)]
@@ -134,15 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn cycles() {
+    fn parents_refused() {
         let t = tree(&[("api", "main"), ("ui", "api")]);
-        assert!(t.would_cycle("api", "api"));
-        assert!(t.would_cycle("api", "ui"));
-        assert!(!t.would_cycle("ui", "main"));
-        assert!(!t.would_cycle("web", "ui"));
+        assert_eq!(t.check_parent("api", "api"), Err(Refused::Own));
+        assert_eq!(t.check_parent("api", "ui"), Err(Refused::Cycle));
+        assert_eq!(t.check_parent("ui", "main"), Ok(()));
+        assert_eq!(t.check_parent("web", "ui"), Ok(()));
         // A cycle already in the config (hand-edited): no endless loop.
         let looped = tree(&[("a", "b"), ("b", "a")]);
-        assert!(!looped.would_cycle("c", "a"));
+        assert_eq!(looped.check_parent("c", "a"), Ok(()));
         assert_eq!(looped.subtree("a"), ["b"]);
     }
 }

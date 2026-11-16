@@ -66,14 +66,17 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<i32> {
         git::require_branch(branch)?;
     }
     if let Some(parent) = &args.set {
-        if *parent == name {
-            eprintln!("gitfold parent: a branch can't be its own parent");
-            return Ok(2);
-        }
         let tree = crate::tree::Tree::read(&crate::settings::Local::read(&common_dir));
-        if tree.would_cycle(&name, parent) {
-            eprintln!("gitfold parent: {parent} is built on {name}: that would be a cycle");
-            return Ok(2);
+        match tree.check_parent(&name, parent) {
+            Ok(()) => {}
+            Err(crate::tree::Refused::Own) => {
+                eprintln!("gitfold parent: a branch can't be its own parent");
+                return Ok(2);
+            }
+            Err(crate::tree::Refused::Cycle) => {
+                eprintln!("gitfold parent: {parent} is built on {name}: that would be a cycle");
+                return Ok(2);
+            }
         }
     }
     Err(not_implemented("gitfold parent"))

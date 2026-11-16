@@ -187,10 +187,9 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     Ok(if lines.is_empty() { 0 } else { FOUND })
 }
 
-/// The main branch (`tree::main_branch`), or a hint to name a target.
+/// The main branch (`git::main_branch`), or a hint to name a target.
 fn default_target(common_dir: &Path) -> Result<String> {
-    crate::tree::main_branch(common_dir)
-        .map_err(|e| anyhow::anyhow!("{e}: name a target with --against"))
+    git::main_branch(common_dir).map_err(|e| anyhow::anyhow!("{e}: name a target with --against"))
 }
 
 /// Target `rev`: what it changed since it diverged from `base`, and, for a
