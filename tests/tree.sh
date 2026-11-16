@@ -49,7 +49,7 @@ check "--yes needs --update" says 2 "--update" parent api --yes
 check "--update and --set: refused" says 2 "cannot be used with" parent api --update --set main
 check "its own parent: refused" says 2 "can't be its own parent" parent api --set api
 R branch ui; R config branch.ui.gitfoldParent api
-check "a cycle: refused" says 2 "would be a cycle" parent api --set ui
+check "a cycle: refused" says 2 "ui is built on api: that would be a cycle" parent api --set ui
 check "not a cycle: not implemented yet" says 1 "not implemented yet" parent ui --set main
 check "outside a workspace, the branch must be named" says 1 "not in a gitfold workspace" parent
 check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
@@ -68,9 +68,19 @@ done
 # origin/HEAD, else main, else master, else an error naming --against.
 the_main_branch() {
 R branch w
-check "main: found" says 0 "" overlaps w
+R switch -q w; echo w >>"$REPO/a.txt"; R commit -qam w; R switch -q main
+echo m >>"$REPO/a.txt"; R commit -qam m
+check "main: chosen" says 6 "W	main	a.txt" overlaps w
+R update-ref refs/remotes/origin/main main
+R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+check "origin/HEAD: its branch chosen" says 6 "W	origin/main	a.txt" overlaps w
+R branch origin/main main
+check "a local branch named like it: still origin/main" says 6 "W	origin/main	a.txt" overlaps w
+R branch -D -q origin/main; R update-ref -d refs/remotes/origin/main
+check "origin/HEAD pointing nowhere: main" says 6 "W	main	a.txt" overlaps w
+R update-ref -d --no-deref refs/remotes/origin/HEAD
 R branch -m main master
-check "no main, master: found" says 0 "" overlaps w
+check "no main, master: chosen" says 6 "W	master	a.txt" overlaps w
 R branch -m master trunk
 check "neither: an error naming --against" says 1 "no main branch: no origin/HEAD, and no branch main or master: name a target with --against" overlaps w
 }

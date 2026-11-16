@@ -12,11 +12,14 @@ use anyhow::Result;
 
 use crate::settings::{self, Local};
 
-/// The parents of the repository's branches, as its config has them.
+/// The parents of the repository's branches, as its config has them (only
+/// branches that exist: a deleted branch's settings may outlive it).
 #[derive(Debug, Default)]
 pub struct Tree {
     /// Branch to parent.
     parents: BTreeMap<String, String>,
+    /// Parent to its children, by name.
+    children: BTreeMap<String, Vec<String>>,
 }
 
 /// Why a branch can't get a parent.
@@ -37,12 +40,32 @@ impl std::fmt::Display for Refused {
     }
 }
 
+/// How `refused` reads for `parent` as the parent of `branch`.
+pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
+    match refused {
+        Refused::Own => refused.to_string(),
+        Refused::Cycle => format!("{parent} is built on {branch}: {refused}"),
+    }
+}
+
 impl Tree {
-    /// The tree in `local`.
+    /// The tree in `local`, of the branches that exist (`git::init` done).
     pub fn read(local: &Local) -> Tree {
-        Tree {
-            parents: local.parents(),
+        let mut parents = local.parents();
+        parents.retain(|branch, _| crate::git::branch_exists(branch));
+        Tree::of(parents)
+    }
+
+    /// The tree of `parents` (branch to parent).
+    fn of(parents: BTreeMap<String, String>) -> Tree {
+        let mut children: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (child, parent) in &parents {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(child.clone());
         }
+        Tree { parents, children }
     }
 
     /// The parent of `branch`, if it has one.
@@ -52,10 +75,8 @@ impl Tree {
 
     /// The branches whose parent is `branch`, by name.
     pub fn children(&self, branch: &str) -> Vec<&str> {
-        self.parents
-            .iter()
-            .filter(|(_, parent)| parent.as_str() == branch)
-            .map(|(child, _)| child.as_str())
+        (self.children.get(branch).into_iter().flatten())
+            .map(String::as_str)
             .collect()
     }
 
@@ -65,9 +86,10 @@ impl Tree {
     #[allow(dead_code)] // used as the tree's streams land (the views)
     pub fn subtree(&self, branch: &str) -> Vec<&str> {
         let mut out: Vec<&str> = Vec::new();
+        let mut seen = std::collections::HashSet::from([branch]);
         let mut stack: Vec<&str> = self.children(branch).into_iter().rev().collect();
         while let Some(next) = stack.pop() {
-            if next != branch && !out.contains(&next) {
+            if seen.insert(next) {
                 out.push(next);
                 stack.extend(self.children(next).into_iter().rev());
             }
@@ -100,7 +122,7 @@ pub fn set_parent(common_dir: &Path, branch: &str, parent: Option<&str>) -> Resu
     if let Some(parent) = parent {
         Tree::read(&Local::read(common_dir))
             .check_parent(branch, parent)
-            .map_err(|refused| anyhow::anyhow!("{parent} as the parent of {branch}: {refused}"))?;
+            .map_err(|refused| anyhow::anyhow!("{}", refusal(branch, parent, &refused)))?;
     }
     settings::write_parent(common_dir, branch, parent)
 }
@@ -110,12 +132,12 @@ mod tests {
     use super::*;
 
     fn tree(pairs: &[(&str, &str)]) -> Tree {
-        Tree {
-            parents: pairs
+        Tree::of(
+            pairs
                 .iter()
                 .map(|(c, p)| (c.to_string(), p.to_string()))
                 .collect(),
-        }
+        )
     }
 
     #[test]

@@ -67,16 +67,12 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<i32> {
     }
     if let Some(parent) = &args.set {
         let tree = crate::tree::Tree::read(&crate::settings::Local::read(&common_dir));
-        match tree.check_parent(&name, parent) {
-            Ok(()) => {}
-            Err(crate::tree::Refused::Own) => {
-                eprintln!("gitfold parent: a branch can't be its own parent");
-                return Ok(2);
-            }
-            Err(crate::tree::Refused::Cycle) => {
-                eprintln!("gitfold parent: {parent} is built on {name}: that would be a cycle");
-                return Ok(2);
-            }
+        if let Err(refused) = tree.check_parent(&name, parent) {
+            eprintln!(
+                "gitfold parent: {}",
+                crate::tree::refusal(&name, parent, &refused)
+            );
+            return Ok(2);
         }
     }
     Err(not_implemented("gitfold parent"))

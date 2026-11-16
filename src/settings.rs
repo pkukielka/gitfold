@@ -4,7 +4,9 @@
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
 //!   mode), `gitfoldTrackReads` (whether it records reads), `gitfoldParent`
 //!   (the branch it is built on, see `tree`) and `gitfoldFollow` (whether it
-//!   takes its parent's new commits by itself; on unless false);
+//!   takes its parent's new commits by itself; on unless false). A parent is
+//!   a setting of the child: renaming or deleting the parent with git leaves
+//!   the child naming the old branch ("parent gone");
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again).
@@ -202,15 +204,16 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 }
 
 /// Makes `parent` the parent of `branch` (`gitfoldParent`), or with `None`
-/// forgets it, with its following setting (see `set_branch`). Unchecked:
+/// forgets it; either way following goes back to its default (on). Unchecked:
 /// `tree::set_parent` refuses self-parents and cycles first.
 pub fn write_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
+    // A new relation follows unless told otherwise (`set_follow`); none has
+    // nothing to follow. Unset first: a stray setting left by a failure
+    // between the two is then the default.
+    unset_branch(git_dir, branch, FOLLOW)?;
     match parent {
         Some(parent) => set_branch(git_dir, branch, PARENT, parent),
-        None => {
-            unset_branch(git_dir, branch, PARENT)?;
-            unset_branch(git_dir, branch, FOLLOW)
-        }
+        None => unset_branch(git_dir, branch, PARENT),
     }
 }
 

@@ -233,10 +233,18 @@ pub fn branch_tip(name: &str) -> Result<Commit> {
 /// `main`, else `master`. Not a branch's upstream: after `git push -u` that
 /// is its own remote branch.
 pub fn main_branch(common_dir: &Path) -> Result<String> {
-    if let Ok(out) = cmd::output(common_dir, &["rev-parse", "--abbrev-ref", "origin/HEAD"]) {
-        let name = String::from_utf8_lossy(&out).trim().to_string();
-        if !name.is_empty() && name != "origin/HEAD" {
-            return Ok(name);
+    // The full name, not `--short` or `rev-parse --abbrev-ref`: those give
+    // `remotes/origin/main` when a local branch is named `origin/main`.
+    if let Ok(out) = cmd::output(
+        common_dir,
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+    ) {
+        let full = String::from_utf8_lossy(&out).trim().to_string();
+        // Pointing at a branch that exists: a clone's can dangle.
+        if let Some(name) = full.strip_prefix("refs/remotes/")
+            && resolve(&full).is_ok()
+        {
+            return Ok(name.to_string());
         }
     }
     for name in ["main", "master"] {
@@ -245,6 +253,17 @@ pub fn main_branch(common_dir: &Path) -> Result<String> {
         }
     }
     bail!("no main branch: no origin/HEAD, and no branch main or master")
+}
+
+/// Whether local branch `name` is the main branch `main` (as `main_branch`
+/// gives it): the same name, or its remote-tracking branch (`main` for
+/// `origin/main`).
+#[allow(dead_code)] // used as the tree's streams land (the tree's root)
+pub fn is_main(name: &str, main: &str) -> bool {
+    name == main
+        || main
+            .split_once('/')
+            .is_some_and(|(_, branch)| branch == name)
 }
 
 /// Whether `refs/heads/<name>` exists.
@@ -346,4 +365,18 @@ pub fn discover(start: &Path) -> Result<PathBuf> {
     let (path, _trust) = gix::discover::upwards(&shown)
         .with_context(|| format!("no git repository at or above {}", shown.display()))?;
     Ok(path.into_repository_and_work_tree_directories().0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_main_branch_by_name() {
+        assert!(is_main("main", "main"));
+        assert!(is_main("main", "origin/main"));
+        assert!(!is_main("origin", "origin/main"));
+        assert!(!is_main("api", "origin/main"));
+        assert!(is_main("master", "master"));
+    }
 }
