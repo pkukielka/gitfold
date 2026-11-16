@@ -31,7 +31,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     } = args;
     let name = name.as_deref().context("name the branch")?;
     if let Some(parent) = &parent {
-        super::tree::check_parent(repo, parent)?;
+        super::tree::check_new_parent(repo, name, parent)?;
         return Err(super::tree::not_implemented("gitfold branch --parent"));
     }
     if from.len() > 1 {

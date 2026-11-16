@@ -198,6 +198,10 @@ fn main() -> std::process::ExitCode {
             eprintln!("{e}");
             1
         }
+        Err(e) if e.is::<cli::tree::Usage>() => {
+            eprintln!("{e}");
+            2
+        }
         Err(e) => {
             eprintln!("Error: {e:?}");
             refusal::Refusal::of(&e).map_or(1, |r| r.exit_code())
@@ -256,7 +260,7 @@ fn run() -> Result<i32> {
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
-        Command::Parent(args) => return cli::tree::parent(&cli::repo()?, args),
+        Command::Parent(args) => cli::tree::parent(&cli::repo()?, args)?,
         Command::Sync(_) => return usage(cli::tree::guessed("sync")),
         Command::Pull(_) => return usage(cli::tree::guessed("pull")),
         Command::Restack(_) => return usage(cli::tree::guessed("restack")),

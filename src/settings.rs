@@ -3,10 +3,10 @@
 //! - per branch, `branch.<branch>.<key>`, which git keeps with the branch
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
 //!   mode), `gitfoldTrackReads` (whether it records reads), `gitfoldParent`
-//!   (the branch it is built on, see `tree`) and `gitfoldFollow` (whether it
-//!   takes its parent's new commits by itself; on unless false). A parent is
-//!   a setting of the child: renaming or deleting the parent with git leaves
-//!   the child naming the old branch ("parent gone");
+//!   (the branch it is built on, see `tree`; read here, written by `gitfold
+//!   parent` as it lands). A parent is a setting of the child: renaming or
+//!   deleting the parent with git leaves the child naming the old branch
+//!   ("parent gone");
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again).
@@ -30,8 +30,6 @@ const PREWARM: &str = "gitfoldPrewarm";
 const TRACK_READS: &str = "gitfoldTrackReads";
 /// `branch.<branch>.gitfoldParent`: the branch it is built on.
 const PARENT: &str = "gitfoldParent";
-/// `branch.<branch>.gitfoldFollow`: a boolean; unset means on.
-const FOLLOW: &str = "gitfoldFollow";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -142,13 +140,6 @@ impl Local {
             .collect()
     }
 
-    /// Whether `branch` takes its parent's new commits by itself
-    /// (`gitfoldFollow`): on unless set false.
-    #[allow(dead_code)] // used as the tree's streams land (`gitfold parent`)
-    pub fn follow(&self, branch: &str) -> bool {
-        self.branch_bool(branch, FOLLOW).unwrap_or(true)
-    }
-
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
     fn branch(&self, branch: &str, key: &str) -> Option<String> {
         let config = self.0.as_ref()?;
@@ -202,27 +193,6 @@ pub fn set_track_reads(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
     set_branch(git_dir, branch, TRACK_READS, &on.to_string())
 }
 
-/// Makes `parent` the parent of `branch` (`gitfoldParent`), or with `None`
-/// forgets it; then following goes back to its default (on). The parent is
-/// written first, so a failure between the two never leaves the old parent
-/// with its following changed. Unchecked, and unconditional:
-/// `tree::set_parent` applies `Tree::check` (unknown names, the root, the
-/// branch itself, cycles) and leaves an unchanged parent alone.
-pub fn write_parent(git_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
-    match parent {
-        Some(parent) => set_branch(git_dir, branch, PARENT, parent)?,
-        None => unset_branch(git_dir, branch, PARENT)?,
-    }
-    unset_branch(git_dir, branch, FOLLOW)
-}
-
-/// Stores whether `branch` takes its parent's new commits by itself (see
-/// `set_branch`).
-#[allow(dead_code)] // used as the tree's streams land (`gitfold parent`)
-pub fn set_follow(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
-    set_branch(git_dir, branch, FOLLOW, &on.to_string())
-}
-
 /// Records `mountpoint` as where the repository is mounted
 /// (`gitfold.mountpoint`), given its git directory or one of its worktrees'.
 pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path) -> Result<()> {
@@ -243,28 +213,11 @@ fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()
     )
 }
 
-/// Removes `branch.<branch>.<key>` if set (as `set_branch`; unset already is
-/// no error).
-fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
-    let out = git::cmd::command(git_dir)
-        .args(["config", "--local", "--unset-all", &branch_key(branch, key)])
-        .output()?;
-    // Exit 5: the key wasn't set.
-    match out.status.code() {
-        Some(0 | 5) => Ok(()),
-        _ => anyhow::bail!(
-            "git config --unset-all {}: {}",
-            branch_key(branch, key),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-    }
-}
-
 /// Gives branch `to` the settings set for branch `from` (a fork); one that
 /// can't be written is warned about.
 pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
-    // Every per-branch setting but the parent and following: a fork starts
-    // at its source, with no relation to it.
+    // Every per-branch setting but the parent: a fork starts at its source,
+    // with no relation to it.
     let copied = [
         (
             PREWARM,

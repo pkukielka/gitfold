@@ -79,6 +79,8 @@ R switch -q w; echo w >>"$REPO/a.txt"; R commit -qam w; R switch -q main
 echo m >>"$REPO/a.txt"; R commit -qam m
 check "compare: local main" says 6 "W	main	a.txt" overlaps w
 check "root: main" says 2 "main is the root of the tree" parent main --set w
+check "a new branch named like the root can't have a parent" says 2 "main is the root of the tree" branch main --parent w
+check "building on the root: allowed (no parent stored)" says 1 "not implemented yet" parent w --set main
 # A clone: origin/main at main, origin/HEAD pointing at it; local main
 # gets an unpushed commit of its own.
 R update-ref refs/remotes/origin/main main
@@ -103,6 +105,7 @@ check "only master: root is master" says 2 "master is the root of the tree" pare
 # No main branch at all: no root, so no parents.
 R branch -m master trunk
 check "no root: setting a parent refused" says 2 "the tree of branches has no root" parent w --set trunk
+check "no root: a new branch with a parent refused" says 2 "the tree of branches has no root" branch c --parent trunk
 }
 
 section "tree: the command-line contract" the_contract

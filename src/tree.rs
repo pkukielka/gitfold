@@ -2,8 +2,9 @@
 //! it (settings: `branch.<branch>.gitfoldParent`, `gitfoldFollow`), and the
 //! tree the parents form, rooted at the main branch (`git::root_branch`).
 //! The tree owns its rules: only branches that exist, the root has no
-//! parent, no branch is its own parent, no cycles (`Tree::check`, which
-//! `set_parent` and every command apply). Shared by `gitfold parent`,
+//! parent (and is never stored as one), no branch is its own parent, no
+//! cycles (`Tree::check`, `Tree::check_new`, which every command applies).
+//! Writing parents and following comes with `gitfold parent` (stream 4). Shared by `gitfold parent`,
 //! `branch --parent`, `list`, `changes -- PATH` and the views; see
 //! layers-design/15-tree-spec.md in the blog notes for the design.
 
@@ -13,7 +14,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::git;
-use crate::settings::{self, Local};
+use crate::settings::Local;
 
 /// The repository's branches built on branches, as its config has them.
 #[derive(Debug, Default)]
@@ -125,6 +126,30 @@ impl Tree {
         self.check_with(branch, parent, git::branch_exists)
     }
 
+    /// Whether a new branch `branch` may be created built on `parent`
+    /// (`gitfold branch NEW --parent P`): `parent` exists, a root is known,
+    /// and `branch` isn't the root's name. The rest of `check` follows: a
+    /// branch not created yet has no children, so no cycle.
+    pub fn check_new(&self, branch: &str, parent: &str) -> Result<(), Refused> {
+        self.check_new_with(branch, parent, git::branch_exists)
+    }
+
+    fn check_new_with(
+        &self,
+        branch: &str,
+        parent: &str,
+        exists: impl Fn(&str) -> bool,
+    ) -> Result<(), Refused> {
+        if !exists(parent) {
+            return Err(Refused::Unknown(parent.to_string()));
+        }
+        match &self.root {
+            None => Err(Refused::NoRoot),
+            Some(root) if root == branch => Err(Refused::Root),
+            Some(_) => Ok(()),
+        }
+    }
+
     fn check_with(
         &self,
         branch: &str,
@@ -154,23 +179,6 @@ impl Tree {
             false => Ok(()),
         }
     }
-}
-
-/// Makes `parent` the parent of `branch`, or with `None` forgets it,
-/// refusing what `Tree::check` refuses: the one way to set it. A changed
-/// parent follows (its following setting reset); the same parent again
-/// changes nothing, an earlier `--no-follow` included.
-#[allow(dead_code)] // used as the tree's streams land (`gitfold parent`)
-pub fn set_parent(common_dir: &Path, branch: &str, parent: Option<&str>) -> Result<()> {
-    let tree = Tree::read(common_dir);
-    if tree.parent(branch) == parent {
-        return Ok(());
-    }
-    if let Some(parent) = parent {
-        tree.check(branch, parent)
-            .map_err(|refused| anyhow::anyhow!("{}", refusal(branch, parent, &refused)))?;
-    }
-    settings::write_parent(common_dir, branch, parent)
 }
 
 #[cfg(test)]
@@ -228,6 +236,18 @@ mod tests {
         );
         let rootless = Tree::of(BTreeMap::new(), None, all);
         assert_eq!(rootless.check_with("ui", "api", all), Err(Refused::NoRoot));
+        // A new branch: its parent must exist, a root be known, and it can't be the root.
+        assert_eq!(t.check_new_with("web", "api", all), Ok(()));
+        assert_eq!(t.check_new_with("web", "main", all), Ok(()));
+        assert_eq!(t.check_new_with("main", "api", all), Err(Refused::Root));
+        assert_eq!(
+            t.check_new_with("web", "typo", |b| b != "typo"),
+            Err(Refused::Unknown("typo".to_string()))
+        );
+        assert_eq!(
+            rootless.check_new_with("web", "api", all),
+            Err(Refused::NoRoot)
+        );
         // A cycle already in the config (hand-edited): no endless loop.
         let looped = Tree::of(
             [("a", "b"), ("b", "a")]
