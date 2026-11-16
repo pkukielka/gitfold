@@ -1,0 +1,688 @@
+//! A view's content: a branch's files with the changes of the branches built
+//! on it merged in, path by path.
+//!
+//! Each member's change is its files against its merge point (where it left
+//! its parent), so it brings only its own work. The changes are merged in
+//! turn, three-way, into what the view holds so far, starting from the
+//! branch's own files: a path only one side changed takes that side's
+//! version without reading any content; a path both changed is merged as
+//! `git merge-file` does (`merge`), conflicts kept as markers named by
+//! branch. Where no markers can show a conflict, a changed file wins over a
+//! deletion and otherwise the side merged earlier stays; every conflict is
+//! recorded (`Conflict`). Renames aren't followed.
+//!
+//! A view is the branch's tree (`View::lower`, a store tree) and the paths
+//! where it differs (`View::overlay`): files only, a directory being the files
+//! in it. Nothing is written to git.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::os::unix::ffi::OsStrExt;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use gix::objs::tree::EntryKind;
+
+use super::merge::{self, ConflictStyle};
+use crate::git;
+use crate::state::{ancestors, join};
+use crate::store::{EMPTY_TREE, Store, TEntry};
+
+/// What a path holds: a file, a symlink or a submodule.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Entry {
+    /// One in a git tree (a store file id).
+    Stored(u32),
+    /// A workspace's uncommitted file or symlink, at `file` in its upper
+    /// directory.
+    Upper { file: PathBuf, kind: EntryKind },
+    /// Content a merge made.
+    Merged { data: Arc<Vec<u8>>, kind: EntryKind },
+}
+
+/// Paths set (`Some`) or deleted (`None`) over a tree.
+pub type Changes = BTreeMap<Vec<u8>, Option<Entry>>;
+
+/// A branch's files: a tree (its tip, or its workspace's base) with its
+/// uncommitted changes over it (none for the committed view).
+pub struct Files {
+    pub tree: u32,
+    pub uncommitted: Changes,
+}
+
+/// A branch merged into a view.
+pub struct Member {
+    pub branch: String,
+    /// The tree of its merge point: where it left its parent.
+    pub merge_point: u32,
+    pub files: Files,
+}
+
+/// A view's content: `lower` with `overlay` over it.
+pub struct View {
+    pub lower: u32,
+    /// The paths where the view differs from `lower`.
+    pub overlay: Changes,
+    pub conflicts: Vec<Conflict>,
+}
+
+/// Where branches' changes conflict.
+#[derive(Debug, PartialEq)]
+pub struct Conflict {
+    pub path: Vec<u8>,
+    pub kind: ConflictKind,
+    /// The branches whose changes meet there: those merged first, then the
+    /// one that conflicted.
+    pub branches: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ConflictKind {
+    /// Shown with git's markers in the file.
+    Markers,
+    /// Changed on one side, deleted on the other: the changed file shows.
+    ModifiedDeleted,
+    /// Changed on both sides, one of them binary: the earlier side shows.
+    Binary,
+    /// Changed on both sides into kinds that can't merge (a file and a
+    /// symlink or submodule, or two executable bits added differently): the
+    /// earlier side shows.
+    Kind,
+    /// A file where the other side has files below it (or below where it
+    /// has a file): the earlier side shows.
+    FileDirectory,
+}
+
+/// The view of `branch`, its `files`, with `members` merged in order (each
+/// after the one it is built on); conflict markers in `style`.
+pub fn build(
+    store: &Store,
+    branch: &str,
+    files: Files,
+    members: &[Member],
+    style: ConflictStyle,
+) -> Result<View> {
+    let lower = files.tree;
+    let mut acc = Acc {
+        store,
+        branch,
+        style,
+        lower,
+        overlay: files.uncommitted,
+        who: HashMap::new(),
+        conflicts: Vec::new(),
+    };
+    for member in members {
+        acc.add(member)?;
+    }
+    let Acc {
+        mut overlay,
+        conflicts,
+        ..
+    } = acc;
+    // A change can come back to the branch's own file.
+    overlay.retain(|path, entry| *entry != stored(store, lower, path));
+    Ok(View {
+        lower,
+        overlay,
+        conflicts,
+    })
+}
+
+/// A view being built.
+struct Acc<'a> {
+    store: &'a Store,
+    branch: &'a str,
+    style: ConflictStyle,
+    lower: u32,
+    overlay: Changes,
+    /// The branches whose changes a path holds, the view's branch first; a
+    /// path missing holds only the view's branch.
+    who: HashMap<Vec<u8>, Vec<String>>,
+    conflicts: Vec<Conflict>,
+}
+
+impl Acc<'_> {
+    /// Merges `member`'s change in.
+    fn add(&mut self, member: &Member) -> Result<()> {
+        let files = &member.files;
+        let mut paths = BTreeSet::new();
+        delta(
+            self.store,
+            member.merge_point,
+            files.tree,
+            &mut Vec::new(),
+            &mut paths,
+        );
+        paths.extend(files.uncommitted.keys().cloned());
+        let mut changes: Vec<_> = (paths.into_iter())
+            .filter_map(|path| {
+                let before = stored(self.store, member.merge_point, &path);
+                let after = match files.uncommitted.get(&path) {
+                    Some(entry) => entry.clone(),
+                    None => stored(self.store, files.tree, &path),
+                };
+                (before != after).then_some((path, before, after))
+            })
+            .collect();
+        // Deletions first: a directory replaced by a file is gone before the
+        // file comes (stable: each part stays in path order).
+        changes.sort_by_key(|(_, _, after)| after.is_some());
+        for (path, before, after) in changes {
+            self.merge(&member.branch, path, before, after)?;
+        }
+        Ok(())
+    }
+
+    /// Merges `name`'s change of `path`, from `before` to `after`.
+    fn merge(
+        &mut self,
+        name: &str,
+        path: Vec<u8>,
+        before: Option<Entry>,
+        after: Option<Entry>,
+    ) -> Result<()> {
+        let ours = self.entry(&path);
+        if ours == after {
+            return Ok(());
+        }
+        if ours == before {
+            self.take(name, path, after, ours.is_none());
+            return Ok(());
+        }
+        match (ours, after) {
+            (None, Some(after)) => {
+                let branches = self.involved(&path, name);
+                if self.take(name, path.clone(), Some(after), true) {
+                    self.record(path, ConflictKind::ModifiedDeleted, branches);
+                }
+            }
+            (Some(_), None) => {
+                let branches = self.involved(&path, name);
+                self.record(path, ConflictKind::ModifiedDeleted, branches);
+            }
+            (Some(ours), Some(after)) => self.content(name, path, before, ours, after)?,
+            (None, None) => unreachable!("ours == after"),
+        }
+        Ok(())
+    }
+
+    /// Merges the content of `path`, changed on both sides.
+    fn content(
+        &mut self,
+        name: &str,
+        path: Vec<u8>,
+        before: Option<Entry>,
+        ours: Entry,
+        after: Entry,
+    ) -> Result<()> {
+        let before_kind = before.as_ref().map(|e| self.kind(e)).transpose()?;
+        let Some(kind) = merged_kind(before_kind, self.kind(&ours)?, self.kind(&after)?) else {
+            let branches = self.involved(&path, name);
+            self.record(path, ConflictKind::Kind, branches);
+            return Ok(());
+        };
+        let base = match &before {
+            Some(e) => self.bytes(e)?,
+            None => Vec::new(),
+        };
+        let (mine, theirs) = (self.bytes(&ours)?, self.bytes(&after)?);
+        if [&base, &mine, &theirs].iter().any(|d| merge::is_binary(d)) {
+            let branches = self.involved(&path, name);
+            self.record(path, ConflictKind::Binary, branches);
+            return Ok(());
+        }
+        let branches = self.involved(&path, name);
+        let ours_label = branches[..branches.len() - 1].join(" + ");
+        let merged = merge::merge3(&base, &mine, &theirs, &ours_label, name, self.style);
+        if merged.conflict {
+            self.record(path.clone(), ConflictKind::Markers, branches);
+        }
+        let entry = Entry::Merged {
+            data: Arc::new(merged.data),
+            kind,
+        };
+        self.take(name, path, Some(entry), false);
+        Ok(())
+    }
+
+    /// Sets `path` to `entry` from `name`, unless a file would sit above or
+    /// below other files (checked where nothing is at `path` yet: `empty`):
+    /// that is recorded instead. Whether it was set.
+    fn take(&mut self, name: &str, path: Vec<u8>, entry: Option<Entry>, empty: bool) -> bool {
+        if entry.is_some() && empty && self.clashes(&path) {
+            let branches = self.involved(&path, name);
+            self.record(path, ConflictKind::FileDirectory, branches);
+            return false;
+        }
+        self.overlay.insert(path.clone(), entry);
+        let branch = self.branch;
+        (self.who.entry(path))
+            .or_insert_with(|| vec![branch.to_string()])
+            .push(name.to_string());
+        true
+    }
+
+    /// Whether a file at `path` would sit below a file the view holds, or
+    /// above files it holds.
+    fn clashes(&self, path: &[u8]) -> bool {
+        if ancestors(path).any(|above| self.entry(above).is_some()) {
+            return true;
+        }
+        let mut prefix = path.to_vec();
+        prefix.push(b'/');
+        let overlaid = (self.overlay.range(prefix.clone()..))
+            .take_while(|(p, _)| p.starts_with(&prefix))
+            .any(|(_, e)| e.is_some());
+        overlaid
+            || tree_at(self.store, self.lower, path)
+                .is_some_and(|tree| self.any_shown_below(path, tree))
+    }
+
+    /// Whether a file of `lower`'s tree `tree` at `dir` isn't deleted.
+    fn any_shown_below(&self, dir: &[u8], tree: u32) -> bool {
+        let table = self.store.tree(tree);
+        table.entries().iter().any(|e| {
+            let path = join(dir, table.name(e));
+            match e.kind {
+                EntryKind::Tree => self.any_shown_below(&path, e.id),
+                _ => self.overlay.get(&path) != Some(&None),
+            }
+        })
+    }
+
+    /// What the view holds at `path` so far.
+    fn entry(&self, path: &[u8]) -> Option<Entry> {
+        match self.overlay.get(path) {
+            Some(entry) => entry.clone(),
+            None => stored(self.store, self.lower, path),
+        }
+    }
+
+    /// The branches whose changes meet at `path` when `name`'s comes.
+    fn involved(&self, path: &[u8], name: &str) -> Vec<String> {
+        let mut branches =
+            (self.who.get(path).cloned()).unwrap_or_else(|| vec![self.branch.into()]);
+        branches.push(name.to_string());
+        branches
+    }
+
+    fn record(&mut self, path: Vec<u8>, kind: ConflictKind, branches: Vec<String>) {
+        self.conflicts.push(Conflict {
+            path,
+            kind,
+            branches,
+        });
+    }
+
+    fn kind(&self, entry: &Entry) -> Result<EntryKind> {
+        Ok(match entry {
+            Entry::Stored(id) => self.store.file(*id).context("stored file")?.kind,
+            Entry::Upper { kind, .. } | Entry::Merged { kind, .. } => *kind,
+        })
+    }
+
+    /// The content of `entry` (a symlink's target).
+    fn bytes(&self, entry: &Entry) -> Result<Vec<u8>> {
+        match entry {
+            Entry::Stored(id) => git::read_blob(self.store.file(*id).context("stored file")?.oid),
+            Entry::Upper { file, kind } if *kind == EntryKind::Link => {
+                Ok(fs::read_link(file)?.as_os_str().as_bytes().to_vec())
+            }
+            Entry::Upper { file, .. } => {
+                fs::read(file).with_context(|| format!("reading {}", file.display()))
+            }
+            Entry::Merged { data, .. } => Ok(data.to_vec()),
+        }
+    }
+}
+
+/// The kind a content merge of `ours` and `theirs` (changed from `before`)
+/// gets, if they can be merged: only regular files can; a change of the
+/// executable bit on one side wins, as in git.
+fn merged_kind(before: Option<EntryKind>, ours: EntryKind, theirs: EntryKind) -> Option<EntryKind> {
+    let blob = |k: EntryKind| matches!(k, EntryKind::Blob | EntryKind::BlobExecutable);
+    if !blob(ours) || !blob(theirs) || before.is_some_and(|b| !blob(b)) {
+        return None;
+    }
+    match before {
+        Some(b) if theirs != b => Some(theirs),
+        Some(_) => Some(ours),
+        None => (ours == theirs).then_some(ours),
+    }
+}
+
+/// The paths of files, symlinks and submodules that differ between trees
+/// `from` and `to` (a directory and a file at one path: the directory's files
+/// and the file), below `dir`. Walks only subtrees that differ.
+fn delta(store: &Store, from: u32, to: u32, dir: &mut Vec<u8>, out: &mut BTreeSet<Vec<u8>>) {
+    if from == to {
+        return;
+    }
+    let (a, b) = (store.tree(from), store.tree(to));
+    let mut names: BTreeMap<&[u8], (Option<TEntry>, Option<TEntry>)> = BTreeMap::new();
+    for e in a.entries() {
+        names.entry(a.name(e)).or_default().0 = Some(*e);
+    }
+    for e in b.entries() {
+        names.entry(b.name(e)).or_default().1 = Some(*e);
+    }
+    let subtree = |e: Option<TEntry>| e.filter(|e| e.kind == EntryKind::Tree).map(|e| e.id);
+    let leaf =
+        |e: Option<TEntry>| (e.filter(|e| e.kind != EntryKind::Tree)).map(|e| (e.kind, e.id));
+    for (name, (x, y)) in names {
+        let len = dir.len();
+        if len > 0 {
+            dir.push(b'/');
+        }
+        dir.extend_from_slice(name);
+        if subtree(x) != subtree(y) {
+            let (x, y) = (subtree(x), subtree(y));
+            delta(
+                store,
+                x.unwrap_or(EMPTY_TREE),
+                y.unwrap_or(EMPTY_TREE),
+                dir,
+                out,
+            );
+        }
+        if leaf(x) != leaf(y) {
+            out.insert(dir.clone());
+        }
+        dir.truncate(len);
+    }
+}
+
+/// The entry of tree `tree` at `path`.
+fn entry_at(store: &Store, tree: u32, path: &[u8]) -> Option<TEntry> {
+    let mut at = tree;
+    let mut parts = path.split(|b| *b == b'/').peekable();
+    loop {
+        let e = *store.tree(at).find(parts.next()?)?;
+        if parts.peek().is_none() {
+            return Some(e);
+        }
+        if e.kind != EntryKind::Tree {
+            return None;
+        }
+        at = e.id;
+    }
+}
+
+/// The file, symlink or submodule of tree `tree` at `path`.
+fn stored(store: &Store, tree: u32, path: &[u8]) -> Option<Entry> {
+    (entry_at(store, tree, path))
+        .filter(|e| e.kind != EntryKind::Tree)
+        .map(|e| Entry::Stored(e.id))
+}
+
+/// The directory of tree `tree` at `path`.
+fn tree_at(store: &Store, tree: u32, path: &[u8]) -> Option<u32> {
+    (entry_at(store, tree, path))
+        .filter(|e| e.kind == EntryKind::Tree)
+        .map(|e| e.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::members::{committed, members};
+    use super::super::test_repo::{branch, commit, tip};
+    use super::*;
+    use crate::tree::Tree;
+
+    /// The view of `n` with `children` (branch, parent) built on it, as committed.
+    fn view(store: &Store, n: &str, children: &[(&str, &str)]) -> View {
+        let stored = (children.iter())
+            .map(|(c, p)| (c.to_string(), format!("refs/heads/{p}")))
+            .collect();
+        let tree = Tree::of(stored, Some("main".into()), |_| true);
+        let (files, members) = committed(store, n, &members(&tree, n, None, |_| true)).unwrap();
+        build(store, n, files, &members, ConflictStyle::Merge).unwrap()
+    }
+
+    /// What `view` shows at `path`, as text.
+    fn show(store: &Store, view: &View, path: &str) -> Option<String> {
+        let path = path.as_bytes();
+        let entry = match view.overlay.get(path) {
+            Some(entry) => entry.clone(),
+            None => stored(store, view.lower, path),
+        }?;
+        let acc = Acc {
+            store,
+            branch: "",
+            style: ConflictStyle::Merge,
+            lower: view.lower,
+            overlay: Changes::new(),
+            who: HashMap::new(),
+            conflicts: Vec::new(),
+        };
+        Some(String::from_utf8(acc.bytes(&entry).unwrap()).unwrap())
+    }
+
+    fn conflict(path: &str, kind: ConflictKind, branches: &[&str]) -> Conflict {
+        Conflict {
+            path: path.into(),
+            kind,
+            branches: branches.iter().map(|b| b.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn siblings_merge_cleanly() {
+        let base = commit(
+            None,
+            &[("a", Some("1\n2\n3\n4\n5\n")), ("d/x", Some("x\n"))],
+        );
+        let api = branch("t1-api", &base);
+        branch(
+            "t1-ui",
+            &commit(Some(&api), &[("a", Some("1\n2\n3\n4\nUI\n"))]),
+        );
+        let web = commit(
+            Some(&api),
+            &[("a", Some("WEB\n2\n3\n4\n5\n")), ("new", Some("n\n"))],
+        );
+        branch("t1-web", &web);
+        let store = Store::default();
+        let v = view(
+            &store,
+            "t1-api",
+            &[("t1-ui", "t1-api"), ("t1-web", "t1-api")],
+        );
+        assert_eq!(show(&store, &v, "a").unwrap(), "WEB\n2\n3\n4\nUI\n");
+        assert_eq!(show(&store, &v, "new").unwrap(), "n\n");
+        assert_eq!(show(&store, &v, "d/x").unwrap(), "x\n");
+        assert!(v.conflicts.is_empty());
+        assert_eq!(v.overlay.len(), 2, "only what differs from api");
+    }
+
+    #[test]
+    fn siblings_conflict_with_markers() {
+        let api = branch("t2-api", &commit(None, &[("a", Some("1\n2\n3\n"))]));
+        branch("t2-ui", &commit(Some(&api), &[("a", Some("1\nUI\n3\n"))]));
+        branch("t2-web", &commit(Some(&api), &[("a", Some("1\nWEB\n3\n"))]));
+        let store = Store::default();
+        let v = view(
+            &store,
+            "t2-api",
+            &[("t2-ui", "t2-api"), ("t2-web", "t2-api")],
+        );
+        assert_eq!(
+            show(&store, &v, "a").unwrap(),
+            "1\n<<<<<<< t2-api + t2-ui\nUI\n=======\nWEB\n>>>>>>> t2-web\n3\n"
+        );
+        let expected = conflict("a", ConflictKind::Markers, &["t2-api", "t2-ui", "t2-web"]);
+        assert_eq!(v.conflicts, [expected]);
+    }
+
+    #[test]
+    fn each_brings_only_its_own_work() {
+        // ui left api at `api0`, api moved on; css left ui, ui moved on.
+        let api0 = commit(None, &[("a", Some("1\n2\n3\n")), ("u", Some("u\n"))]);
+        let ui0 = commit(Some(&api0), &[("a", Some("1\n2\nUI\n"))]);
+        let css = commit(Some(&ui0), &[("c", Some("css\n"))]);
+        branch("t3-css", &css);
+        branch("t3-ui", &commit(Some(&ui0), &[("u", Some("u2\n"))]));
+        branch(
+            "t3-api",
+            &commit(Some(&api0), &[("a", Some("API\n2\n3\n"))]),
+        );
+        let store = Store::default();
+        let v = view(
+            &store,
+            "t3-api",
+            &[("t3-ui", "t3-api"), ("t3-css", "t3-ui")],
+        );
+        assert_eq!(show(&store, &v, "a").unwrap(), "API\n2\nUI\n");
+        assert_eq!(
+            show(&store, &v, "u").unwrap(),
+            "u2\n",
+            "css's old copy of u isn't its change"
+        );
+        assert_eq!(show(&store, &v, "c").unwrap(), "css\n");
+        assert!(v.conflicts.is_empty(), "{:?}", v.conflicts);
+    }
+
+    #[test]
+    fn conflicts_without_markers() {
+        let files = [
+            ("gone", Some("1\n")),
+            ("kept", Some("1\n")),
+            ("bin", Some("b\0in")),
+            ("link", Some("1\n")),
+        ];
+        let api = branch("t4-api", &commit(None, &files));
+        let ui = [
+            ("gone", None),
+            ("kept", Some("ui\n")),
+            ("bin", Some("ui\0")),
+            ("link", Some("link:target")),
+            ("d", Some("file\n")),
+        ];
+        branch("t4-ui", &commit(Some(&api), &ui));
+        let web = [
+            ("gone", Some("web\n")),
+            ("kept", None),
+            ("bin", Some("web\0")),
+            ("link", Some("web\n")),
+            ("d/x", Some("below\n")),
+        ];
+        branch("t4-web", &commit(Some(&api), &web));
+        let store = Store::default();
+        let v = view(
+            &store,
+            "t4-api",
+            &[("t4-ui", "t4-api"), ("t4-web", "t4-api")],
+        );
+        assert_eq!(
+            show(&store, &v, "gone").unwrap(),
+            "web\n",
+            "changed wins over deleted"
+        );
+        assert_eq!(show(&store, &v, "kept").unwrap(), "ui\n");
+        assert_eq!(show(&store, &v, "bin").unwrap(), "ui\0", "the earlier side");
+        assert_eq!(show(&store, &v, "link").unwrap(), "target");
+        assert_eq!(show(&store, &v, "d").unwrap(), "file\n");
+        assert_eq!(show(&store, &v, "d/x"), None);
+        let both = ["t4-api", "t4-ui", "t4-web"];
+        let mut got = v.conflicts;
+        got.sort_by(|a, b| a.path.cmp(&b.path));
+        assert_eq!(
+            got,
+            [
+                conflict("bin", ConflictKind::Binary, &both),
+                conflict("d/x", ConflictKind::FileDirectory, &["t4-api", "t4-web"]),
+                conflict("gone", ConflictKind::ModifiedDeleted, &both),
+                conflict("kept", ConflictKind::ModifiedDeleted, &both),
+                conflict("link", ConflictKind::Kind, &both),
+            ]
+        );
+    }
+
+    #[test]
+    fn directory_replaced_by_a_file() {
+        let api = branch(
+            "t5-api",
+            &commit(None, &[("d/x", Some("x\n")), ("d/y", Some("y\n"))]),
+        );
+        branch(
+            "t5-ui",
+            &commit(
+                Some(&api),
+                &[("d/x", None), ("d/y", None), ("d", Some("f\n"))],
+            ),
+        );
+        let store = Store::default();
+        let v = view(&store, "t5-api", &[("t5-ui", "t5-api")]);
+        assert_eq!(show(&store, &v, "d").unwrap(), "f\n");
+        assert_eq!(show(&store, &v, "d/x"), None);
+        assert!(v.conflicts.is_empty(), "{:?}", v.conflicts);
+    }
+
+    #[test]
+    fn uncommitted_changes() {
+        let api = branch(
+            "t6-api",
+            &commit(None, &[("a", Some("1\n2\n3\n")), ("b", Some("b\n"))]),
+        );
+        let ui = commit(Some(&api), &[("a", Some("1\n2\nUI\n"))]);
+        let store = Store::default();
+        let dir = std::env::temp_dir().join(format!("gitfold-t6-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let upper = |name: &str, data: &str| {
+            let file = dir.join(name);
+            fs::write(&file, data).unwrap();
+            Some(Entry::Upper {
+                file,
+                kind: EntryKind::Blob,
+            })
+        };
+        let tree = |c: &str| store.load_tree(tip(c).tree).unwrap();
+        let files = Files {
+            tree: tree(&api),
+            uncommitted: [
+                (b"a".to_vec(), upper("a", "API\n2\n3\n")),
+                (b"b".to_vec(), None),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let members = [Member {
+            branch: "t6-ui".into(),
+            merge_point: tree(&api),
+            files: Files {
+                tree: tree(&ui),
+                uncommitted: [(b"new".to_vec(), upper("new", "n\n"))]
+                    .into_iter()
+                    .collect(),
+            },
+        }];
+        let v = build(&store, "t6-api", files, &members, ConflictStyle::Merge).unwrap();
+        assert_eq!(show(&store, &v, "a").unwrap(), "API\n2\nUI\n");
+        assert_eq!(show(&store, &v, "b"), None);
+        assert_eq!(show(&store, &v, "new").unwrap(), "n\n");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn delta_walks_only_what_differs() {
+        let one = commit(
+            None,
+            &[("a/b/c", Some("1")), ("a/d", Some("2")), ("e", Some("3"))],
+        );
+        let two = commit(
+            Some(&one),
+            &[("a/b/c", Some("x")), ("e", None), ("e/f", Some("4"))],
+        );
+        let store = Store::default();
+        let (one, two) = (
+            store.load_tree(tip(&one).tree).unwrap(),
+            store.load_tree(tip(&two).tree).unwrap(),
+        );
+        let mut out = BTreeSet::new();
+        delta(&store, one, two, &mut Vec::new(), &mut out);
+        let out: Vec<&[u8]> = out.iter().map(Vec::as_slice).collect();
+        assert_eq!(out, [&b"a/b/c"[..], b"e", b"e/f"]);
+    }
+}
