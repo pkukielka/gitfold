@@ -20,7 +20,9 @@ pub struct BuiltOn {
 /// is the tree's root and it exists: branches built on it are in the
 /// root's view too (only origin's: decided 2026-11-16).
 pub fn origin_root(tree: &Tree, branch: &str) -> Option<String> {
-    if tree.root() != Some(branch) {
+    // Not `git::remote_tracking`: it goes by the configured remotes, which
+    // the mount's repository handle has as they were at mount time.
+    if tree.root() != Some(branch) || branch == "HEAD" {
         return None;
     }
     let full = format!("refs/remotes/origin/{branch}");
@@ -65,8 +67,8 @@ pub fn members(
 pub struct Committed {
     pub files: Files,
     pub members: Vec<Member>,
-    /// Members whose tip or parent doesn't resolve (deleted, pruned), with
-    /// why: left out of the view.
+    /// Members whose branch or parent is gone (deleted, pruned), and those
+    /// built on them, with why: left out of the view.
     pub skipped: Vec<(String, String)>,
 }
 
@@ -85,11 +87,13 @@ pub fn committed(
         tree,
         uncommitted: Changes::new(),
     };
-    let mut own = git::branch_tip(branch).with_context(|| format!("branch {branch}"))?;
-    if let Some(remote) = origin_root.and_then(|r| git::resolve(r).ok())
-        && merge_base(own.id, remote.id)? == Some(own.id)
-    {
-        own = remote;
+    let resolve = |full: &str| git::resolve(full).with_context(|| format!("resolving {full}"));
+    let mut own = resolve(&format!("refs/heads/{branch}"))?;
+    if let Some(remote) = origin_root {
+        let remote = resolve(remote)?;
+        if merge_base(own.id, remote.id)? == Some(own.id) {
+            own = remote;
+        }
     }
     let mut out = Committed {
         files: files(store.load_tree(own.tree)?),
@@ -97,20 +101,26 @@ pub fn committed(
         skipped: Vec::new(),
     };
     for m in members {
-        let refs = git::branch_tip(&m.branch)
-            .with_context(|| format!("branch {}", m.branch))
-            .and_then(|at| {
-                let parent = (git::resolve(&m.parent))
-                    .with_context(|| format!("its parent {}", m.parent))?;
-                Ok((at, parent))
-            });
-        let (at, parent) = match refs {
-            Ok(refs) => refs,
-            Err(e) => {
-                out.skipped.push((m.branch.clone(), format!("{e:#}")));
-                continue;
-            }
+        let full = format!("refs/heads/{}", m.branch);
+        let exists = |full: &str| git::full_ref(full).as_deref() == Some(full);
+        // Deleted since the tree was read (or its parent was): left out,
+        // with what is built on it, whose work is measured against it.
+        let why = if !exists(&full) {
+            Some(format!("no branch {}", m.branch))
+        } else if let Some(parent) = (out.skipped.iter())
+            .find(|(skipped, _)| m.parent.strip_prefix("refs/heads/") == Some(skipped))
+        {
+            Some(format!("built on {}, left out", parent.0))
+        } else if !exists(&m.parent) {
+            Some(format!("its parent {} is gone", m.parent))
+        } else {
+            None
         };
+        if let Some(why) = why {
+            out.skipped.push((m.branch.clone(), why));
+            continue;
+        }
+        let (at, parent) = (resolve(&full)?, resolve(&m.parent)?);
         let merge_point = match merge_base(at.id, parent.id)? {
             Some(base) => store.load_tree(git::with_repo(|repo| commit_tree(repo, base))?)?,
             None => EMPTY_TREE,
@@ -202,24 +212,45 @@ mod tests {
             branch: "m1-gone".into(),
             parent: "refs/heads/m1-main".into(),
         };
+        let on_gone = BuiltOn {
+            branch: "m1-ui".into(),
+            parent: "refs/heads/m1-gone".into(),
+        };
+        branch("m1-ui", &local);
         let orphan = BuiltOn {
             branch: "m1-api".into(),
             parent: "refs/heads/m1-nosuch".into(),
         };
         let remote = Some("refs/remotes/origin/m1-main");
         let tree_of = |c: &str| store.load_tree(git::resolve(c).unwrap().tree).unwrap();
-        let c = committed(&store, "m1-main", remote, &[api, gone, orphan]).unwrap();
+        let c = committed(&store, "m1-main", remote, &[api, gone, on_gone, orphan]).unwrap();
         assert_eq!(
             c.files.tree,
             tree_of(&ahead),
             "local main only behind: origin's"
         );
         assert_eq!(names_of(&c), ["m1-api"]);
-        let skipped: Vec<&str> = c.skipped.iter().map(|(b, _)| b.as_str()).collect();
-        assert_eq!(skipped, ["m1-gone", "m1-api"]);
-        assert!(c.skipped[1].1.contains("m1-nosuch"), "{}", c.skipped[1].1);
+        let skipped: Vec<(&str, &str)> = (c.skipped.iter())
+            .map(|(b, why)| (b.as_str(), why.as_str()))
+            .collect();
+        assert_eq!(
+            skipped,
+            [
+                ("m1-gone", "no branch m1-gone"),
+                ("m1-ui", "built on m1-gone, left out"),
+                ("m1-api", "its parent refs/heads/m1-nosuch is gone"),
+            ]
+        );
 
-        // Local main with its own commit: its own files.
+        // The same commit, or local main ahead: its own files.
+        branch("m1-main", &ahead);
+        let c = committed(&store, "m1-main", remote, &[]).unwrap();
+        assert_eq!(c.files.tree, tree_of(&ahead));
+        let further = commit(Some(&ahead), &[("c", Some("c\n"))]);
+        branch("m1-main", &further);
+        let c = committed(&store, "m1-main", remote, &[]).unwrap();
+        assert_eq!(c.files.tree, tree_of(&further));
+        // Local main with its own commit, origin with others: its own files.
         let own = commit(Some(&local), &[("b", Some("b\n"))]);
         branch("m1-main", &own);
         let c = committed(&store, "m1-main", remote, &[]).unwrap();
@@ -230,9 +261,9 @@ mod tests {
     fn origins_root() {
         let c = commit(None, &[("a", Some("1\n"))]);
         let t = Tree::of(Default::default(), Some("m2-main".into()), |_| true);
-        assert_eq!(origin_root(&t, "m2-main"), None, "no origin/m2-main yet");
-        remote_branch("origin/m2-main", &c);
         remote_branch("upstream/m2-main", &c);
+        assert_eq!(origin_root(&t, "m2-main"), None, "only origin's counts");
+        remote_branch("origin/m2-main", &c);
         let full = Some("refs/remotes/origin/m2-main".to_string());
         assert_eq!(origin_root(&t, "m2-main"), full);
         assert_eq!(origin_root(&t, "m2-api"), None, "not the root");
