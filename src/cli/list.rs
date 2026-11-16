@@ -1,12 +1,14 @@
 //! `gitfold list` (the workspaces, their changes and activity) and `gitfold
-//! changes` (one workspace's changed paths).
+//! changes` (one workspace's changed paths; with `-- PATH`, who is changing
+//! those paths).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use super::write_path;
 use crate::git;
@@ -68,6 +70,184 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     }
     out.flush()?;
     Ok(())
+}
+
+/// How a branch is changing a path (`changes -- PATH`).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Kind {
+    /// In a commit on the branch, not yet in main.
+    Committed,
+    /// In its workspace, not committed.
+    Uncommitted,
+}
+
+/// `gitfold changes -- PATH…`: who is changing `paths`, one line per branch
+/// and path, `BRANCH\tcommitted|uncommitted\tPATH`, sorted by path. Paths
+/// are typed as git takes pathspecs (relative to the current directory,
+/// taken literally) and printed from the repository's root, as `git diff
+/// --name-only` prints them; a directory stands for everything below it.
+/// Committed: the branch's own commits (since it diverged from its parent,
+/// if that still exists, else from main: `git::default_compare_target`) on
+/// branches not merged into main; with no main branch, only uncommitted.
+/// Uncommitted: what `gitfold changes` says of each workspace.
+pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
+    let (top, prefix) = work_tree_position()?;
+    let paths = (args.paths.iter())
+        .map(|p| in_tree(top.as_deref(), &prefix, p))
+        .collect::<Result<Vec<_>>>()?;
+    let common_dir = git::init(repo)?;
+    let mut lines = BTreeSet::new();
+    match git::default_compare_target(&common_dir) {
+        Ok(main) => committed(&common_dir, &main, &paths, &mut lines)?,
+        Err(_) => eprintln!(
+            "note: no main branch (no origin/HEAD, and no branch main): uncommitted changes only"
+        ),
+    }
+    let store = Store::default();
+    for w in state::list(&common_dir)? {
+        if !w.state.opened() {
+            continue;
+        }
+        let s = match status::status(&store, &w.state) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skipping workspace {}: {e:#}", w.branch);
+                continue;
+            }
+        };
+        let mut found = false;
+        for path in s.changed.iter().chain(&s.deleted) {
+            if paths.iter().any(|q| below(path, q.as_bytes())) {
+                lines.insert((path.clone(), w.branch.clone(), Kind::Uncommitted));
+                found = true;
+            }
+        }
+        let note = base_note(&w.branch, &s.base);
+        if found && !note.is_empty() {
+            eprintln!(
+                "note: {}: {note}; changes are against the stored base",
+                w.branch
+            );
+        }
+    }
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    for (path, branch, kind) in &lines {
+        let kind = match kind {
+            Kind::Committed => "committed",
+            Kind::Uncommitted => "uncommitted",
+        };
+        write!(out, "{branch}\t{kind}\t")?;
+        write_path(&mut out, path, args.nul)?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Adds to `lines` the paths below `paths` that each branch not merged into
+/// `main` changed in its own commits: since it diverged from its parent, if
+/// that still exists, else from `main`.
+fn committed(
+    common_dir: &Path,
+    main: &str,
+    paths: &[String],
+    lines: &mut BTreeSet<(Vec<u8>, String, Kind)>,
+) -> Result<()> {
+    let tree = crate::tree::Tree::read(common_dir)?;
+    let no_merged = format!("--no-merged={main}");
+    let refs = git::cmd::output(
+        common_dir,
+        &[
+            "for-each-ref",
+            &no_merged,
+            "--format=%(refname)",
+            "refs/heads",
+        ],
+    )?;
+    let pathspecs: Vec<&str> = (paths.iter())
+        .map(|p| if p.is_empty() { "." } else { p.as_str() })
+        .collect();
+    for full in refs.split(|b| *b == b'\n').filter(|r| !r.is_empty()) {
+        let full = std::str::from_utf8(full)?;
+        let Some(branch) = full.strip_prefix("refs/heads/") else {
+            continue;
+        };
+        let from = match tree.parent(branch) {
+            Some(parent) if git::resolve(parent).is_ok() => parent,
+            _ => main,
+        };
+        let range = format!("{from}...{full}");
+        let mut args = vec![
+            "--literal-pathspecs",
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            &range,
+            "--",
+        ];
+        args.extend(&pathspecs);
+        for path in git::cmd::output(common_dir, &args)?.split(|b| *b == 0) {
+            if !path.is_empty() {
+                lines.insert((path.to_vec(), branch.to_string(), Kind::Committed));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The top of the work tree the current directory is in, if any, and where
+/// in it the current directory is (empty: the top, or no work tree), as git
+/// finds them.
+fn work_tree_position() -> Result<(Option<PathBuf>, PathBuf)> {
+    let cwd = std::env::current_dir()?;
+    let top = gix::discover::upwards(&cwd)
+        .ok()
+        .and_then(|(path, _)| path.into_repository_and_work_tree_directories().1);
+    let prefix = (top.as_deref())
+        .and_then(|top| cwd.strip_prefix(top).ok())
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    Ok((top, prefix))
+}
+
+/// `typed`, a path typed in directory `prefix` of the work tree at `top`,
+/// as a path from its root (empty: the root itself), resolved as git
+/// resolves pathspecs: `.` and `..` lexically, an absolute path only within
+/// the work tree.
+fn in_tree(top: Option<&Path>, prefix: &Path, typed: &str) -> Result<String> {
+    let typed_path = Path::new(typed);
+    let joined = match typed_path.is_absolute() {
+        true => match top.and_then(|top| typed_path.strip_prefix(top).ok()) {
+            Some(rest) => rest.to_path_buf(),
+            None => bail!("{typed}: outside the repository's work tree"),
+        },
+        false => prefix.join(typed_path),
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.components() {
+        match part {
+            Component::Normal(name) => match name.to_str() {
+                Some(name) => parts.push(name),
+                None => bail!("{typed}: a directory above it isn't UTF-8"),
+            },
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    bail!("{typed}: outside the repository's work tree");
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    Ok(parts.join("/"))
+}
+
+/// Whether `path` is `dir` or below it (`dir` empty: the root, everything).
+fn below(path: &[u8], dir: &[u8]) -> bool {
+    dir.is_empty()
+        || path
+            .strip_prefix(dir)
+            .is_some_and(|rest| rest.is_empty() || rest[0] == b'/')
 }
 
 /// The summary `git diff --shortstat` prints: ` 2 files changed, 3
@@ -218,6 +398,42 @@ mod tests {
             " 3 files changed, 2 insertions(+), 1 deletion(-)"
         );
         assert_eq!(shortstat(1, (0, 0)), " 1 file changed");
+    }
+
+    #[test]
+    fn paths_as_git_takes_pathspecs() {
+        let top = Some(Path::new("/w/ws"));
+        let at = |prefix: &str, typed: &str| in_tree(top, Path::new(prefix), typed).ok();
+        assert_eq!(at("", "a/b.txt").as_deref(), Some("a/b.txt"));
+        assert_eq!(
+            at("src", "x.rs").as_deref(),
+            Some("src/x.rs"),
+            "cwd-relative"
+        );
+        assert_eq!(at("src/a", "../b/./c").as_deref(), Some("src/b/c"));
+        assert_eq!(at("src", "..").as_deref(), Some(""), "the root");
+        assert_eq!(at("", ".").as_deref(), Some(""));
+        assert_eq!(at("", "d/").as_deref(), Some("d"), "a trailing slash");
+        assert_eq!(at("src", "/w/ws/d/e").as_deref(), Some("d/e"), "absolute");
+        assert_eq!(at("", "/w/ws").as_deref(), Some(""));
+        assert_eq!(at("", ".."), None, "above the root");
+        assert_eq!(at("src", "../.."), None);
+        assert_eq!(at("", "/w/other/x"), None, "another tree");
+        assert_eq!(
+            in_tree(None, Path::new(""), "/x").ok(),
+            None,
+            "no work tree"
+        );
+        assert_eq!(in_tree(None, Path::new(""), "x").ok().as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn below_a_path() {
+        assert!(below(b"src/a.rs", b"src"));
+        assert!(below(b"src", b"src"));
+        assert!(below(b"x", b""), "the root: everything");
+        assert!(!below(b"srcx", b"src"), "a sibling with a common prefix");
+        assert!(!below(b"src", b"src/a.rs"), "not above");
     }
 
     #[test]
