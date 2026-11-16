@@ -42,6 +42,12 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     }
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
+    if with_changes || from.len() > 1 {
+        // Checked before the work: `git branch` checks names itself only at
+        // the end, and `update-ref` (a fork's) would take `HEAD`.
+        let valid = git::cmd::output(&common_dir, &["check-ref-format", "--branch", name]);
+        ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
+    }
     if from.len() > 1 {
         let done = merged(repo, &common_dir, name, &from)?;
         set_branch_settings(repo, name, prewarm, track_reads)?;
@@ -50,10 +56,6 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     }
     let from = from.into_iter().next();
     if with_changes {
-        // `git branch` checks names itself; `update-ref` would take `HEAD`, and
-        // refuse other bad names only after the copy.
-        let valid = git::cmd::output(&common_dir, &["check-ref-format", "--branch", name]);
-        ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
         // A workspace to copy: `from`, or the one we are in.
         let source = super::branch_or_current(from, repo).map_err(|_| {
             anyhow::anyhow!("not in a gitfold workspace: name the source with --from")
@@ -102,15 +104,13 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
 /// where. The branch keeps no relation to them. A conflict, which would
 /// leave a merge in progress, isn't built yet.
 fn merged(repo: &Path, common_dir: &Path, name: &str, from: &[String]) -> Result<String> {
-    // Checked before merging; `git branch` checks again at the end.
-    let valid = git::cmd::output(common_dir, &["check-ref-format", "--branch", name]);
-    ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
+    // Before merging; `git branch` checks again at the end.
     ensure!(
         !git::branch_exists(name),
         "a branch named '{name}' already exists"
     );
     let sources = (from.iter())
-        .map(|rev| merge::source(common_dir, rev))
+        .map(|rev| merge::source(rev))
         .collect::<Result<Vec<_>>>()?;
     // The names of the sources but those at commit `except`, each once.
     let names = |except: Option<&str>| {

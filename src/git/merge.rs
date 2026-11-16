@@ -6,11 +6,9 @@
 //! `git merge-tree`. Only the last step may conflict, as for the octopus.
 //! The commit is `git commit-tree`'s, with `git fmt-merge-msg`'s message.
 
-use std::io::Write;
 use std::path::Path;
-use std::process::Stdio;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use super::cmd;
 
@@ -33,28 +31,13 @@ pub enum Merged {
     Conflict,
 }
 
-/// The commit `rev` stands for, as `git merge` takes it.
-pub fn source(common_dir: &Path, rev: &str) -> Result<Source> {
-    let spec = format!("{rev}^{{commit}}");
-    let out = cmd::output(
-        common_dir,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            "--end-of-options",
-            &spec,
-        ],
-    )
-    .ok()
-    .and_then(|out| first_line(&out));
-    match out {
-        Some(id) => Ok(Source {
-            name: rev.to_string(),
-            id,
-        }),
-        None => bail!("{rev} - not something we can merge"),
-    }
+/// The commit `rev` stands for.
+pub fn source(rev: &str) -> Result<Source> {
+    let commit = super::resolve(rev).map_err(|_| anyhow!("{rev} - not something we can merge"))?;
+    Ok(Source {
+        name: rev.to_string(),
+        id: commit.id.to_string(),
+    })
 }
 
 /// Merges `sources` (at least two; the first is where the branch starts) for
@@ -86,43 +69,36 @@ pub fn merge(common_dir: &Path, into: &str, sources: &[Source]) -> Result<Merged
         .chain(remotes.iter().copied())
         .map(|s| s.id.as_str())
         .collect();
-    let common = merge_bases(common_dir, "--octopus", &all)?;
-    ensure!(!common.is_empty(), "refusing to merge unrelated histories");
+    ensure!(
+        !merge_bases(common_dir, "--octopus", &all)?.is_empty(),
+        "refusing to merge unrelated histories"
+    );
     if let [remote] = remotes[..]
-        && common == [head.id.as_str()]
+        && head_subsumed
     {
         let at = sources.iter().position(|s| s.id == remote.id);
         return Ok(Merged::FastForward(at.expect("a source")));
     }
     // git-merge-octopus.sh (with one remote, the same as a two-way merge): the
-    // commits merged so far (`MRC`) and their merge (`ours`, a commit).
+    // commits merged so far (`MRC`), their merge (`ours`, a commit) and its
+    // tree once a step merged (none while only fast-forwards).
     let mut merged = vec![head.id.clone()];
     let mut ours = head.id.clone();
     let mut tree: Option<String> = None;
-    let mut non_ff = false;
-    let mut failed: Option<&str> = None;
-    for remote in &remotes {
-        if let Some(name) = failed {
-            bail!(
-                "merging {name}: automated merge did not work, and more --from follow. \
-                 Should not be doing an octopus: only the last --from may conflict"
-            );
-        }
+    for (i, remote) in remotes.iter().enumerate() {
         let mut args = vec![remote.id.as_str()];
         args.extend(merged.iter().map(String::as_str));
         let common = merge_bases(common_dir, "--all", &args)?;
         if common.contains(&remote.id) {
             continue; // "Already up to date with" it.
         }
-        if !non_ff && common == [merged[0].as_str()] {
+        if tree.is_none() && common == [merged[0].as_str()] {
             // The first head merged was a fast-forward: its tree is the result
             // so far, and it still counts among the parents.
             merged = vec![remote.id.clone()];
             ours = remote.id.clone();
-            tree = None;
             continue;
         }
-        non_ff = true;
         if let Some(t) = &tree {
             // `merge-tree` finds the merge bases of the commits merged so far
             // and the next itself, from a commit of their merge.
@@ -130,20 +106,18 @@ pub fn merge(common_dir: &Path, into: &str, sources: &[Source]) -> Result<Merged
         }
         match merge_tree(common_dir, &ours, &remote.id)? {
             Some(t) => tree = Some(t),
-            None => failed = Some(remote.name.as_str()),
+            None if i + 1 == remotes.len() => return Ok(Merged::Conflict),
+            None => bail!(
+                "merging {}: automated merge did not work, and more --from follow. Should \
+                 not be doing an octopus: only the last --from may conflict",
+                remote.name
+            ),
         }
         merged.push(remote.id.clone());
     }
-    if failed.is_some() {
-        return Ok(Merged::Conflict);
-    }
     let tree = match tree {
         Some(tree) => tree,
-        None => first_line(&cmd::output(
-            common_dir,
-            &["rev-parse", "--verify", &format!("{ours}^{{tree}}")],
-        )?)
-        .context("no tree")?,
+        None => super::resolve(&ours)?.tree.to_string(),
     };
     let mut parents: Vec<String> = Vec::new();
     if !head_subsumed {
@@ -157,35 +131,20 @@ pub fn merge(common_dir: &Path, into: &str, sources: &[Source]) -> Result<Merged
 
 /// `git merge-base <how> <commits>`: none if they have no common ancestor.
 fn merge_bases(common_dir: &Path, how: &str, commits: &[&str]) -> Result<Vec<String>> {
-    let mut command = cmd::command(common_dir);
-    command.args(["merge-base", how]).args(commits);
-    let out = command.output()?;
-    match out.status.code() {
-        Some(0) => Ok(lines(&out.stdout)),
-        // No common ancestor.
-        Some(1) if out.stdout.is_empty() => Ok(Vec::new()),
-        _ => bail!(
-            "git merge-base failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-    }
+    let mut args = vec!["merge-base", how];
+    args.extend(commits);
+    // Exit 1: no common ancestor.
+    let (_, out) = cmd::output_or_no(common_dir, &args)?;
+    Ok(lines(&out))
 }
 
 /// The tree `git merge-tree` makes of commits `ours` and `theirs`, if they
 /// merge without conflicts.
 fn merge_tree(common_dir: &Path, ours: &str, theirs: &str) -> Result<Option<String>> {
-    let out = cmd::command(common_dir)
-        .args(["merge-tree", "--write-tree", "--no-messages", ours, theirs])
-        .output()?;
-    match out.status.code() {
-        Some(0) => Ok(Some(first_line(&out.stdout).context("no tree")?)),
-        Some(1) => Ok(None),
-        _ => bail!(
-            "git merge-tree failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
+    let args = ["merge-tree", "--write-tree", "--no-messages", ours, theirs];
+    match cmd::output_or_no(common_dir, &args)? {
+        (true, out) => Ok(Some(first_line(&out).context("no tree")?)),
+        (false, _) => Ok(None),
     }
 }
 
@@ -195,7 +154,7 @@ fn commit_tree(common_dir: &Path, tree: &str, parents: &[String], message: &str)
     for p in parents {
         args.extend(["-p", p.as_str()]);
     }
-    let out = with_stdin(common_dir, &args, message.as_bytes())?;
+    let out = cmd::output_with_input(common_dir, &args, message.as_bytes())?;
     first_line(&out).context("git commit-tree printed no commit")
 }
 
@@ -205,11 +164,8 @@ fn commit_tree(common_dir: &Path, tree: &str, parents: &[String], message: &str)
 /// Without `merge.log`'s shortlog: `fmt-merge-msg` takes it against the HEAD
 /// of the repository, not the branch made here.
 fn message(common_dir: &Path, into: &str, remotes: &[&Source]) -> Result<String> {
-    let mut input = String::new();
-    for remote in remotes {
-        input.push_str(&merge_name(common_dir, remote)?);
-    }
-    let out = with_stdin(
+    let input: String = remotes.iter().map(|r| merge_name(r)).collect();
+    let out = cmd::output_with_input(
         common_dir,
         &["fmt-merge-msg", "--no-log", "--into-name", into],
         input.as_bytes(),
@@ -218,33 +174,38 @@ fn message(common_dir: &Path, into: &str, remotes: &[&Source]) -> Result<String>
 }
 
 /// The line `git merge` writes for `fmt-merge-msg` about `source` (builtin/
-/// merge.c, `merge_name`): a branch, tag or remote-tracking branch by the
-/// ref the name stands for; `<branch>~<n>` or `<branch>^` as the branch's
-/// "early part"; any other revision as a commit.
-fn merge_name(common_dir: &Path, source: &Source) -> Result<String> {
+/// merge.c, `merge_name`; no plumbing writes it): a branch, tag or
+/// remote-tracking branch by the ref the name stands for; `<branch>~<n>` or
+/// `<branch>^` as the branch's "early part"; any other revision as a commit.
+fn merge_name(source: &Source) -> String {
     let name = &source.name;
-    if let Some(full) = super::full_ref(name) {
-        let kind = [
-            ("refs/heads/", "branch"),
-            ("refs/tags/", "tag"),
-            ("refs/remotes/", "remote-tracking branch"),
-        ]
-        .into_iter()
-        .find_map(|(prefix, kind)| full.starts_with(prefix).then_some(kind));
-        if let Some(kind) = kind {
-            // The ref's own object: an annotated tag's, whose message git adds.
-            let id = first_line(&cmd::output(common_dir, &["rev-parse", "--verify", &full])?)
-                .context("no object")?;
-            return Ok(format!("{id}\t\t{kind} '{name}' of .\n"));
-        }
+    let kinds = [
+        ("refs/heads/", "branch"),
+        ("refs/tags/", "tag"),
+        ("refs/remotes/", "remote-tracking branch"),
+    ];
+    if let Some(full) = super::full_ref(name)
+        && let Some((_, kind)) = kinds.iter().find(|(prefix, _)| full.starts_with(prefix))
+        // The ref's own object: an annotated tag's, whose message git adds.
+        && let Some(id) = ref_target(&full)
+    {
+        return format!("{id}\t\t{kind} '{name}' of .\n");
     }
     if let Some((branch, early)) = early_part(name)
         && super::branch_exists(branch)
     {
         let early = if early { " (early part)" } else { "" };
-        return Ok(format!("{}\t\tbranch '{branch}'{early} of .\n", source.id));
+        return format!("{}\t\tbranch '{branch}'{early} of .\n", source.id);
     }
-    Ok(format!("{}\t\tcommit '{name}'\n", source.id))
+    format!("{}\t\tcommit '{name}'\n", source.id)
+}
+
+/// The object ref `full` points at, not peeled.
+fn ref_target(full: &str) -> Option<String> {
+    super::with_repo(|repo| {
+        let reference = repo.find_reference(full).ok()?;
+        Some(reference.target().try_id()?.to_string())
+    })
 }
 
 /// `name` as `<branch>^…` or `<branch>~<n>`: the branch, and whether it is
@@ -259,26 +220,6 @@ fn early_part(name: &str) -> Option<(&str, bool)> {
         return None;
     }
     Some((branch, n.is_empty() || n.bytes().any(|b| b != b'0')))
-}
-
-/// Runs git with `args` and `input` on its stdin; what it printed.
-fn with_stdin(common_dir: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = cmd::command(common_dir)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child.stdin.take().expect("piped").write_all(input)?;
-    let out = child.wait_with_output()?;
-    ensure!(
-        out.status.success(),
-        "git {} failed ({}): {}",
-        args.join(" "),
-        out.status,
-        String::from_utf8_lossy(&out.stderr).trim()
-    );
-    Ok(out.stdout)
 }
 
 fn lines(out: &[u8]) -> Vec<String> {
