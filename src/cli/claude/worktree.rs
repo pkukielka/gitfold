@@ -42,7 +42,7 @@ pub fn worktree_create() -> Result<()> {
     let exists = git::branch_exists(&branch);
     let mount = match mount_table::mount_of(&common_dir)? {
         Some(mount) => Some(mount),
-        None if state_root(&common_dir).exists() => Some(mount_again(&common_dir)?),
+        None if state_root(&common_dir).exists() => Some(mount_again_or_refuse(&common_dir)?),
         None => None,
     };
     let path = match mount {
@@ -87,7 +87,7 @@ pub fn worktree_create() -> Result<()> {
 
 /// Mounts the repository of `common_dir` again where it last was (see
 /// `mount::mount_again`), or refuses: it is used with gitfold.
-fn mount_again(common_dir: &Path) -> Result<PathBuf> {
+fn mount_again_or_refuse(common_dir: &Path) -> Result<PathBuf> {
     let mountpoint = settings::Local::read(common_dir)
         .mountpoint()
         .with_context(|| {

@@ -92,11 +92,15 @@ check "  nothing left behind" nothing_of c
 R config --unset merge.ff
 check "an unknown revision: git's refusal" says 1 "not something we can merge" branch c --from api --from nosuch
 check "  nothing left behind" nothing_of c
-check "an unknown first revision: git branch's refusal" says 1 "not a valid object name" branch c --from nosuch --from api
+check "an unknown first revision: refused as git merge refuses it" says 1 "nosuch - not something we can merge" branch c --from nosuch --from api
 check "  nothing left behind" nothing_of c
 check "an existing branch" says 1 "a branch named 'ui' already exists" branch ui --from api --from x
 check "refused with --prewarm: the setting goes too" says 1 "refusing to merge unrelated histories" branch c --from api --from lone --prewarm none
 eq "  no setting left" "" "$(R config --get branch.c.gitfoldPrewarm)"
+R config branch.c.gitfoldTrackReads true
+check "refused without settings given: settings found there stay" says 1 "refusing to merge" branch c --from api --from lone
+eq "  still there" true "$(R config --get branch.c.gitfoldTrackReads)"
+R config --unset branch.c.gitfoldTrackReads
 check "-w with several: not implemented yet" says 1 "not implemented yet" branch c -w --from api --from ui
 check "  nothing left behind" nothing_of c
 }
@@ -125,9 +129,28 @@ eq "  nothing conflicts" "" "$(W h diff --name-only --diff-filter=U)"
 rm "$COMMON/hooks/pre-merge-commit"
 }
 
+names() {
+setup
+ls "$MNT/ui" >/dev/null
+# gitfold as run in a workspace: its HEAD, its names.
+in_ui() { (cd "$MNT/ui" && "$BIN" "$@" 2>&1); }
+check "HEAD where the user stands, not in the new workspace" in_ui branch h --from api --from HEAD
+eq "  as git merge makes it (named as git names it)" "$(git_merge h api ui)" "$(made h)"
+check "a revision named relative to a branch" says 0 "created branch t" branch t --from x --from ui~0
+eq "  as git merge makes it" "$(git_merge t x ui~0)" "$(made t)"
+W ui commit -q --allow-empty -m more
+check "HEAD~1 where the user stands: its commit" in_ui branch p --from api --from HEAD~1
+eq "  merged" "$(R rev-parse api ui~1 | tr '\n' ' ')" "$(R log -1 --format=%P p | tr ' ' '\n' | tr '\n' ' ')"
+R config merge.ff true
+check "configuration given in the environment applies (git -c)" sh -c "GIT_CONFIG_PARAMETERS=\"'merge.ff'='false'\" '$BIN' -C '$REPO' branch n --from main --from api"
+eq "  a merge, not a fast-forward" 2 "$(R log -1 --format=%P n | wc -w)"
+}
+
 unmounted() {
 setup
 unmount_fs
+check "unmounted, an unknown revision: refused before mounting" says 1 "nosuch - not something we can merge" branch c --from api --from nosuch
+check "  nothing mounted" fails mountpoint -q "$MNT"
 check "unmounted: mounted again where it was, then merged" says 0 "created branch c; open it as $MNT/c" branch c --from api --from ui
 check "  the mount stays" mountpoint -q "$MNT"
 eq "  as git merge makes it" "$(git_merge c api ui)" "$(made c)"
@@ -137,5 +160,6 @@ eq "  as git merge makes it" "$(git_merge c api ui)" "$(made c)"
 section "from: clean merges, as git makes them" clean_merges
 section "from: refused: nothing left" refused
 section "from: conflicts: git's merge in progress" conflicts
+section "from: names, as where the user stands" names
 section "from: unmounted" unmounted
 finish
