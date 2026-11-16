@@ -10,10 +10,13 @@ use gix::merge::blob::builtin_driver::{self, text};
 pub use text::ConflictStyle;
 
 /// What a merge made.
-pub struct Merged {
-    pub data: Vec<u8>,
-    /// Whether conflicts remain (as markers in `data`).
-    pub conflict: bool,
+#[derive(Debug, PartialEq)]
+pub enum Merged {
+    Clean(Vec<u8>),
+    /// With conflicts kept as markers.
+    Markers(Vec<u8>),
+    /// Nothing: a side is binary (as git decides it).
+    Binary,
 }
 
 /// The merge of `ours` and `theirs`, both changed from `base`: conflicting
@@ -27,6 +30,9 @@ pub fn merge3(
     theirs_label: &str,
     style: ConflictStyle,
 ) -> Merged {
+    if [base, ours, theirs].iter().any(|d| is_binary(d)) {
+        return Merged::Binary;
+    }
     let mut input = gix::diff::blob::InternedInput::default();
     let mut data = Vec::new();
     let labels = text::Labels {
@@ -43,16 +49,14 @@ pub fn merge3(
         },
         ..Default::default()
     };
-    let resolution =
-        builtin_driver::text(&mut data, &mut input, labels, ours, base, theirs, options);
-    Merged {
-        data,
-        conflict: matches!(resolution, Resolution::Conflict),
+    match builtin_driver::text(&mut data, &mut input, labels, ours, base, theirs, options) {
+        Resolution::Conflict => Merged::Markers(data),
+        Resolution::Complete | Resolution::CompleteWithAutoResolvedConflict => Merged::Clean(data),
     }
 }
 
 /// Whether git takes `data` for binary: a NUL in its first 8000 bytes.
-pub fn is_binary(data: &[u8]) -> bool {
+fn is_binary(data: &[u8]) -> bool {
     data[..data.len().min(8000)].contains(&0)
 }
 
@@ -61,13 +65,11 @@ pub fn is_binary(data: &[u8]) -> bool {
 /// `zdiff3`), as git itself reads it (the user's config included, which the
 /// daemon's repository handle has as it was at mount time).
 pub fn conflict_style(common_dir: &Path) -> ConflictStyle {
-    let out = crate::git::cmd::command(common_dir)
-        .args(["config", "--get", "merge.conflictStyle"])
-        .output();
-    let style = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    match style.as_deref() {
-        Ok("diff3") => ConflictStyle::Diff3,
-        Ok("zdiff3") => ConflictStyle::ZealousDiff3,
+    let args = ["config", "--get", "merge.conflictStyle"];
+    // Unset: git exits 1.
+    match crate::git::cmd::output(common_dir, &args).ok().as_deref() {
+        Some(b"diff3\n") => ConflictStyle::Diff3,
+        Some(b"zdiff3\n") => ConflictStyle::ZealousDiff3,
         _ => ConflictStyle::Merge,
     }
 }
@@ -76,44 +78,31 @@ pub fn conflict_style(common_dir: &Path) -> ConflictStyle {
 mod tests {
     use super::*;
 
+    fn text(merged: Merged) -> String {
+        match merged {
+            Merged::Clean(data) | Merged::Markers(data) => String::from_utf8(data).unwrap(),
+            Merged::Binary => panic!("binary"),
+        }
+    }
+
     #[test]
     fn clean_and_conflicting() {
         let base = b"a\nb\nc\n";
-        let m = merge3(
-            base,
-            b"A\nb\nc\n",
-            b"a\nb\nC\n",
-            "api",
-            "ui",
-            ConflictStyle::Merge,
-        );
-        assert!(!m.conflict);
-        assert_eq!(m.data, b"A\nb\nC\n");
+        let style = ConflictStyle::Merge;
+        let m = merge3(base, b"A\nb\nc\n", b"a\nb\nC\n", "api", "ui", style);
+        assert_eq!(m, Merged::Clean(b"A\nb\nC\n".to_vec()));
 
-        let m = merge3(
-            base,
-            b"a\nX\nc\n",
-            b"a\nY\nc\n",
-            "api",
-            "ui",
-            ConflictStyle::Merge,
-        );
-        assert!(m.conflict);
-        let text = String::from_utf8(m.data).unwrap();
+        let m = merge3(base, b"a\nX\nc\n", b"a\nY\nc\n", "api", "ui", style);
+        assert!(matches!(m, Merged::Markers(_)));
         assert_eq!(
-            text, "a\n<<<<<<< api\nX\n=======\nY\n>>>>>>> ui\nc\n",
+            text(m),
+            "a\n<<<<<<< api\nX\n=======\nY\n>>>>>>> ui\nc\n",
             "git's markers, named by branch"
         );
 
-        let m = merge3(
-            base,
-            b"a\nX\nc\n",
-            b"a\nY\nc\n",
-            "api",
-            "ui",
-            ConflictStyle::Diff3,
-        );
-        let text = String::from_utf8(m.data).unwrap();
+        let style = ConflictStyle::Diff3;
+        let m = merge3(base, b"a\nX\nc\n", b"a\nY\nc\n", "api", "ui", style);
+        let text = text(m);
         assert!(text.contains("||||||| base\nb\n"), "{text}");
     }
 
@@ -129,7 +118,8 @@ mod tests {
 
     #[test]
     fn binary() {
-        assert!(is_binary(b"a\0b"));
+        let style = ConflictStyle::Merge;
+        assert_eq!(merge3(b"a", b"a\0b", b"c", "", "", style), Merged::Binary);
         assert!(!is_binary(b"text\n"));
         let mut late = vec![b'a'; 8000];
         late.push(0);

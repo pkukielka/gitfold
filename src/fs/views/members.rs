@@ -30,13 +30,12 @@ pub fn members(
     opened: impl Fn(&str) -> bool,
 ) -> Vec<BuiltOn> {
     let is_root = tree.root() == Some(branch);
-    let names = match is_root {
-        true => {
-            let mut refs = vec![format!("refs/heads/{branch}")];
-            refs.extend(remote_root.map(String::from));
-            tree.built_on(&refs)
-        }
-        false => tree.subtree(branch),
+    let names = if is_root {
+        let mut refs = vec![format!("refs/heads/{branch}")];
+        refs.extend(remote_root.map(String::from));
+        tree.built_on(&refs)
+    } else {
+        tree.subtree(branch)
     };
     (names.into_iter())
         .filter(|name| !is_root || opened(name))
@@ -63,8 +62,8 @@ pub fn committed(store: &Store, branch: &str, members: &[BuiltOn]) -> Result<(Fi
     for m in members {
         let at = tip(&m.branch)?;
         let parent = git::resolve(&m.parent).with_context(|| format!("parent {}", m.parent))?;
-        let merge_point = match merge_base(at.id, parent.id)? {
-            Some(base) => store.load_tree(git::resolve(&base.to_string())?.tree)?,
+        let merge_point = match merge_base_tree(at.id, parent.id)? {
+            Some(tree) => store.load_tree(tree)?,
             None => EMPTY_TREE,
         };
         out.push(Member {
@@ -76,9 +75,15 @@ pub fn committed(store: &Store, branch: &str, members: &[BuiltOn]) -> Result<(Fi
     Ok((own, out))
 }
 
-/// The best merge base of commits `a` and `b`, as `git merge-base` finds it.
-fn merge_base(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
-    git::with_repo(|repo| Ok(repo.merge_base(a, b)?.map(|id| id.detach())))
+/// The tree of the best merge base of commits `a` and `b`, as `git
+/// merge-base` finds it.
+fn merge_base_tree(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
+    git::with_repo(|repo| {
+        let Some(base) = repo.merge_base(a, b)? else {
+            return Ok(None);
+        };
+        Ok(Some(base.object()?.peel_to_commit()?.tree_id()?.detach()))
+    })
 }
 
 #[cfg(test)]
