@@ -103,6 +103,8 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         return Err(refused("gitfold parent", &given, "", r));
     };
     let refuse = |parent: &str, r| refused("gitfold parent", &name, parent, r);
+    // A move a crash interrupted is finished first: the tree as it left it.
+    follow::settle(&common_dir, &name)?;
     let tree = Tree::read(&common_dir)?;
     if let Some(parent) = &args.set {
         let full = tree.check(&name, parent).map_err(|r| refuse(parent, r))?;
@@ -267,11 +269,15 @@ fn set(common_dir: &Path, tree: &Tree, name: &str, full: &str, follow: Option<bo
     if let follow::Moved::Pushed(pushed) = &moved {
         // Built on P without the move: its own commits start where they
         // did, until `--update --yes` moves them.
-        follow::set_base(common_dir, name, plan.base)?;
-        settings::set_parent(common_dir, name, full)?;
-        settings::set_follow(common_dir, name, follow)?;
+        let outcome = follow::Outcome {
+            from: plan.tip,
+            onto: plan.base,
+            parent: Some((full.to_string(), follow)),
+        };
+        outcome.finish(common_dir, name)?;
+        let paused = if follow { "following paused: " } else { "" };
         println!(
-            "{name} is now built on {short}; following paused: {}",
+            "{name} is now built on {short}; {paused}{}",
             pushed_said(name, pushed)
         );
         return Ok(());

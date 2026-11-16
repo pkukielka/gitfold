@@ -11,11 +11,13 @@
 //!   the parent's reflog), else their merge base. A branch without a parent
 //!   owns what isn't on the root (local or remote-tracking).
 //! - **Crash safety:** before the rebase, one record (`gitfoldMoving`, see
-//!   `settings::set_moving`) holds the whole outcome: the commit it moves
-//!   onto, and for `--set` the new parent and following. After, they are
-//!   written (`finish`) and it goes. One left behind (`recover`) means the
-//!   move was interrupted: if the branch sits on that commit, git finished,
-//!   and the outcome is written then; else nothing moved, and it goes.
+//!   `settings::set_moving`) holds the whole outcome: where the branch was,
+//!   the commit it moves onto, and for `--set` the new parent and
+//!   following. After, they are written (`finish`) and it goes. One left
+//!   behind (`recover`, before any `gitfold parent` reads the tree) means
+//!   the move was interrupted: if git moved the branch from where it was
+//!   onto that commit, the outcome is written then; else nothing moved, and
+//!   it goes.
 //! - **Pushed commits** (on the branch's same-name branch of its push
 //!   remote, never main or its upstream) are moved only when asked
 //!   (`--yes`); gitfold prints the force-push and never pushes.
@@ -126,6 +128,9 @@ fn clear_conflict(common_dir: &Path, branch: &str) -> Result<()> {
 
 /// The outcome of a move, recorded before it (see the module doc).
 pub struct Outcome {
+    /// The branch's tip before: still there, nothing moved (git moves a
+    /// branch only when its rebase finishes).
+    pub from: ObjectId,
     /// What it moves onto: its base after.
     pub onto: ObjectId,
     /// For `--set`: the new parent (a full ref) and whether it follows it.
@@ -134,25 +139,28 @@ pub struct Outcome {
 
 impl Outcome {
     fn encode(&self) -> String {
+        let (from, onto) = (self.from, self.onto);
         match &self.parent {
-            None => self.onto.to_string(),
-            Some((parent, follow)) => format!("{} {follow} {parent}", self.onto),
+            None => format!("{from} {onto}"),
+            Some((parent, follow)) => format!("{from} {onto} {follow} {parent}"),
         }
     }
 
     fn decode(text: &str) -> Option<Outcome> {
         let mut words = text.split(' ');
-        let onto = ObjectId::from_hex(words.next()?.as_bytes()).ok()?;
+        let mut id = || ObjectId::from_hex(words.next()?.as_bytes()).ok();
+        let (from, onto) = (id()?, id()?);
         let parent = match (words.next(), words.next()) {
             (Some(follow), Some(parent)) => Some((parent.to_string(), follow.parse().ok()?)),
             _ => None,
         };
-        Some(Outcome { onto, parent })
+        Some(Outcome { from, onto, parent })
     }
 
-    /// Writes it for `branch`, which git moved: its base, its parent, then
-    /// the record goes.
-    fn finish(&self, common_dir: &Path, branch: &str) -> Result<()> {
+    /// Writes it for `branch`, which git moved (or, with commits pushed,
+    /// that is built on a new parent without the move): its base, its
+    /// parent, then the record goes.
+    pub fn finish(&self, common_dir: &Path, branch: &str) -> Result<()> {
         set_base(common_dir, branch, self.onto)?;
         if let Some((parent, follow)) = &self.parent {
             settings::set_parent(common_dir, branch, parent)?;
@@ -163,16 +171,34 @@ impl Outcome {
 }
 
 /// Finishes or forgets the outcome of a move of `branch` a crash
-/// interrupted (see the module doc).
+/// interrupted (see the module doc): finished if git moved the branch from
+/// where it was onto the target, else forgotten.
 fn recover(common_dir: &Path, branch: &str) -> Result<()> {
     let Some(text) = Local::read_checked(common_dir)?.moving(branch) else {
         return Ok(());
     };
+    let tip = git::branch_tip(branch)?.id;
     match Outcome::decode(&text) {
-        Some(outcome) if is_ancestor(common_dir, outcome.onto, git::branch_tip(branch)?.id)? => {
+        Some(outcome) if tip != outcome.from && is_ancestor(common_dir, outcome.onto, tip)? => {
             outcome.finish(common_dir, branch)
         }
         _ => settings::set_moving(common_dir, branch, None),
+    }
+}
+
+/// Finishes the record of a move of `branch` a crash interrupted, unless a
+/// move of it is running (then that one sees to it): for commands that
+/// read the tree before they act.
+pub fn settle(common_dir: &Path, branch: &str) -> Result<()> {
+    if Local::read_checked(common_dir)?.moving(branch).is_none() {
+        return Ok(());
+    }
+    match rebase::lock(common_dir, branch) {
+        Ok(_lock) => {
+            rebase::clean_up(common_dir, branch)?;
+            recover(common_dir, branch)
+        }
+        Err(_) => Ok(()),
     }
 }
 
@@ -389,6 +415,7 @@ impl Plan {
         let branch = &self.branch;
         let record = parent.is_none();
         let outcome = Outcome {
+            from: self.tip,
             onto: self.onto,
             parent,
         };
