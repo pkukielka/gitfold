@@ -297,7 +297,8 @@ pub fn branch_exists(name: &str) -> bool {
 }
 
 /// The full ref that `name` stands for, as git takes it: a short name by
-/// git's rules (gitrevisions, "<refname>": `$GIT_DIR/<name>`, then
+/// git's rules (gitrevisions, "<refname>": `$GIT_DIR/<name>` for names
+/// like `HEAD`, then
 /// `refs/<name>`, `refs/tags/<name>`, `refs/heads/<name>`,
 /// `refs/remotes/<name>`, `refs/remotes/<name>/HEAD`, the first that
 /// exists), and a symbolic ref followed to the ref it points at
@@ -321,13 +322,23 @@ fn followed(repo: &gix::Repository, name: &str) -> Option<String> {
 
 /// The remote-tracking branch `<remote>/<branch>` of a configured remote, as
 /// a full ref (`origin`'s if there are several), if it exists and is a
-/// branch itself (`origin/HEAD` is a symbolic ref, not one).
+/// branch itself (`origin/HEAD` is a symbolic ref, not one). Never for
+/// `HEAD`, which git refuses as a branch name.
 pub fn remote_tracking(branch: &str) -> Option<String> {
+    if branch == "HEAD" {
+        return None;
+    }
     with_repo(|repo| {
         (repo.remote_names().iter())
-            .map(|remote| format!("refs/remotes/{remote}/{branch}"))
-            .filter(|full| followed(repo, full).as_ref() == Some(full))
-            .min_by_key(|full| !full.starts_with("refs/remotes/origin/"))
+            .map(|remote| {
+                (
+                    *remote != "origin",
+                    format!("refs/remotes/{remote}/{branch}"),
+                )
+            })
+            .filter(|(_, full)| followed(repo, full).as_ref() == Some(full))
+            .min_by_key(|(not_origin, _)| *not_origin)
+            .map(|(_, full)| full)
     })
 }
 

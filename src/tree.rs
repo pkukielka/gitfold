@@ -33,7 +33,7 @@ pub struct Tree {
 pub enum Refused {
     /// No such branch (P6, S1).
     Unknown(String),
-    /// A name git takes for a ref that isn't a branch: a tag (P6).
+    /// A name git takes for a ref that isn't a branch: a tag, `stash` (P6).
     NotBranch { name: String, full: String },
     /// No branch of that name, but a remote-tracking one of a configured
     /// remote (P5).

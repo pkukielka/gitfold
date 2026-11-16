@@ -142,6 +142,9 @@ R remote add team/a /nonexistent; R update-ref refs/remotes/team/a/x main
 check "P5: a remote whose name has a slash" says 3 "no branch x (only team/a/x exists)" parent api --set x
 R update-ref refs/remotes/origin/x main
 check "P5: origin's preferred" says 3 "only origin/x exists" parent api --set x
+R remote add origin/fork /nonexistent; R update-ref refs/remotes/origin/fork/q main
+R remote add alpha /nonexistent; R update-ref refs/remotes/alpha/q main
+check "P5: origin by its name, not a prefix" says 3 "only alpha/q exists" parent api --set q
 R update-ref refs/remotes/gone/y main
 check "P5: not for a remote no longer configured" lacks 3 "only" parent api --set y
 R update-ref refs/remotes/origin/fix/test main
