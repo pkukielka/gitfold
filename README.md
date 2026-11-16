@@ -480,6 +480,21 @@ then say `not implemented yet` (exit 1). Commands people guess (`gitfold
 sync`, `pull`, `restack`, `rebase`, `branch --on`, `branch --merge`) exit 2
 naming the right one.
 
+`<mount>/@committed/<branch>/` is a read-only view of a branch merged with
+every branch built on it, their committed tips (for the main branch, only
+branches opened as workspaces, and those they are built on). Each branch's
+change is its files against where it left its parent, merged path by path as
+git's merge does (renames aren't followed, `.gitattributes` merge settings
+aren't applied). Conflicts show as git's markers named by branch; where no
+markers can show one (a change against a deletion, binary files, a file and a
+directory), the file carries the attribute `user.gitfold.conflict`
+(`<kind>: <branches>`), and `.gitfold-conflicts` at the view's root lists
+every conflict, one per line (`<kind>\t<branches>\t<path>`), and the branches
+left out (`skipped`) or refs that couldn't be read (`unread`). The view follows
+new commits and changes to the tree within about a second. `@live` (with
+uncommitted work) is reserved and comes later; a branch or remote named
+`committed` or `live` is reached as `@refs/heads/committed`.
+
 ### Partial clones
 
 In a partial clone the object database lacks blobs (`blob:none`) or trees
