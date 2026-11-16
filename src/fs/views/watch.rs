@@ -13,6 +13,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
+use gix::ObjectId;
 use log::error;
 
 use super::members::{self, Bases, BuiltOn, Refs};
@@ -20,6 +21,7 @@ use super::merge::{Member, Private};
 use super::serve::ViewDir;
 use super::shown::{Changed, Shown, Times};
 use crate::fs::NameChanges;
+use crate::git;
 use crate::inode;
 use crate::state::{self, name, parent};
 use crate::store::Store;
@@ -71,7 +73,7 @@ impl Watch {
         &mut self,
         ctx: &Context,
         before: Option<&Shown>,
-    ) -> Result<Option<(Shown, Vec<Changed>)>> {
+    ) -> Result<Option<(Shown, Vec<Changed>, ObjectId)>> {
         let config = stamp(&ctx.common_dir.join("config"));
         if self.config != Some(config) || self.reads >= TREE_EVERY {
             self.tree = Tree::read(&ctx.common_dir)?;
@@ -99,7 +101,7 @@ impl Watch {
         }
         let bases = &mut self.bases;
         let inputs = (refs.members.iter())
-            .map(|(branch, tip, parent)| {
+            .map(|(branch, (tip, _), parent)| {
                 let base = bases.get(*tip, *parent)?;
                 Ok(Member {
                     branch,
@@ -109,13 +111,22 @@ impl Watch {
             })
             .collect::<Result<Vec<_>>>()?;
         self.bases.next_round();
+        // What git will read, loaded first: in a partial clone, fetched as
+        // for a snapshot (git doesn't fetch in the private repository).
+        ctx.store.load_tree(refs.own.1)?;
+        for ((_, (_, tree), _), m) in refs.members.iter().zip(&inputs) {
+            ctx.store.load_tree(*tree)?;
+            if let Some(base) = m.base {
+                ctx.store.load_tree(git::resolve(&base.to_string())?.tree)?;
+            }
+        }
         // No lock the requests need is held meanwhile.
         let merged = ctx.private.merge(branch, refs.own, &inputs)?;
         let tree = ctx.store.load_tree(merged.tree)?;
         let (conflicts, notes) = (&merged.conflicts, &refs.notes);
-        let next = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);
+        let (shown, changed) = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);
         self.built = Some((members, refs, config));
-        Ok(Some(next))
+        Ok(Some((shown, changed, merged.commit)))
     }
 }
 
@@ -130,11 +141,14 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
             match watch.next(&ctx, Some(&before)) {
                 Ok(next) => {
                     watch.last_error.clear();
-                    if let Some((shown, changed)) = next {
+                    if let Some((shown, changed, commit)) = next {
                         // Waits for requests served from the old view: their
                         // replies can't land after the kernel is told.
                         view.swap(shown, &changed);
                         tell(&ctx.names, &view, &changed);
+                        if let Err(e) = ctx.private.shown(&ctx.branch, commit) {
+                            error!("view {}: {e:#}", view.name);
+                        }
                     }
                 }
                 Err(e) => {

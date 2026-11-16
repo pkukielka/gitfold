@@ -276,10 +276,13 @@ impl Views {
         let built = watch.next(&ctx, None).and_then(|built| {
             built.ok_or_else(|| anyhow::anyhow!("nothing built")) // the first always is
         });
-        let (shown, _) = built.map_err(|e| {
+        let (shown, _, commit) = built.map_err(|e| {
             error!("view {name}: {e:#}");
             Errno::EIO
         })?;
+        if let Err(e) = ctx.private.shown(branch, commit) {
+            error!("view {name}: {e:#}");
+        }
         let mut list = self.list.write();
         let slot = list.len() as u32;
         let view = Arc::new(ViewDir {
