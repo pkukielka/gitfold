@@ -28,6 +28,12 @@ impl NameChanges {
         let _ = self.notifier.set(notifier);
     }
 
+    /// The session's notifier, once mounted (the views tell the kernel what
+    /// changed in them).
+    pub fn notifier(&self) -> Option<&Notifier> {
+        self.notifier.get()
+    }
+
     /// Name `name` in directory `parent` (the root or a namespace) was removed.
     /// Not to be called while serving a request in `parent`: invalidating an
     /// entry takes the directory's lock, which the request holds.

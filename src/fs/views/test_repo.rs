@@ -132,6 +132,14 @@ pub fn remote_branch(name: &str, commit: &str) {
     );
 }
 
+/// Writes ref `full` as a file pointing at `oid`, which git's commands
+/// would refuse if the object is missing.
+pub fn write_ref(full: &str, oid: &str) {
+    let path = git_dir().join(full);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("{oid}\n")).unwrap();
+}
+
 /// The repository's git directory.
 pub fn git_dir() -> PathBuf {
     repo().join(".git")

@@ -1,12 +1,15 @@
 //! FUSE view of a git repository: read-only snapshots of any revision
-//! (`<mount>/@<rev>/<path>`) and writable branch workspaces
-//! (`<mount>/<branch>/<path>`).
+//! (`<mount>/@<rev>/<path>`), writable branch workspaces
+//! (`<mount>/<branch>/<path>`), and read-only views of a branch merged with
+//! those built on it (`<mount>/@committed/<branch>/<path>`).
 //!
 //! Snapshot contents are immutable, so entries, attributes and page cache are
 //! cached by the kernel indefinitely; after the first walk, `find`/`grep`/
 //! `git status` are served mostly without calling into this process.
 //! Workspaces change only through this file system, or without visible effect
 //! (`workspace::rebase`), so the kernel's caches stay coherent with them too.
+//! Views change without the kernel seeing it; they tell it what changed
+//! (`views::watch`).
 //!
 //! Nothing is stored per snapshot node: inode numbers encode where to find an
 //! entry (see `inode`), trees and files live in the shared `Store`, and a
@@ -29,8 +32,6 @@ mod removal;
 mod snapshots;
 mod stats;
 mod view;
-// Served by the mount once the views land there (stream-views, V2).
-#[allow(dead_code)]
 mod views;
 pub mod workspace;
 mod workspaces;
@@ -45,7 +46,7 @@ use fuser::{
     AccessFlags, BsdFileFlags, Errno, FileAttr, FileHandle, Filesystem, FopenFlags, Generation,
     INodeNo, InitFlags, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
     ReplyData, ReplyDirectory, ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
-    ReplyWrite, Request, TimeOrNow, WriteFlags,
+    ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 use log::info;
 
@@ -59,6 +60,7 @@ pub use removal::Removal;
 use snapshots::Snapshots;
 use stats::{Counters, IoTimer, bump};
 use view::Content;
+use views::Views;
 use workspace::{Obj, Workspace};
 use workspaces::Workspaces;
 
@@ -87,6 +89,7 @@ pub struct GitFold {
     store: Arc<Store>,
     snapshots: Arc<Snapshots>,
     workspaces: Arc<Workspaces>,
+    views: Arc<Views>,
     content: ContentCache,
     counters: Counters,
     names: Arc<NameChanges>,
@@ -105,10 +108,13 @@ impl GitFold {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
+        let store: Arc<Store> = Arc::default();
+        let views = Arc::new(Views::new(common_dir.clone(), store.clone(), names.clone()));
         GitFold {
             no_open: opts.no_open,
             stat,
-            store: Arc::default(),
+            store,
+            views,
             snapshots: Arc::new(Snapshots::new(
                 common_dir.clone(),
                 mount_point.clone(),
@@ -217,6 +223,16 @@ fn time(t: TimeOrNow) -> SystemTime {
     }
 }
 
+/// Replies with an attribute's value (or a list of names): its size if
+/// `size` is 0, else the value if it fits.
+fn reply_xattr(value: &[u8], size: u32, reply: ReplyXattr) {
+    match size {
+        0 => reply.size(value.len() as u32),
+        n if (n as usize) < value.len() => reply.error(Errno::ERANGE),
+        _ => reply.data(value),
+    }
+}
+
 fn reply_empty(result: Result<(), Errno>, reply: ReplyEmpty) {
     match result {
         Ok(()) => reply.ok(),
@@ -231,6 +247,11 @@ impl Filesystem for GitFold {
             InitFlags::FUSE_PARALLEL_DIROPS,
             InitFlags::FUSE_CACHE_SYMLINKS,
             InitFlags::FUSE_NO_OPENDIR_SUPPORT,
+            // With extended attributes answered (`getxattr`), the kernel would
+            // otherwise ask for `security.capability` before every write.
+            // Clearing set-id bits on writes is left to us: upper files are
+            // written by this process, so their file system does it.
+            InitFlags::FUSE_HANDLE_KILLPRIV_V2,
         ];
         if self.no_open {
             flags.push(InitFlags::FUSE_NO_OPEN_SUPPORT);
@@ -567,6 +588,33 @@ impl Filesystem for GitFold {
         {
             ws.forget(local, nlookup);
         }
+        if let Some(inode::Ino::View { slot, local }) = inode::decode(ino.0)
+            && let Ok(view) = self.views.get(slot)
+        {
+            view.forget(local, nlookup);
+        }
+    }
+
+    // Extended attributes: only a view's conflicting files have one
+    // (`views::shown::CONFLICT_XATTR`). Answered for every inode, as the
+    // kernel stops asking the whole mount after one ENOSYS.
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        bump(&self.counters.xattr);
+        match self.conflict(ino.0) {
+            Some(value) if name.as_bytes() == views::shown::CONFLICT_XATTR => {
+                reply_xattr(value.as_bytes(), size, reply)
+            }
+            _ => reply.error(Errno::ENODATA),
+        }
+    }
+
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        bump(&self.counters.xattr);
+        let names = match self.conflict(ino.0) {
+            Some(_) => [views::shown::CONFLICT_XATTR, b"\0"].concat(),
+            None => Vec::new(),
+        };
+        reply_xattr(&names, size, reply)
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {

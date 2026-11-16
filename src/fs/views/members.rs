@@ -1,5 +1,9 @@
-//! Which branches a view merges in, and what each brings to the committed
-//! view: its tip, against its merge point with its parent.
+//! Which branches a view merges in (`members`), the refs it is made of now
+//! (`Refs`, compared between refreshes), and what each member brings to the
+//! committed view (`committed`): its tip, against its merge point with its
+//! parent.
+
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result};
 use gix::ObjectId;
@@ -10,7 +14,7 @@ use crate::store::{EMPTY_TREE, Store};
 use crate::tree::Tree;
 
 /// A branch a view merges in, and its parent (a full ref).
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BuiltOn {
     pub branch: String,
     pub parent: String,
@@ -22,7 +26,7 @@ pub struct BuiltOn {
 pub fn origin_root(tree: &Tree, branch: &str) -> Option<String> {
     // Not `git::remote_tracking`: it goes by the configured remotes, which
     // the mount's repository handle has as they were at mount time.
-    if tree.root() != Some(branch) || branch == "HEAD" {
+    if tree.root() != Some(branch) {
         return None;
     }
     let full = format!("refs/remotes/origin/{branch}");
@@ -51,9 +55,16 @@ pub fn members(
     } else {
         tree.subtree(branch)
     };
-    let shown = |name: &str| opened(name) || tree.subtree(name).into_iter().any(&opened);
+    // Children come after their parents: from the end, a branch is kept if
+    // it is opened or a child is kept.
+    let mut kept: HashSet<&str> = HashSet::new();
+    for &name in names.iter().rev() {
+        if !is_root || opened(name) || tree.children(name).iter().any(|c| kept.contains(c)) {
+            kept.insert(name);
+        }
+    }
     (names.into_iter())
-        .filter(|name| !is_root || shown(name))
+        .filter(|name| kept.contains(name))
         .filter_map(|name| {
             Some(BuiltOn {
                 branch: name.to_string(),
@@ -63,87 +74,157 @@ pub fn members(
         .collect()
 }
 
-/// The committed view's inputs.
-pub struct Committed {
-    pub files: Files,
-    pub members: Vec<Member>,
-    /// Members whose branch or parent doesn't resolve (deleted, pruned), and
-    /// those built on them, with why: left out of the view.
-    pub skipped: Vec<(String, String)>,
+/// A commit and its tree.
+pub type Tip = (ObjectId, ObjectId);
+
+/// Something a view leaves out or can't show as asked, said in its summary.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    /// `skipped` (a member left out) or `unread` (a ref that exists but
+    /// can't be read).
+    pub kind: &'static str,
+    /// The branch or ref.
+    pub what: String,
+    pub why: String,
 }
 
-/// The committed view's inputs: the files of `branch`, and each member's tip
-/// with its merge point (the merge base of its tip and its parent's; none
-/// for unrelated histories: everything is its change). The files of the
-/// root are its local tip, or `origin_root`'s if the local one is only
-/// behind it (an ancestor).
-pub fn committed(
-    store: &Store,
+/// The refs a committed view is made of, resolved once: compared between
+/// refreshes to see whether it changed, and built from (`committed`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Refs {
+    /// The view's own files: the branch's tip, or its origin root's.
+    pub own: Tip,
+    /// Each member and its tip and parent's commit; skipped members aren't
+    /// here (`notes`).
+    pub members: Vec<(String, Tip, ObjectId)>,
+    pub notes: Vec<Note>,
+}
+
+/// Merge bases already found, by the two commits: kept between refreshes,
+/// for those still asked (`next_round`).
+#[derive(Default)]
+pub struct Bases {
+    now: HashMap<(ObjectId, ObjectId), Option<ObjectId>>,
+    before: HashMap<(ObjectId, ObjectId), Option<ObjectId>>,
+}
+
+impl Bases {
+    /// The best merge base of commits `a` and `b`, as `git merge-base` finds
+    /// it.
+    fn get(&mut self, a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
+        if let Some(&base) = self.now.get(&(a, b)) {
+            return Ok(base);
+        }
+        let base = match self.before.remove(&(a, b)) {
+            Some(base) => base,
+            None => git::with_repo(|repo| -> Result<Option<ObjectId>> {
+                Ok(repo.merge_base(a, b)?.map(|id| id.detach()))
+            })?,
+        };
+        self.now.insert((a, b), base);
+        Ok(base)
+    }
+
+    /// Forgets those not asked since the last call.
+    pub fn next_round(&mut self) {
+        self.before = std::mem::take(&mut self.now);
+    }
+}
+
+/// The refs of the view of `branch` with `members` now. The root's files are
+/// its local tip, or `origin_root`'s if the local one is only behind it (an
+/// ancestor). Missing refs leave members out (and what is built on them,
+/// whose work is measured against them), noted; refs that exist but can't
+/// be read fail the view, except `origin_root`'s, noted (the local tip
+/// stays).
+pub fn refs(
     branch: &str,
     origin_root: Option<&str>,
     members: &[BuiltOn],
-) -> Result<Committed> {
-    let files = |tree: u32| Files {
-        tree,
-        uncommitted: Changes::new(),
+    bases: &mut Bases,
+) -> Result<Refs> {
+    let exists = |full: &str| git::full_ref(full).is_some();
+    let tip = |full: &str| -> Result<Tip> {
+        let c = git::resolve(full).with_context(|| format!("reading {full}"))?;
+        Ok((c.id, c.tree))
     };
-    let resolve = |full: &str| git::resolve(full).with_context(|| format!("resolving {full}"));
-    let mut own = resolve(&format!("refs/heads/{branch}"))?;
-    // Pruned since: the local tip.
-    if let Some(remote) = origin_root.and_then(|r| git::resolve(r).ok())
-        && merge_base(own.id, remote.id)? == Some(own.id)
-    {
-        own = remote;
+    let mut own = tip(&format!("refs/heads/{branch}"))?;
+    let mut notes = Vec::new();
+    if let Some(remote) = origin_root.filter(|r| exists(r)) {
+        match tip(remote) {
+            Ok(remote) if bases.get(own.0, remote.0)? == Some(own.0) => own = remote,
+            Ok(_) => {}
+            Err(e) => notes.push(Note {
+                kind: "unread",
+                what: remote.to_string(),
+                why: format!("{e:#}; the view shows {branch}'s own files"),
+            }),
+        }
     }
-    let mut out = Committed {
-        files: files(store.load_tree(own.tree)?),
-        members: Vec::with_capacity(members.len()),
-        skipped: Vec::new(),
-    };
+    let mut out = Vec::with_capacity(members.len());
+    let mut skipped: Vec<&str> = Vec::new();
     // `members` has every branch before those built on it (`members()`).
     for m in members {
-        // Left out with what is built on it, whose work is measured against it.
-        let skipped_parent = (out.skipped.iter())
-            .find(|(skipped, _)| m.parent.strip_prefix("refs/heads/") == Some(skipped));
-        if let Some((parent, _)) = skipped_parent {
-            let why = format!("built on {parent}, left out");
-            out.skipped.push((m.branch.clone(), why));
+        let full = format!("refs/heads/{}", m.branch);
+        let on_skipped =
+            (m.parent.strip_prefix("refs/heads/")).and_then(|p| skipped.iter().find(|s| **s == p));
+        let why = match on_skipped {
+            Some(parent) => Some(format!("built on {parent}, left out")),
+            None if !exists(&full) => Some(format!("no branch {}", m.branch)),
+            None if !exists(&m.parent) => Some(format!("its parent {} is gone", m.parent)),
+            None => None,
+        };
+        if let Some(why) = why {
+            skipped.push(&m.branch);
+            notes.push(Note {
+                kind: "skipped",
+                what: m.branch.clone(),
+                why,
+            });
             continue;
         }
-        let refs = resolve(&format!("refs/heads/{}", m.branch))
-            .and_then(|at| Ok((at, resolve(&m.parent)?)));
-        let (at, parent) = match refs {
-            Ok(refs) => refs,
-            Err(e) => {
-                out.skipped.push((m.branch.clone(), format!("{e:#}")));
-                continue;
+        out.push((m.branch.clone(), tip(&full)?, tip(&m.parent)?.0));
+    }
+    Ok(Refs {
+        own,
+        members: out,
+        notes,
+    })
+}
+
+/// The committed view's inputs from `refs`: the view's own files, and each
+/// member's tip with its merge point (the merge base of its tip and its
+/// parent's; none for unrelated histories: everything is its change).
+pub fn committed(store: &Store, refs: &Refs, bases: &mut Bases) -> Result<(Files, Vec<Member>)> {
+    let files = |tree: ObjectId| -> Result<Files> {
+        Ok(Files {
+            tree: store.load_tree(tree)?,
+            uncommitted: Changes::new(),
+        })
+    };
+    let mut members = Vec::with_capacity(refs.members.len());
+    for (branch, (tip, tree), parent) in &refs.members {
+        let merge_point = match bases.get(*tip, *parent)? {
+            Some(base) => {
+                let tree = git::with_repo(|repo| -> Result<ObjectId> {
+                    Ok(repo.find_commit(base)?.tree_id()?.detach())
+                })?;
+                store.load_tree(tree)?
             }
-        };
-        let merge_point = match merge_base(at.id, parent.id)? {
-            Some(base) => store.load_tree(git::with_repo(|repo| commit_tree(repo, base))?)?,
             None => EMPTY_TREE,
         };
-        out.members.push(Member {
-            branch: m.branch.clone(),
+        members.push(Member {
+            branch: branch.clone(),
             merge_point,
-            files: files(store.load_tree(at.tree)?),
+            files: files(*tree)?,
         });
     }
-    Ok(out)
-}
-
-/// The best merge base of commits `a` and `b`, as `git merge-base` finds it.
-fn merge_base(a: ObjectId, b: ObjectId) -> Result<Option<ObjectId>> {
-    git::with_repo(|repo| Ok(repo.merge_base(a, b)?.map(|id| id.detach())))
-}
-
-fn commit_tree(repo: &gix::Repository, commit: ObjectId) -> Result<ObjectId> {
-    Ok(repo.find_commit(commit)?.tree_id()?.detach())
+    Ok((files(refs.own.1)?, members))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_repo::{branch, commit, remote_branch};
+    use super::super::test_repo::{branch, commit, remote_branch, write_ref};
     use super::*;
 
     fn tree(pairs: &[(&str, &str)]) -> Tree {
@@ -194,61 +275,87 @@ mod tests {
         assert_eq!(names(&none), ["api"], "ui only for an opened branch on it");
     }
 
+    fn built_on(branch: &str, parent: &str) -> BuiltOn {
+        BuiltOn {
+            branch: branch.into(),
+            parent: format!("refs/heads/{parent}"),
+        }
+    }
+
     #[test]
     fn root_files_and_skipped_members() {
-        let store = Store::default();
+        let mut bases = Bases::default();
         let local = commit(None, &[("a", Some("1\n"))]);
         let ahead = commit(Some(&local), &[("a", Some("2\n"))]);
         branch("m1-main", &local);
         remote_branch("origin/m1-main", &ahead);
-        let api = BuiltOn {
-            branch: "m1-api".into(),
-            parent: "refs/heads/m1-main".into(),
-        };
         branch("m1-api", &local);
-        let gone = BuiltOn {
-            branch: "m1-gone".into(),
-            parent: "refs/heads/m1-main".into(),
-        };
-        let on_gone = BuiltOn {
-            branch: "m1-ui".into(),
-            parent: "refs/heads/m1-gone".into(),
-        };
         branch("m1-ui", &local);
-        let orphan = BuiltOn {
-            branch: "m1-orphan".into(),
-            parent: "refs/heads/m1-nosuch".into(),
-        };
         branch("m1-orphan", &local);
+        let members = [
+            built_on("m1-api", "m1-main"),
+            built_on("m1-gone", "m1-main"),
+            built_on("m1-ui", "m1-gone"),
+            built_on("m1-orphan", "m1-nosuch"),
+        ];
         let remote = Some("refs/remotes/origin/m1-main");
-        let tree_of = |c: &str| store.load_tree(git::resolve(c).unwrap().tree).unwrap();
-        let c = committed(&store, "m1-main", remote, &[api, gone, on_gone, orphan]).unwrap();
+        let tree_of = |c: &str| git::resolve(c).unwrap().tree;
+        let r = refs("m1-main", remote, &members, &mut bases).unwrap();
+        assert_eq!(r.own.1, tree_of(&ahead), "local main only behind: origin's");
+        let kept: Vec<&str> = r.members.iter().map(|m| m.0.as_str()).collect();
+        assert_eq!(kept, ["m1-api"]);
+        let notes: Vec<(&str, &str)> = (r.notes.iter())
+            .map(|n| (n.what.as_str(), n.why.as_str()))
+            .collect();
         assert_eq!(
-            c.files.tree,
-            tree_of(&ahead),
-            "local main only behind: origin's"
+            notes,
+            [
+                ("m1-gone", "no branch m1-gone"),
+                ("m1-ui", "built on m1-gone, left out"),
+                ("m1-orphan", "its parent refs/heads/m1-nosuch is gone"),
+            ]
         );
-        assert_eq!(names_of(&c), ["m1-api"]);
-        let skipped: Vec<&str> = c.skipped.iter().map(|(b, _)| b.as_str()).collect();
-        assert_eq!(skipped, ["m1-gone", "m1-ui", "m1-orphan"]);
-        let why = |i: usize| c.skipped[i].1.as_str();
-        assert!(why(0).contains("refs/heads/m1-gone"), "{}", why(0));
-        assert_eq!(why(1), "built on m1-gone, left out");
-        assert!(why(2).contains("refs/heads/m1-nosuch"), "{}", why(2));
+        assert!(r.notes.iter().all(|n| n.kind == "skipped"));
 
         // The same commit, or local main ahead: its own files.
         branch("m1-main", &ahead);
-        let c = committed(&store, "m1-main", remote, &[]).unwrap();
-        assert_eq!(c.files.tree, tree_of(&ahead));
+        let own = |bases: &mut Bases| refs("m1-main", remote, &[], bases).unwrap().own.1;
+        assert_eq!(own(&mut bases), tree_of(&ahead));
         let further = commit(Some(&ahead), &[("c", Some("c\n"))]);
         branch("m1-main", &further);
-        let c = committed(&store, "m1-main", remote, &[]).unwrap();
-        assert_eq!(c.files.tree, tree_of(&further));
+        assert_eq!(own(&mut bases), tree_of(&further));
         // Local main with its own commit, origin with others: its own files.
-        let own = commit(Some(&local), &[("b", Some("b\n"))]);
-        branch("m1-main", &own);
-        let c = committed(&store, "m1-main", remote, &[]).unwrap();
-        assert_eq!(c.files.tree, tree_of(&own));
+        let mine = commit(Some(&local), &[("b", Some("b\n"))]);
+        branch("m1-main", &mine);
+        assert_eq!(own(&mut bases), tree_of(&mine));
+    }
+
+    #[test]
+    fn unreadable_refs() {
+        let mut bases = Bases::default();
+        let c = commit(None, &[("a", Some("1\n"))]);
+        branch("m3-main", &c);
+        branch("m3-api", &c);
+        // A ref to an object that isn't there: it exists, but can't be read.
+        let missing = "1234567890123456789012345678901234567890";
+        write_ref("refs/remotes/origin/m3-main", missing);
+        let remote = Some("refs/remotes/origin/m3-main");
+        let r = refs("m3-main", remote, &[], &mut bases).unwrap();
+        assert_eq!(r.own.0.to_string(), c, "the local tip");
+        assert_eq!(r.notes.len(), 1);
+        assert_eq!(r.notes[0].kind, "unread");
+        assert_eq!(r.notes[0].what, "refs/remotes/origin/m3-main");
+        write_ref("refs/heads/m3-api", missing);
+        let failed = refs(
+            "m3-main",
+            None,
+            &[built_on("m3-api", "m3-main")],
+            &mut bases,
+        );
+        assert!(
+            failed.is_err(),
+            "a member that can't be read fails the view"
+        );
     }
 
     #[test]
@@ -261,9 +368,5 @@ mod tests {
         let full = Some("refs/remotes/origin/m2-main".to_string());
         assert_eq!(origin_root(&t, "m2-main"), full);
         assert_eq!(origin_root(&t, "m2-api"), None, "not the root");
-    }
-
-    fn names_of(c: &Committed) -> Vec<&str> {
-        c.members.iter().map(|m| m.branch.as_str()).collect()
     }
 }

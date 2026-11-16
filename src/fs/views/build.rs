@@ -41,6 +41,7 @@ pub enum Entry {
     Stored(u32),
     /// A workspace's uncommitted file or symlink, at `file` in its upper
     /// directory.
+    #[allow(dead_code)] // made by `@live`'s views (V3)
     Upper { file: PathBuf, kind: EntryKind },
     /// Content a merge made.
     Merged { data: Arc<Vec<u8>>, kind: EntryKind },
@@ -99,6 +100,7 @@ pub struct View {
 
 impl View {
     /// What the view shows at `path`.
+    #[cfg(test)]
     pub fn entry(&self, store: &Store, path: &[u8]) -> Option<Entry> {
         shown(store, self.lower, &self.overlay, path)
     }
@@ -139,6 +141,20 @@ pub enum ConflictKind {
     /// A file where the other side has files below it (or below where it
     /// has a file): the earlier side shows.
     FileDirectory,
+}
+
+impl ConflictKind {
+    /// As the view says it (its summary, the files' attribute).
+    pub fn name(self) -> &'static str {
+        match self {
+            ConflictKind::Markers => "markers",
+            ConflictKind::ModifiedDeleted => "modified-deleted",
+            ConflictKind::Binary => "binary",
+            ConflictKind::Kind => "kind",
+            ConflictKind::Mode => "mode",
+            ConflictKind::FileDirectory => "file-directory",
+        }
+    }
 }
 
 /// The view of `branch`, its `files`, with `members` merged in order (each
@@ -323,8 +339,22 @@ impl Acc<'_> {
     /// A file the view holds that a file at `path` would sit below, or one
     /// it would sit above, if any.
     fn clash(&self, path: &[u8]) -> Option<Vec<u8>> {
-        if let Some(above) = ancestors(path).find(|above| self.entry(above).is_some()) {
-            return Some(above.to_vec());
+        // One walk down `lower` along `path`.
+        let last = |p: &[u8]| -> usize { p.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1) };
+        let mut tree = Some(self.lower);
+        for above in ancestors(path).chain([path]) {
+            let lower = tree.and_then(|t| self.store.tree(t).find(&above[last(above)..]).copied());
+            tree = lower.filter(|e| e.kind == EntryKind::Tree).map(|e| e.id);
+            if above.len() == path.len() {
+                break;
+            }
+            let file = match self.overlay.get(above) {
+                Some(entry) => entry.is_some(),
+                None => lower.is_some_and(|e| e.kind != EntryKind::Tree),
+            };
+            if file {
+                return Some(above.to_vec());
+            }
         }
         let prefix = [path, b"/"].concat();
         let below = (Bound::Included(&prefix[..]), Bound::Unbounded);
@@ -334,8 +364,7 @@ impl Acc<'_> {
         if let Some((p, _)) = overlaid {
             return Some(p.clone());
         }
-        let tree = tree_at(self.store, self.lower, path)?;
-        self.shown_below(path, tree)
+        self.shown_below(path, tree?)
     }
 
     /// A file of `lower`'s tree `tree` at `dir` that isn't deleted, if any.
@@ -397,13 +426,13 @@ fn merged_kind(
 }
 
 /// What a change does to one path: from, to.
-type Change = (Option<Entry>, Option<Entry>);
+pub(super) type Change = (Option<Entry>, Option<Entry>);
 
 /// The files, symlinks and submodules that differ between trees `from` and
 /// `to` below `dir` (a directory and a file at one path: the directory's
 /// files and the file), with what each is in both. Walks only subtrees that
 /// differ.
-fn delta(
+pub(super) fn delta(
     store: &Store,
     from: u32,
     to: u32,
@@ -453,16 +482,9 @@ fn stored(store: &Store, tree: u32, path: &[u8]) -> Option<Entry> {
         .map(|e| Entry::Stored(e.id))
 }
 
-/// The directory of tree `tree` at `path`.
-fn tree_at(store: &Store, tree: u32, path: &[u8]) -> Option<u32> {
-    (store.tree_entry_at(tree, path))
-        .filter(|e| e.kind == EntryKind::Tree)
-        .map(|e| e.id)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::super::members::{committed, members};
+    use super::super::members::{Bases, committed, members, refs};
     use super::super::test_repo::{branch, commit, scratch, tip};
     use super::*;
     use crate::tree::Tree;
@@ -473,9 +495,12 @@ mod tests {
             .map(|(c, p)| (c.to_string(), format!("refs/heads/{p}")))
             .collect();
         let tree = Tree::of(stored, Some("main".into()), |_| true);
-        let c = committed(store, n, None, &members(&tree, n, None, |_| true)).unwrap();
-        assert!(c.skipped.is_empty());
-        build(store, n, c.files, &c.members, ConflictStyle::Merge).unwrap()
+        let mut bases = Bases::default();
+        let members = members(&tree, n, None, |_| true);
+        let r = refs(n, None, &members, &mut bases).unwrap();
+        assert!(r.notes.is_empty());
+        let (files, members) = committed(store, &r, &mut bases).unwrap();
+        build(store, n, files, &members, ConflictStyle::Merge).unwrap()
     }
 
     /// What `view` shows at `path`, as text.
