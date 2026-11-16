@@ -1,12 +1,17 @@
 //! Merging revisions as `git merge` would on a branch at the first one, without
 //! a worktree (`gitfold branch NEW --from A --from B …`): the sources are
 //! reduced as git reduces them (one contained in another is dropped, the
-//! first one too), a single one left is a fast-forward, and several are
-//! merged one after the other as git's octopus strategy does, each step by
-//! `git merge-tree`. Only the last step may conflict, as for the octopus.
-//! The commit is `git commit-tree`'s, with `git fmt-merge-msg`'s message.
+//! first one too), a single one left is a fast-forward (as `merge.ff`
+//! allows) or merged by `git merge-tree` (git's default strategy, ort), and
+//! several are merged as git's octopus strategy (git-merge-octopus.sh) merges
+//! them: one after the other, each by `git read-tree --aggressive` in an
+//! index of its own and git-merge-one-file's rules for what that leaves.
+//! Only the last may conflict. The commit is `git commit-tree`'s, with `git
+//! fmt-merge-msg`'s message.
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
@@ -25,8 +30,8 @@ pub enum Merged {
     UpToDate,
     /// At source `.0`, which contains the first (a fast-forward).
     FastForward(usize),
-    /// At a new merge commit, `id`.
-    Merge { id: String },
+    /// At new merge commit `id`, whose parents are the sources at `parents`.
+    Merge { id: String, parents: Vec<usize> },
     /// The last source conflicts: a merge in progress (not built yet).
     Conflict,
 }
@@ -40,93 +45,259 @@ pub fn source(rev: &str) -> Result<Source> {
     })
 }
 
+/// `merge.ff`, as git reads it.
+#[derive(PartialEq)]
+enum FastForward {
+    Allow,
+    No,
+    Only,
+}
+
 /// Merges `sources` (at least two; the first is where the branch starts) for
 /// new branch `into` (named in the message), as `git merge` run on a branch
 /// at the first would.
 pub fn merge(common_dir: &Path, into: &str, sources: &[Source]) -> Result<Merged> {
     // Repeated sources count once, as for git (its list of heads is a set).
-    let mut heads: Vec<&Source> = Vec::new();
-    for s in sources {
-        if !heads.iter().any(|h| h.id == s.id) {
-            heads.push(s);
+    let mut heads: Vec<usize> = Vec::new();
+    for (i, s) in sources.iter().enumerate() {
+        if !heads.iter().any(|&h| sources[h].id == s.id) {
+            heads.push(i);
         }
     }
-    let head = heads[0];
+    let head = &sources[0];
     // Those that no other contains (git's `reduce_heads`), in the order given.
     let mut args = vec!["merge-base", "--independent"];
-    args.extend(heads.iter().map(|h| h.id.as_str()));
+    args.extend(heads.iter().map(|&h| sources[h].id.as_str()));
     let independent = lines(&cmd::output(common_dir, &args)?);
     let head_subsumed = !independent.contains(&head.id);
-    let remotes: Vec<&Source> = heads[1..]
-        .iter()
-        .copied()
-        .filter(|h| independent.contains(&h.id))
+    let remotes: Vec<usize> = (heads[1..].iter().copied())
+        .filter(|&h| independent.contains(&sources[h].id))
         .collect();
     if remotes.is_empty() {
         return Ok(Merged::UpToDate);
     }
-    let all: Vec<&str> = std::iter::once(head)
+    let all: Vec<&str> = std::iter::once(0)
         .chain(remotes.iter().copied())
-        .map(|s| s.id.as_str())
+        .map(|i| sources[i].id.as_str())
         .collect();
     ensure!(
         !merge_bases(common_dir, "--octopus", &all)?.is_empty(),
         "refusing to merge unrelated histories"
     );
+    let ff = fast_forward(common_dir)?;
     if let [remote] = remotes[..]
         && head_subsumed
+        && ff != FastForward::No
     {
-        let at = sources.iter().position(|s| s.id == remote.id);
-        return Ok(Merged::FastForward(at.expect("a source")));
+        return Ok(Merged::FastForward(remote));
     }
-    // git-merge-octopus.sh (with one remote, the same as a two-way merge): the
-    // commits merged so far (`MRC`), their merge (`ours`, a commit) and its
-    // tree once a step merged (none while only fast-forwards).
-    let mut merged = vec![head.id.clone()];
-    let mut ours = head.id.clone();
-    let mut tree: Option<String> = None;
-    for (i, remote) in remotes.iter().enumerate() {
+    ensure!(
+        ff != FastForward::Only,
+        "Not possible to fast-forward, aborting."
+    );
+    let tree = match remotes[..] {
+        [remote] => merge_tree(common_dir, &head.id, &sources[remote].id)?,
+        _ => octopus(common_dir, head, &remotes, sources)?,
+    };
+    let Some(tree) = tree else {
+        return Ok(Merged::Conflict);
+    };
+    let mut parents = Vec::new();
+    if !head_subsumed || ff == FastForward::No {
+        parents.push(0);
+    }
+    parents.extend(&remotes);
+    let ids: Vec<String> = parents.iter().map(|&p| sources[p].id.clone()).collect();
+    let remotes: Vec<&Source> = remotes.iter().map(|&r| &sources[r]).collect();
+    let message = message(common_dir, into, &remotes)?;
+    let id = commit_tree(common_dir, &tree, &ids, &message)?;
+    Ok(Merged::Merge { id, parents })
+}
+
+/// `merge.ff` (default: allowed); a value git doesn't know is ignored, as
+/// git ignores it.
+fn fast_forward(common_dir: &Path) -> Result<FastForward> {
+    let args = ["config", "--type=bool-or-str", "--get", "merge.ff"];
+    // Exit 1: not set.
+    let (_, out) = cmd::output_or_no(common_dir, &args)?;
+    Ok(match first_line(&out).as_deref() {
+        Some("false") => FastForward::No,
+        Some("only") => FastForward::Only,
+        _ => FastForward::Allow,
+    })
+}
+
+/// git-merge-octopus.sh: merges the sources at `remotes` one after the other
+/// into `head`; the tree, or none if the last conflicts. One conflicting
+/// earlier is refused, as the octopus refuses it.
+fn octopus(
+    common_dir: &Path,
+    head: &Source,
+    remotes: &[usize],
+    sources: &[Source],
+) -> Result<Option<String>> {
+    let index = TempIndex::new(common_dir)?;
+    // The commits merged so far (`MRC`) and the tree of their merge (`MRT`).
+    let mut merged = vec![head.id.as_str()];
+    let mut tree = format!("{}^{{tree}}", head.id);
+    let mut non_ff = false;
+    for (i, &r) in remotes.iter().enumerate() {
+        let remote = &sources[r];
         let mut args = vec![remote.id.as_str()];
-        args.extend(merged.iter().map(String::as_str));
+        args.extend(&merged);
         let common = merge_bases(common_dir, "--all", &args)?;
-        if common.contains(&remote.id) {
-            continue; // "Already up to date with" it.
-        }
-        if tree.is_none() && common == [merged[0].as_str()] {
+        if !non_ff && common == merged {
             // The first head merged was a fast-forward: its tree is the result
             // so far, and it still counts among the parents.
-            merged = vec![remote.id.clone()];
-            ours = remote.id.clone();
+            merged = vec![remote.id.as_str()];
+            tree = format!("{}^{{tree}}", remote.id);
             continue;
         }
-        if let Some(t) = &tree {
-            // `merge-tree` finds the merge bases of the commits merged so far
-            // and the next itself, from a commit of their merge.
-            ours = commit_tree(common_dir, t, &merged, "gitfold: octopus step\n")?;
-        }
-        match merge_tree(common_dir, &ours, &remote.id)? {
-            Some(t) => tree = Some(t),
-            None if i + 1 == remotes.len() => return Ok(Merged::Conflict),
+        non_ff = true;
+        match index.merge(&common, &tree, &remote.id)? {
+            Some(next) => tree = next,
+            None if i + 1 == remotes.len() => return Ok(None),
             None => bail!(
-                "merging {}: automated merge did not work, and more --from follow. Should \
-                 not be doing an octopus: only the last --from may conflict",
+                "merging {}: Automated merge did not work. Should not be doing an octopus \
+                 (only the last --from may conflict).",
                 remote.name
             ),
         }
-        merged.push(remote.id.clone());
+        merged.push(remote.id.as_str());
     }
-    let tree = match tree {
-        Some(tree) => tree,
-        None => super::resolve(&ours)?.tree.to_string(),
-    };
-    let mut parents: Vec<String> = Vec::new();
-    if !head_subsumed {
-        parents.push(head.id.clone());
+    Ok(Some(tree))
+}
+
+/// An index entry: its mode and object id, as git prints them.
+type Entry = (String, String);
+
+/// An index file of its own for the octopus's steps, deleted when dropped.
+struct TempIndex {
+    common_dir: PathBuf,
+    path: PathBuf,
+}
+
+impl TempIndex {
+    fn new(common_dir: &Path) -> Result<TempIndex> {
+        let dir = crate::state::state_root(common_dir);
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!(".merge-index-{}", std::process::id()));
+        Ok(TempIndex {
+            common_dir: common_dir.to_path_buf(),
+            path,
+        })
     }
-    parents.extend(remotes.iter().map(|r| r.id.clone()));
-    let message = message(common_dir, into, &remotes)?;
-    let id = commit_tree(common_dir, &tree, &parents, &message)?;
-    Ok(Merged::Merge { id })
+
+    /// Runs git with `args` on this index; what it printed.
+    fn git(&self, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
+        let mut git = cmd::command(&self.common_dir);
+        git.env("GIT_INDEX_FILE", &self.path);
+        let out = cmd::exec(git, args, input)?;
+        match out.status.success() {
+            true => Ok(out.stdout),
+            false => Err(cmd::failed(args, &out)),
+        }
+    }
+
+    /// One step of the octopus: `ours` and `theirs` (trees) merged with
+    /// merge bases `bases`; the tree, or none on a conflict.
+    fn merge(&self, bases: &[String], ours: &str, theirs: &str) -> Result<Option<String>> {
+        let _ = fs::remove_file(&self.path);
+        let mut args = vec!["read-tree", "-m", "--aggressive"];
+        args.extend(bases.iter().map(String::as_str));
+        args.extend([ours, theirs]);
+        self.git(&args, b"")?;
+        // What read-tree left unmerged, by path: stages 1 (base), 2 (ours) and
+        // 3 (theirs), as (mode, id).
+        let mut unmerged: BTreeMap<Vec<u8>, [Option<Entry>; 3]> = BTreeMap::new();
+        for entry in self.git(&["ls-files", "-u", "-z"], b"")?.split(|&b| b == 0) {
+            let Some(tab) = entry.iter().position(|&b| b == b'\t') else {
+                continue;
+            };
+            let meta = String::from_utf8_lossy(&entry[..tab]);
+            let fields: Vec<&str> = meta.split(' ').collect();
+            let [mode, id, stage] = fields[..] else {
+                bail!("git ls-files -u: unexpected entry {meta}");
+            };
+            let stage: usize = stage.parse()?;
+            ensure!((1..=3).contains(&stage), "git ls-files -u: stage {stage}");
+            let stages = unmerged.entry(entry[tab + 1..].to_vec()).or_default();
+            stages[stage - 1] = Some((mode.to_string(), id.to_string()));
+        }
+        let mut info = Vec::new();
+        for (path, stages) in &unmerged {
+            let Some(resolved) = merge_one_file(&self.common_dir, stages)? else {
+                return Ok(None);
+            };
+            // Every stage of the path goes, then the resolution comes in.
+            info.extend_from_slice(b"0 0000000000000000000000000000000000000000\t");
+            info.extend_from_slice(path);
+            info.push(0);
+            if let Some((mode, id)) = resolved {
+                info.extend_from_slice(format!("{mode} {id} 0\t").as_bytes());
+                info.extend_from_slice(path);
+                info.push(0);
+            }
+        }
+        if !info.is_empty() {
+            self.git(&["update-index", "-z", "--index-info"], &info)?;
+        }
+        Ok(first_line(&self.git(&["write-tree"], b"")?))
+    }
+}
+
+impl Drop for TempIndex {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// git-merge-one-file's resolution of a path read-tree left unmerged, with
+/// `stages` 1 (base), 2 (ours) and 3 (theirs): the entry it keeps (none:
+/// removed), or none if git leaves a conflict (or refuses the case).
+fn merge_one_file(common_dir: &Path, stages: &[Option<Entry>; 3]) -> Result<Option<Option<Entry>>> {
+    fn mode(s: &Option<Entry>) -> &str {
+        s.as_ref().map_or("", |(m, _)| m.as_str())
+    }
+    fn id(s: &Option<Entry>) -> Option<&str> {
+        s.as_ref().map(|(_, i)| i.as_str())
+    }
+    let [base, ours, theirs] = stages;
+    // Deleted in both, or deleted in one and unchanged in the other: refused
+    // if the mode changed.
+    let deleted = base.is_some()
+        && ((ours.is_none() && (theirs.is_none() || id(theirs) == id(base)))
+            || (theirs.is_none() && id(ours) == id(base)));
+    if deleted {
+        let mode_changed = (ours.is_none() && mode(base) != mode(theirs))
+            || (theirs.is_none() && mode(base) != mode(ours));
+        return Ok((!mode_changed).then_some(None));
+    }
+    match (base, ours, theirs) {
+        // Added in one.
+        (None, Some(added), None) | (None, None, Some(added)) => Ok(Some(Some(added.clone()))),
+        // Added in both, identically (and with the same mode).
+        (None, Some(o), Some(t)) if o.1 == t.1 => Ok((o.0 == t.0).then(|| Some(o.clone()))),
+        // Modified in both, but differently: merged by content, if regular
+        // files; added in both differently is a conflict.
+        (Some(b), Some(o), Some(t)) => {
+            let special = |m: &str| m == "120000" || m == "160000";
+            if special(&o.0) || special(&t.0) || o.0 != t.0 {
+                return Ok(None);
+            }
+            let args = ["merge-file", "--object-id", &o.1, &b.1, &t.1];
+            let out = cmd::command(common_dir).args(args).output()?;
+            match out.status.code() {
+                Some(0) => {
+                    let merged = first_line(&out.stdout).context("git merge-file: no id")?;
+                    Ok(Some(Some((o.0.clone(), merged))))
+                }
+                Some(1..=127) => Ok(None),
+                _ => Err(cmd::failed(&args, &out)),
+            }
+        }
+        _ => Ok(None),
+    }
 }
 
 /// `git merge-base <how> <commits>`: none if they have no common ancestor.
@@ -176,7 +347,8 @@ fn message(common_dir: &Path, into: &str, remotes: &[&Source]) -> Result<String>
 /// The line `git merge` writes for `fmt-merge-msg` about `source` (builtin/
 /// merge.c, `merge_name`; no plumbing writes it): a branch, tag or
 /// remote-tracking branch by the ref the name stands for; `<branch>~<n>` or
-/// `<branch>^` as the branch's "early part"; any other revision as a commit.
+/// `<branch>^` as the branch's "early part"; a tag object by its id as a
+/// tag; any other revision as a commit.
 fn merge_name(source: &Source) -> String {
     let name = &source.name;
     let kinds = [
@@ -197,6 +369,9 @@ fn merge_name(source: &Source) -> String {
         let early = if early { " (early part)" } else { "" };
         return format!("{}\t\tbranch '{branch}'{early} of .\n", source.id);
     }
+    if let Some(tag) = tag_object(name) {
+        return format!("{tag}\t\ttag '{name}'\n");
+    }
     format!("{}\t\tcommit '{name}'\n", source.id)
 }
 
@@ -205,6 +380,14 @@ fn ref_target(full: &str) -> Option<String> {
     super::with_repo(|repo| {
         let reference = repo.find_reference(full).ok()?;
         Some(reference.target().try_id()?.to_string())
+    })
+}
+
+/// The tag object `rev` names itself (not through a ref), if it names one.
+fn tag_object(rev: &str) -> Option<String> {
+    super::with_repo(|repo| {
+        let object = repo.rev_parse_single(rev).ok()?.object().ok()?;
+        (object.kind == gix::object::Kind::Tag).then(|| object.id.to_string())
     })
 }
 

@@ -112,11 +112,11 @@ fn merged(repo: &Path, common_dir: &Path, name: &str, from: &[String]) -> Result
     let sources = (from.iter())
         .map(|rev| merge::source(rev))
         .collect::<Result<Vec<_>>>()?;
-    // The names of the sources but those at commit `except`, each once.
-    let names = |except: Option<&str>| {
+    // The names of the sources that pass `keep`, each once.
+    let names = |keep: &dyn Fn(usize, &merge::Source) -> bool| {
         let mut names: Vec<&str> = Vec::new();
-        for s in &sources {
-            if Some(s.id.as_str()) != except && !names.contains(&s.name.as_str()) {
+        for (i, s) in sources.iter().enumerate() {
+            if keep(i, s) && !names.contains(&s.name.as_str()) {
                 names.push(&s.name);
             }
         }
@@ -125,7 +125,7 @@ fn merged(repo: &Path, common_dir: &Path, name: &str, from: &[String]) -> Result
     // Where the branch is, at source `at`, and why.
     let at = |at: usize, why: &str| {
         let source = &sources[at];
-        let done = match names(Some(&source.id)) {
+        let done = match names(&|_, s| s.id != source.id) {
             others if others.is_empty() => format!("at {} ({why})", source.name),
             others => format!("at {} ({why}: it contains {others})", source.name),
         };
@@ -134,7 +134,10 @@ fn merged(repo: &Path, common_dir: &Path, name: &str, from: &[String]) -> Result
     let (at, done) = match merge::merge(common_dir, name, &sources)? {
         Merged::UpToDate => at(0, "already up to date"),
         Merged::FastForward(i) => at(i, "a fast-forward"),
-        Merged::Merge { id } => (id, format!("at a merge of {}", names(None))),
+        Merged::Merge { id, parents } => {
+            let of = names(&|i, _| parents.contains(&i));
+            (id, format!("at a merge of {of}"))
+        }
         Merged::Conflict => {
             return Err(super::tree::not_implemented(
                 "gitfold branch with several --from that conflict",

@@ -29,6 +29,15 @@ git_merge() {
     R worktree remove --force "$T/git-$name"
 }
 made() { R log -1 --format='%P %T%n%B' "$1"; }
+# Whether `git merge REV…` on a branch at $1 fails.
+git_refuses() {
+    local at=$1; shift
+    R worktree add -q --detach "$T/git-refuses" "$at"
+    ! G "$T/git-refuses" merge -q --no-edit "$@" >/dev/null 2>&1
+    local refused=$?
+    R worktree remove --force "$T/git-refuses"
+    return $refused
+}
 
 setup() {
     R config user.name t; R config user.email t@t   # for the merge commits
@@ -45,7 +54,7 @@ eq "two sources: the merged files" "api ui" "$(R show c:api.txt) $(R show c:ui.t
 check "three: an octopus" says 0 "at a merge of api, ui and x" branch c3 --from api --from ui --from x
 eq "three: as git merge makes it" "$(git_merge c3 api ui x)" "$(made c3)"
 eq "three: three parents" 3 "$(R log -1 --format=%P c3 | wc -w)"
-check "the first contained in the others: dropped from the parents" says 0 "created branch s" branch s --from main --from api --from ui
+check "the first contained in the others: dropped from the parents" says 0 "created branch s at a merge of api and ui" branch s --from main --from api --from ui
 eq "  as git merge does" "$(git_merge s main api ui)" "$(made s)"
 check "a source repeated counts once" says 0 "created branch r" branch r --from api --from ui --from api
 eq "  as git merge does" "$(git_merge r api ui api)" "$(made r)"
@@ -54,10 +63,43 @@ eq "  as git merge does" "$(git_merge m x "$(R rev-parse ui)" api~0)" "$(made m)
 R tag -a -m "the tag's message" v1 ui; R tag lw api
 check "tags" says 0 "created branch t" branch t --from x --from v1 --from lw
 eq "  as git merge does (an annotated tag's message too)" "$(git_merge t x v1 lw)" "$(made t)"
+v1=$(R rev-parse v1)
+check "an annotated tag by its id" says 0 "created branch ti" branch ti --from x --from "$v1"
+eq "  as git merge does (a tag, with its message)" "$(git_merge ti x "$v1")" "$(made ti)"
 work api2 api api.txt api2
 check "an early part (api2~1)" says 0 "created branch e" branch e --from ui --from api2~1
 eq "  as git merge does" "$(git_merge e ui api2~1)" "$(made e)"
 eq "no relation afterwards" "" "$(R config --get-regexp '^branch\.(c|c3)\.' || true)"
+}
+
+octopus_steps() {
+setup
+work lines main m.txt "$(printf '1\n2\n3\n4\n5')"
+work top lines m.txt "$(printf 'one\n2\n3\n4\n5')"
+work bottom lines m.txt "$(printf '1\n2\n3\n4\nfive')"
+check "an octopus merging a file's content (merge-one-file)" says 0 "at a merge of top, bottom and x" branch o --from top --from bottom --from x
+eq "  as git merge does" "$(git_merge o top bottom x)" "$(made o)"
+R branch ren main; R worktree add -q "$T/wt-ren" ren; G "$T/wt-ren" mv a.txt moved.txt; G "$T/wt-ren" commit -qm ren; R worktree remove "$T/wt-ren"
+work edit main a.txt edited
+check "two sources: renames followed (ort, git's default)" says 0 "at a merge of ren and edit" branch two --from ren --from edit
+eq "  as git merge does" "$(git_merge two ren edit)" "$(made two)"
+check "an octopus follows no renames: refused before the last, as git" says 1 "Should not be doing an octopus" branch o2 --from ren --from edit --from x
+check "  git refuses it too" git_refuses ren edit x
+eq "  no index of the steps left" "" "$(ls -A "$COMMON/gitfold" | grep merge-index)"
+check "  nothing left behind" fails R rev-parse --verify -q refs/heads/o2
+}
+
+merge_ff() {
+setup
+R config merge.ff false
+check "merge.ff=false: a merge where a fast-forward would do" says 0 "at a merge of main and api" branch n --from main --from api
+eq "  as git merge does" "$(git_merge n main api)" "$(made n)"
+check "  already up to date stays so" says 0 "already up to date" branch n2 --from api --from main
+R config merge.ff only
+check "merge.ff=only: a fast-forward" says 0 "a fast-forward" branch f --from main --from api
+check "merge.ff=only: no merge" says 1 "Not possible to fast-forward" branch m --from api --from ui
+check "  git refuses it too" git_refuses api ui
+check "  nothing left behind" fails R rev-parse --verify -q refs/heads/m
 }
 
 no_merge_needed() {
@@ -99,6 +141,8 @@ unmount_fs
 }
 
 section "from: clean merges, as git makes them" clean_merges
+section "from: octopus steps, as git takes them" octopus_steps
+section "from: merge.ff" merge_ff
 section "from: no merge needed" no_merge_needed
 section "from: refused, and conflicts" refused
 section "from: mounted" mounted

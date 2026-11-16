@@ -6,7 +6,7 @@
 //! worktree's admin directory for what is per worktree (its HEAD, index and
 //! config).
 
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 
@@ -49,24 +49,33 @@ pub fn output_or_no(git_dir: &Path, args: &[&str]) -> Result<(bool, Vec<u8>)> {
     }
 }
 
-/// `output`, with `input` on git's stdin (read whole before git prints).
+/// `output`, with `input` on git's stdin.
 pub fn output_with_input(git_dir: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>> {
-    let mut child = command(git_dir)
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child.stdin.take().expect("piped").write_all(input)?;
-    let out = child.wait_with_output()?;
+    let out = exec(command(git_dir), args, input)?;
     if !out.status.success() {
         return Err(failed(args, &out));
     }
     Ok(out.stdout)
 }
 
+/// Runs `git` (from `command`, to which it adds `args`) with `input` on its
+/// stdin, whatever its exit code; git reads it whole before it prints.
+pub fn exec(mut git: Command, args: &[&str], input: &[u8]) -> Result<Output> {
+    let mut child = (git.args(args))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    match child.stdin.take().expect("piped").write_all(input) {
+        // git exited without reading it all: its own error says why.
+        Err(e) if e.kind() == ErrorKind::BrokenPipe => {}
+        written => written?,
+    }
+    Ok(child.wait_with_output()?)
+}
+
 /// The error of git run with `args` that ended as `out` says: with what it said.
-fn failed(args: &[&str], out: &Output) -> anyhow::Error {
+pub fn failed(args: &[&str], out: &Output) -> anyhow::Error {
     anyhow!(
         "git {} failed ({}): {}",
         args.join(" "),
