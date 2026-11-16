@@ -67,8 +67,8 @@ pub fn members(
 pub struct Committed {
     pub files: Files,
     pub members: Vec<Member>,
-    /// Members whose branch or parent is gone (deleted, pruned), and those
-    /// built on them, with why: left out of the view.
+    /// Members whose branch or parent doesn't resolve (deleted, pruned), and
+    /// those built on them, with why: left out of the view.
     pub skipped: Vec<(String, String)>,
 }
 
@@ -89,38 +89,36 @@ pub fn committed(
     };
     let resolve = |full: &str| git::resolve(full).with_context(|| format!("resolving {full}"));
     let mut own = resolve(&format!("refs/heads/{branch}"))?;
-    if let Some(remote) = origin_root {
-        let remote = resolve(remote)?;
-        if merge_base(own.id, remote.id)? == Some(own.id) {
-            own = remote;
-        }
+    // Pruned since: the local tip.
+    if let Some(remote) = origin_root.and_then(|r| git::resolve(r).ok())
+        && merge_base(own.id, remote.id)? == Some(own.id)
+    {
+        own = remote;
     }
     let mut out = Committed {
         files: files(store.load_tree(own.tree)?),
         members: Vec::with_capacity(members.len()),
         skipped: Vec::new(),
     };
+    // `members` has every branch before those built on it (`members()`).
     for m in members {
-        let full = format!("refs/heads/{}", m.branch);
-        let exists = |full: &str| git::full_ref(full).as_deref() == Some(full);
-        // Deleted since the tree was read (or its parent was): left out,
-        // with what is built on it, whose work is measured against it.
-        let why = if !exists(&full) {
-            Some(format!("no branch {}", m.branch))
-        } else if let Some(parent) = (out.skipped.iter())
-            .find(|(skipped, _)| m.parent.strip_prefix("refs/heads/") == Some(skipped))
-        {
-            Some(format!("built on {}, left out", parent.0))
-        } else if !exists(&m.parent) {
-            Some(format!("its parent {} is gone", m.parent))
-        } else {
-            None
-        };
-        if let Some(why) = why {
+        // Left out with what is built on it, whose work is measured against it.
+        let skipped_parent = (out.skipped.iter())
+            .find(|(skipped, _)| m.parent.strip_prefix("refs/heads/") == Some(skipped));
+        if let Some((parent, _)) = skipped_parent {
+            let why = format!("built on {parent}, left out");
             out.skipped.push((m.branch.clone(), why));
             continue;
         }
-        let (at, parent) = (resolve(&full)?, resolve(&m.parent)?);
+        let refs = resolve(&format!("refs/heads/{}", m.branch))
+            .and_then(|at| Ok((at, resolve(&m.parent)?)));
+        let (at, parent) = match refs {
+            Ok(refs) => refs,
+            Err(e) => {
+                out.skipped.push((m.branch.clone(), format!("{e:#}")));
+                continue;
+            }
+        };
         let merge_point = match merge_base(at.id, parent.id)? {
             Some(base) => store.load_tree(git::with_repo(|repo| commit_tree(repo, base))?)?,
             None => EMPTY_TREE,
@@ -218,9 +216,10 @@ mod tests {
         };
         branch("m1-ui", &local);
         let orphan = BuiltOn {
-            branch: "m1-api".into(),
+            branch: "m1-orphan".into(),
             parent: "refs/heads/m1-nosuch".into(),
         };
+        branch("m1-orphan", &local);
         let remote = Some("refs/remotes/origin/m1-main");
         let tree_of = |c: &str| store.load_tree(git::resolve(c).unwrap().tree).unwrap();
         let c = committed(&store, "m1-main", remote, &[api, gone, on_gone, orphan]).unwrap();
@@ -230,17 +229,12 @@ mod tests {
             "local main only behind: origin's"
         );
         assert_eq!(names_of(&c), ["m1-api"]);
-        let skipped: Vec<(&str, &str)> = (c.skipped.iter())
-            .map(|(b, why)| (b.as_str(), why.as_str()))
-            .collect();
-        assert_eq!(
-            skipped,
-            [
-                ("m1-gone", "no branch m1-gone"),
-                ("m1-ui", "built on m1-gone, left out"),
-                ("m1-api", "its parent refs/heads/m1-nosuch is gone"),
-            ]
-        );
+        let skipped: Vec<&str> = c.skipped.iter().map(|(b, _)| b.as_str()).collect();
+        assert_eq!(skipped, ["m1-gone", "m1-ui", "m1-orphan"]);
+        let why = |i: usize| c.skipped[i].1.as_str();
+        assert!(why(0).contains("refs/heads/m1-gone"), "{}", why(0));
+        assert_eq!(why(1), "built on m1-gone, left out");
+        assert!(why(2).contains("refs/heads/m1-nosuch"), "{}", why(2));
 
         // The same commit, or local main ahead: its own files.
         branch("m1-main", &ahead);
