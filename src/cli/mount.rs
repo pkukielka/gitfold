@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use crate::daemon::control;
 use crate::daemon::{self, serve};
 use crate::prewarm::Prewarm;
-use crate::{mount_table, prewarm, procs};
+use crate::{mount_table, prewarm, procs, settings};
 
 /// How long `mount` waits for the daemon to mount.
 const MOUNT_WAIT: Duration = Duration::from_secs(60);
@@ -73,11 +73,58 @@ pub struct MountArgs {
     pub track_reads: bool,
 }
 
+impl MountArgs {
+    /// The flags to record for mounting again the same way
+    /// (`gitfold.mountOptions`): those mount takes the daemon's options from,
+    /// the log file absolute.
+    fn flags(&self) -> Result<Vec<String>> {
+        let mut flags = vec![
+            format!("--prewarm={}", self.prewarm),
+            format!("--prewarm-walks={}", self.prewarm_walks),
+        ];
+        flags.extend(self.threads.map(|n| format!("--threads={n}")));
+        flags.extend(
+            self.prewarm_threads
+                .map(|n| format!("--prewarm-threads={n}")),
+        );
+        if self.track_reads {
+            flags.push("--track-reads".into());
+        }
+        if let Some(log) = &self.log {
+            let log = std::path::absolute(log)?;
+            let log = log.to_str().context("a log file path that isn't UTF-8")?;
+            flags.push(format!("--log={log}"));
+        }
+        Ok(flags)
+    }
+}
+
+/// Where the repository of `common_dir` is mounted: its mount, else mounted
+/// again where it was last mounted (see `mount_again`); `None` if no mount
+/// point is recorded (never mounted). Refused if the mount doesn't answer.
+pub fn mount_or_again(common_dir: &Path) -> Result<Option<PathBuf>> {
+    let mount = match mount_table::mount_of(common_dir)? {
+        Some(mount) => mount,
+        None => match settings::Local::read(common_dir).mountpoint() {
+            Some(last) => mount_again(common_dir, &last)?,
+            None => return Ok(None),
+        },
+    };
+    fs::metadata(&mount).with_context(|| {
+        format!(
+            "the gitfold mount at {} doesn't answer (its daemon gone?); `gitfold unmount` it",
+            mount.display()
+        )
+    })?;
+    Ok(Some(mount))
+}
+
 /// Mounts the repository of `common_dir` at `mountpoint` (where it last was:
-/// `gitfold.mountpoint`, recorded by `gitfold mount`), with the default
-/// options: `gitfold mount` in the background, its messages on stderr. The
-/// mount point, the repository's mount found afterwards: another command
-/// may have mounted it meanwhile, its mount refused.
+/// `gitfold.mountpoint`, recorded by `gitfold mount`), with the flags it was
+/// last mounted with (`gitfold.mountOptions`): `gitfold mount` in the
+/// background, its messages on stderr. The mount point, the repository's
+/// mount found afterwards: another command may have mounted it meanwhile,
+/// its mount refused.
 pub fn mount_again(common_dir: &Path, mountpoint: &Path) -> Result<PathBuf> {
     // Gone with a reboot if it was on a tmpfs (/tmp, /run/user).
     fs::create_dir_all(mountpoint)
@@ -85,6 +132,8 @@ pub fn mount_again(common_dir: &Path, mountpoint: &Path) -> Result<PathBuf> {
     let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
     let status = Command::new(std::env::current_exe()?)
         .arg("mount")
+        .args(settings::Local::read(common_dir).mount_options())
+        .arg("--")
         .arg(common_dir)
         .arg(mountpoint)
         .stdin(Stdio::null())
@@ -105,6 +154,7 @@ pub fn mount_again(common_dir: &Path, mountpoint: &Path) -> Result<PathBuf> {
 pub fn mount(args: MountArgs) -> Result<()> {
     let mountpoint = daemon::check(&args.mountpoint)?;
     if args.foreground {
+        let flags = args.flags()?;
         return serve::run(serve::Options {
             repo: args.repo,
             mountpoint,
@@ -114,6 +164,7 @@ pub fn mount(args: MountArgs) -> Result<()> {
             prewarm_threads: args.prewarm_threads,
             prewarm_walks: args.prewarm_walks,
             track_reads: args.track_reads,
+            flags,
         });
     }
     let log = match args.log {
