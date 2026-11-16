@@ -8,7 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use super::write_path;
 use crate::git;
@@ -152,14 +152,20 @@ fn committed(
             _ => main,
         };
         let range = format!("{from}...refs/heads/{branch}");
-        let diff = ["diff", "--name-only", "--no-relative", "-z", "--no-renames"];
+        let diff = [
+            "--literal-pathspecs",
+            "diff",
+            "--name-only",
+            "--no-relative",
+            "-z",
+        ];
         let args: Vec<&str> = (diff.into_iter())
-            .chain([range.as_str(), "--"])
+            .chain(["--no-renames", range.as_str(), "--"])
             .chain(typed.iter().map(String::as_str))
             .collect();
         // One branch git can't diff (no history shared with its parent)
         // doesn't hide the others.
-        match git_here(&args, None, None) {
+        match git::cmd::output_of(git::cmd::here().args(&args), &args, None) {
             Ok(out) => {
                 for path in out.split(|b| *b == 0).filter(|p| !p.is_empty()) {
                     lines.insert((path.to_vec(), branch.to_string(), "committed"));
@@ -172,53 +178,42 @@ fn committed(
 }
 
 /// Which of `paths` (from the root) match `typed`, as git matches them: they
-/// go into a throwaway index (no objects written), which `git ls-files`
-/// lists. A file and a path below it can't share an index (`d` and `d/x`,
-/// as in a workspace that replaced a directory with a file), so such paths
-/// go into indexes of their own.
+/// go into throwaway indexes (no objects written), which `git ls-files`
+/// lists; with no paths, an empty index, so that git still checks `typed`.
 fn matching<'a>(
     paths: impl Iterator<Item = &'a Vec<u8>>,
     typed: &[String],
 ) -> Result<HashSet<Vec<u8>>> {
-    let mut indexes: Vec<BTreeSet<&[u8]>> = Vec::new();
-    for path in paths {
-        let fits = |index: &BTreeSet<&[u8]>| {
-            let below = [path.as_slice(), b"/"].concat();
-            !state::ancestors(path).any(|a| index.contains(a))
-                && (index.range(below.as_slice()..).next()).is_none_or(|p| !p.starts_with(&below))
-        };
-        match indexes.iter_mut().find(|index| fits(index)) {
-            Some(index) => {
-                index.insert(path);
-            }
-            None => indexes.push(BTreeSet::from([path.as_slice()])),
-        }
-    }
-    // With no paths, an empty index (one that doesn't exist): git still
-    // checks the paths typed.
+    let mut indexes = without_clashes(paths);
     if indexes.is_empty() {
         indexes.push(BTreeSet::new());
     }
-    let mut matching = HashSet::new();
     let empty = git::with_repo(|repo| gix::ObjectId::empty_blob(repo.object_hash()));
+    let entry = format!("100644 {empty} 0\t");
+    let update = ["--literal-pathspecs", "update-index", "-z", "--index-info"];
+    let list: Vec<&str> = ["--literal-pathspecs", "ls-files", "-z", "--full-name", "--"]
+        .into_iter()
+        .chain(typed.iter().map(String::as_str))
+        .collect();
     let dir = TempDir::new()?;
+    let mut matching = HashSet::new();
     for (n, index) in indexes.iter().enumerate() {
+        // An index that doesn't exist is an empty one.
         let file = dir.0.join(format!("index{n}"));
         if !index.is_empty() {
             let mut info = Vec::new();
             for path in index {
-                info.extend(format!("100644 {empty} 0\t").bytes());
+                info.extend(entry.as_bytes());
                 info.extend(*path);
                 info.push(0);
             }
-            let update = ["update-index", "-z", "--index-info"];
-            git_here(&update, Some(&file), Some(&info))?;
+            let command = &mut git::cmd::here();
+            command.args(update).env("GIT_INDEX_FILE", &file);
+            git::cmd::output_of(command, &update, Some(info))?;
         }
-        let list = ["ls-files", "-z", "--full-name", "--"];
-        let args: Vec<&str> = (list.into_iter())
-            .chain(typed.iter().map(String::as_str))
-            .collect();
-        let out = git_here(&args, Some(&file), None)?;
+        let command = &mut git::cmd::here();
+        command.args(&list).env("GIT_INDEX_FILE", &file);
+        let out = git::cmd::output_of(command, &list, None)?;
         matching.extend(
             out.split(|b| *b == 0)
                 .filter(|p| !p.is_empty())
@@ -228,12 +223,34 @@ fn matching<'a>(
     Ok(matching)
 }
 
+/// `paths` in sets that an index can hold: none with both a path and one
+/// below it (`d` and `d/x`, as when a workspace replaced a directory with a
+/// file); normally one set.
+fn without_clashes<'a>(paths: impl Iterator<Item = &'a Vec<u8>>) -> Vec<BTreeSet<&'a [u8]>> {
+    let mut sets: Vec<BTreeSet<&[u8]>> = Vec::new();
+    for path in paths {
+        let below = [path.as_slice(), b"/"].concat();
+        let fits = |set: &BTreeSet<&[u8]>| {
+            !state::ancestors(path).any(|a| set.contains(a))
+                && (set.range(below.as_slice()..).next()).is_none_or(|p| !p.starts_with(&below))
+        };
+        match sets.iter_mut().find(|set| fits(set)) {
+            Some(set) => {
+                set.insert(path);
+            }
+            None => sets.push(BTreeSet::from([path.as_slice()])),
+        }
+    }
+    sets
+}
+
 /// A directory of its own in the system's temporary directory, removed
 /// when dropped.
 struct TempDir(PathBuf);
 
 impl TempDir {
     fn new() -> Result<TempDir> {
+        // Not the pid alone: one left by a killed run could be in the way.
         let pid = std::process::id();
         let nanos = (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH))
             .map_or(0, |d| d.subsec_nanos());
@@ -247,39 +264,6 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
-}
-
-/// Runs git with `--literal-pathspecs` and `args` in the current directory,
-/// so that it takes pathspecs as typed there, as git does; with
-/// `GIT_INDEX_FILE` = `index` if given, and `input` on its stdin. What it
-/// printed; a failure's error holds what git said.
-fn git_here(args: &[&str], index: Option<&Path>, input: Option<&[u8]>) -> Result<Vec<u8>> {
-    use std::process::{Command, Stdio};
-    let mut command = Command::new("git");
-    command.arg("--literal-pathspecs").args(args);
-    if let Some(index) = index {
-        command.env("GIT_INDEX_FILE", index);
-    }
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let mut stdin = child.stdin.take().expect("piped");
-    // Written by a thread of its own: git may print before it has read all.
-    let input = input.unwrap_or_default().to_vec();
-    let writer = std::thread::spawn(move || stdin.write_all(&input));
-    let out = child.wait_with_output()?;
-    writer.join().expect("writer thread")?;
-    if !out.status.success() {
-        bail!(
-            "git {} failed ({}): {}",
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(out.stdout)
 }
 
 /// The summary `git diff --shortstat` prints: ` 2 files changed, 3
