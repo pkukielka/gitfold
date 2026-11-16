@@ -60,7 +60,7 @@ pub use removal::Removal;
 use snapshots::Snapshots;
 use stats::{Counters, IoTimer, bump};
 use view::Content;
-use views::Views;
+use views::{ViewDir, Views};
 use workspace::{Obj, Workspace};
 use workspaces::Workspaces;
 
@@ -167,6 +167,15 @@ impl GitFold {
         // `make` counts the kernel's reference to the new node (see `workspace::nodes`).
         let (child, obj) = make(&ws, local)?;
         self.obj_attr(inode::ws(slot, child), &obj)
+    }
+
+    /// The view inode `ino` is in, if it is a view's: requests in it hold
+    /// its gate while served and replied to (`ViewDir::swap`).
+    fn view_of(&self, ino: u64) -> Option<Arc<ViewDir>> {
+        match inode::decode(ino)? {
+            inode::Ino::View { slot, .. } => self.views.get(slot).ok(),
+            _ => None,
+        }
     }
 
     /// The workspace and local id of a workspace entry inode (see `ws_node_ino`).
@@ -277,6 +286,8 @@ impl Filesystem for GitFold {
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         bump(&self.counters.lookup);
+        let view = self.view_of(parent.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let names_dir = self.is_names_dir(parent.0);
         let names_before = names_dir.then(|| self.name_count());
         let result = self.lookup_attr(parent, name.as_bytes());
@@ -306,6 +317,8 @@ impl Filesystem for GitFold {
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         bump(&self.counters.getattr);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         reply_attr(self.attr(ino.0), reply)
     }
 
@@ -347,6 +360,8 @@ impl Filesystem for GitFold {
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         bump(&self.counters.readlink);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         match self.link_target(ino) {
             Ok(data) => reply.data(&data),
             Err(e) => reply.error(e),
@@ -518,6 +533,8 @@ impl Filesystem for GitFold {
         reply: ReplyData,
     ) {
         bump(&self.counters.read);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let _t = IoTimer::start(&self.counters);
         match self.content(ino, offset, size) {
             Ok(Content::Whole(data)) => {
@@ -638,6 +655,8 @@ impl Filesystem for GitFold {
         mut reply: ReplyDirectory,
     ) {
         bump(&self.counters.readdir);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let result = self.for_each_entry(ino, offset, false, |next, child, name, attr| {
             reply.add(INodeNo(child), next, attr.kind, OsStr::from_bytes(name))
         });
@@ -656,6 +675,8 @@ impl Filesystem for GitFold {
         mut reply: ReplyDirectoryPlus,
     ) {
         bump(&self.counters.readdir);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let result = self.for_each_entry(ino, offset, true, |next, child, name, attr| {
             reply.add(
                 INodeNo(child),

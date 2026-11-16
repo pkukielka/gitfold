@@ -99,6 +99,11 @@ R config --unset branch.web.gitfoldParent
 check "and gone when it isn't any more" until_ok fails test -e "$MNT/$V/web.txt"
 commit_on api main $'a.txt=api\n'
 check "the branch's own commit" until_ok has "$MNT/$V/a.txt" api
+check "with a new time" test "$(stat -c %Y "$MNT/$V/a.txt")" -gt 1577836800
+stat "$MNT/$V/ui.txt" >/dev/null
+commit_on ui api ui.txt=- $'ui.txt/x=x\n'
+check "a file now a directory" until_ok test -f "$MNT/$V/ui.txt/x"
+check "seen as one" test -d "$MNT/$V/ui.txt"
 }
 
 names() {

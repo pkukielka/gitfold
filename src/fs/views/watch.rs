@@ -17,8 +17,9 @@ use log::error;
 use super::build;
 use super::members::{self, Bases, BuiltOn, Refs};
 use super::merge;
+use super::merge::ConflictStyle;
 use super::serve::ViewDir;
-use super::shown::Shown;
+use super::shown::{Shown, Times};
 use crate::fs::NameChanges;
 use crate::inode;
 use crate::state::{self, name, parent};
@@ -30,9 +31,6 @@ const INTERVAL: Duration = Duration::from_secs(1);
 /// How often the tree is read again even when the config didn't change (a
 /// new `origin/HEAD` moves the root without touching it).
 const TREE_EVERY: u32 = 30;
-/// When the kernel is told a second time: a lookup or listing in flight while
-/// the view was swapped can be cached after the first.
-const AGAIN_AFTER: Duration = Duration::from_millis(100);
 
 /// What a view's watch needs from the mount.
 pub struct Context {
@@ -50,7 +48,10 @@ pub struct Watch {
     config: Option<Stamp>,
     reads: u32,
     tree: Tree,
-    built: Option<(Vec<BuiltOn>, Refs)>,
+    built: Option<(Vec<BuiltOn>, Refs, ConflictStyle)>,
+    /// The conflict style the config asks for.
+    style: ConflictStyle,
+    times: Times,
     bases: Bases,
     last_error: String,
 }
@@ -76,6 +77,8 @@ impl Watch {
         if self.config != Some(config) || self.reads >= TREE_EVERY {
             self.tree = Tree::read(&ctx.common_dir)?;
             self.config = Some(config);
+            // As git reads it now; a change builds the view again.
+            self.style = merge::conflict_style(&ctx.common_dir);
             self.reads = 0;
         }
         self.reads += 1;
@@ -92,17 +95,16 @@ impl Watch {
         let opened = |b: &str| opened.contains(b);
         let members = members::members(&self.tree, branch, origin.as_deref(), opened);
         let refs = members::refs(branch, origin.as_deref(), &members, &mut self.bases)?;
-        if let Some((m, r)) = &self.built
-            && (m, r) == (&members, &refs)
+        if let Some((m, r, s)) = &self.built
+            && (m, r, *s) == (&members, &refs, self.style)
         {
             return Ok(None);
         }
-        let style = merge::conflict_style(&ctx.common_dir);
         let (files, inputs) = members::committed(&ctx.store, &refs, &mut self.bases)?;
         self.bases.next_round();
-        let view = build::build(&ctx.store, branch, files, &inputs, style)?;
-        let next = Shown::next(&ctx.store, view, &refs.notes, before);
-        self.built = Some((members, refs));
+        let view = build::build(&ctx.store, branch, files, &inputs, self.style)?;
+        let next = Shown::next(&ctx.store, view, &refs.notes, before, &self.times);
+        self.built = Some((members, refs, self.style));
         Ok(Some(next))
     }
 }
@@ -119,9 +121,9 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                 Ok(next) => {
                     watch.last_error.clear();
                     if let Some((shown, changed)) = next {
-                        view.swap(shown);
-                        tell(&ctx.names, &view, &changed);
-                        thread::sleep(AGAIN_AFTER);
+                        // Waits for requests served from the old view: their
+                        // replies can't land after the kernel is told.
+                        view.swap(&ctx.store, shown, &changed);
                         tell(&ctx.names, &view, &changed);
                     }
                 }

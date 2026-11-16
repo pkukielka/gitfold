@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use gix::objs::tree::EntryKind;
+use parking_lot::Mutex;
 
 use super::build::{self, Entry, View};
 use super::members::Note;
@@ -42,20 +43,26 @@ pub struct Shown {
     /// Each conflicting path's attribute.
     conflicts: HashMap<Vec<u8>, String>,
     summary: Arc<Vec<u8>>,
-    /// When the overlay's paths last changed (others: `inode::file_time`).
-    times: HashMap<Vec<u8>, SystemTime>,
+    times: Times,
     /// When this was made: the time of the directories and the summary.
     pub made: SystemTime,
 }
 
+/// When a view's paths last changed (those not here: never, they show
+/// `inode::file_time`), shared by the views it was built as, so each refresh
+/// adds to it rather than copying it.
+pub type Times = Arc<Mutex<HashMap<Vec<u8>, SystemTime>>>;
+
 impl Shown {
     /// `view` as shown, after `before` (none: the first): with the paths
-    /// whose files or directories differ from it, sorted.
+    /// whose files or directories differ from it, sorted, given the time now
+    /// in `times`.
     pub fn next(
         store: &Store,
         view: View,
         notes: &[Note],
         before: Option<&Shown>,
+        times: &Times,
     ) -> (Shown, Vec<Vec<u8>>) {
         let made = SystemTime::now();
         let mut added = BTreeSet::new();
@@ -80,37 +87,35 @@ impl Shown {
         for n in notes {
             summary.extend_from_slice(format!("{}\t{}\t{}\n", n.kind, n.what, n.why).as_bytes());
         }
-        let mut shown = Shown {
+        let shown = Shown {
             view,
             added,
             emptied,
             conflicts,
             summary: Arc::new(summary),
-            times: HashMap::new(),
+            times: times.clone(),
             made,
         };
         let changed = match before {
             Some(before) => changed(store, before, &shown),
             None => Vec::new(),
         };
-        let overlay = &shown.view.overlay;
-        shown.times = (overlay.keys())
-            .map(|p| {
-                let unchanged = before.filter(|_| changed.binary_search(p).is_err());
-                let time = unchanged.and_then(|b| b.times.get(p).copied());
-                (p.clone(), time.unwrap_or(made))
-            })
-            .collect();
+        let mut times = times.lock();
+        let first = before.is_none().then(|| shown.view.overlay.keys());
+        for path in changed.iter().chain(first.into_iter().flatten()) {
+            times.insert(path.clone(), made);
+        }
+        drop(times);
         (shown, changed)
     }
 
     /// What `path` is (`""`: the root), if anything.
     pub fn obj(&self, store: &Store, path: &[u8]) -> Option<Obj> {
-        if path.is_empty() || self.added.contains(path) {
-            return Some(Obj::Dir);
-        }
         if path == SUMMARY {
             return Some(Obj::Summary(self.summary.clone()));
+        }
+        if path.is_empty() || self.added.contains(path) {
+            return Some(Obj::Dir);
         }
         match self.view.overlay.get(path) {
             Some(entry) => Some(self.of(store, entry.clone()?)),
@@ -194,10 +199,7 @@ impl Shown {
 
     /// When `path` last changed.
     pub fn time(&self, path: &[u8]) -> SystemTime {
-        self.times
-            .get(path)
-            .copied()
-            .unwrap_or_else(inode::file_time)
+        (self.times.lock().get(path).copied()).unwrap_or_else(inode::file_time)
     }
 }
 
@@ -292,6 +294,7 @@ mod tests {
     #[test]
     fn directories_and_listings() {
         let store = Store::default();
+        let times = Times::default();
         let c = commit(
             None,
             &[
@@ -318,7 +321,7 @@ mod tests {
                 ("n/m/k", Some(f)),
             ],
         );
-        let (s, changed) = Shown::next(&store, v, &[], None);
+        let (s, changed) = Shown::next(&store, v, &[], None, &times);
         assert!(changed.is_empty());
         assert_eq!(
             names(s.list(&store, b"")),
@@ -337,18 +340,18 @@ mod tests {
             &c,
             &[("d/e/y", None), ("g/z", None), ("g", Some(f))],
         );
-        let (s2, changed) = Shown::next(&store, v, &[], Some(&s));
+        let (s2, changed) = Shown::next(&store, v, &[], Some(&s), &times);
         let changed: Vec<String> = (changed.into_iter())
             .map(|p| String::from_utf8(p).unwrap())
             .collect();
         assert_eq!(changed, ["d", "d/x", "n", "n/m", "n/m/k"]);
         assert_eq!(names(s2.list(&store, b"d")), ["x"]);
         assert_eq!(s2.time(b"g"), s.time(b"g"), "unchanged: its time kept");
-        assert_eq!(
-            s2.time(b"d/x"),
-            inode::file_time(),
-            "the branch's own file again"
+        assert!(
+            s2.time(b"d/x") > inode::file_time(),
+            "the branch's own file, changed"
         );
+        assert_eq!(s2.time(b"f"), inode::file_time(), "never changed");
     }
 
     #[test]
@@ -369,7 +372,7 @@ mod tests {
             what: "web".into(),
             why: "no branch web".into(),
         };
-        let (s, _) = Shown::next(&store, v, &[note], None);
+        let (s, _) = Shown::next(&store, v, &[note], None, &Times::default());
         assert_eq!(s.conflict(b"a"), Some("mode: api, ui; markers: api, ui"));
         assert_eq!(
             String::from_utf8(s.summary.to_vec()).unwrap(),

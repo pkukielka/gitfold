@@ -492,8 +492,9 @@ directory), the file carries the attribute `user.gitfold.conflict`
 every conflict, one per line (`<kind>\t<branches>\t<path>`), and the branches
 left out (`skipped`) or refs that couldn't be read (`unread`). The view follows
 new commits and changes to the tree within about a second. `@live` (with
-uncommitted work) is reserved and comes later; a branch or remote named
-`committed` or `live` is reached as `@refs/heads/committed`.
+uncommitted work) is reserved and comes later; a branch named `committed` or
+`live` is reached as `@refs/heads/committed` (a remote so named as
+`@refs/remotes/committed/<branch>`).
 
 ### Partial clones
 

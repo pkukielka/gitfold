@@ -850,20 +850,23 @@ of decoding trees on demand. The remaining cold cost is per-entry kernel work
 **What:** a view (`@committed/<branch>`) is the branch's tree (a store tree)
 and an overlay of the paths where the merged branches differ, rebuilt whole
 when its refs move: a thread per open view reads its members' refs every
-second (the tree of branches again when the config or the set of workspaces
-changed, or every 30 s), and if they moved, builds the view again, swaps it
-in, and tells the kernel which paths changed: `inval_entry` for each name in
-its directory, `inval_inode` for the directory's listing and the file's
-attributes and pages, only for nodes the kernel holds, and the same again
-100 ms later. Paths keep their inodes (path-derived, as in workspaces), so
-the kernel's long TTLs stay and nothing is re-walked.
+second (the tree of branches again when the config changed, or every 30 s;
+for the main branch's view, which workspaces are opened), and if they moved,
+builds the view again, swaps it in, waits for the requests served from the
+old one (each holds the view's gate, shared, until it has replied), and tells
+the kernel which paths changed: `inval_entry` for each name in its
+directory, `inval_inode` for the directory's listing and the file's
+attributes and pages, only for nodes the kernel holds. Paths keep their
+inodes (path-derived, as in workspaces), so the kernel's long TTLs stay and
+nothing is re-walked; a path whose kind changed (a file now a directory) gets
+a new one. Files get the time of the refresh that changed them.
 
 **Why:** the views change without the kernel seeing it, unlike workspaces;
 short TTLs would cost a request per access everywhere in a view, for content
 that changes rarely. Building is proportional to the branches' changes, not to
 the repository (deltas walk only differing subtrees; merge bases are cached
-by the two commits). The second invalidation covers a lookup or listing in
-flight during the swap, which the kernel can cache after the first.
+by the two commits). Waiting for the requests in flight: one that read the
+old view and replied after the kernel was told would be cached for good.
 
 **Extended attributes:** a conflict no marker can show is an attribute on the
 file (`user.gitfold.conflict`), so the mount answers `getxattr` and `listxattr`

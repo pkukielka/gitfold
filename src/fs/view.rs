@@ -122,7 +122,7 @@ impl GitFold {
     /// needed besides the invalidation (`names`): a listing in flight when a
     /// name was added can be cached after it; the new mtime drops it.
     fn names_mtime(&self) -> SystemTime {
-        self.snapshots.root_mtime().max(self.workspaces.mtime())
+        (self.snapshots.root_mtime().max(self.workspaces.mtime())).max(self.views.mtime())
     }
 
     pub(super) fn ws_node(&self, slot: u32, local: u64) -> Result<WsNode, Errno> {
@@ -261,8 +261,13 @@ impl GitFold {
         }
         if let Ino::View { slot, local } = decode(parent.0)? {
             // Counts the kernel's reference, as for workspaces.
-            let (child, item) = self.views.get(slot)?.lookup(&self.store, local, name)?;
-            return self.view_attr(inode::view(slot, child), &item);
+            let view = self.views.get(slot)?;
+            let (child, item) = view.lookup(&self.store, local, name)?;
+            let attr = self.view_attr(inode::view(slot, child), &item);
+            if attr.is_err() {
+                view.forget(child, 1); // the kernel gets no reference
+            }
+            return attr;
         }
         self.attr(self.lookup_ino(parent, name)?)
     }

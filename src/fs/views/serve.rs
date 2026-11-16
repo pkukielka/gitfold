@@ -10,7 +10,7 @@ use std::time::SystemTime;
 
 use fuser::Errno;
 use log::{error, info};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Mutex, RwLock, RwLockReadGuard};
 
 use super::build::Entry;
 use super::shown::{Obj, Shown};
@@ -18,7 +18,7 @@ use super::watch::{self, Watch};
 use crate::fs::NameChanges;
 use crate::fs::workspace::nodes::Nodes;
 use crate::inode;
-use crate::state::join;
+use crate::state::{join, name, parent};
 use crate::store::Store;
 
 /// What a view inode is, with its time.
@@ -55,6 +55,9 @@ pub struct ViewDir {
     shown: RwLock<Arc<Shown>>,
     nodes: Mutex<Nodes>,
     listings: Mutex<HashMap<u64, Arc<Listing>>>,
+    /// Taken shared by requests while they are served, exclusively by
+    /// `swap` to wait for them.
+    gate: RwLock<()>,
 }
 
 impl ViewDir {
@@ -62,10 +65,34 @@ impl ViewDir {
         self.shown.read().clone()
     }
 
-    /// Replaces what it shows.
-    pub fn swap(&self, shown: Shown) {
-        *self.shown.write() = Arc::new(shown);
-        self.listings.lock().clear();
+    /// Replaces what it shows with `shown`, where `changed` paths differ,
+    /// then waits for the requests served from the old one: their replies
+    /// reach the kernel before it is told what changed. A path whose kind
+    /// changed (a file now a directory) gets a node of its own: the kernel's
+    /// inode keeps its type.
+    pub fn swap(&self, store: &Store, shown: Shown, changed: &[Vec<u8>]) {
+        {
+            let mut current = self.shown.write();
+            let mut nodes = self.nodes.lock();
+            let kind = |s: &Shown, p: &[u8]| s.obj(store, p).map(|o| matches!(o, Obj::Dir));
+            for path in changed {
+                let was = kind(&current, path);
+                if was.is_some()
+                    && was != kind(&shown, path)
+                    && let Some(dir) = held(&nodes, parent(path))
+                {
+                    nodes.orphan(dir, name(path));
+                }
+            }
+            *current = Arc::new(shown);
+            self.listings.lock().clear();
+        }
+        drop(self.gate.write());
+    }
+
+    /// Held while a request in it is served and replied to (`swap`).
+    pub fn serving(&self) -> RwLockReadGuard<'_, ()> {
+        self.gate.read()
     }
 
     /// The path of node `local` (`""`: the root).
@@ -75,15 +102,7 @@ impl ViewDir {
 
     /// The node the kernel holds for `path`, if it holds one.
     pub fn held(&self, path: &[u8]) -> Option<u64> {
-        if path.is_empty() {
-            return Some(0);
-        }
-        let nodes = self.nodes.lock();
-        let mut local = 0;
-        for name in path.split(|b| *b == b'/') {
-            local = nodes.existing(local, name)?;
-        }
-        Some(local)
+        held(&self.nodes.lock(), path)
     }
 
     /// What node `local` is.
@@ -115,7 +134,11 @@ impl ViewDir {
             return Ok(l.clone());
         }
         let dir = self.path(local)?;
-        let entries = shown.list(store, &dir).ok_or(Errno::ENOTDIR)?;
+        let entries = match shown.list(store, &dir) {
+            Some(entries) => entries,
+            None if shown.obj(store, &dir).is_none() => return Err(Errno::ENOENT),
+            None => return Err(Errno::ENOTDIR),
+        };
         let listing = Arc::new(Listing {
             shown,
             dir,
@@ -160,6 +183,18 @@ impl ViewDir {
     }
 }
 
+/// The node held for `path` in `nodes`, if any.
+fn held(nodes: &Nodes, path: &[u8]) -> Option<u64> {
+    if path.is_empty() {
+        return Some(0);
+    }
+    let mut local = 0;
+    for name in path.split(|b| *b == b'/') {
+        local = nodes.existing(local, name)?;
+    }
+    Some(local)
+}
+
 /// The served views, by slot (never reused: a slot's inodes stay its own).
 pub struct Views {
     common_dir: PathBuf,
@@ -167,6 +202,8 @@ pub struct Views {
     names: Arc<NameChanges>,
     list: RwLock<Vec<Arc<ViewDir>>>,
     creating: Mutex<()>,
+    /// Bumped when a view opens: the namespace listings holding it changed.
+    mtime: Mutex<SystemTime>,
 }
 
 impl Views {
@@ -177,6 +214,7 @@ impl Views {
             names,
             list: RwLock::default(),
             creating: Mutex::default(),
+            mtime: Mutex::new(SystemTime::now()),
         }
     }
 
@@ -186,6 +224,11 @@ impl Views {
             .get(slot as usize)
             .cloned()
             .ok_or(Errno::ENOENT)
+    }
+
+    /// When a view last opened.
+    pub fn mtime(&self) -> SystemTime {
+        *self.mtime.lock()
     }
 
     /// How many views were opened; only grows.
@@ -239,8 +282,10 @@ impl Views {
             shown: RwLock::new(Arc::new(shown)),
             nodes: Mutex::default(),
             listings: Mutex::default(),
+            gate: RwLock::default(),
         });
         list.push(view.clone());
+        *self.mtime.lock() = SystemTime::now();
         drop(list);
         info!("view {name} opened");
         watch::spawn(Arc::downgrade(&view), ctx, watch);

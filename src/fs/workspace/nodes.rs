@@ -199,7 +199,7 @@ impl Nodes {
         Some(entry.remove().0)
     }
 
-    pub(super) fn orphan(&mut self, parent: u64, name: &[u8]) {
+    pub(in crate::fs) fn orphan(&mut self, parent: u64, name: &[u8]) {
         if let Some(local) = self.take(parent, name)
             && let Some(node) = self.get_mut(local)
         {

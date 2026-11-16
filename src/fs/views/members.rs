@@ -150,15 +150,21 @@ pub fn refs(
     };
     let mut own = tip(&format!("refs/heads/{branch}"))?;
     let mut notes = Vec::new();
+    // The origin root, if it exists but can't be read: noted, not failing.
+    let mut unread: Option<&str> = None;
     if let Some(remote) = origin_root.filter(|r| exists(r)) {
-        match tip(remote) {
-            Ok(remote) if bases.get(own.0, remote.0)? == Some(own.0) => own = remote,
+        let behind = tip(remote).and_then(|r| Ok((r, bases.get(own.0, r.0)?)));
+        match behind {
+            Ok((remote, base)) if base == Some(own.0) => own = remote,
             Ok(_) => {}
-            Err(e) => notes.push(Note {
-                kind: "unread",
-                what: remote.to_string(),
-                why: format!("{e:#}; the view shows {branch}'s own files"),
-            }),
+            Err(e) => {
+                unread = Some(remote);
+                notes.push(Note {
+                    kind: "unread",
+                    what: remote.to_string(),
+                    why: format!("{e:#}; the view shows {branch}'s own files"),
+                });
+            }
         }
     }
     let mut out = Vec::with_capacity(members.len());
@@ -168,12 +174,26 @@ pub fn refs(
         let full = format!("refs/heads/{}", m.branch);
         let on_skipped =
             (m.parent.strip_prefix("refs/heads/")).and_then(|p| skipped.iter().find(|s| **s == p));
-        let why = match on_skipped {
+        let mut why = match on_skipped {
             Some(parent) => Some(format!("built on {parent}, left out")),
             None if !exists(&full) => Some(format!("no branch {}", m.branch)),
             None if !exists(&m.parent) => Some(format!("its parent {} is gone", m.parent)),
+            None if unread == Some(m.parent.as_str()) => {
+                Some(format!("its parent {} can't be read", m.parent))
+            }
             None => None,
         };
+        if why.is_none() {
+            match tip(&full).and_then(|t| Ok((t, tip(&m.parent)?.0))) {
+                Ok((at, parent)) => out.push((m.branch.clone(), at, parent)),
+                // Deleted meanwhile: as if it had been gone.
+                Err(_) if !exists(&full) => why = Some(format!("no branch {}", m.branch)),
+                Err(_) if !exists(&m.parent) => {
+                    why = Some(format!("its parent {} is gone", m.parent))
+                }
+                Err(e) => return Err(e),
+            }
+        }
         if let Some(why) = why {
             skipped.push(&m.branch);
             notes.push(Note {
@@ -181,9 +201,7 @@ pub fn refs(
                 what: m.branch.clone(),
                 why,
             });
-            continue;
         }
-        out.push((m.branch.clone(), tip(&full)?, tip(&m.parent)?.0));
     }
     Ok(Refs {
         own,
@@ -345,6 +363,20 @@ mod tests {
         assert_eq!(r.notes.len(), 1);
         assert_eq!(r.notes[0].kind, "unread");
         assert_eq!(r.notes[0].what, "refs/remotes/origin/m3-main");
+        // A branch built on it is left out, noted: the view still shows.
+        branch("m3-cli", &c);
+        let on_origin = BuiltOn {
+            branch: "m3-cli".into(),
+            parent: "refs/remotes/origin/m3-main".into(),
+        };
+        let r = refs("m3-main", remote, &[on_origin], &mut bases).unwrap();
+        assert!(r.members.is_empty());
+        assert_eq!(r.notes[1].what, "m3-cli");
+        assert!(
+            r.notes[1].why.contains("can't be read"),
+            "{}",
+            r.notes[1].why
+        );
         write_ref("refs/heads/m3-api", missing);
         let failed = refs(
             "m3-main",
