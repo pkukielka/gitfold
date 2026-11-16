@@ -99,12 +99,6 @@ check "refused with --prewarm: the setting goes too" says 1 "refusing to merge u
 eq "  no setting left" "" "$(R config --get branch.c.gitfoldPrewarm)"
 check "-w with several: not implemented yet" says 1 "not implemented yet" branch c -w --from api --from ui
 check "  nothing left behind" nothing_of c
-R config branch.c.gitfoldTrackReads true; R config branch.c.gitfoldParent refs/heads/api
-R update-ref refs/gitfold-base/c api
-left() { echo "$(R config --get-regexp '^branch\.c\.gitfold' | sort | tr '\n' ' ')$(R rev-parse -q --verify refs/gitfold-base/c)"; }
-before=$(left)
-check "refused, a deleted branch's leftovers found there: kept" says 1 "refusing to merge" branch c --from api --from lone --prewarm none
-eq "  as they were" "$before" "$(left)"
 }
 
 conflicts() {
@@ -151,24 +145,10 @@ eq "  as git merge makes it" "$(git_merge g api ui)" "$(made g)"
 R checkout -q x; R checkout -q main
 check "- : the previous branch where the user stands, as git merge -" says 0 "created branch prev" branch prev --from api --from -
 eq "  named as git merge - names it" "Merge branch 'x' into prev" "$(R log -1 --format=%s prev --)"
-R config branch.lp.gitfoldParent refs/heads/api; R config branch.lp.gitfoldFollow false
-R update-ref refs/gitfold-base/lp api
-check "a deleted branch's relation left: forgotten" says 0 "created branch lp" branch lp --from api --from ui
-eq "  no parent, following or base ref" "" "$(R config --get-regexp '^branch\.lp\.gitfold(parent|follow)'; R rev-parse -q --verify refs/gitfold-base/lp)"
-R config branch.ls.gitfoldPrewarm none; R config branch.ls.gitfoldTrackReads true
-check "a deleted branch's workspace settings left: forgotten, but for those given" says 0 "created branch ls" branch ls --from api --from ui --track-reads off
-eq "  prewarm forgotten, read tracking as given" " false" "$(R config --get branch.ls.gitfoldPrewarm) $(R config --get branch.ls.gitfoldTrackReads)"
 R config branch.x.gitfoldParent refs/heads/api
 for how in "--from api" "-w --from api" "--from api --from ui"; do
-    check "an existing branch ($how): refused, its settings untouched" says 1 "a branch named 'x' already exists" branch x $how
+    check "an existing branch ($how): refused, its settings untouched" says 1 "exist" branch x $how
     eq "  its parent kept" refs/heads/api "$(R config --get branch.x.gitfoldParent)"
-done
-for how in "--from api" "-w --from api"; do
-    R config branch.one.gitfoldParent refs/heads/ui; R config branch.one.gitfoldPrewarm none
-    R config branch.one.gitfoldTrackReads true; R update-ref refs/gitfold-base/one api
-    check "one --from ($how): a deleted branch's leftovers forgotten, but for those given" says 0 "created branch one" branch one $how --track-reads off
-    eq "  no parent, prewarm or base ref; read tracking as given" "false" "$(R config --get-regexp '^branch\.one\.gitfold(parent|follow|prewarm)'; R rev-parse -q --verify refs/gitfold-base/one; R config --get branch.one.gitfoldTrackReads)"
-    "$BIN" -C "$REPO" remove --force one >/dev/null 2>&1; R branch -D one >/dev/null
 done
 }
 
