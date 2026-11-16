@@ -51,6 +51,10 @@ check "its own parent: refused" says 2 "can't be its own parent" parent api --se
 R branch ui; R config branch.ui.gitfoldParent api
 check "a cycle: refused" says 2 "ui is built on api: that would be a cycle" parent api --set ui
 check "not a cycle: not implemented yet" says 1 "not implemented yet" parent ui --set main
+check "main can't have a parent: it is the root" says 2 "main is the root of the tree; it can't have a parent" parent main --set api
+R update-ref refs/remotes/origin/main main; R symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main
+check "nor when main is origin/main's" says 2 "main is the root of the tree" parent main --set api
+R update-ref -d --no-deref refs/remotes/origin/HEAD; R update-ref -d refs/remotes/origin/main
 check "outside a workspace, the branch must be named" says 1 "not in a gitfold workspace" parent
 check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
 check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.txt

@@ -29,6 +29,8 @@ pub enum Refused {
     Own,
     /// A branch built on it.
     Cycle,
+    /// The branch is the main branch: always the root.
+    Root,
 }
 
 impl std::fmt::Display for Refused {
@@ -36,6 +38,7 @@ impl std::fmt::Display for Refused {
         match self {
             Refused::Own => write!(f, "a branch can't be its own parent"),
             Refused::Cycle => write!(f, "that would be a cycle"),
+            Refused::Root => write!(f, "it can't have a parent"),
         }
     }
 }
@@ -45,6 +48,7 @@ pub fn refusal(branch: &str, parent: &str, refused: &Refused) -> String {
     match refused {
         Refused::Own => refused.to_string(),
         Refused::Cycle => format!("{parent} is built on {branch}: {refused}"),
+        Refused::Root => format!("{branch} is the root of the tree; {refused}"),
     }
 }
 
@@ -115,6 +119,16 @@ impl Tree {
     }
 }
 
+/// Whether `parent` may become the parent of `branch` in the repository of
+/// `common_dir`: `Tree::check_parent`, and never for the main branch, the
+/// root (`git::main_branch`; with no main branch, no root to protect).
+pub fn check(common_dir: &Path, tree: &Tree, branch: &str, parent: &str) -> Result<(), Refused> {
+    if crate::git::main_branch(common_dir).is_ok_and(|main| main.is(branch)) {
+        return Err(Refused::Root);
+    }
+    tree.check_parent(branch, parent)
+}
+
 /// Makes `parent` the parent of `branch`, or with `None` forgets it,
 /// refusing a parent `Tree::check_parent` refuses: the one way to set it.
 /// A changed parent follows (its following setting reset); the same parent
@@ -126,7 +140,7 @@ pub fn set_parent(common_dir: &Path, branch: &str, parent: Option<&str>) -> Resu
         return Ok(());
     }
     if let Some(parent) = parent {
-        tree.check_parent(branch, parent)
+        check(common_dir, &tree, branch, parent)
             .map_err(|refused| anyhow::anyhow!("{}", refusal(branch, parent, &refused)))?;
     }
     settings::write_parent(common_dir, branch, parent)
