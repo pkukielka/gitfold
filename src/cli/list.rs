@@ -88,7 +88,6 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     let paths = (search.patterns())
         .map(|p| Ok(p.path().to_str()?.to_string()))
         .collect::<Result<Vec<_>>>()?;
-    let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
     // The root (`.`) matches everything; gix's search would take its `.`
     // for a prefix every path must start with.
     let everything = search.patterns().any(|p| p.is_nil());
@@ -166,7 +165,7 @@ fn pathspecs(typed: &[String]) -> Result<gix::pathspec::Search> {
 fn committed(
     common_dir: &Path,
     main: &str,
-    paths: &[&str],
+    paths: &[String],
     lines: &mut BTreeSet<(Vec<u8>, String, &str)>,
 ) -> Result<()> {
     let tree = crate::tree::Tree::read(common_dir)?;
@@ -179,14 +178,21 @@ fn committed(
     ];
     let branches = git::cmd::output(common_dir, &args)?;
     for branch in branches.split(|b| *b == b'\n').filter(|r| !r.is_empty()) {
-        let branch = std::str::from_utf8(branch)?;
-        let from = match tree.parent(branch) {
+        let branch = String::from_utf8_lossy(branch);
+        let from = match tree.parent(&branch) {
             Some(parent) if git::resolve(parent).is_ok() => parent,
             _ => main,
         };
         let to = format!("refs/heads/{branch}");
-        for path in super::overlaps::diff(common_dir, from, &to, paths)? {
-            lines.insert((path, branch.to_string(), "committed"));
+        // One branch git can't diff (no history shared with its parent)
+        // doesn't hide the others.
+        match super::overlaps::diff(common_dir, from, &to, paths) {
+            Ok(changed) => {
+                for path in changed {
+                    lines.insert((path, branch.to_string(), "committed"));
+                }
+            }
+            Err(e) => eprintln!("skipping branch {branch}: {e:#}"),
         }
     }
     Ok(())

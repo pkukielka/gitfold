@@ -165,6 +165,13 @@ eq "the root: everything" 11 "$(gfc -- . | wc -l)"
 eq "the root from a subdirectory" 11 "$(cd "$MNT/api/d" && "$BIN" changes -- .. 2>&1 | wc -l)"
 eq "a directory with a trailing slash" "$(gfc -- d)" "$(gfc -- d/)"
 eq "-z: NUL-terminated" "api	committed	d/b.txt|" "$(gfc -z -- d/b.txt | tr '\0' '|')"
+R update-ref refs/heads/unrel "$(R commit-tree "$(R mktree </dev/null)" -m unrelated)"
+R config branch.api.gitfoldParent refs/heads/unrel
+out=$("$BIN" -C "$REPO" changes -- d 2>"$T/err"); rc=$?
+eq "a branch git can't diff (no history shared with its parent): skipped, said, the rest kept" "0 api	uncommitted	d/c.txt
+mv	committed	d/c.txt yes" "$rc $out $(grep -q 'skipping branch api' "$T/err" && echo yes)"
+R config --unset branch.api.gitfoldParent
+check "overlaps with a global pathspec setting of git's: no literal-pathspec clash" sh -c "GIT_GLOB_PATHSPECS=1 '$BIN' -C '$REPO' overlaps api; [ \$? != 1 ]"
 out=$(gfc -- ../x); eq "outside the work tree: refused" "1 yes" "$? $(grep -q 'leaves the repository' <<<"$out" && echo yes)"
 unmount_fs
 R branch -m main trunk

@@ -220,19 +220,15 @@ pub(super) fn diff(
     common_dir: &Path,
     from: &str,
     to: &str,
-    pathspecs: &[&str],
+    pathspecs: &[String],
 ) -> Result<Vec<Vec<u8>>> {
     let range = format!("{from}...{to}");
-    let mut args = vec![
-        "--literal-pathspecs",
-        "diff",
-        "--name-only",
-        "-z",
-        "--no-renames",
-        &range,
-        "--",
-    ];
-    args.extend(pathspecs);
+    // Only with paths: git refuses it alongside GIT_GLOB_PATHSPECS and the like.
+    let literal = (!pathspecs.is_empty()).then_some("--literal-pathspecs");
+    let args: Vec<&str> = (literal.into_iter())
+        .chain(["diff", "--name-only", "-z", "--no-renames", &range, "--"])
+        .chain(pathspecs.iter().map(String::as_str))
+        .collect();
     Ok(git::cmd::output(common_dir, &args)?
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())
