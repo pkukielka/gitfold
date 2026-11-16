@@ -170,10 +170,18 @@ R config branch.api.gitfoldParent refs/heads/unrel
 out=$("$BIN" -C "$REPO" changes -- d 2>"$T/err"); rc=$?
 eq "a branch git can't diff (no history shared with its parent): skipped, said, the rest kept" "0 api	uncommitted	d/c.txt
 mv	committed	d/c.txt yes" "$rc $out $(grep -q 'skipping branch api' "$T/err" && echo yes)"
-R config --unset branch.api.gitfoldParent
-check "overlaps with a global pathspec setting of git's: no literal-pathspec clash" sh -c "GIT_GLOB_PATHSPECS=1 '$BIN' -C '$REPO' overlaps api; [ \$? != 1 ]"
-out=$(gfc -- ../x); eq "outside the work tree: refused" "1 yes" "$? $(grep -q 'leaves the repository' <<<"$out" && echo yes)"
+R config --unset branch.api.gitfoldParent; R branch -D -q unrel
+eq "a file with a trailing slash: nothing, committed or not, as git" "" "$(gfc -- a.txt/)"
+echo n >"$MNT/api/n"; mkdir "$MNT/ui/n"; echo m >"$MNT/ui/n/m"
+eq "a file in one workspace, a directory of that name in another" "api	uncommitted	n
+ui	uncommitted	n/m" "$(gfc -- n)"
+eq "and with a trailing slash, only the directory's" "ui	uncommitted	n/m" "$(gfc -- n/)"
+out=$("$BIN" -C "$REPO" changes -- ../x 2>&1); rc=$?
+eq "outside the work tree: refused by git, once" "1 0" "$rc $(grep -c 'skipping' <<<"$out")"
 unmount_fs
+R config core.worktree "$REPO"
+eq "core.worktree set, from a subdirectory" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- b.txt 2>&1)"
+R config --unset core.worktree
 R branch -m main trunk
 out=$("$BIN" -C "$REPO" changes -- a.txt 2>"$T/err"); rc=$?
 eq "no main branch: a note, then uncommitted changes only (unmounted)" "0 ui	uncommitted	a.txt yes" "$rc $out $(grep -q 'no main branch' "$T/err" && echo yes)"

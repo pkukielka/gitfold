@@ -157,7 +157,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
         let committed = match kinds {
             Kinds::Reads => Vec::new(),
             // The branch's own commits since it diverged from this target.
-            _ => diff(&common_dir, &t.name, &base.to_string(), &[])?,
+            _ => diff(&common_dir, &t.name, &base.to_string())?,
         };
         // The paths written that this target changed too.
         let mut written = HashSet::new();
@@ -204,7 +204,7 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
         true => format!("refs/heads/{rev}"),
         false => rev.clone(),
     };
-    let mut changed = diff(common_dir, &base.to_string(), &spec, &[])?;
+    let mut changed = diff(common_dir, &base.to_string(), &spec)?;
     let state = StateDir::of(common_dir, &rev);
     if branch && state.opened() {
         let s = status::status(store, &state)?;
@@ -214,21 +214,10 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
 }
 
 /// The paths `to` changed since it diverged from `from` (`git diff
-/// from...to`), both sides of a rename; only those below `pathspecs` (from
-/// the root, taken literally) if any are given.
-pub(super) fn diff(
-    common_dir: &Path,
-    from: &str,
-    to: &str,
-    pathspecs: &[String],
-) -> Result<Vec<Vec<u8>>> {
+/// from...to`), both sides of a rename.
+fn diff(common_dir: &Path, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
     let range = format!("{from}...{to}");
-    // Only with paths: git refuses it alongside GIT_GLOB_PATHSPECS and the like.
-    let literal = (!pathspecs.is_empty()).then_some("--literal-pathspecs");
-    let args: Vec<&str> = (literal.into_iter())
-        .chain(["diff", "--name-only", "-z", "--no-renames", &range, "--"])
-        .chain(pathspecs.iter().map(String::as_str))
-        .collect();
+    let args = ["diff", "--name-only", "-z", "--no-renames", &range, "--"];
     Ok(git::cmd::output(common_dir, &args)?
         .split(|b| *b == 0)
         .filter(|p| !p.is_empty())

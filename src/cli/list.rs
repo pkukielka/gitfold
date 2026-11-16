@@ -2,14 +2,13 @@
 //! changes` (one workspace's changed paths; with `-- PATH`, who is changing
 //! those paths).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::Result;
-use gix::bstr::ByteSlice;
+use anyhow::{Result, bail};
 
 use super::write_path;
 use crate::git;
@@ -74,61 +73,49 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
 }
 
 /// `gitfold changes -- PATH…`: who is changing `paths`, one line per branch
-/// and path, `BRANCH\tcommitted|uncommitted\tPATH`, sorted by path. Paths
-/// are typed as git takes pathspecs (`pathspecs`) and printed from the
-/// repository's root, as `git diff --name-only` prints them; a directory
-/// stands for everything below it. Committed: the branch's own commits
-/// (since it diverged from its parent, if that still exists, else from
-/// main: `git::default_compare_target`) on branches not merged into main;
-/// with no main branch, only uncommitted. Uncommitted: what `gitfold
-/// changes` says of each workspace.
+/// and path, `BRANCH\tcommitted|uncommitted\tPATH`, sorted by path. git
+/// itself matches the paths, as typed (pathspecs taken literally, relative
+/// to the current directory), and the paths printed are from the
+/// repository's root, as `git diff --name-only` prints them. Committed: the
+/// branch's own commits (since it diverged from its parent, if that still
+/// exists, else from main: `git::default_compare_target`) on branches not
+/// merged into main; with no main branch, only uncommitted. Uncommitted:
+/// what `gitfold changes` says of each workspace.
 pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     let common_dir = git::init(repo)?;
-    let mut search = pathspecs(&args.paths)?;
-    let paths = (search.patterns())
-        .map(|p| Ok(p.path().to_str()?.to_string()))
-        .collect::<Result<Vec<_>>>()?;
-    // The root (`.`) matches everything; gix's search would take its `.`
-    // for a prefix every path must start with.
-    let everything = search.patterns().any(|p| p.is_nil());
-    let mut lines = BTreeSet::new();
-    match git::default_compare_target(&common_dir)? {
-        Some(main) => committed(&common_dir, &main, &paths, &mut lines)?,
-        None => eprintln!("note: no main branch to compare with: uncommitted changes only"),
-    }
+    // Each workspace's uncommitted paths, and its note if any.
     let store = Store::default();
+    let mut workspaces = Vec::new();
     for w in state::list(&common_dir)? {
         if !w.state.opened() {
             continue;
         }
-        let s = match status::status(&store, &w.state) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("skipping workspace {}: {e:#}", w.branch);
-                continue;
+        match status::status(&store, &w.state) {
+            Ok(s) => {
+                let note = base_note(&w.branch, &s.base);
+                let paths: Vec<Vec<u8>> = s.changed.into_iter().chain(s.deleted).collect();
+                workspaces.push((w.branch, paths, note));
             }
-        };
-        let mut found = false;
-        for path in s.changed.iter().chain(&s.deleted) {
-            let no_attributes = &mut |_: &_, _, _, _: &mut _| false;
-            if everything
-                || (search.pattern_matching_relative_path(
-                    path.as_bstr(),
-                    Some(false),
-                    no_attributes,
-                ))
-                .is_some()
-            {
-                lines.insert((path.clone(), w.branch.clone(), "uncommitted"));
-                found = true;
-            }
+            Err(e) => eprintln!("skipping workspace {}: {e:#}", w.branch),
         }
-        let note = base_note(&w.branch, &s.base);
+    }
+    // First: it also has git check the paths, once (a path outside the
+    // repository fails here, not once per branch).
+    let all = workspaces.iter().flat_map(|(_, paths, _)| paths);
+    let matching = matching(all, &args.paths)?;
+    let mut lines = BTreeSet::new();
+    match git::default_compare_target(&common_dir)? {
+        Some(main) => committed(&common_dir, &main, &args.paths, &mut lines)?,
+        None => eprintln!("note: no main branch to compare with: uncommitted changes only"),
+    }
+    for (branch, paths, note) in workspaces {
+        let mut found = false;
+        for path in paths.into_iter().filter(|p| matching.contains(p)) {
+            lines.insert((path, branch.clone(), "uncommitted"));
+            found = true;
+        }
         if found && !note.is_empty() {
-            eprintln!(
-                "note: {}: {note}; changes are against the stored base",
-                w.branch
-            );
+            eprintln!("note: {branch}: {note}; changes are against the stored base");
         }
     }
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -140,32 +127,13 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     Ok(())
 }
 
-/// `typed` as git takes pathspecs with `--literal-pathspecs`, from the
-/// current directory, parsed, normalized (paths from the repository's root,
-/// `.` for the root itself) and matched by gix as git does.
-fn pathspecs(typed: &[String]) -> Result<gix::pathspec::Search> {
-    git::with_repo(|repo| {
-        let mut defaults = repo.pathspec_defaults()?;
-        defaults.literal = true;
-        let patterns = (typed.iter())
-            .map(|p| gix::pathspec::parse(p.as_bytes(), defaults))
-            .collect::<Result<Vec<_>, _>>()?;
-        let root = gix::path::realpath(repo.workdir().unwrap_or(repo.git_dir()))?;
-        Ok(gix::pathspec::Search::from_specs(
-            patterns,
-            repo.prefix()?,
-            &root,
-        )?)
-    })
-}
-
-/// Adds to `lines` the paths below `paths` that each branch not merged into
-/// `main` changed in its own commits: since it diverged from its parent, if
-/// that still exists, else from `main`.
+/// Adds to `lines` the paths matching `typed` that each branch not merged
+/// into `main` changed in its own commits: since it diverged from its
+/// parent, if that still exists, else from `main`.
 fn committed(
     common_dir: &Path,
     main: &str,
-    paths: &[String],
+    typed: &[String],
     lines: &mut BTreeSet<(Vec<u8>, String, &str)>,
 ) -> Result<()> {
     let tree = crate::tree::Tree::read(common_dir)?;
@@ -183,19 +151,135 @@ fn committed(
             Some(parent) if git::resolve(parent).is_ok() => parent,
             _ => main,
         };
-        let to = format!("refs/heads/{branch}");
+        let range = format!("{from}...refs/heads/{branch}");
+        let diff = ["diff", "--name-only", "--no-relative", "-z", "--no-renames"];
+        let args: Vec<&str> = (diff.into_iter())
+            .chain([range.as_str(), "--"])
+            .chain(typed.iter().map(String::as_str))
+            .collect();
         // One branch git can't diff (no history shared with its parent)
         // doesn't hide the others.
-        match super::overlaps::diff(common_dir, from, &to, paths) {
-            Ok(changed) => {
-                for path in changed {
-                    lines.insert((path, branch.to_string(), "committed"));
+        match git_here(&args, None, None) {
+            Ok(out) => {
+                for path in out.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+                    lines.insert((path.to_vec(), branch.to_string(), "committed"));
                 }
             }
             Err(e) => eprintln!("skipping branch {branch}: {e:#}"),
         }
     }
     Ok(())
+}
+
+/// Which of `paths` (from the root) match `typed`, as git matches them: they
+/// go into a throwaway index (no objects written), which `git ls-files`
+/// lists. A file and a path below it can't share an index (`d` and `d/x`,
+/// as in a workspace that replaced a directory with a file), so such paths
+/// go into indexes of their own.
+fn matching<'a>(
+    paths: impl Iterator<Item = &'a Vec<u8>>,
+    typed: &[String],
+) -> Result<HashSet<Vec<u8>>> {
+    let mut indexes: Vec<BTreeSet<&[u8]>> = Vec::new();
+    for path in paths {
+        let fits = |index: &BTreeSet<&[u8]>| {
+            let below = [path.as_slice(), b"/"].concat();
+            !state::ancestors(path).any(|a| index.contains(a))
+                && (index.range(below.as_slice()..).next()).is_none_or(|p| !p.starts_with(&below))
+        };
+        match indexes.iter_mut().find(|index| fits(index)) {
+            Some(index) => {
+                index.insert(path);
+            }
+            None => indexes.push(BTreeSet::from([path.as_slice()])),
+        }
+    }
+    // With no paths, an empty index (one that doesn't exist): git still
+    // checks the paths typed.
+    if indexes.is_empty() {
+        indexes.push(BTreeSet::new());
+    }
+    let mut matching = HashSet::new();
+    let empty = git::with_repo(|repo| gix::ObjectId::empty_blob(repo.object_hash()));
+    let dir = TempDir::new()?;
+    for (n, index) in indexes.iter().enumerate() {
+        let file = dir.0.join(format!("index{n}"));
+        if !index.is_empty() {
+            let mut info = Vec::new();
+            for path in index {
+                info.extend(format!("100644 {empty} 0\t").bytes());
+                info.extend(*path);
+                info.push(0);
+            }
+            let update = ["update-index", "-z", "--index-info"];
+            git_here(&update, Some(&file), Some(&info))?;
+        }
+        let list = ["ls-files", "-z", "--full-name", "--"];
+        let args: Vec<&str> = (list.into_iter())
+            .chain(typed.iter().map(String::as_str))
+            .collect();
+        let out = git_here(&args, Some(&file), None)?;
+        matching.extend(
+            out.split(|b| *b == 0)
+                .filter(|p| !p.is_empty())
+                .map(<[u8]>::to_vec),
+        );
+    }
+    Ok(matching)
+}
+
+/// A directory of its own in the system's temporary directory, removed
+/// when dropped.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> Result<TempDir> {
+        let pid = std::process::id();
+        let nanos = (SystemTime::now().duration_since(SystemTime::UNIX_EPOCH))
+            .map_or(0, |d| d.subsec_nanos());
+        let dir = std::env::temp_dir().join(format!("gitfold-changes-{pid}-{nanos}"));
+        fs::create_dir(&dir)?;
+        Ok(TempDir(dir))
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Runs git with `--literal-pathspecs` and `args` in the current directory,
+/// so that it takes pathspecs as typed there, as git does; with
+/// `GIT_INDEX_FILE` = `index` if given, and `input` on its stdin. What it
+/// printed; a failure's error holds what git said.
+fn git_here(args: &[&str], index: Option<&Path>, input: Option<&[u8]>) -> Result<Vec<u8>> {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new("git");
+    command.arg("--literal-pathspecs").args(args);
+    if let Some(index) = index {
+        command.env("GIT_INDEX_FILE", index);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    let mut stdin = child.stdin.take().expect("piped");
+    // Written by a thread of its own: git may print before it has read all.
+    let input = input.unwrap_or_default().to_vec();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let out = child.wait_with_output()?;
+    writer.join().expect("writer thread")?;
+    if !out.status.success() {
+        bail!(
+            "git {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(out.stdout)
 }
 
 /// The summary `git diff --shortstat` prints: ` 2 files changed, 3
@@ -326,8 +410,9 @@ pub struct ChangesArgs {
     /// -- PATH).
     #[arg(long, conflicts_with = "paths")]
     pub stat: bool,
-    /// Instead: who is changing these paths, on every branch (committed on
-    /// it, not yet in main) and in every workspace (uncommitted).
+    /// Instead: who is changing these paths, on every branch (committed:
+    /// its own commits, since its parent if it has one, else not yet in
+    /// main) and in every workspace (uncommitted).
     #[arg(last = true, value_name = "PATH")]
     pub paths: Vec<String>,
 }
