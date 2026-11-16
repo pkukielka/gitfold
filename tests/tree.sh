@@ -13,7 +13,7 @@ NAME=tree
 . "$(dirname "$0")/fixture.sh"
 
 # gitfold run in the repository: its exit code, then its output on one line.
-gf() { local out rc; out=$("$BIN" -C "$REPO" "$@" 2>&1); rc=$?; echo "$rc $(tr '\n' ' ' <<<"$out")"; }
+gf() { local out rc; out=$("$BIN" -C "$REPO" "$@" 2>&1); rc=$?; echo "$rc ${out//$'\n'/ }"; }
 # Whether `gf ARGS` exits with $1 and says $2.
 says() { local code=$1 text=$2; shift 2; local r; r=$(gf "$@"); [[ $r == "$code "* && $r == *"$text"* ]] || { echo "  got: $r"; false; }; }
 

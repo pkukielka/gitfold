@@ -195,9 +195,9 @@ fn main() -> std::process::ExitCode {
     std::process::ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// A command people guess: says the right one, exit code 2.
-fn guessed(name: &str) -> Result<i32> {
-    eprintln!("{}", cli::tree::guessed(name));
+/// A usage hint (a guessed command or flag): says the right one, exit code 2.
+fn usage(hint: String) -> Result<i32> {
+    eprintln!("{hint}");
     Ok(2)
 }
 
@@ -224,16 +224,14 @@ fn run() -> Result<i32> {
         Command::Branch(args) if args.claude_hook.is_some() => cli::claude::worktree_create()?,
         Command::Branch(args) => {
             if let Some(hint) = cli::tree::branch_hint(&args.on, &args.merge) {
-                eprintln!("{hint}");
-                return Ok(2);
+                return usage(hint);
             }
             cli::branch::branch(&cli::repo()?, args)?
         }
         Command::List(args) => cli::list::list(&cli::repo()?, args)?,
         Command::Changes(args) if !args.paths.is_empty() => {
-            if args.branch.is_some() {
-                eprintln!("gitfold changes: with -- PATH it lists every branch; drop BRANCH");
-                return Ok(2);
+            if let Some(hint) = cli::tree::changes_hint(&args.branch) {
+                return usage(hint);
             }
             return Err(cli::tree::not_implemented("gitfold changes -- PATH"));
         }
@@ -247,10 +245,10 @@ fn run() -> Result<i32> {
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
         Command::Parent(args) => cli::tree::parent(&cli::repo()?, args)?,
-        Command::Sync(_) => return guessed("sync"),
-        Command::Pull(_) => return guessed("pull"),
-        Command::Restack(_) => return guessed("restack"),
-        Command::Rebase(_) => return guessed("rebase"),
+        Command::Sync(_) => return usage(cli::tree::guessed("sync")),
+        Command::Pull(_) => return usage(cli::tree::guessed("pull")),
+        Command::Restack(_) => return usage(cli::tree::guessed("restack")),
+        Command::Rebase(_) => return usage(cli::tree::guessed("rebase")),
         Command::Prewarm(args) => cli::branch::prewarm(&cli::repo()?, args)?,
         Command::TrackReads(args) if args.claude_hook.is_some() => cli::claude::reads_hook()?,
         Command::TrackReads(args) => cli::branch::track_reads(&cli::repo()?, args)?,

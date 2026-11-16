@@ -9,7 +9,6 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::git;
-use crate::refusal::Refusal;
 use crate::state::retire::check_name;
 
 /// The error of a command whose arguments parse but that isn't built yet.
@@ -51,9 +50,7 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     git::init(repo)?;
     for branch in std::iter::once(&name).chain(&args.set) {
         check_name(branch)?;
-        if !git::branch_exists(branch) {
-            return Err(Refusal::NotFound.error(format!("no branch {branch}")));
-        }
+        git::require_branch(branch)?;
     }
     Err(not_implemented("gitfold parent"))
 }
@@ -71,6 +68,14 @@ pub fn guessed(name: &str) -> String {
     format!(
         "gitfold {name}: no such command. To take your parent's new commits: gitfold parent --update"
     )
+}
+
+/// The hint for `gitfold changes BRANCH -- PATH`: with paths it lists every
+/// branch.
+pub fn changes_hint(branch: &Option<String>) -> Option<String> {
+    branch
+        .as_ref()
+        .map(|_| "gitfold changes: with -- PATH it lists every branch; drop BRANCH".to_string())
 }
 
 /// The hint for `gitfold branch` flags people guess (`--on`, `--merge`), if
