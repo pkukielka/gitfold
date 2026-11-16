@@ -50,12 +50,6 @@ pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -
     finish(command.args(args), args, input)
 }
 
-/// Runs `git`, a command its `args` are already added to, returning what it
-/// printed; a failure's error holds `args` and what git said.
-pub fn checked(git: &mut Command, args: &[&str]) -> Result<Vec<u8>> {
-    finish(git, args, None)
-}
-
 fn finish(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
     let (out, written) = match input {
         None => (command.stdin(Stdio::null()).output()?, Ok(())),
@@ -117,10 +111,8 @@ pub fn in_other_worktree(git: &mut Command) -> Result<&mut Command> {
     let local = match LOCAL.get() {
         Some(local) => local,
         None => {
-            let out = checked(
-                Command::new("git").args(["rev-parse", "--local-env-vars"]),
-                &["rev-parse", "--local-env-vars"],
-            )?;
+            let args = ["rev-parse", "--local-env-vars"];
+            let out = output_of(&mut Command::new("git"), &args, None)?;
             let vars = String::from_utf8_lossy(&out)
                 .lines()
                 .map(String::from)
