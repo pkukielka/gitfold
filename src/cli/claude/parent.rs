@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use super::cwd;
 use crate::cli::hook::field;
-use crate::cli::tree::{Followed, follow_once};
+use crate::cli::tree::{Followed, follow_once, moved_said};
 use crate::git;
 use crate::state::StateDir;
 use crate::tree::Tree;
@@ -111,8 +111,7 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
         }
         Followed::Moved(took) => {
             state.set_told(session, None)?;
-            let said = took.told();
-            format!("gitfold: {branch} took its parent's new commits:\n{said}")
+            format!("gitfold: {}", moved_said(branch, &took.told()))
         }
         Followed::Landed(took) => {
             state.set_told(session, None)?;

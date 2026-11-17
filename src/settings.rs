@@ -376,29 +376,29 @@ const CONFIG_WAIT: Duration = Duration::from_secs(2);
 fn config(git_dir: &Path, args: &[&str]) -> Result<()> {
     let started = Instant::now();
     loop {
-        let out = (git::cmd::command(git_dir))
-            .args(["config", "--local"])
-            .args(args)
-            .stdin(std::process::Stdio::null())
-            .output()?;
-        match out.status.code() {
-            Some(0 | 5) => return Ok(()),
+        let Err(e) = git_config(git_dir, args) else {
+            return Ok(());
+        };
+        match e
+            .downcast_ref::<git::cmd::Failed>()
+            .and_then(|f| f.status.code())
+        {
+            Some(5) => return Ok(()),
             // The file not written (4, git config's exit code) or its lock
             // held (255, what git exits with then): retried; any other
             // failure waiting doesn't change.
             Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
                 sleep(Duration::from_millis(100));
-                continue;
             }
-            _ => {}
+            _ => return Err(e),
         }
-        anyhow::bail!(
-            "git config {} failed ({}): {}",
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
     }
+}
+
+/// `git config --local <args>` (see `config`), what it printed.
+fn git_config(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let args = [&["config", "--local"], args].concat();
+    git::cmd::output_of(&mut git::cmd::command(git_dir), &args, None)
 }
 
 /// Sets `branch.<branch>.<key>` to `value` (see `config`).
@@ -410,12 +410,13 @@ fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()
 /// the config isn't written (git takes its lock even then).
 fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
     let key = branch_key(branch, key);
-    let set = (git::cmd::command(git_dir))
-        .args(["config", "--local", "--get-all", &key])
-        .stdin(std::process::Stdio::null())
-        .output()?;
     // Exit 1: not set.
-    if set.status.code() == Some(1) {
+    let set = git_config(git_dir, &["--get-all", &key]);
+    if let Err(e) = &set
+        && e.downcast_ref::<git::cmd::Failed>()
+            .and_then(|f| f.status.code())
+            == Some(1)
+    {
         return Ok(());
     }
     config(git_dir, &["--unset-all", &key])
