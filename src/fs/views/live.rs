@@ -1,17 +1,20 @@
 //! A workspace's live tree: its files as they are now, uncommitted work
-//! included and ignored files left out, as a tree in the views' private
-//! repository, which `@live` views merge as the workspace's branch.
+//! included and ignored files left out, as `git add -A` would stage them, as
+//! a tree in the views' private repository, which `@live` views merge as the
+//! workspace's branch.
 //!
 //! git makes it, in the workspace (through the mount: the `.gitignore` files,
 //! modes and symlinks it shows), on a copy of the workspace's index, with its
-//! objects going to the private repository. Only the paths gitfold knows
-//! differ from the base are given to git (`state::status::unfiltered`): git
-//! never walks the tree, and every command costs about one read and one write
-//! of the index (pathspecs would cost each path times the index). For upper
-//! files, git says which it ignores (`check-ignore`); those the index tracks
-//! stay, as for `git add -A`. git hashes the rest (`update-index`, with the
-//! repository's filters), deletions first: a base file now a directory leaves
-//! the index before what is below it comes in.
+//! objects going to the private repository. Only paths given to git are
+//! looked at, so git never walks the tree, and every command costs about one
+//! read and one write of the index (pathspecs would cost each path times the
+//! index): those gitfold knows differ from the base
+//! (`state::status::unfiltered`), and those where the index differs from the
+//! base (`git diff-index --cached`: staged, unstaged with `git rm --cached`,
+//! unmerged). Of these, git says which it ignores (`check-ignore`); those
+//! the index tracks stay, as for `git add -A`. git hashes the rest
+//! (`update-index`, with the repository's filters), removals first: a base
+//! file now a directory leaves the index before what is below it comes in.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -22,6 +25,20 @@ use gix::ObjectId;
 
 use super::merge::Private;
 use crate::git;
+use crate::state::upper_path;
+
+/// A workspace, as its live tree is made from it.
+pub struct Workspace<'a> {
+    /// Its worktree (through the mount), its index, its upper directory.
+    pub dir: &'a Path,
+    pub index: &'a Path,
+    pub upper: &'a Path,
+    /// Its base, its upper files and symlinks that differ from it, and the
+    /// base files deleted (`state::status::unfiltered`).
+    pub base: ObjectId,
+    pub changed: &'a [Vec<u8>],
+    pub deleted: &'a [Vec<u8>],
+}
 
 /// A workspace's live tree, and the commit of it the views merge.
 pub struct Live {
@@ -30,26 +47,39 @@ pub struct Live {
 }
 
 impl Private {
-    /// The live tree of the workspace of `branch`: its worktree `dir`, its
-    /// index `index`, its upper files and symlinks that differ from its base
-    /// `changed` and its deleted base files `deleted` (`state::status::
-    /// unfiltered`). The commit is kept (`refs/gitfold/live/<branch>`) until
-    /// the next.
-    pub fn live(
-        &self,
-        branch: &str,
-        dir: &Path,
-        index: &Path,
-        changed: &[Vec<u8>],
-        deleted: &[Vec<u8>],
-    ) -> Result<Live> {
+    /// The live tree of workspace `ws`, of `branch`. The commit is kept
+    /// (`refs/gitfold/live/<branch>`) until the next.
+    pub fn live(&self, branch: &str, ws: &Workspace) -> Result<Live> {
         let _lock = self.lock.lock();
         let copy = self.live_index(branch)?;
+        let index = ws.index;
         std::fs::copy(index, &copy).with_context(|| format!("copying {}", index.display()))?;
-        let git = || self.in_workspace(dir, &copy);
-        let untracked = untracked_ignored(&git, changed)?;
-        let kept = changed.iter().filter(|p| !untracked.contains(p.as_slice()));
-        let update = nul_list(b"", deleted.iter().chain(kept).map(Vec::as_slice));
+        let git = || self.in_workspace(ws.dir, &copy);
+        let base = ws.base.to_string();
+        let args = ["diff-index", "--cached", "--name-only", "-z", &base];
+        let out = git::cmd::output_of(&mut git()?, &args, None)?;
+        let staged = git::cmd::nul_paths(&out);
+        let staged: Vec<&[u8]> = staged.iter().map(Vec::as_slice).collect();
+        let changed: Vec<&[u8]> = ws.changed.iter().map(Vec::as_slice).collect();
+        // Removals first (`deleted`, `staged`): a path git would refuse to
+        // remove, a directory the index has nothing at (it adds what is
+        // below), is left out.
+        let removals: Vec<&[u8]> = ws
+            .deleted
+            .iter()
+            .map(Vec::as_slice)
+            .chain(staged.iter().copied())
+            .collect();
+        let ignored = ignored(&git, changed.iter().chain(&staged).copied())?;
+        let dirs = removals.iter().copied().filter(|p| {
+            std::fs::symlink_metadata(upper_path(ws.upper, p)).is_ok_and(|m| m.is_dir())
+        });
+        let asked: Vec<&[u8]> = ignored.iter().copied().chain(dirs).collect();
+        let untracked = untracked(&git, &asked)?;
+        let mut seen = HashSet::new();
+        let update = (removals.into_iter().chain(changed))
+            .filter(|p| !untracked.contains(p) && seen.insert(*p));
+        let update = nul_list(b"", update);
         let args = [
             "update-index",
             "-z",
@@ -59,7 +89,8 @@ impl Private {
             "--stdin",
         ];
         git::cmd::output_of(&mut git()?, &args, Some(update))?;
-        let tree = write_tree(&git)?;
+        let args = ["write-tree", "--missing-ok"];
+        let tree = super::merge::oid(&git::cmd::output_of(&mut git()?, &args, None)?)?;
         let commit = self.commit(&tree, branch)?;
         self.refs(format!("update refs/gitfold/live/{branch} {commit}\n"))?;
         Ok(Live { tree, commit })
@@ -98,62 +129,41 @@ impl Private {
     }
 }
 
-/// Of `paths`, those git ignores and the index doesn't track.
-fn untracked_ignored(
+/// Of `paths`, those git ignores (tracked or not).
+fn ignored<'a>(
     git: &dyn Fn() -> Result<Command>,
-    paths: &[Vec<u8>],
-) -> Result<HashSet<Vec<u8>>> {
+    paths: impl Iterator<Item = &'a [u8]>,
+) -> Result<Vec<&'a [u8]>> {
+    let paths: Vec<&[u8]> = paths.collect();
     // `./`: a path is taken as a pathspec there, which `:` would start.
-    // `--no-index`: the index is asked below (git would match each path
-    // against the whole index).
-    let input = nul_list(b"./", paths.iter().map(Vec::as_slice));
+    // `--no-index`: the index is asked apart (`untracked`; git would match
+    // each path against the whole index).
+    let input = nul_list(b"./", paths.iter().copied());
     let args = ["check-ignore", "--no-index", "-z", "--stdin"];
     // 1: none ignored.
     let out = git::cmd::output_allowing(&mut git()?, &args, Some(input), &[1])?;
-    let ignored: Vec<&[u8]> = (out.split(|b| *b == 0))
-        .take_while(|p| !p.is_empty())
-        .map(|p| p.strip_prefix(b"./").unwrap_or(p))
+    let ignored: HashSet<Vec<u8>> = (git::cmd::nul_paths(&out).into_iter())
+        .map(|p| p.strip_prefix(b"./").map(<[u8]>::to_vec).unwrap_or(p))
         .collect();
-    if ignored.is_empty() {
+    Ok(paths.into_iter().filter(|p| ignored.contains(*p)).collect())
+}
+
+/// Of `paths`, those the index has no entry at (unmerged ones aside).
+fn untracked<'a>(
+    git: &dyn Fn() -> Result<Command>,
+    paths: &[&'a [u8]],
+) -> Result<HashSet<&'a [u8]>> {
+    if paths.is_empty() {
         return Ok(HashSet::new());
     }
     // `:0:<path>`: the index's entry at the path, if it has one.
-    let input = nul_list(b":0:", ignored.iter().copied());
+    let input = nul_list(b":0:", paths.iter().copied());
     let args = ["cat-file", "-Z", "--batch-check=%(objectname)"];
     let answers = git::cmd::output_of(&mut git()?, &args, Some(input))?;
-    Ok((ignored.into_iter().zip(answers.split(|b| *b == 0)))
+    Ok((paths.iter().zip(answers.split(|b| *b == 0)))
         .filter(|(_, a)| a.ends_with(b" missing"))
-        .map(|(p, _)| p.to_vec())
+        .map(|(p, _)| *p)
         .collect())
-}
-
-/// The tree of the index. Paths the index has unmerged (a merge in
-/// progress) that gitfold doesn't know changed are taken as the worktree has
-/// them first, as `git add` of them would: while the merge lasts, each tree
-/// costs a failed `write-tree` and these. Objects aren't checked: they are
-/// the repository's (a partial clone's may be missing) or hashed just now.
-fn write_tree(git: &dyn Fn() -> Result<Command>) -> Result<ObjectId> {
-    let write = || git::cmd::output_of(&mut git()?, &["write-tree", "--missing-ok"], None);
-    let out = match write() {
-        Ok(out) => out,
-        Err(e) => {
-            let args = ["ls-files", "-z", "--unmerged"];
-            let unmerged = git::cmd::output_of(&mut git()?, &args, None)?;
-            // Each: a mode, an id and a stage, a tab, the path.
-            let mut paths: Vec<&[u8]> = (unmerged.split(|b| *b == 0))
-                .filter_map(|e| Some(&e[e.iter().position(|b| *b == b'\t')? + 1..]))
-                .collect();
-            paths.dedup();
-            if paths.is_empty() {
-                return Err(e);
-            }
-            let input = nul_list(b"", paths.into_iter());
-            let args = ["update-index", "-z", "--add", "--remove", "--stdin"];
-            git::cmd::output_of(&mut git()?, &args, Some(input))?;
-            write()?
-        }
-    };
-    super::merge::oid(&out)
 }
 
 /// `paths`, each with `prefix` and ended by a NUL.
@@ -195,6 +205,28 @@ mod tests {
     fn in_private(args: &[&str]) -> String {
         let out = git::cmd::output(&private().dir, args).unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    /// The live tree of worktree `wt` (its own upper directory) at `base`.
+    fn live(name: &str, wt: &Path, base: &str, changed: &[&str], deleted: &[&str]) -> Live {
+        let (changed, deleted) = (paths(changed), paths(deleted));
+        let index = index_of(wt);
+        let ws = Workspace {
+            dir: wt,
+            index: &index,
+            upper: wt,
+            base: ObjectId::from_hex(base.as_bytes()).unwrap(),
+            changed: &changed,
+            deleted: &deleted,
+        };
+        private().live(name, &ws).unwrap()
+    }
+
+    /// `files` (mode, path, content) as `git ls-tree -r` lists them.
+    fn tree_of(files: &[(&str, &str, &str)]) -> String {
+        (files.iter())
+            .map(|(mode, path, data)| format!("{mode} blob {}\t{path}\n", blob(data)))
+            .collect()
     }
 
     /// The blob id of `data`, as git would hash it.
@@ -239,7 +271,7 @@ mod tests {
         run_in(&wt, &["add", "st"], None);
         let index = index_of(&wt);
         let before = fs::read(&index).unwrap();
-        let changed = paths(&[
+        let changed = [
             "tracked.o",
             "new.o",
             "keep.o",
@@ -249,11 +281,8 @@ mod tests {
             "link",
             "exe",
             "st",
-        ]);
-        let deleted = paths(&["d/b", "d/e/a", "f/c"]);
-        let live = private()
-            .live("l1", &wt, &index, &changed, &deleted)
-            .unwrap();
+        ];
+        let live = live("l1", &wt, &base, &changed, &["d/b", "d/e/a", "f/c"]);
         let expected = [
             ("100644", ".gitignore", "*.o\nbuild/\n!keep.o\n"),
             ("100644", "d", "now a file\n"),
@@ -265,10 +294,7 @@ mod tests {
             ("100644", "st", "staged\n"),
             ("100644", "tracked.o", "t2\n"),
         ];
-        let expected: String = (expected.iter())
-            .map(|(mode, path, data)| format!("{mode} blob {}\t{path}\n", blob(data)))
-            .collect();
-        assert_eq!(listing(&live.tree), expected);
+        assert_eq!(listing(&live.tree), tree_of(&expected));
         assert_eq!(
             fs::read(&index).unwrap(),
             before,
@@ -289,10 +315,7 @@ mod tests {
         for p in [":x", "1:y", "a b"] {
             fs::write(wt.join(p), "p\n").unwrap();
         }
-        let changed = paths(&[":x", "1:y", "a b"]);
-        let live = private()
-            .live("l2", &wt, &index_of(&wt), &changed, &[])
-            .unwrap();
+        let live = live("l2", &wt, &base, &[":x", "1:y", "a b"], &[]);
         let expected: String = [".gitignore", "1:y", ":x", "a b"]
             .iter()
             .map(|p| {
@@ -313,13 +336,12 @@ mod tests {
             "0 {zero}\tm\n100644 {one} 1\tm\n100644 {two} 2\tm\n",
             zero = "0".repeat(40)
         );
-        let index = index_of(&wt);
         run_in(
             &wt,
             &["update-index", "--index-info"],
             Some(info.as_bytes()),
         );
-        let live = private().live("l3", &wt, &index, &[], &[]).unwrap();
+        let live = live("l3", &wt, &base, &[], &[]);
         let expected = format!(
             "100644 blob {}\tm\n100644 blob {}\tn\n",
             blob("base\n"),
@@ -329,7 +351,54 @@ mod tests {
     }
 
     #[test]
+    fn the_index_follows_the_worktree() {
+        let files = [
+            ("same", Some("s\n")),
+            ("f", Some("f\n")),
+            ("g", Some("g\n")),
+            ("h", Some("h\n")),
+        ];
+        let base = commit(None, &files);
+        let wt = worktree("l5", &base);
+        let w = |p: &str, data: &str| fs::write(wt.join(p), data).unwrap();
+        // None of these differs from the base in the worktree: the index does.
+        run_in(&wt, &["rm", "-q", "--cached", "same"], None);
+        w("new", "x\n");
+        run_in(&wt, &["add", "new"], None);
+        fs::remove_file(wt.join("new")).unwrap();
+        w("f", "f2\n");
+        run_in(&wt, &["add", "f"], None);
+        w("f", "f\n");
+        // Base files now empty directories, removed from the index (`g`) or
+        // not (`h`).
+        run_in(&wt, &["rm", "-q", "g"], None);
+        fs::remove_file(wt.join("h")).unwrap();
+        for d in ["g", "h"] {
+            fs::create_dir(wt.join(d)).unwrap();
+        }
+        let live = live("l5", &wt, &base, &[], &["g", "h"]);
+        let expected = [("100644", "f", "f\n"), ("100644", "same", "s\n")];
+        assert_eq!(listing(&live.tree), tree_of(&expected));
+    }
+
+    #[test]
+    fn a_submodule_as_its_commit() {
+        let old = commit(None, &[("a", Some("a\n"))]);
+        let base = commit(None, &[("sub", Some(&format!("gitlink:{old}")))]);
+        let wt = worktree("l6", &base);
+        let sub = wt.join("sub");
+        run_in(&wt, &["init", "-q", "sub"], None);
+        fs::write(sub.join("f"), "f\n").unwrap();
+        run_in(&sub, &["add", "f"], None);
+        run_in(&sub, &["commit", "-q", "-m", "s"], None);
+        let head = run_in(&sub, &["rev-parse", "HEAD"], None);
+        let live = live("l6", &wt, &base, &["sub"], &[]);
+        assert_eq!(listing(&live.tree), format!("160000 commit {head}\tsub\n"));
+    }
+
+    #[test]
     fn changes_from_the_state_ignored_included() {
+        let old = commit(None, &[("a", Some("a\n"))]);
         let base = commit(
             None,
             &[
@@ -338,6 +407,7 @@ mod tests {
                 ("a/y", Some("y\n")),
                 ("b", Some("b\n")),
                 ("s", Some("s\n")),
+                ("sub", Some(&format!("gitlink:{old}"))),
             ],
         );
         let state = crate::state::StateDir::of(&super::super::test_repo::git_dir(), "l4");
@@ -349,11 +419,19 @@ mod tests {
         for (p, data) in [("b", "b2\n"), ("n.o", "o\n"), ("c", "c\n"), ("s", "s\n")] {
             fs::write(upper.join(p), data).unwrap();
         }
+        // A submodule checked out: its commit is git's to tell.
+        fs::create_dir_all(upper.join("sub")).unwrap();
+        fs::write(upper.join("sub/.git"), "gitdir: x\n").unwrap();
+        fs::write(upper.join("sub/f"), "f\n").unwrap();
         fs::write(state.markers(), "Wa\0").unwrap();
         let s = crate::state::status::unfiltered(&crate::store::Store::default(), &state).unwrap();
         let mut changed = s.changed.clone();
         changed.sort();
-        assert_eq!(changed, paths(&["b", "c", "n.o"]), "s is as in the base");
+        assert_eq!(
+            changed,
+            paths(&["b", "c", "n.o", "sub"]),
+            "s is as in the base"
+        );
         assert_eq!(s.deleted, paths(&["a/x", "a/y"]));
         assert_eq!(s.ignored, 0);
     }
