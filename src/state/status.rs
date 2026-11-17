@@ -136,10 +136,6 @@ impl Status {
 /// The changes of the workspace stored in `state`.
 pub fn status(store: &Store, state: &StateDir) -> Result<Status> {
     let common_dir = &state.common_dir;
-    let base = state.read_base()?;
-    let tree = store.load_tree(base.tree)?;
-    let (whiteouts, opaque) = Markers::read(&state.markers())?;
-    let upper = state.upper();
     let mut buf = Vec::new();
     // The worktree's own view of the config (worktree config, `includeIf`).
     let config_dir = match state.admin.exists() {
@@ -152,6 +148,30 @@ pub fn status(store: &Store, state: &StateDir) -> Result<Status> {
         &mut buf,
         Default::default(),
     )?;
+    walk(store, state, ignore, Ignoring::Match)
+}
+
+/// The changes of the workspace stored in `state`, ignored untracked files
+/// included (`ignored` is 0): for git itself to tell which it ignores.
+// Its caller, the `@live` views' watch, comes next.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn unfiltered(store: &Store, state: &StateDir) -> Result<Status> {
+    walk(store, state, Default::default(), Ignoring::Never)
+}
+
+/// The changes of the workspace stored in `state`, with the ignore patterns
+/// `ignore` (global and `info/exclude`), counting ignored untracked files as
+/// `ignoring` says.
+fn walk(
+    store: &Store,
+    state: &StateDir,
+    ignore: gix::ignore::Search,
+    ignoring: Ignoring,
+) -> Result<Status> {
+    let base = state.read_base()?;
+    let tree = store.load_tree(base.tree)?;
+    let (whiteouts, opaque) = Markers::read(&state.markers())?;
+    let upper = state.upper();
     let mut walk = Walk {
         store,
         upper: &upper,
@@ -163,7 +183,7 @@ pub fn status(store: &Store, state: &StateDir) -> Result<Status> {
         ignored: 0,
         newest: None,
     };
-    walk.changed_below(b"", Some(tree), Ignoring::Match)?;
+    walk.changed_below(b"", Some(tree), ignoring)?;
     let Walk {
         changed,
         mut deleted,
@@ -213,7 +233,7 @@ enum Ignoring {
     Match,
     /// All: git ignores the directory (patterns below can't re-include).
     All,
-    /// None: the directory is a submodule's.
+    /// None: the directory is a submodule's (or git tells, `unfiltered`).
     Never,
 }
 
