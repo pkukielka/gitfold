@@ -46,9 +46,9 @@ struct Seen {
     /// it is that.
     writes: Option<u64>,
     since: Instant,
-    /// The state last tried: its tip, its parent's, its workspace's
-    /// writes.
-    tried: Option<(ObjectId, ObjectId, Option<u64>)>,
+    /// The state last tried: its tip, its parent's and the root's, its
+    /// workspace's writes.
+    tried: Option<(ObjectId, Vec<ObjectId>, Option<u64>)>,
     /// The pause it last logged: the same one isn't logged again.
     paused: String,
 }
@@ -108,12 +108,17 @@ fn walk(
         let Some(parent) = tree.parent(branch).filter(|_| tree.follows(branch)) else {
             continue;
         };
-        let (Ok(tip), Ok(on)) = (git::branch_tip(branch), git::resolve(parent)) else {
-            continue; // parent gone (T3), or the branch meanwhile
+        let Ok(tip) = git::branch_tip(branch) else {
+            continue; // the branch gone meanwhile
         };
+        // Its parent's tip (none: gone, T3) and the root's, where the parent
+        // may land (spec section 4).
+        let on: Vec<ObjectId> = (std::iter::once(parent.to_string()).chain(tree.root_refs()))
+            .filter_map(|r| git::resolve(&r).ok().map(|c| c.id))
+            .collect();
         let state = StateDir::of(common_dir, branch);
-        let now = (tip.id, on.id, writes);
-        if seen.tried == Some(now) || state.agent_present() {
+        let now = (tip.id, on, writes);
+        if seen.tried.as_ref() == Some(&now) || state.agent_present() {
             continue;
         }
         let idle = seen.since.elapsed() >= IDLE;
@@ -121,7 +126,7 @@ fn walk(
             continue;
         }
         seen.tried = Some(now);
-        update(common_dir, &state, tip.id, &mut seen.paused);
+        update(common_dir, &state, tip.id, parent, &mut seen.paused);
     }
     Ok(())
 }
@@ -171,13 +176,15 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<String> {
     Ok(out.join().unwrap_or_default() + &err.join().unwrap_or_default())
 }
 
-/// Moves the branch of `state` (at `tip`): a move (the branch isn't at
-/// `tip` any more) logged and kept for its agent, anything else said
-/// logged as a pause, unless it is the one logged last (`paused`).
-fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, paused: &mut String) {
+/// Moves the branch of `state` (at `tip`, built on `parent`): a move (the
+/// branch isn't at `tip` any more, or its parent landed and it is built
+/// elsewhere) logged and kept for its agent, anything else said logged as a
+/// pause, unless it is the one logged last (`paused`).
+fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, parent: &str, paused: &mut String) {
     let branch = &state.branch;
     let said = run_update(common_dir, branch).unwrap_or_else(|e| format!("{e:#}\n"));
-    if git::branch_tip(branch).is_ok_and(|now| now.id != tip) {
+    let moved = git::branch_tip(branch).is_ok_and(|now| now.id != tip);
+    if moved || Tree::read(common_dir).is_ok_and(|t| t.parent(branch) != Some(parent)) {
         paused.clear();
         info!("following: {}", said.trim_end().replace('\n', "; "));
         if let Err(e) = state.add_followed(&said) {

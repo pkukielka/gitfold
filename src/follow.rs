@@ -246,6 +246,23 @@ fn own_base(
     base.with_context(|| format!("can't tell where the own commits of {branch} start"))
 }
 
+/// Where the own commits of local branch `branch` start, built on `parent`
+/// (see `own_base`).
+pub fn own_start(
+    common_dir: &Path,
+    branch: &str,
+    parent: Option<&str>,
+    roots: &[String],
+) -> Result<ObjectId> {
+    own_base(
+        common_dir,
+        branch,
+        parent,
+        roots,
+        git::branch_tip(branch)?.id,
+    )
+}
+
 /// Own commits of a branch already on its remote.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Pushed {
@@ -673,4 +690,235 @@ impl Plan {
         }
         Ok(Some(paths))
     }
+}
+
+/// The most commits of a target `landed` tries a merge on in one check:
+/// the newest (a later check takes only the target's commits after them).
+const MAX_TRIED: usize = 500;
+
+/// What `landing` checked for a branch: its base, and per target (a full
+/// ref) the tip it checked and whether the base had landed there
+/// (`gitfoldLanding`: the base and whether the parent existed (`fresh`),
+/// then `<ref> <tip> <0|1>` per line).
+/// Forgotten when either changes.
+struct Checked {
+    base: ObjectId,
+    fresh: bool,
+    targets: Vec<(String, ObjectId, bool)>,
+}
+
+impl Checked {
+    fn encode(&self) -> String {
+        let lines =
+            (self.targets.iter()).map(|(t, tip, yes)| format!("\n{t} {tip} {}", *yes as u8));
+        std::iter::once(format!("{} {}", self.base, self.fresh as u8))
+            .chain(lines)
+            .collect()
+    }
+
+    fn decode(text: &str) -> Option<Checked> {
+        let mut lines = text.lines();
+        let (base, fresh) = lines.next()?.split_once(' ')?;
+        let base = ObjectId::from_hex(base.as_bytes()).ok()?;
+        let fresh = fresh == "1";
+        let targets = lines
+            .map(|line| {
+                let mut words = line.split(' ');
+                let target = words.next()?.to_string();
+                let tip = ObjectId::from_hex(words.next()?.as_bytes()).ok()?;
+                Some((target, tip, words.next()? == "1"))
+            })
+            .collect::<Option<_>>()?;
+        Some(Checked {
+            base,
+            fresh,
+            targets,
+        })
+    }
+}
+
+/// The first of `targets` (full refs) that the commits of the parent of
+/// `branch` it sits on, up to `base`, landed in (spec section 4): see
+/// `landed`; `fresh` while the parent's branch exists. Incremental: the
+/// commits of a target checked before (`Checked`) aren't checked again.
+pub fn landing(
+    common_dir: &Path,
+    local: &Local,
+    branch: &str,
+    base: ObjectId,
+    targets: &[String],
+    fresh: bool,
+) -> Result<Option<String>> {
+    let recorded = local.landing(branch);
+    let before = (recorded.as_deref())
+        .and_then(Checked::decode)
+        .filter(|c| c.base == base && c.fresh == fresh);
+    let mut checked = Checked {
+        base,
+        fresh,
+        targets: Vec::new(),
+    };
+    let mut found = None;
+    for target in targets {
+        let Some(tip) = rev(target) else { continue };
+        let mut since = None;
+        for (t, at, yes) in before.iter().flat_map(|c| &c.targets) {
+            if t == target && is_ancestor(common_dir, *at, tip)? {
+                since = Some((*at, *yes));
+            }
+        }
+        let yes = match since {
+            Some((_, true)) => true,
+            Some((at, false)) if at == tip => false,
+            _ => landed(common_dir, base, tip, since.map(|(at, _)| at), fresh)?,
+        };
+        checked.targets.push((target.clone(), tip, yes));
+        if yes {
+            found = Some(target.clone());
+            break;
+        }
+    }
+    let text = checked.encode();
+    if recorded.as_deref() != Some(text.as_str()) {
+        settings::set_landing(common_dir, branch, &text)?;
+    }
+    Ok(found)
+}
+
+/// Whether the commits of a parent a branch sits on, up to `base`, are in
+/// `tip` (a target's), as git answers it: in its history (`git merge-base
+/// --is-ancestor`: a merge commit, or a fast-forward unless `fresh`), else
+/// as other commits (`squashed`). `since`: an older tip of the target they
+/// weren't in, whose commits aren't checked again.
+///
+/// With `fresh` (the parent's branch still exists) a base on the target's
+/// first-parent line isn't taken: a fast-forward looks there just like a
+/// parent with no commits of its own.
+fn landed(
+    common_dir: &Path,
+    base: ObjectId,
+    tip: ObjectId,
+    since: Option<ObjectId>,
+    fresh: bool,
+) -> Result<bool> {
+    if !is_ancestor(common_dir, base, tip)? {
+        return squashed(common_dir, base, tip, since);
+    }
+    if !fresh {
+        return Ok(true);
+    }
+    if let Some(since) = since
+        && is_ancestor(common_dir, base, since)?
+    {
+        // On its first-parent line then already.
+        return Ok(false);
+    }
+    // The oldest commit of the target's first-parent line after the base
+    // (and `since`): a merge has the base as a second parent; on the line,
+    // as its first.
+    let mut args = vec![tip.to_string(), format!("^{base}")];
+    args.extend(since.map(|at| format!("^{at}")));
+    let args: Vec<&str> = (["rev-list", "--first-parent", "--parents"].into_iter())
+        .chain(args.iter().map(String::as_str))
+        .collect();
+    let line = cmd::output(common_dir, &args)?;
+    let line = String::from_utf8_lossy(&line);
+    let first_parent = line.lines().last().and_then(|l| l.split(' ').nth(1));
+    Ok(first_parent.is_some_and(|p| ObjectId::from_hex(p.as_bytes()).ok() != Some(base)))
+}
+
+/// Whether the changes of `base` since it and the target (at `tip`)
+/// diverged are in a commit of the target since then (a squash merge; the
+/// last commit of a rebase merge; also with the target changing those lines
+/// later): merging `base` into it, from where they diverged, changes
+/// nothing (`git merge-tree`, one for each commit touching their paths,
+/// after `since`). It is a guess: the target making the same change on its
+/// own looks the same.
+fn squashed(
+    common_dir: &Path,
+    base: ObjectId,
+    tip: ObjectId,
+    since: Option<ObjectId>,
+) -> Result<bool> {
+    let (base_hex, tip_hex) = (base.to_string(), tip.to_string());
+    let Some(fork) = merge_base(common_dir, &[&base_hex, &tip_hex])? else {
+        return Ok(false);
+    };
+    let fork_hex = fork.to_string();
+    let args = [
+        "diff",
+        "--no-renames",
+        "--name-only",
+        "-z",
+        &fork_hex,
+        &base_hex,
+    ];
+    let paths = cmd::nul_paths(&cmd::output(common_dir, &args)?);
+    if paths.is_empty() {
+        return Ok(false);
+    }
+    // The paths on standard input: a large change's would overflow the
+    // command line.
+    let mut input = format!("{tip}\n^{fork}\n").into_bytes();
+    if let Some(since) = since {
+        input.extend(format!("^{since}\n").bytes());
+    }
+    input.extend(b"--\n");
+    for path in paths {
+        input.extend(path);
+        input.push(b'\n');
+    }
+    let mut rev_list = cmd::command(common_dir);
+    rev_list.env("GIT_LITERAL_PATHSPECS", "1");
+    let args = [
+        "rev-list",
+        "--no-commit-header",
+        "--format=%H %T",
+        "--stdin",
+    ];
+    let touching = cmd::output_of(&mut rev_list, &args, Some(input))?;
+    let touching = String::from_utf8_lossy(&touching);
+    let mut commits: Vec<(&str, &str)> = (touching.lines())
+        .filter_map(|line| line.split_once(' '))
+        .collect();
+    if commits.len() > MAX_TRIED {
+        log::warn!(
+            "whether {base} landed in {tip}: only the newest {MAX_TRIED} of {} commits touching \
+             its files tried",
+            commits.len()
+        );
+        commits.truncate(MAX_TRIED);
+    }
+    if commits.is_empty() {
+        return Ok(false);
+    }
+    let merges: String = (commits.iter())
+        .map(|(commit, _)| format!("{fork} -- {commit} {base}\n"))
+        .collect();
+    let args = [
+        "merge-tree",
+        "--stdin",
+        "--write-tree",
+        "--no-messages",
+        "--name-only",
+        "-z",
+    ];
+    let out = cmd::output_of(
+        &mut cmd::command(common_dir),
+        &args,
+        Some(merges.into_bytes()),
+    )?;
+    // Each merge: its status (1: clean), its tree, the paths it conflicts
+    // on, an empty field.
+    let mut fields = out.split(|b| *b == 0);
+    for (_, tree) in commits {
+        let (Some(clean), Some(merged)) = (fields.next(), fields.next()) else {
+            bail!("git merge-tree --stdin said less than asked");
+        };
+        if clean == b"1" && merged == tree.as_bytes() {
+            return Ok(true);
+        }
+        fields.by_ref().take_while(|f| !f.is_empty()).for_each(drop);
+    }
+    Ok(false)
 }
