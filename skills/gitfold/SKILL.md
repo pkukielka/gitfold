@@ -238,9 +238,8 @@ gitfold parent --update                      # take the parent's new commits now
   itself (with the plugin, at your turn start, and you are told what moved),
   replaying its own commits onto them, your uncommitted work carried along.
   `--no-follow` (or `gitfold parent --no-follow`) leaves it to `--update`.
-- **When it can't:** a conflict moves nothing; you are told the paths once,
-  then reminded each turn until the parent changes again or you resolve it
-  (rebase by hand, or `gitfold parent --set` elsewhere). Commits you already
+- **When it can't:** a conflict moves nothing; you are told the paths and
+  how to resolve it once, then reminded each turn. Commits you already
   pushed move only with `gitfold parent --update --yes`, which prints the
   force-push to run; gitfold never pushes.
 - **When the parent lands** in the main branch: once its branch is deleted,
