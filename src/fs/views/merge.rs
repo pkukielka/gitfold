@@ -27,7 +27,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use gix::ObjectId;
 use log::warn;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 
 use crate::git;
 
@@ -66,9 +66,10 @@ pub struct Private {
     top: PathBuf,
     /// The repository's object format, and so the private one's.
     hash: gix::hash::Kind,
-    /// Held by each merge, each live tree (`live`) and each garbage
-    /// collection: one would prune what another just wrote.
-    pub(super) lock: Mutex<()>,
+    /// Shared by the merges and live trees (`live`), which write objects
+    /// before a ref holds them, exclusive for a garbage collection, which
+    /// would prune them.
+    pub(super) lock: RwLock<()>,
 }
 
 impl Private {
@@ -87,7 +88,7 @@ impl Private {
             top: git::work_tree().unwrap_or_else(|| git_dir.clone()),
             git_dir,
             hash,
-            lock: Mutex::new(()),
+            lock: RwLock::new(()),
         };
         // In the repository's object format: git writes its objects there.
         private.run(&["init", "-q", "--bare", &format!("--object-format={hash}")])?;
@@ -178,7 +179,7 @@ impl Private {
         own: (ObjectId, ObjectId),
         members: &[Member],
     ) -> Result<Merged> {
-        let _lock = self.lock.lock();
+        let _writing = self.lock.read();
         // The view so far: its commit (a commit of each fold's tree: git
         // 2.44 takes no tree there), and how the summary names it.
         let (mut ours, mut side) = (own.0, branch.to_string());
@@ -239,7 +240,7 @@ impl Private {
     /// pruning at once): what no view shows goes. A failure of that is only
     /// logged.
     pub fn shown(&self, branch: &str, commit: ObjectId) -> Result<()> {
-        let _lock = self.lock.lock();
+        let _collecting = self.lock.write();
         self.refs(format!(
             "update refs/gitfold/views/{branch} {commit}\ndelete refs/gitfold/next/{branch}\n"
         ))?;

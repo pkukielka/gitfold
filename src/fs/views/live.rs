@@ -28,13 +28,11 @@ pub struct Live {
 impl Private {
     /// The live tree of the workspace of `branch`: its worktree `dir`
     /// (through the mount), its index `index`. The commit is kept
-    /// (`refs/gitfold/live/<branch>`) until the next.
+    /// (`refs/gitfold/live/<workspace id>`) until the next.
     pub fn live(&self, branch: &str, dir: &Path, index: &Path) -> Result<Live> {
-        let _lock = self.lock.lock();
-        let copy = self
-            .dir
-            .join("live")
-            .join(crate::state::workspace_id(branch));
+        let _writing = self.lock.read();
+        let id = crate::state::workspace_id(branch);
+        let copy = self.dir.join("live").join(&id);
         std::fs::create_dir_all(copy.parent().expect("in live/"))?;
         // Its lock too, if a git killed meanwhile left one.
         let mut lock = copy.clone().into_os_string();
@@ -44,15 +42,38 @@ impl Private {
         {
             return Err(e.into());
         }
-        std::fs::copy(index, &copy).with_context(|| format!("copying {}", index.display()))?;
+        copy_index(index, &copy)?;
         let git = || in_workspace(self, dir, &copy);
         git::cmd::output_of(&mut git()?, &["add", "-A"], None)?;
         let args = ["write-tree", "--missing-ok"];
         let tree = oid(&git::cmd::output_of(&mut git()?, &args, None)?)?;
         let commit = self.commit(&tree, branch)?;
-        self.refs(format!("update refs/gitfold/live/{branch} {commit}\n"))?;
+        // By id: branch names nest (`a`, `a/b`), refs can't.
+        self.refs(format!("update refs/gitfold/live/{id} {commit}\n"))?;
         Ok(Live { tree, commit })
     }
+}
+
+/// Copies the workspace's index `index` to `copy`, with its modification
+/// time: git tells racily clean entries by it (a file changed within the
+/// index's timestamp is checked). No index: git starts from an empty one.
+fn copy_index(index: &Path, copy: &Path) -> Result<()> {
+    let modified = match std::fs::metadata(index) {
+        Ok(m) => m.modified()?,
+        Err(e) if crate::fsutil::not_found(&e) => {
+            return match std::fs::remove_file(copy) {
+                Err(e) if !crate::fsutil::not_found(&e) => Err(e.into()),
+                _ => Ok(()),
+            };
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", index.display())),
+    };
+    std::fs::copy(index, copy).with_context(|| format!("copying {}", index.display()))?;
+    std::fs::File::options()
+        .write(true)
+        .open(copy)?
+        .set_modified(modified)?;
+    Ok(())
 }
 
 /// git in the workspace at `dir`, on index `index`, its objects going to the
@@ -241,6 +262,17 @@ mod tests {
         let head = run_in(&sub, &["rev-parse", "HEAD"], None);
         let live = live("l6", &wt);
         assert_eq!(listing(&live.tree), format!("160000 commit {head}\tsub\n"));
+    }
+
+    #[test]
+    fn no_index_yet() {
+        let base = commit(None, &[("a", Some("a\n"))]);
+        let wt = worktree("l8", &base);
+        fs::remove_file(index_of(&wt)).unwrap();
+        fs::write(wt.join("b"), "b\n").unwrap();
+        let live = live("l8", &wt);
+        let expected = [("100644", "a", "a\n"), ("100644", "b", "b\n")];
+        assert_eq!(listing(&live.tree), tree_of(&expected));
     }
 
     #[test]

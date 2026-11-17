@@ -596,8 +596,8 @@ So do a workspace's base following a branch that moved, and the checks of
 - No fetch starts with less than 1 GiB free in `.git/objects`
   (`GITFOLD_FETCH_MIN_FREE_MB` changes it): a large commit can be tens of
   thousands of objects.
-- The views (`@committed`) need git 2.44 or newer: gitfold fetches what their
-  merges read first, and older git, which can't be told not to
+- The views (`@committed`, `@live`) need git 2.44 or newer: gitfold fetches
+  what their merges read first, and older git, which can't be told not to
   (`GIT_NO_LAZY_FETCH`), would fetch what a merge misses on its own.
 
 ## Running it
