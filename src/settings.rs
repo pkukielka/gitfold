@@ -41,6 +41,9 @@ const CONFLICT: &str = "gitfoldConflict";
 /// `branch.<branch>.gitfoldMoving`: the outcome of a move under way (see
 /// `follow`).
 const MOVING: &str = "gitfoldMoving";
+/// `branch.<branch>.gitfoldLanding`: what was checked of the landing of its
+/// parent (see `follow::landing`).
+const LANDING: &str = "gitfoldLanding";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -192,6 +195,12 @@ impl Local {
         self.branch(branch, MOVING)
     }
 
+    /// What was checked of the landing of the parent of `branch`
+    /// (`gitfoldLanding`).
+    pub fn landing(&self, branch: &str) -> Option<String> {
+        self.branch(branch, LANDING)
+    }
+
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
     fn branch(&self, branch: &str, key: &str) -> Option<String> {
         let config = self.0.as_ref()?;
@@ -263,9 +272,11 @@ pub fn forget_workspace(
 }
 
 /// Makes `parent` (a full ref) the parent of `branch` (see `set_branch`);
-/// following is `set_follow`'s.
+/// following is `set_follow`'s. What was checked of the landing of the
+/// parent before is forgotten: it was of another parent maybe.
 pub fn set_parent(git_dir: &Path, branch: &str, parent: &str) -> Result<()> {
-    set_branch(git_dir, branch, PARENT, parent)
+    set_branch(git_dir, branch, PARENT, parent)?;
+    unset_branch(git_dir, branch, LANDING)
 }
 
 /// Forgets the parent of `branch`, whether it follows it (F5), and a
@@ -273,6 +284,7 @@ pub fn set_parent(git_dir: &Path, branch: &str, parent: &str) -> Result<()> {
 pub fn forget_parent(git_dir: &Path, branch: &str) -> Result<()> {
     unset_branch(git_dir, branch, PARENT)?;
     unset_branch(git_dir, branch, FOLLOW)?;
+    unset_branch(git_dir, branch, LANDING)?;
     set_conflict(git_dir, branch, None)
 }
 
@@ -283,6 +295,11 @@ pub fn set_moving(git_dir: &Path, branch: &str, outcome: Option<&str>) -> Result
         Some(outcome) => set_branch(git_dir, branch, MOVING, outcome),
         None => unset_branch(git_dir, branch, MOVING),
     }
+}
+
+/// Records what was checked of the landing of the parent of `branch`.
+pub fn set_landing(git_dir: &Path, branch: &str, checked: &str) -> Result<()> {
+    set_branch(git_dir, branch, LANDING, checked)
 }
 
 /// Records that the commits of `branch` conflict with its parent's tip

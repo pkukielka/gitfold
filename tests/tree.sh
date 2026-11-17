@@ -562,6 +562,14 @@ eq "not following: nothing said" "" "$(turn)"
 W ui rebase -q api -X theirs >/dev/null 2>&1
 eq "rebased by hand: nothing said" "" "$(turn)"
 check "  the conflict forgotten" fails R config branch.ui.gitfoldConflict
+# Its parent merged: said once; deleted, ui moves onto main.
+R merge -q --no-ff --no-edit api
+eq "the parent merged: said once" "gitfold: api looks merged into main: \`gitfold parent ui --set main\` moves ui there with only its own commits (or delete api, \`git branch -d api\`, and ui moves there by itself) " "$(turn)"
+eq "  then nothing" "" "$(turn)"
+R branch -D -q api
+r=$(turn)
+check "  deleted: ui moved onto main, said" test "$([[ $r == "gitfold: api landed in main; ui is now built on main moved "*" of ui onto main"* ]] && echo yes)" = yes
+check "  through its workspace" W ui merge-base --is-ancestor main HEAD
 # Presence: one file per session or subagent, refreshed by its hooks.
 hook post-tool-use inbox '"session_id":"s1","agent_id":"a1"' >/dev/null
 eq "a subagent's tool call: it is present" "a1" "$(cat "$AGENTS/a1")"
@@ -625,9 +633,96 @@ eq "  logged once" "1" "$(grep -c "following ui: " "$LOG")"
 W ui rebase -q api -X theirs >/dev/null 2>&1
 sleep 5
 check "not following: not moved" fails R merge-base --is-ancestor ui leaf
+# A parent landed and deleted: its child is built on main.
+R branch dp; on dp dp.txt one; "$BIN" -C "$REPO" branch dc --parent dp >/dev/null; on dc dc.txt mine
+R merge -q --no-ff --no-edit dp; R branch -D -q dp
+check "a parent landed and deleted: built on main" until_ok sh -c "[ \"\$(git -C '$REPO' config branch.dc.gitfoldParent)\" = refs/heads/main ]"
+check "  logged" until_ok grep -q "following: dp landed in main; dc is now built on main" "$LOG"
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
 }
 
+
+# The parent lands (spec section 4) or disappears (section 5): reported
+# while its branch exists, taken (`--update --auto`, the automation's
+# policy) once it is deleted.
+# A parent $1 with one commit, child $2 built on it with one of its own.
+built() { R branch "$1"; on "$1" "$1.txt" one; "$BIN" -C "$REPO" branch "$2" --parent "$1" >/dev/null; on "$2" "$2.txt" mine; }
+landed_in() { eq "  $1 built on $2, with only its own commit" "refs/heads/$2 1" "$(R config "branch.$1.gitfoldParent") $(own "$2" "$1")"; }
+landing() {
+identity; on main f.txt base
+R branch fresh; "$BIN" -C "$REPO" branch fu --parent fresh >/dev/null
+check "a parent with no commits of its own: not merged" lacks 0 "merged" parent fu
+built api ui
+check "not merged yet: nothing said" lacks 0 "merged" parent ui
+check "  showing records nothing" fails R config branch.ui.gitfoldLanding
+R merge -q --no-ff --no-edit api
+check "a merge commit, api still there: reported" says 0 "api looks merged into main: \`gitfold parent ui --set main\` moves ui there with only its own commits" parent ui
+check "  by --update --auto too, nothing moved" says 0 "api looks merged into main" parent ui --update --auto
+eq "  still built on api" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
+check "  checked once: recorded" R config branch.ui.gitfoldLanding
+R branch -D -q api
+check "api deleted: ui moves onto main, told" says 0 "api landed in main; ui is now built on main moved 1 commit of ui onto main" parent ui --update --auto
+landed_in ui main
+eq "  then nothing more to say" "0 " "$(gf parent ui --update --auto)"
+# A squash, main changing the same lines after it.
+built sq us
+check "not merged yet (checked, so the squash is found incrementally)" lacks 0 "merged" parent us
+R merge -q --squash sq >/dev/null; R commit -qm squash; echo later >>"$REPO/sq.txt"; R commit -qam later
+check "a squash, its lines changed since: reported" says 0 "sq looks merged into main" parent us
+R branch -D -q sq
+check "  deleted: lands" says 0 "sq landed in main; us is now built on main" parent us --update --auto
+landed_in us main
+eq "  sq's change not taken twice" "us.txt" "$(R diff --name-only main us)"
+# A rebase merge: its commits copied onto main.
+built rb ur; on rb rb.txt two
+R cherry-pick rb~1 rb >/dev/null
+R branch -D -q rb
+check "a rebase merge: lands" says 0 "rb landed in main; ur is now built on main" parent ur --update --auto
+landed_in ur main
+# A fast-forward: not told from a fresh parent while the branch exists.
+built ff uf
+R merge -q --ff-only ff
+check "a fast-forward, ff still there: not reported" lacks 0 "merged" parent uf
+R branch -D -q ff
+check "  deleted: lands" says 0 "ff landed in main; uf is now built on main" parent uf --update --auto
+landed_in uf main
+# Into the parent's own parent, while it is known: the parent's settings
+# kept (deleted by update-ref); `git branch -D` drops them, and then only
+# the root is checked.
+R branch core; "$BIN" -C "$REPO" branch mid --parent core >/dev/null; on mid mid.txt one
+"$BIN" -C "$REPO" branch leaf --parent mid >/dev/null; on leaf leaf.txt mine
+R branch core2 core; "$BIN" -C "$REPO" branch mid2 --parent core2 >/dev/null; on mid2 mid2.txt one
+"$BIN" -C "$REPO" branch leaf2 --parent mid2 >/dev/null; on leaf2 leaf2.txt mine
+R switch -q core; R merge -q --no-ff --no-edit mid; R switch -q core2; R merge -q --no-ff --no-edit mid2; R switch -q main
+check "into its parent's parent: reported, with how to get there" says 0 "mid looks merged into core: \`gitfold parent leaf --set core\` moves leaf there with only its own commits" parent leaf --update --auto
+check "  not by deleting mid (its own parent forgotten with it)" lacks 0 "by itself" parent leaf --update --auto
+R update-ref -d refs/heads/mid
+check "  deleted, its settings kept: lands there" says 0 "mid landed in core; leaf is now built on core" parent leaf --update --auto
+landed_in leaf core
+R branch -D -q mid2
+check "  deleted by git branch -D: not known, only the root checked" says 0 "leaf2's parent mid2 is gone, with no landing of it found" parent leaf2 --update --auto
+# Gone without landing: its commits kept, noted.
+built gone ug; before=$(R rev-parse ug)
+R branch -D -q gone
+check "gone, not landed: noted, with --set and --none" says 0 "ug's parent gone is gone, with no landing of it found: ug keeps its commits as they are (\`gitfold parent ug --set P\` moves its own onto P; \`gitfold parent ug --none\`" parent ug --update --auto
+eq "  nothing moved" "$before refs/heads/gone" "$(R rev-parse ug) $(R config branch.ug.gitfoldParent)"
+check "  shown" says 0 "ug is built on gone (parent gone)" parent ug
+# Landed on origin's main only (merged by the forge, fetched).
+R remote add origin /nonexistent
+built fo uo
+R switch -q -c forge main; R merge -q --no-ff --no-edit fo; R switch -q main
+R update-ref refs/remotes/origin/main forge; R branch -D -q forge
+check "merged on origin/main only: reported" says 0 "fo looks merged into origin/main" parent uo
+R branch -D -q fo
+check "  deleted: lands there" says 0 "fo landed in origin/main; uo is now built on origin/main" parent uo --update --auto
+eq "  on origin/main" "refs/remotes/origin/main 1" "$(R config branch.uo.gitfoldParent) $(own origin/main uo)"
+# The pushed-commits rule applies.
+built pp up; R update-ref refs/remotes/origin/up up; before=$(R rev-parse up)
+R merge -q --no-ff --no-edit pp; R branch -D -q pp
+check "its commits pushed: built on main, paused (exit 4)" says 4 "following paused: pp landed in main; up is now built on main 1 commit is pushed" parent up --update --auto
+eq "  nothing moved" "$before refs/heads/main" "$(R rev-parse up) $(R config branch.up.gitfoldParent)"
+check "  --update --yes moves it" says 0 "moved 1 commit of up onto main" parent up --update --yes
+}
 # --update --auto (hidden): the automation's policy, as the daemon and an
 # agent's turn start take the parent's new commits.
 update_auto() {
@@ -658,6 +753,42 @@ on api c.txt more
 check "a workspace, unmounted: refused (exit 4)" says 4 "isn't mounted: mount it first" parent ui --update --auto
 check "  not mounted again" fails mountpoint -q "$MNT"
 }
+# gitfold list (spec section 8): each branch under its parent, whether it
+# follows it, and a note when something needs doing. Its rows with columns
+# split at two spaces or more (the indentation kept), and one row's.
+rows() { "$BIN" -C "$REPO" list 2>&1 | tail -n +2 | sed -E 's/([^ ]) {2,}/\1|/g'; }
+row() { rows | grep -E "^[ └─]*$1\|"; }
+listed() {
+identity; on main f.txt base
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+"$BIN" -C "$REPO" branch deep --parent ui >/dev/null; "$BIN" -C "$REPO" branch side --parent main >/dev/null
+R branch lone; "$BIN" -C "$REPO" parent deep --no-follow >/dev/null
+eq "under their parents, following on or off; the root's children at the top; no other branch" "api|-|-|-|-|-
+└─ ui|-|-|-|-|-|on
+   └─ deep|-|-|-|-|-|off
+side|-|-|-|-|-|on" "$(rows)"
+"$BIN" -C "$REPO" branch ws --parent api >/dev/null
+mount_fs; ls "$MNT/ws" "$MNT/lone" >/dev/null; echo new >"$MNT/ws/n.txt"
+eq "  a workspace: its columns as before, in the tree" "└─ ws 1 0 0 on" "$(row ws | awk -F'|' '{ print $1, $2, $3, $4, $7 }')"
+eq "  a workspace without a parent: no following" "lone 0 none" "$(row lone | awk -F'|' '{ print $1, $2, ($7 == "" ? "none" : $7) }')"
+rm "$MNT/ws/n.txt"; unmount_fs
+on api a.txt new; on ui a.txt mine
+"$BIN" -C "$REPO" parent ui --update --auto >/dev/null 2>&1
+eq "a conflict: noted" "(conflict on a.txt)" "$(row ui | awk -F'|' '{ print $NF }')"
+R branch -f ui ui~1; on ui u.txt mine; "$BIN" -C "$REPO" parent ui --update >/dev/null
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui; on api b.txt more
+eq "pushed commits: noted" "(following paused: pushed)" "$(row ui | awk -F'|' '{ print $NF }')"
+R update-ref -d refs/remotes/origin/ui; "$BIN" -C "$REPO" parent ui --update >/dev/null
+R merge -q --no-ff --no-edit api
+eq "its parent merged, not checked yet: nothing noted" "on" "$(row ui | awk -F'|' '{ print $NF }')"
+"$BIN" -C "$REPO" parent ui --update --auto >/dev/null
+eq "  checked (recorded): noted" "(api looks merged into main)" "$(row ui | awk -F'|' '{ print $NF }')"
+R update-ref -d refs/heads/api
+eq "its parent deleted: at the top, deep still under it; landed, as recorded" "ui|-|-|-|-|-|on|(api landed in main)
+└─ deep|-|-|-|-|-|off" "$(rows | grep -e ui -e deep)"
+R branch gone; "$BIN" -C "$REPO" branch ug --parent gone >/dev/null; on ug g.txt mine; R branch -D -q gone
+eq "gone, not landed: noted" "(parent gone)" "$(row ug | awk -F'|' '{ print $NF }')"
+}
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
 section "tree: rules R (the root)" the_root
@@ -670,7 +801,9 @@ section "tree: moves (--update, --set)" moves
 section "tree: pushed commits" pushed
 section "tree: what isn't moved, and crashes" not_moved
 section "tree: workspaces moved through the mount" workspaces
+section "tree: the parent lands, or is gone" landing
 section "tree: --update --auto" update_auto
 section "tree: following at turn start, agent presence" agents
 section "tree: following without an agent (the daemon)" daemon_follows
+section "tree: gitfold list" listed
 finish
