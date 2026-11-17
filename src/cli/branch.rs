@@ -548,15 +548,10 @@ fn and_list(names: &[String]) -> String {
 /// user's, as in a shell there (`git::cmd::in_other_worktree`); whether it
 /// made the merge.
 fn run_merge(workspace: &Path, revs: &[String]) -> Result<bool> {
+    // git's own warnings stay on (its hooks' git too): a name already
+    // warned about as it was resolved may be warned about again here.
     let status = (git::cmd::in_workspace(workspace)?)
-        // git's warnings of the names said once, as they were resolved (for
-        // the git its hooks run too).
-        .args([
-            "-c",
-            "core.warnAmbiguousRefs=false",
-            "merge",
-            "--end-of-options",
-        ])
+        .args(["merge", "--end-of-options"])
         .args(revs)
         .status()
         .context("running git merge")?;

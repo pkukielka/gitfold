@@ -231,7 +231,7 @@ eq "  git's warning said once" 1 "$(grep -o "warning: refname 'api' is ambiguous
 check "  nothing left behind" nothing_of w9
 r=$(gf branch w11 -w --from x --from api)
 check "a later source git finds ambiguous: created" eq_ok "$r" "created branch w11"
-eq "  git's warning said once" 1 "$(grep -o "warning: refname 'api' is ambiguous." <<<"$r" | wc -l)"
+check "  git's warning said" eq_ok "$r" "warning: refname 'api' is ambiguous."
 check "  no changes from it (it names no branch)" test ! -e "$MNT/w11/new.txt"
 R tag -d api >/dev/null
 for i in $(seq -w 12); do for b in api ui x; do echo "p by $b" >"$MNT/$b/p$i.txt"; done; done
