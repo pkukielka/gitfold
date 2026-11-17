@@ -72,7 +72,11 @@ enum Command {
     /// For each: how many files it changed and deleted (uncommitted), how many
     /// ignored files it holds, its base commit, how long ago it last changed
     /// (a file written, created or deleted, or a commit), and notes (branch
-    /// deleted, base behind).
+    /// deleted, base behind). Branches built on others are shown as a tree,
+    /// each under its parent, with a column saying whether it follows it;
+    /// branches without a workspace are listed too if they have a parent or
+    /// children. Notes say when something needs doing: a conflict, following
+    /// paused, a parent that looks merged or landed, a parent gone.
     List(cli::list::ListArgs),
     /// List a workspace's uncommitted changes (A/M/D per path), without git status.
     ///
@@ -134,10 +138,13 @@ enum Command {
     /// (at its agent's turn start, or once its workspace is idle), replaying
     /// its own commits onto them, uncommitted changes carried along; a
     /// conflict moves nothing and is reported. Commits already pushed are
-    /// moved only with --update --yes. When P lands in main, the branch
-    /// follows it there. Without options: the parent, and whether it is
-    /// followed. Exit codes: 3 no such branch, 1 other errors (also: not
-    /// implemented yet), 2 usage errors.
+    /// moved only with --update --yes. When P lands in main (or in its own
+    /// parent), the branch is told; once P's branch is deleted, a following
+    /// branch moves there by itself with only its own commits. Without
+    /// options: the parent, and whether it is followed. Exit codes: 3 no such
+    /// branch, 4 nothing moved (a conflict, pushed commits, git refused), 5
+    /// busy (a move under way, checked out in a git worktree), 1 other
+    /// errors, 2 usage errors.
     Parent(cli::tree::ParentArgs),
     #[command(hide = true, disable_help_flag = true, about = GUESSED)]
     Sync(cli::tree::GuessArgs),

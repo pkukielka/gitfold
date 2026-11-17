@@ -684,7 +684,7 @@ pub struct BranchArgs {
     /// Record the files Claude Code reads in this workspace (its hook reports
     /// them), for `gitfold overlaps`, or not, whatever the mount's
     /// --track-reads says (in git config, branch.<BRANCH>.gitfoldTrackReads).
-    #[arg(long, value_name = "on|off", value_parser = BoolishValueParser::new())]
+    #[arg(long, value_name = "on|off", value_parser = BoolishValueParser::new(), hide_possible_values = true)]
     pub track_reads: Option<bool>,
     /// As Claude Code's `WorktreeCreate` hook (`worktree-create`): its
     /// worktree a workspace of branch `worktree-<name>`, the path printed; a
@@ -713,7 +713,7 @@ pub struct PrewarmArgs {
 pub struct TrackReadsArgs {
     #[arg(required_unless_present = "claude_hook")]
     pub branch: Option<String>,
-    #[arg(value_name = "on|off", value_parser = BoolishValueParser::new(), action = clap::ArgAction::Set, required_unless_present = "claude_hook")]
+    #[arg(value_name = "on|off", value_parser = BoolishValueParser::new(), hide_possible_values = true, action = clap::ArgAction::Set, required_unless_present = "claude_hook")]
     pub on: Option<bool>,
     /// As Claude Code's `PreToolUse` hook on Read and Bash (`pre-tool-use`):
     /// records the files they read in a tracked workspace, which gitfold
