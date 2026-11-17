@@ -343,7 +343,8 @@ pub enum Followed {
         short: String,
         refusal: Option<Refusal>,
     },
-    /// Nothing moved, but its parent looks merged elsewhere: what to do.
+    /// Nothing moved, but something to say once: its parent looks merged
+    /// elsewhere (what to do), or (at turn start) the tree can't be read.
     Noted(String),
 }
 

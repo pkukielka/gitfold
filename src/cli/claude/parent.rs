@@ -105,7 +105,8 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
         Err(e) => Followed::Noted(format!("can't read the tree of branches: {e:#}")),
     };
     // Moves made while no agent was here (the daemon's): taken after
-    // `follow_once`, which waits for one under way.
+    // `follow_once`, which waits for one under way (not when the tree
+    // can't be read: then whatever is kept by now).
     let mut out = match state.take_followed()? {
         Some(said) => format!("gitfold: since your last turn, {said}"),
         None => String::new(),
