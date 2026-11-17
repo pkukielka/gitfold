@@ -199,8 +199,8 @@ gitfold parent --claude-hook <EVENT>
 Commands other than `mount` work on the repository the current directory is
 in, as git does (a workspace or snapshot under the mount included), or, from
 elsewhere in a mount (its root, a view), on the mounted one. `-C <PATH>` runs
-any command as if started in `<PATH>`, as `git -C` does. For `mount`, `<REPO>` is
-the repository's top-level work tree or its git directory (not a
+any command as if started in `<PATH>`, as `git -C` does. For `mount`,
+`<REPO>` is the repository's top-level work tree or its git directory (not a
 subdirectory). `<MOUNTPOINT>` must be an existing directory you own; use an
 empty one, since its contents are hidden while mounted. A repository can be
 mounted only once at a time (a second `gitfold mount` of it fails): two mounts
@@ -232,7 +232,8 @@ mounted): git merges, and says how, as it does. In a terminal it opens your
 editor for the merge message, as `git merge` does (`GIT_MERGE_AUTOEDIT=no`
 skips it). A conflict leaves the branch with git's merge in progress (exit
 1): finish it with `git merge --continue` there, or `git merge --abort`. If
-git refuses, nothing is left. The branch keeps no relation to the others. With `-w`, each local branch's uncommitted changes in its
+git refuses, nothing is left. The branch keeps no relation to the others.
+With `-w`, each local branch's uncommitted changes in its
 workspace (tracked and untracked, not ignored files) are then applied as `git
 cherry-pick -n` applies them, unstaged; a conflict between them is left as git
 leaves it (exit 1, the paths named). With `-w`, a merge that doesn't complete

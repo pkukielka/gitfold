@@ -44,6 +44,17 @@ pub fn mounts() -> Result<Vec<(PathBuf, PathBuf)>> {
         .collect())
 }
 
+/// The mount of `mounts` (as `mounts` returns them) that `path`, canonical, is
+/// below: the innermost, should one be mounted in another.
+pub fn containing<'a>(
+    mounts: &'a [(PathBuf, PathBuf)],
+    path: &Path,
+) -> Option<&'a (PathBuf, PathBuf)> {
+    (mounts.iter())
+        .filter(|(mount, _)| path.starts_with(mount))
+        .max_by_key(|(mount, _)| mount.as_os_str().len())
+}
+
 /// The source of the gitfold mount at `path` in mount table `mountinfo`.
 fn source_in(mountinfo: &[u8], path: &[u8]) -> Option<String> {
     mounts_in(mountinfo)

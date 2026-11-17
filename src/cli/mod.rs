@@ -27,70 +27,64 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 /// The repository commands work on: the one the current directory is in
-/// (`repo_at`). In a gitfold mount where git finds none, git run on paths as
-/// typed (`git::cmd::here`) takes them from the top of the view the current
-/// directory is in (`@live/<branch>`, `@committed/<branch>`); elsewhere in
-/// the mount (its root, `@live`, a namespace directory), from the current
-/// directory, which stands for the top of the work tree.
+/// (`repo_at`).
 pub fn repo() -> Result<PathBuf> {
-    let (repo, mounted) = find(Path::new("."))?;
-    if let Some((mount, cwd)) = mounted {
-        crate::git::cmd::set_here(&repo, &view_top(&repo, mount, cwd)?);
-    }
-    Ok(repo)
+    repo_at(Path::new("."))
 }
 
 /// The repository directory `dir` is in (its git directory), found as git
 /// finds it; or, below a gitfold mount where git finds none (its root, a
 /// view, a namespace directory), the mounted one (its git common directory).
 pub fn repo_at(dir: &Path) -> Result<PathBuf> {
-    Ok(find(dir)?.0)
+    crate::git::discover(dir)
+        .or_else(|e| mounted(dir).map(|(_, common_dir, _)| common_dir).ok_or(e))
 }
 
-/// `repo_at`, and, if found from the mount table, the mount point and `dir`
-/// as a path below it.
-fn find(dir: &Path) -> Result<(PathBuf, Option<(PathBuf, PathBuf)>)> {
-    let e = match crate::git::discover(dir) {
-        Ok(repo) => return Ok((repo, None)),
-        Err(e) => e,
-    };
-    let Ok(dir) = std::fs::canonicalize(dir) else {
-        return Err(e);
-    };
-    // The innermost, should one be mounted in another.
-    let found = (crate::mount_table::mounts()?.into_iter())
-        .filter(|(mount, _)| dir.starts_with(mount))
-        .max_by_key(|(mount, _)| mount.components().count());
-    match found {
-        Some((mount, common_dir)) => Ok((common_dir, Some((mount, dir)))),
-        None => Err(e),
+/// How git takes paths as typed in the current directory (`git::cmd::Here`):
+/// below a gitfold mount where git finds no repository, from the top of the
+/// view the current directory is in (`@live/<branch>`, `@committed/<branch>`),
+/// elsewhere in the mount (its root, `@live`, a namespace directory) from the
+/// current directory, which stands for the top of the work tree. After
+/// `git::init` of the repository.
+pub fn here() -> Result<crate::git::cmd::Here> {
+    use crate::git::cmd::Here;
+    let dir = Path::new(".");
+    if crate::git::discover(dir).is_ok() {
+        return Ok(Here(None));
     }
+    let Some((mount, common_dir, dir)) = mounted(dir) else {
+        return Ok(Here(None));
+    };
+    Ok(Here(Some((common_dir, view_top(&mount, dir)?))))
 }
 
-/// The top of the view that `dir`, below `mount` of the repository of git
-/// common directory `common_dir`, is in, else `dir` itself.
-fn view_top(common_dir: &Path, mount: PathBuf, dir: PathBuf) -> Result<PathBuf> {
-    let names: Vec<_> = (dir.strip_prefix(&mount)?.components())
-        .map(|c| c.as_os_str().to_string_lossy())
+/// The gitfold mount `dir` is below: its mount point, its repository's git
+/// common directory, and `dir` canonical.
+fn mounted(dir: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let dir = std::fs::canonicalize(dir).ok()?;
+    let mounts = crate::mount_table::mounts().ok()?;
+    let (mount, common_dir) = crate::mount_table::containing(&mounts, &dir)?.clone();
+    Some((mount, common_dir, dir))
+}
+
+/// The top of the view that `dir`, below `mount`, is in, else `dir` itself. A
+/// view's branch is the first of the names below `@live` or `@committed` that
+/// is one, as the mount resolves them.
+fn view_top(mount: &Path, dir: PathBuf) -> Result<PathBuf> {
+    let names: Vec<String> = (dir.strip_prefix(mount)?.components())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
         .collect();
-    let Some((kind, below)) = names.split_first() else {
-        return Ok(dir);
-    };
-    if kind != "@live" && kind != "@committed" {
-        return Ok(dir);
-    }
-    // A view's branch: the first of the names below that is one, as the
-    // mount resolves them.
-    crate::git::init(common_dir)?;
-    let view = (1..=below.len()).find(|&n| crate::git::branch_exists(&below[..n].join("/")));
-    Ok(match view {
-        Some(n) => names[..=n].iter().fold(mount, |top, name| top.join(&**name)),
-        None => dir,
-    })
+    let kinds = [crate::fs::ViewKind::Committed, crate::fs::ViewKind::Live];
+    let in_view = names
+        .first()
+        .is_some_and(|first| kinds.iter().any(|k| *first == format!("@{}", k.name())));
+    let view =
+        (2..=names.len()).find(|&n| in_view && crate::git::branch_exists(&names[1..n].join("/")));
+    Ok(view.map_or(dir, |n| mount.join(names[..n].join("/"))))
 }
 
 /// `branch` if given, else the branch of the workspace the current directory is
-/// in: `repo`, the git directory found from it (`git::discover`), is then the
+/// in: `repo`, the git directory found from it (`repo_at`), is then the
 /// workspace's registration, `<common>/worktrees/gitfold-ws-<id>`.
 pub fn branch_or_current(branch: Option<String>, repo: &Path) -> Result<String> {
     if let Some(branch) = branch {

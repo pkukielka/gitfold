@@ -43,13 +43,10 @@ fn report_reads(input: &str) -> Result<()> {
         let Ok(path) = fs::canonicalize(dir).map(|d| d.join(name)) else {
             continue;
         };
-        let below = mounts
-            .iter()
-            .filter_map(|(mount, common_dir)| Some((path.strip_prefix(mount).ok()?, common_dir)))
-            .min_by_key(|(rel, _)| rel.as_os_str().len());
-        let Some((rel, common_dir)) = below else {
+        let Some((mount, common_dir)) = mount_table::containing(&mounts, &path) else {
             continue;
         };
+        let rel = path.strip_prefix(mount)?;
         let Some(rel) = rel.to_str().filter(|_| path.is_file()) else {
             continue;
         };

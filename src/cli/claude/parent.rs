@@ -58,7 +58,7 @@ fn run(event: ParentHook, input: &str) -> Result<()> {
 /// runs in, if it runs in one. Found without opening the repository: an
 /// `inbox` hook opens the one of its own directory.
 fn workspace(input: &str) -> Option<(PathBuf, StateDir)> {
-    let repo = crate::cli::repo_at(&cwd(input).ok()?).ok()?;
+    let repo = git::discover(&cwd(input).ok()?).ok()?;
     let branch = crate::cli::branch_or_current(None, &repo).ok()?;
     // `<common>/worktrees/gitfold-ws-<id>` (see `branch_or_current`).
     let common_dir = repo.parent()?.parent()?;

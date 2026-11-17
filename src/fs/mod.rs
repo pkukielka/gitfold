@@ -36,6 +36,8 @@ mod views;
 pub mod workspace;
 mod workspaces;
 
+pub use views::Kind as ViewKind;
+
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};

@@ -130,7 +130,7 @@ fn removal(branch: String) -> crate::cli::remove::RemoveArgs {
 /// path where it was last mounted (`gitfold.mountpoint`), and that workspace
 /// is stored.
 fn unmounted_workspace(session: &Path, path: &Path) -> Option<(PathBuf, String)> {
-    let repo = crate::cli::repo_at(session).ok()?;
+    let repo = git::discover(session).ok()?;
     let common_dir = git::init(&repo).ok()?;
     if mount_table::mount_of(&common_dir).ok()?.is_some() {
         return None;
