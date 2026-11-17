@@ -92,7 +92,7 @@ impl Private {
         std::fs::create_dir_all(private.dir.join("objects/info"))?;
         std::fs::write(
             private.dir.join("objects/info/alternates"),
-            format!("{}\n", private.objects.display()),
+            [alternate(&private.objects), b"\n".to_vec()].concat(),
         )?;
         // Its commits' author, and no reflogs: they would keep what no view
         // shows.
@@ -103,15 +103,23 @@ impl Private {
         ] {
             private.run(&["config", key, value])?;
         }
+        // In a partial clone, the repository's promisor remotes: what they
+        // promise (blobs the merged trees name) its garbage collection leaves
+        // alone, instead of failing on it.
+        for remote in git::promisor::remotes() {
+            private.run(&["config", &format!("remote.{remote}.promisor"), "true"])?;
+        }
         git::open_private(&private.dir)?;
         Ok(private)
     }
 
     /// git in the private repository: no hook (a global `core.hooksPath`'s
-    /// `pre-auto-gc`, `reference-transaction`) hears of it.
+    /// `pre-auto-gc`, `reference-transaction`) hears of it, and nothing is
+    /// fetched.
     fn private_git(&self) -> Result<Command> {
         let mut git = git::cmd::command_in_other(&self.dir)?;
-        git.args(["-c", "core.hooksPath=/dev/null"]);
+        git.args(["-c", "core.hooksPath=/dev/null"])
+            .env("GIT_NO_LAZY_FETCH", "1");
         Ok(git)
     }
 
@@ -128,7 +136,10 @@ impl Private {
         let mut git = git::cmd::command_in_other(&self.git_dir)?;
         git.current_dir(&self.top)
             .env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
-            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate(&self.objects))
+            .env(
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                OsString::from_vec(alternate(&self.objects)),
+            )
             .env("GIT_NO_LAZY_FETCH", "1");
         Ok(git)
     }
@@ -168,12 +179,8 @@ impl Private {
         // markers: a ref, then a commit of the view so far (git 2.44
         // takes no tree there; the last one is the view's).
         let (mut ours, mut ours_at) = (named(&own_refs, own.0), own.0);
-        // How the summary names it: as the first markers do, by branch if
-        // they name it by id.
-        let mut side = match ObjectId::from_hex(ours.as_bytes()).is_ok() {
-            true => branch.to_string(),
-            false => ours.clone(),
-        };
+        // How the summary names it: by branch.
+        let mut side = branch.to_string();
         let mut tree = own.1;
         let mut commit = None;
         let mut conflicts = Vec::new();
@@ -188,14 +195,6 @@ impl Private {
             let out = (self.in_repository()?.args(["-c", &attributes]).args(args))
                 .stdin(Stdio::null())
                 .output()?;
-            // A branch git took by name moved meanwhile: merged against
-            // another merge point. Made again at the next refresh.
-            for (name, at) in [(&ours, ours_at), (&theirs, m.tip)] {
-                let by_id = ObjectId::from_hex(name.as_bytes()).is_ok_and(|id| id == at);
-                if !by_id && !git::resolve(name).is_ok_and(|c| c.id == at) {
-                    bail!("{name} moved during the merge");
-                }
-            }
             // 1: conflicts, which the output says.
             if !matches!(out.status.code(), Some(0 | 1)) {
                 return Err(git::cmd::Failed {
@@ -204,6 +203,14 @@ impl Private {
                     stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
                 }
                 .into());
+            }
+            // A branch git took by name moved meanwhile: merged against
+            // another merge point. Made again at the next refresh.
+            for (name, at) in [(&ours, ours_at), (&theirs, m.tip)] {
+                let by_id = ObjectId::from_hex(name.as_bytes()).is_ok_and(|id| id == at);
+                if !by_id && !git::resolve(name).is_ok_and(|c| c.id == at) {
+                    bail!("{name} moved during the merge");
+                }
             }
             let found;
             (tree, found) = parse(&out.stdout)?;
@@ -281,22 +288,16 @@ fn named(refs: &[&str], id: ObjectId) -> String {
     }
 }
 
-/// `dir` as an entry of `GIT_ALTERNATE_OBJECT_DIRECTORIES` (`:`-separated):
-/// quoted, C-style, if it would be taken apart.
-fn alternate(dir: &Path) -> OsString {
-    let text = dir.as_os_str().as_bytes();
-    if !text.contains(&b':') && !text.starts_with(b"\"") {
-        return dir.as_os_str().to_owned();
+/// `dir` as an entry of an alternates list (`objects/info/alternates`, one per
+/// line; `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `:`-separated): C-quoted as git
+/// quotes paths, and also if it has a `:`.
+fn alternate(dir: &Path) -> Vec<u8> {
+    let path = dir.as_os_str().as_bytes();
+    let quoted = crate::cli::quote(path);
+    match quoted == path && path.contains(&b':') {
+        true => [&b"\""[..], path, b"\""].concat(),
+        false => quoted,
     }
-    let mut quoted = b"\"".to_vec();
-    for &b in text {
-        if b == b'"' || b == b'\\' {
-            quoted.push(b'\\');
-        }
-        quoted.push(b);
-    }
-    quoted.push(b'"');
-    OsString::from_vec(quoted)
 }
 
 /// How the summary names the view so far after `member`, the `merged`th
@@ -552,8 +553,9 @@ mod tests {
 
     #[test]
     fn alternates_quoted() {
-        assert_eq!(alternate(Path::new("/a/b")), "/a/b");
-        assert_eq!(alternate(Path::new("/a:b/\"c\\")), "\"/a:b/\\\"c\\\\\"");
+        assert_eq!(alternate(Path::new("/a/b")), b"/a/b");
+        assert_eq!(alternate(Path::new("/a:b")), b"\"/a:b\"");
+        assert_eq!(alternate(Path::new("/a\nb\"")), b"\"/a\\nb\\\"\"");
     }
 
     #[test]
