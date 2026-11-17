@@ -16,10 +16,10 @@ use anyhow::Result;
 use gix::ObjectId;
 use log::error;
 
-use super::lives::{self, Lives};
+use super::lives::Lives;
 use super::members::{self, Bases, BuiltOn, Refs};
 use super::merge::{Member, Private};
-use super::serve::{Kind, ViewDir, rests_after};
+use super::serve::{Kind, Tick, ViewDir};
 use super::shown::{Changed, Shown, Times};
 use crate::fs::NameChanges;
 use crate::fs::workspaces::Workspaces;
@@ -42,20 +42,12 @@ pub struct Context {
     pub names: Arc<NameChanges>,
     pub branch: String,
     pub private: Arc<Private>,
+    /// Its name in the private repository (`merge::Private::merge`):
+    /// `<kind>/<its branch's workspace id>`.
+    pub key: String,
     pub kind: Kind,
     pub workspaces: Arc<Workspaces>,
     pub lives: Arc<Lives>,
-}
-
-impl Context {
-    /// The view's name in the private repository (`merge::Private::merge`).
-    pub fn key(&self) -> String {
-        let kind = match self.kind {
-            Kind::Committed => "committed",
-            Kind::Live => "live",
-        };
-        format!("{kind}/{}", state::workspace_id(&self.branch))
-    }
 }
 
 /// Which trees an `@live` view merges.
@@ -86,9 +78,9 @@ pub struct Watch {
 }
 
 /// A file's modification time and size, if it has them.
-type Stamp = Option<(SystemTime, u64)>;
+pub(super) type Stamp = Option<(SystemTime, u64)>;
 
-fn stamp(path: &Path) -> Stamp {
+pub(super) fn stamp(path: &Path) -> Stamp {
     let meta = fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
 }
@@ -127,18 +119,12 @@ impl Watch {
         if ctx.kind == Kind::Live && trees != Trees::Tips {
             let now = trees == Trees::Now;
             // Each workspace as it is: its live tree for its tip.
-            let mount = lives::Mount {
-                store: &ctx.store,
-                workspaces: &ctx.workspaces,
-                names: &ctx.names,
-                private: &ctx.private,
-            };
-            let own_tip = git::resolve(&format!("refs/heads/{branch}"))?.id;
-            if let Some(live) = ctx.lives.tip(&mount, branch, own_tip, now)? {
+            // (Opening the workspaces not open yet: `Workspaces::open_quietly`.)
+            if let Some(live) = ctx.lives.tip(ctx, branch, refs.local, now)? {
                 refs.own = live;
             }
             for (member, tip, _) in &mut refs.members {
-                if let Some(live) = ctx.lives.tip(&mount, member, tip.0, now)? {
+                if let Some(live) = ctx.lives.tip(ctx, member, tip.0, now)? {
                     *tip = live;
                 }
             }
@@ -158,12 +144,12 @@ impl Watch {
         // What git will read, loaded first: in a partial clone, fetched as
         // for a snapshot (git doesn't fetch for the views).
         ctx.store.load_tree(refs.own.1)?;
-        for ((_, (_, tree), base), _) in refs.members.iter().zip(&inputs) {
+        for (_, (_, tree), base) in &refs.members {
             ctx.store.load_tree(*tree)?;
             ctx.store.load_tree(git::resolve(&base.to_string())?.tree)?;
         }
         // No lock the requests need is held meanwhile.
-        let merged = ctx.private.merge(&ctx.key(), branch, refs.own, &inputs)?;
+        let merged = ctx.private.merge(&ctx.key, branch, refs.own, &inputs)?;
         let tree = ctx.store.load_tree(merged.tree)?;
         let (conflicts, notes) = (&merged.conflicts, &refs.notes);
         let (shown, changed) = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);
@@ -180,24 +166,14 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
     let spawned = thread::Builder::new().name(name).spawn(move || {
         loop {
             let Some(view) = view.upgrade() else { return };
-            let woken = {
-                let mut rest = view.rest.lock();
-                // Woken early by an access to a resting view.
-                view.woken.wait_for(&mut rest, INTERVAL);
-                let idle = rest.accessed.elapsed() >= rests_after();
-                match (rest.resting, idle) {
-                    // Rests on.
-                    (true, true) => continue,
-                    // Accessed: refreshed at once.
-                    (true, false) => true,
-                    (false, true) => {
-                        rest.resting = true;
-                        drop(rest);
-                        resting(&ctx.names, &view);
-                        continue;
-                    }
-                    (false, false) => false,
+            let woken = match view.rest.tick(INTERVAL) {
+                Tick::Refresh => false,
+                Tick::Wake => true,
+                Tick::Rested => {
+                    resting(&ctx.names, &view);
+                    continue;
                 }
+                Tick::Rests => continue,
             };
             let before = view.shown();
             let trees = if woken { Trees::Now } else { Trees::Quiet };
@@ -209,7 +185,7 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                         // replies can't land after the kernel is told.
                         view.swap(shown, &changed);
                         tell(&ctx.names, &view, &changed);
-                        if let Err(e) = ctx.private.shown(&ctx.key(), commit) {
+                        if let Err(e) = ctx.private.shown(&ctx.key, commit) {
                             error!("view {}: {e:#}", view.name);
                         }
                     }
@@ -224,10 +200,7 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                 }
             }
             if woken {
-                let mut rest = view.rest.lock();
-                rest.resting = false;
-                rest.refreshed += 1;
-                view.woken.notify_all();
+                view.rest.woke();
             }
         }
     });

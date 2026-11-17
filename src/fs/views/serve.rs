@@ -11,6 +11,8 @@ use std::time::{Duration, Instant, SystemTime};
 use fuser::Errno;
 use log::{error, info};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::lives::Lives;
 use super::merge::Private;
@@ -30,6 +32,16 @@ pub enum Kind {
     Live,
 }
 
+impl Kind {
+    /// Its name below `@` (`@committed`, `@live`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Committed => "committed",
+            Kind::Live => "live",
+        }
+    }
+}
+
 /// How long the kernel keeps an `@live` view's entries and attributes: it
 /// asks again soon, so an access wakes a dormant view (`ViewDir::reached`).
 pub const LIVE_TTL: Duration = Duration::from_secs(1);
@@ -45,12 +57,89 @@ pub fn rests_after() -> Duration {
 /// How long the first access to a resting view waits for it to be fresh.
 const WAKE_WAIT: Duration = Duration::from_secs(5);
 
-/// When a view was last accessed, whether it rests, and how many times it
-/// was refreshed (or found current) since it was opened.
+/// A view's rest: when it was last accessed, whether it rests, and the
+/// requests waiting for it to wake (`ViewDir::reached`, `watch`).
 pub struct Rest {
-    pub accessed: Instant,
-    pub resting: bool,
-    pub refreshed: u64,
+    /// The last access, in milliseconds since `EPOCH`.
+    accessed: AtomicU64,
+    resting: AtomicBool,
+    lock: Mutex<()>,
+    woken: Condvar,
+}
+
+/// What the watch of a view does next (`Rest::tick`).
+pub enum Tick {
+    /// Refreshes it, its live trees made again once quiet.
+    Refresh,
+    /// Refreshes it at once: it was accessed resting.
+    Wake,
+    /// It rests from now on.
+    Rested,
+    /// Nothing: it rests on.
+    Rests,
+}
+
+/// Milliseconds since the first call.
+fn now_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+impl Rest {
+    fn new(resting: bool) -> Rest {
+        Rest {
+            accessed: AtomicU64::new(now_ms()),
+            resting: AtomicBool::new(resting),
+            lock: Mutex::new(()),
+            woken: Condvar::new(),
+        }
+    }
+
+    /// Accessed: if it rests, its watch is woken, and this waits for it to
+    /// be refreshed (a while at most: then it shows what it last did).
+    fn reached(&self) {
+        self.accessed.store(now_ms(), Ordering::Relaxed);
+        if !self.resting.load(Ordering::Acquire) {
+            return;
+        }
+        let mut lock = self.lock.lock();
+        self.woken.notify_all();
+        let until = Instant::now() + WAKE_WAIT;
+        while self.resting.load(Ordering::Acquire) {
+            if self.woken.wait_until(&mut lock, until).timed_out() {
+                break;
+            }
+        }
+    }
+
+    /// For the watch: waits `interval` (unless it was woken), then says what
+    /// to do.
+    pub fn tick(&self, interval: Duration) -> Tick {
+        let mut lock = self.lock.lock();
+        let idle = || {
+            let since = now_ms().saturating_sub(self.accessed.load(Ordering::Relaxed));
+            Duration::from_millis(since) >= rests_after()
+        };
+        if !(self.resting.load(Ordering::Acquire) && !idle()) {
+            self.woken.wait_for(&mut lock, interval);
+        }
+        match (self.resting.load(Ordering::Acquire), idle()) {
+            (true, true) => Tick::Rests,
+            (true, false) => Tick::Wake,
+            (false, true) => {
+                self.resting.store(true, Ordering::Release);
+                Tick::Rested
+            }
+            (false, false) => Tick::Refresh,
+        }
+    }
+
+    /// For the watch: refreshed after a wake; the requests waiting go on.
+    pub fn woke(&self) {
+        let _lock = self.lock.lock();
+        self.resting.store(false, Ordering::Release);
+        self.woken.notify_all();
+    }
 }
 
 /// What a view inode is, with its time.
@@ -89,9 +178,8 @@ pub struct ViewDir {
     /// The directory its root is listed in (`@committed`, or a namespace
     /// below it).
     pub parent: u64,
-    /// Its rest (`watch`), and the requests waiting for it to end.
-    pub rest: Mutex<Rest>,
-    pub woken: Condvar,
+    /// Its rest (`watch`).
+    pub rest: Rest,
     shown: RwLock<Arc<Shown>>,
     nodes: Mutex<Nodes>,
     listings: Mutex<HashMap<u64, Arc<Listing>>>,
@@ -130,23 +218,9 @@ impl ViewDir {
         self.gate.read()
     }
 
-    /// The view was accessed: if it rests, its watch refreshes it at once,
-    /// and this waits for that (a while at most: then it shows what it
-    /// last did).
+    /// The view was accessed (`Rest::reached`).
     pub fn reached(&self) {
-        let mut rest = self.rest.lock();
-        rest.accessed = Instant::now();
-        if !rest.resting {
-            return;
-        }
-        let seen = rest.refreshed;
-        self.woken.notify_all();
-        let until = Instant::now() + WAKE_WAIT;
-        while rest.resting && rest.refreshed == seen {
-            if self.woken.wait_until(&mut rest, until).timed_out() {
-                break;
-            }
-        }
+        self.rest.reached();
     }
 
     /// The path of node `local` (`""`: the root).
@@ -342,6 +416,7 @@ impl Views {
             names: self.names.clone(),
             branch: branch.to_string(),
             private: self.private()?,
+            key: format!("{}/{}", kind.name(), crate::state::workspace_id(branch)),
             kind,
             workspaces: self.workspaces.clone(),
             lives: self.lives.clone(),
@@ -354,7 +429,7 @@ impl Views {
             error!("view {name}: {e:#}");
             Errno::EIO
         })?;
-        if let Err(e) = ctx.private.shown(&ctx.key(), commit) {
+        if let Err(e) = ctx.private.shown(&ctx.key, commit) {
             error!("view {name}: {e:#}");
         }
         let mut list = self.list.write();
@@ -366,12 +441,7 @@ impl Views {
             parent,
             // An `@live` view opens with the tips: its first requests wait for
             // the workspaces (`ViewDir::reached`).
-            rest: Mutex::new(Rest {
-                accessed: Instant::now(),
-                resting: kind == Kind::Live,
-                refreshed: 0,
-            }),
-            woken: Condvar::new(),
+            rest: Rest::new(kind == Kind::Live),
             shown: RwLock::new(Arc::new(shown)),
             nodes: Mutex::default(),
             listings: Mutex::default(),

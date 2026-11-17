@@ -215,10 +215,10 @@ fn ttl(view: Option<&ViewDir>) -> &'static Duration {
     }
 }
 
-/// Replies with `attr`, or the error.
-fn reply_attr(result: Result<FileAttr, Errno>, reply: ReplyAttr) {
+/// Replies with `attr` (kept `ttl`), or the error.
+fn reply_attr(result: Result<FileAttr, Errno>, ttl: &Duration, reply: ReplyAttr) {
     match result {
-        Ok(attr) => reply.attr(&IMMUTABLE_TTL, &attr),
+        Ok(attr) => reply.attr(ttl, &attr),
         Err(e) => reply.error(e),
     }
 }
@@ -319,10 +319,7 @@ impl Filesystem for GitFold {
         bump(&self.counters.getattr);
         let view = self.view_of(ino.0);
         let _serving = view.as_deref().map(ViewDir::serving);
-        match self.attr(ino.0) {
-            Ok(attr) => reply.attr(ttl(view.as_deref()), &attr),
-            Err(e) => reply.error(e),
-        }
+        reply_attr(self.attr(ino.0), ttl(view.as_deref()), reply)
     }
 
     fn setattr(
@@ -358,7 +355,7 @@ impl Filesystem for GitFold {
             )?;
             self.attr(ino.0)
         });
-        reply_attr(result, reply)
+        reply_attr(result, &IMMUTABLE_TTL, reply)
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {

@@ -91,6 +91,8 @@ pub struct Note {
 pub struct Refs {
     /// The view's own files: the branch's tip, or its origin root's.
     pub own: Tip,
+    /// The branch's tip.
+    pub local: ObjectId,
     /// Each member, its tip, and its merge point with its parent (where it
     /// left it); skipped members aren't here (`notes`).
     pub members: Vec<(String, Tip, ObjectId)>,
@@ -146,6 +148,7 @@ pub fn refs(
         Ok((c.id, c.tree))
     };
     let mut own = tip(&format!("refs/heads/{branch}"))?;
+    let local = own.0;
     let mut notes = Vec::new();
     // The origin root, if it exists but can't be read: noted, not failing.
     let mut unread: Option<&str> = None;
@@ -206,6 +209,7 @@ pub fn refs(
     }
     Ok(Refs {
         own,
+        local,
         members: out,
         notes,
     })

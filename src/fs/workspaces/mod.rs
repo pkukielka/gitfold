@@ -363,20 +363,21 @@ impl Workspaces {
         }
         // Reserved under `@`: the views (a branch named so is
         // `@refs/heads/committed`).
-        if path == "@committed" || path == "@live" {
+        let kinds = [Kind::Committed, Kind::Live];
+        if (path.strip_prefix('@')).is_some_and(|n| kinds.iter().any(|k| k.name() == n)) {
             return Ok(self.namespace(path));
         }
-        let view = (path
-            .strip_prefix("@committed/")
-            .map(|b| (b, Kind::Committed)))
-        .or_else(|| path.strip_prefix("@live/").map(|b| (b, Kind::Live)));
+        let view = kinds.into_iter().find_map(|kind| {
+            let branch = path.strip_prefix('@')?.strip_prefix(kind.name())?;
+            Some((branch.strip_prefix('/')?, kind))
+        });
         if let Some((branch, kind)) = view {
             if let Some(ino) = views.existing(path) {
                 return Ok(ino);
             }
             return self.branch_or_namespace(path, branch, || {
                 // Its root is listed there (a resting view forgets it there).
-                let parent = self.namespace(&path[..path.rfind('/').expect("below @")]);
+                let parent = self.namespace(path.rsplit_once('/').expect("below @").0);
                 views.open(path, branch, kind, parent)
             });
         }

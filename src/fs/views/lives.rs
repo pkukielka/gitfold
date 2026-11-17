@@ -4,7 +4,6 @@
 //! the latest some seconds into a burst.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -12,12 +11,9 @@ use gix::ObjectId;
 use parking_lot::Mutex;
 
 use super::members::Tip;
-use super::merge::Private;
-use crate::fs::NameChanges;
-use crate::fs::workspaces::Workspaces;
+use super::watch::{Context, Stamp, stamp};
 use crate::inode;
 use crate::state::StateDir;
-use crate::store::Store;
 
 /// How long a workspace is quiet before its live tree is made again.
 const QUIET: Duration = Duration::from_secs(2);
@@ -41,15 +37,7 @@ struct Made {
 
 /// What tells a workspace changed: writes through the mount, its base, its
 /// branch's tip, its index (staging, a commit).
-type Signal = (u64, ObjectId, ObjectId, Option<std::time::SystemTime>, u64);
-
-/// What `Lives` needs from the mount.
-pub struct Mount<'a> {
-    pub store: &'a Arc<Store>,
-    pub workspaces: &'a Workspaces,
-    pub names: &'a NameChanges,
-    pub private: &'a Private,
-}
+type Signal = (u64, ObjectId, ObjectId, Stamp);
 
 impl Lives {
     /// The live tree of the workspace of `branch` (whose tip is `tip`), as a
@@ -58,12 +46,12 @@ impl Lives {
     /// changing for long, or `now` asks for it at once (a view woken).
     pub fn tip(
         &self,
-        mount: &Mount,
+        ctx: &Context,
         branch: &str,
         tip: ObjectId,
         now: bool,
     ) -> Result<Option<Tip>> {
-        let opened = (mount.workspaces.open_quietly(mount.store, branch))
+        let opened = (ctx.workspaces.open_quietly(&ctx.store, branch))
             .map_err(|e| anyhow!("opening the workspace of {branch}: {e:?}"))?;
         let Some((ws, opened_now)) = opened else {
             self.trees.lock().remove(branch);
@@ -72,18 +60,11 @@ impl Lives {
         if opened_now {
             // A new name in the root and namespace listings.
             let mut dirs = vec![inode::ROOT];
-            dirs.extend(mount.workspaces.namespace_inodes());
-            mount.names.changed(&dirs);
+            dirs.extend(ctx.workspaces.namespace_inodes());
+            ctx.names.changed(&dirs);
         }
-        let state = StateDir::of(mount.workspaces.common_dir(), branch);
-        let index = std::fs::metadata(state.index()).ok();
-        let signal = (
-            ws.writes(),
-            ws.base().0,
-            tip,
-            index.as_ref().and_then(|m| m.modified().ok()),
-            index.map_or(0, |m| m.len()),
-        );
+        let state = StateDir::of(ctx.workspaces.common_dir(), branch);
+        let signal = (ws.writes(), ws.base().0, tip, stamp(&state.index()));
         let mut trees = self.trees.lock();
         if let Some(made) = trees.get_mut(branch) {
             if made.at == signal {
@@ -102,8 +83,8 @@ impl Lives {
             }
         }
         // The signal was read before: a change meanwhile is seen next time.
-        let dir = mount.workspaces.mount_point().join(branch);
-        let live = mount.private.live(branch, &dir, &state.index())?;
+        let dir = ctx.workspaces.mount_point().join(branch);
+        let live = ctx.private.live(branch, &dir, &state.index())?;
         let tip = (live.commit, live.tree);
         let made = Made {
             at: signal,
