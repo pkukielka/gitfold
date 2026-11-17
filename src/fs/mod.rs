@@ -81,6 +81,8 @@ pub struct Options {
     /// Record the files read in workspaces, unless a branch says otherwise
     /// (`workspace::reads`).
     pub track_reads: bool,
+    /// How many threads serve requests.
+    pub request_threads: usize,
 }
 
 pub struct GitFold {
@@ -117,6 +119,7 @@ impl GitFold {
             opts.prewarm_threads,
             opts.track_reads,
         ));
+        views::waiting_at_most(opts.request_threads / 2);
         let views = Views::new(
             common_dir.clone(),
             store.clone(),

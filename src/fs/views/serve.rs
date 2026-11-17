@@ -79,16 +79,23 @@ pub enum Tick {
     Rests,
 }
 
-/// A request waiting for a view to wake, counted: at most half the CPUs
-/// (the request threads, by default) wait at once: none with one CPU, where
-/// git would wait for the one thread.
+/// A request waiting for a view to wake, counted: at most `waiting_at_most`
+/// at once, so that git (reading workspaces for the wake) has request threads
+/// left.
 struct Waiting;
 
 static WAITING: AtomicUsize = AtomicUsize::new(0);
+static MOST_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// Lets `most` requests wait at once for views to wake: half the request
+/// threads (none with one).
+pub fn waiting_at_most(most: usize) {
+    MOST_WAITING.store(most, Ordering::Relaxed);
+}
 
 impl Waiting {
     fn take() -> Option<Waiting> {
-        let most = std::thread::available_parallelism().map_or(0, |n| n.get() / 2);
+        let most = MOST_WAITING.load(Ordering::Relaxed);
         let taken = WAITING.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < most).then_some(n + 1)
         });
@@ -451,6 +458,7 @@ impl Views {
             branch: branch.to_string(),
             private: self.private()?,
             key: format!("{}/{}", kind.name(), crate::state::workspace_id(branch)),
+            name: name.to_string(),
             kind,
             workspaces: self.workspaces.clone(),
             lives: self.lives.clone(),

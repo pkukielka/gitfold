@@ -24,4 +24,4 @@ pub mod shown;
 mod test_repo;
 mod watch;
 
-pub use serve::{Item, Kind, LIVE_TTL, ViewDir, Views};
+pub use serve::{Item, Kind, LIVE_TTL, ViewDir, Views, waiting_at_most};

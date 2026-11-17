@@ -45,6 +45,8 @@ pub struct Context {
     /// Its name in the private repository (`merge::Private::merge`):
     /// `<kind>/<its branch's workspace id>`.
     pub key: String,
+    /// Its name below the mount root (`@live/api`).
+    pub name: String,
     pub kind: Kind,
     pub workspaces: Arc<Workspaces>,
     pub lives: Arc<Lives>,
@@ -127,7 +129,7 @@ impl Watch {
             // Errors logged once, while they last.
             let before = std::mem::take(&mut self.live_failed);
             let failed = &mut self.live_failed;
-            let view = format!("@{}/{branch}", ctx.kind.name());
+            let view = &ctx.name;
             let mut live =
                 |branch: &str, tip: &mut Tip| match ctx.lives.tip(ctx, branch, tip.0, now) {
                     Ok(Some(live)) => *tip = live,
@@ -142,7 +144,8 @@ impl Watch {
                         notes.push(Note {
                             kind: "unread",
                             what: branch.to_string(),
-                            why: "its workspace (see the log); the view has its tip".into(),
+                            why: "its workspace (see the log); its uncommitted work is left out"
+                                .into(),
                         });
                     }
                 };
