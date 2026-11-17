@@ -132,21 +132,29 @@ pub fn remote_branch(name: &str, commit: &str) {
     );
 }
 
+/// Writes ref `full` as a file pointing at `oid`, which git's commands
+/// would refuse if the object is missing.
+pub fn write_ref(full: &str, oid: &str) {
+    let path = git_dir().join(full);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("{oid}\n")).unwrap();
+}
+
 /// The repository's git directory.
 pub fn git_dir() -> PathBuf {
     repo().join(".git")
 }
 
-/// A new directory `name` for a test's files, removed with the repository.
-pub fn scratch(name: &str) -> PathBuf {
-    let dir = git_dir().join(format!("test-{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// The views' private repository of the test repository (one per process,
+/// as `git::open_private` allows).
+pub fn private() -> &'static super::merge::Private {
+    static PRIVATE: OnceLock<super::merge::Private> = OnceLock::new();
+    PRIVATE.get_or_init(|| super::merge::Private::create(&git_dir()).unwrap())
 }
 
-/// Sets `key` to `value` in the repository's config.
-pub fn config(key: &str, value: &str) {
-    git(repo(), &["config", key, value], None, None);
+/// Runs git in the test repository; its output.
+pub fn run(args: &[&str]) -> String {
+    git(repo(), args, None, None)
 }
 
 /// The commit `commit` (and its tree).

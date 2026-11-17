@@ -1,12 +1,15 @@
 //! FUSE view of a git repository: read-only snapshots of any revision
-//! (`<mount>/@<rev>/<path>`) and writable branch workspaces
-//! (`<mount>/<branch>/<path>`).
+//! (`<mount>/@<rev>/<path>`), writable branch workspaces
+//! (`<mount>/<branch>/<path>`), and read-only views of a branch merged with
+//! those built on it (`<mount>/@committed/<branch>/<path>`).
 //!
 //! Snapshot contents are immutable, so entries, attributes and page cache are
 //! cached by the kernel indefinitely; after the first walk, `find`/`grep`/
 //! `git status` are served mostly without calling into this process.
 //! Workspaces change only through this file system, or without visible effect
 //! (`workspace::rebase`), so the kernel's caches stay coherent with them too.
+//! Views change without the kernel seeing it; they tell it what changed
+//! (`views::watch`).
 //!
 //! Nothing is stored per snapshot node: inode numbers encode where to find an
 //! entry (see `inode`), trees and files live in the shared `Store`, and a
@@ -29,8 +32,6 @@ mod removal;
 mod snapshots;
 mod stats;
 mod view;
-// Served by the mount once the views land there (stream-views, V2).
-#[allow(dead_code)]
 mod views;
 pub mod workspace;
 mod workspaces;
@@ -59,6 +60,7 @@ pub use removal::Removal;
 use snapshots::Snapshots;
 use stats::{Counters, IoTimer, bump};
 use view::Content;
+use views::{ViewDir, Views};
 use workspace::{Obj, Workspace};
 use workspaces::Workspaces;
 
@@ -87,6 +89,7 @@ pub struct GitFold {
     store: Arc<Store>,
     snapshots: Arc<Snapshots>,
     workspaces: Arc<Workspaces>,
+    views: Arc<Views>,
     content: ContentCache,
     counters: Counters,
     names: Arc<NameChanges>,
@@ -105,10 +108,13 @@ impl GitFold {
             uid: unsafe { libc::getuid() },
             gid: unsafe { libc::getgid() },
         };
+        let store: Arc<Store> = Arc::default();
+        let views = Arc::new(Views::new(common_dir.clone(), store.clone(), names.clone()));
         GitFold {
             no_open: opts.no_open,
             stat,
-            store: Arc::default(),
+            store,
+            views,
             snapshots: Arc::new(Snapshots::new(
                 common_dir.clone(),
                 mount_point.clone(),
@@ -161,6 +167,15 @@ impl GitFold {
         // `make` counts the kernel's reference to the new node (see `workspace::nodes`).
         let (child, obj) = make(&ws, local)?;
         self.obj_attr(inode::ws(slot, child), &obj)
+    }
+
+    /// The view inode `ino` is in, if it is a view's: requests in it hold
+    /// its gate while served and replied to (`ViewDir::swap`).
+    fn view_of(&self, ino: u64) -> Option<Arc<ViewDir>> {
+        match inode::decode(ino)? {
+            inode::Ino::View { slot, .. } => self.views.get(slot).ok(),
+            _ => None,
+        }
     }
 
     /// The workspace and local id of a workspace entry inode (see `ws_node_ino`).
@@ -255,6 +270,8 @@ impl Filesystem for GitFold {
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         bump(&self.counters.lookup);
+        let view = self.view_of(parent.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let names_dir = self.is_names_dir(parent.0);
         let names_before = names_dir.then(|| self.name_count());
         let result = self.lookup_attr(parent, name.as_bytes());
@@ -284,6 +301,8 @@ impl Filesystem for GitFold {
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         bump(&self.counters.getattr);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         reply_attr(self.attr(ino.0), reply)
     }
 
@@ -325,6 +344,8 @@ impl Filesystem for GitFold {
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         bump(&self.counters.readlink);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         match self.link_target(ino) {
             Ok(data) => reply.data(&data),
             Err(e) => reply.error(e),
@@ -496,6 +517,8 @@ impl Filesystem for GitFold {
         reply: ReplyData,
     ) {
         bump(&self.counters.read);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let _t = IoTimer::start(&self.counters);
         match self.content(ino, offset, size) {
             Ok(Content::Whole(data)) => {
@@ -567,6 +590,11 @@ impl Filesystem for GitFold {
         {
             ws.forget(local, nlookup);
         }
+        if let Some(inode::Ino::View { slot, local }) = inode::decode(ino.0)
+            && let Ok(view) = self.views.get(slot)
+        {
+            view.forget(local, nlookup);
+        }
     }
 
     fn access(&self, _req: &Request, _ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
@@ -589,6 +617,8 @@ impl Filesystem for GitFold {
         mut reply: ReplyDirectory,
     ) {
         bump(&self.counters.readdir);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let result = self.for_each_entry(ino, offset, false, |next, child, name, attr| {
             reply.add(INodeNo(child), next, attr.kind, OsStr::from_bytes(name))
         });
@@ -607,6 +637,8 @@ impl Filesystem for GitFold {
         mut reply: ReplyDirectoryPlus,
     ) {
         bump(&self.counters.readdir);
+        let view = self.view_of(ino.0);
+        let _serving = view.as_deref().map(ViewDir::serving);
         let result = self.for_each_entry(ino, offset, true, |next, child, name, attr| {
             reply.add(
                 INodeNo(child),

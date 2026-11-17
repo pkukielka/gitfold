@@ -505,6 +505,27 @@ Following by itself is still to come. Commands people guess (`gitfold
 sync`, `pull`, `restack`, `rebase`, `branch --on`, `branch --merge`) exit 2
 naming the right one.
 
+`<mount>/@committed/<branch>/` is a read-only view of a branch merged with
+every branch built on it, their committed tips (for the main branch, only
+branches opened as workspaces, and those they are built on). Each branch's
+change is its files against where it left its parent, merged in turn by git
+(`git merge-tree`): renames, `.gitattributes` merge settings and
+`merge.conflictStyle` apply as in a merge, and conflicts stay in the files as
+git leaves them (markers name the sides by commit id: the branches' tips, and
+commits of the view so far in gitfold's private repository).
+`.gitfold-conflicts` at the view's root lists every conflict git reports, one
+per line (`CONFLICT (<kind>)\t<the two sides>\t<path>`, the sides named by
+branch: `api+ui, web`), and the branches left out (`skipped`) or refs that
+couldn't be read (`unread`). git merges in the repository itself (its
+settings, attributes and merge drivers), but writes its objects into a
+private repository, `.git/gitfold/.views.git`, which borrows the
+repository's objects: no object or ref is written into the repository (merge
+drivers run in its top, as in any merge). The view
+follows new commits and changes to the tree within about a second. `@live`
+(with uncommitted work) is reserved and comes later; a branch named `committed` or
+`live` is reached as `@refs/heads/committed` (a remote so named as
+`@refs/remotes/committed/<branch>`).
+
 ### Partial clones
 
 In a partial clone the object database lacks blobs (`blob:none`) or trees

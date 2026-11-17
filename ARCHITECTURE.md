@@ -125,6 +125,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
+| `src/fs/views/` | `@committed/<branch>`: which branches a view merges (`members`), the merge by `git merge-tree` in a private repository (`merge`), the merged tree as files and its summary (`shown`), serving it (`serve`), and keeping it current (`watch`) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
@@ -843,6 +844,56 @@ What did **not** matter for cold walks (fresh mount, empty kernel caches; spark
 plain readdir vs auto, no-opendir, and building the node table up front instead
 of decoding trees on demand. The remaining cold cost is per-entry kernel work
 (inode and dentry creation, ~8 µs per entry), which led to prewarming.
+
+### Views: rebuilt behind the kernel's back, then told what changed
+
+**What:** a view (`@committed/<branch>`) is a tree git merges: `git
+merge-tree --write-tree` folds each member into the view so far, against its
+merge base with its parent. git runs in the repository itself (its config,
+`includeIf`, attributes, merge drivers; in its work tree's top), with only
+its objects redirected (`GIT_OBJECT_DIRECTORY`) into a private bare
+repository (`.git/gitfold/.views.git`, made anew at each mount) that borrows
+the repository's objects through `objects/info/alternates`;
+`.gitattributes` are read from the view so far (`attr.tree`). git is given
+every side by commit id, so markers show ids: the branches' tips, and for
+the view so far a commit of each fold's tree in the private repository (git
+2.44 takes no tree as a side). Names given to git would be resolved by git
+meanwhile, racing with the refs and its own shortening;
+`.gitfold-conflicts`, which gitfold writes, names the branches. gitfold
+reads the merged trees through a second object-database handle on it
+(`git::open_private`: `tree_entries`, `object_size` and `read_blob` look
+there when the repository hasn't an object). Its only refs are each view's,
+and `git gc --auto` (with `gc.pruneExpire=now`) collects the rest as git
+decides. The view is rebuilt when its refs move: a thread per open view
+reads its members' refs every
+second (the tree of branches again when the config changed, or every 30 s;
+for the main branch's view, which workspaces are opened), and if they moved,
+builds the view again, swaps it in, waits for the requests served from the
+old one (each holds the view's gate, shared, until it has replied), and tells
+the kernel which paths changed: `inval_entry` for each name in its
+directory, `inval_inode` for the directory's listing and the file's
+attributes and pages, only for nodes the kernel holds. Paths keep their
+inodes (path-derived, as in workspaces), so the kernel's long TTLs stay and
+nothing is re-walked; a path whose kind changed (a file now a directory) gets
+a new one. What changed is the difference between the old and the new
+merged tree. Times: a file's is when its blob last changed, a directory's when
+an entry in it appeared or went; the root keeps its first.
+
+**Why git's merge:** each hand-built copy of git's merge behaviour (renames,
+attributes, conflict cases) left the next difference; `merge-tree` is git's
+own, and takes ~5 ms per merge on 100k files (it reads only differing
+subtrees). It runs in the user's repository because a second repository
+imitating it (borrowed config, attributes, label refs) kept differing
+(`includeIf`, relative merge-driver paths, branch names clashing with its
+refs); only the objects go elsewhere, keeping the user's repository free of
+them.
+
+**Why:** the views change without the kernel seeing it, unlike workspaces;
+short TTLs would cost a request per access everywhere in a view, for content
+that changes rarely. Building is proportional to the branches' changes, not to
+the repository (deltas walk only differing subtrees; merge bases are cached
+by the two commits). Waiting for the requests in flight: one that read the
+old view and replied after the kernel was told would be cached for good.
 
 ### Prewarm instead of tricks
 
