@@ -28,19 +28,33 @@ use gix::ObjectId;
 use super::merge::{Private, oid};
 use crate::git;
 
-/// The hook git asks what changed, given `GITFOLD_LIVE`: the token it should
-/// hold, the new one, and the paths changed between them (each ended by a
-/// NUL), in `$GITFOLD_LIVE.since`, `.token`, `.paths`.
+/// The hook git asks what changed, given the directory `GITFOLD_LIVE`: the
+/// token git should hold, the new one, and the paths changed between them
+/// (each ended by a NUL), in its files `since`, `token`, `paths`.
 const HOOK: &str = r#"#!/bin/sh
 # git's file system monitor (core.fsmonitor, hook version 2) for gitfold's
 # views: what changed since token $2, as gitfold wrote it; all of it ("/")
 # for another token.
-printf '%s\0' "$(cat "$GITFOLD_LIVE.token")"
-if [ "$2" = "$(cat "$GITFOLD_LIVE.since")" ]; then
-    exec cat "$GITFOLD_LIVE.paths"
+printf '%s\0' "$(cat "$GITFOLD_LIVE/token")"
+if [ "$2" = "$(cat "$GITFOLD_LIVE/since")" ]; then
+    exec cat "$GITFOLD_LIVE/paths"
 fi
 printf '/\0'
 "#;
+
+/// Writes the hook into the private repository at `dir` (`live/fsmonitor`).
+pub(super) fn install(dir: &Path) -> Result<()> {
+    let hook = hook(dir);
+    std::fs::create_dir_all(hook.parent().expect("in live/"))?;
+    std::fs::write(&hook, HOOK)?;
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
+/// Where the hook is in the private repository at `dir`.
+fn hook(dir: &Path) -> PathBuf {
+    dir.join("live").join("fsmonitor")
+}
 
 /// A workspace, as its live tree is made from it.
 pub struct Workspace<'a> {
@@ -70,10 +84,10 @@ struct Member {
     /// The token the private index holds, and the paths that differed from
     /// the base then.
     token: u64,
-    paths: BTreeSet<Vec<u8>>,
+    paths: Vec<Vec<u8>>,
 }
 
-/// A file's identity and change time.
+/// A file's identity and modification time.
 type Stamp = (u64, i64, i64, u64);
 
 fn stamp(path: &Path) -> Result<Stamp> {
@@ -86,104 +100,81 @@ impl Private {
     /// (`refs/gitfold/live/<branch>`) until the next.
     pub fn live(&self, branch: &str, ws: &Workspace) -> Result<Live> {
         let mut told = self.lock.lock();
-        // Its files: `<id>.index`, and the hook's.
-        let base = self
-            .hook()?
-            .with_file_name(crate::state::workspace_id(branch));
-        let file = |suffix: &str| with_suffix(&base, suffix);
-        let index = file(".index");
+        // Its private index and the hook's files.
+        let dir = self
+            .dir
+            .join("live")
+            .join(crate::state::workspace_id(branch));
+        let index = dir.join("index");
         let copied = stamp(ws.index)?;
-        let now: BTreeSet<Vec<u8>> = ws.changed.iter().chain(ws.deleted).cloned().collect();
         // The private index made again from the workspace's when that one
         // changed (or there was none): git checks it all (no token).
         let member = match told.0.remove(branch) {
             Some(m) if m.copied == copied => m,
             _ => {
+                std::fs::create_dir_all(&dir)?;
                 std::fs::copy(ws.index, &index)
                     .with_context(|| format!("copying {}", ws.index.display()))?;
                 Member {
                     copied,
                     token: 0,
-                    paths: BTreeSet::new(),
+                    paths: Vec::new(),
                 }
             }
         };
         let token = member.token + 1;
+        let now: Vec<Vec<u8>> = ws.changed.iter().chain(ws.deleted).cloned().collect();
         let paths: Vec<u8> = (member.paths.iter().chain(&now))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .flat_map(|p| p.iter().copied().chain([0]))
             .collect();
-        std::fs::write(file(".since"), since(member.token))?;
-        std::fs::write(file(".token"), since(token))?;
-        std::fs::write(file(".paths"), paths)?;
-        let git = || self.in_workspace(ws.dir, &index, &base);
+        std::fs::write(dir.join("since"), since(member.token))?;
+        std::fs::write(dir.join("token"), since(token))?;
+        std::fs::write(dir.join("paths"), paths)?;
+        let git = || self.in_workspace(ws.dir, &dir);
         git::cmd::output_of(&mut git()?, &["add", "-A"], None)?;
         // The private index holds the new token: nothing changed since, for
         // `write-tree` (which asks too).
-        std::fs::write(file(".since"), since(token))?;
-        std::fs::write(file(".paths"), b"")?;
-        told.0.insert(
-            branch.to_string(),
-            Member {
-                copied,
-                token,
-                paths: now,
-            },
-        );
-        let tree = oid(&git::cmd::output_of(
-            &mut git()?,
-            &["write-tree", "--missing-ok"],
-            None,
-        )?)?;
+        std::fs::write(dir.join("since"), since(token))?;
+        std::fs::write(dir.join("paths"), b"")?;
+        let member = Member {
+            copied,
+            token,
+            paths: now,
+        };
+        told.0.insert(branch.to_string(), member);
+        let args = ["write-tree", "--missing-ok"];
+        let tree = oid(&git::cmd::output_of(&mut git()?, &args, None)?)?;
         let commit = self.commit(&tree, branch)?;
         self.refs(format!("update refs/gitfold/live/{branch} {commit}\n"))?;
         Ok(Live { tree, commit })
     }
 
-    /// The hook (`live/fsmonitor`), written the first time.
-    fn hook(&self) -> Result<PathBuf> {
-        let hook = self.dir.join("live").join("fsmonitor");
-        if !hook.exists() {
-            std::fs::create_dir_all(self.dir.join("live"))?;
-            std::fs::write(&hook, HOOK)?;
-            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))?;
-        }
-        Ok(hook)
-    }
-
-    /// git in the workspace at `dir`, on index `index`, told what changed by
-    /// the hook (`HOOK`, its files at `told`), its objects going to the
-    /// private repository: a plain index, whatever the repository's are like
-    /// (no split or sparse index), unhashed (nothing reads it but these
-    /// commands), and no hook (but the monitor's) hearing of it.
-    fn in_workspace(&self, dir: &Path, index: &Path, told: &Path) -> Result<Command> {
+    /// git in the workspace at `dir`, on the private index in `told` and
+    /// told what changed by the hook (`HOOK`, its files in `told` too), its
+    /// objects going to the private repository: safe for the repository
+    /// (`git::cmd::REPOSITORY_SAFE`), and unhashed (nothing reads it but
+    /// these commands).
+    fn in_workspace(&self, dir: &Path, told: &Path) -> Result<Command> {
         let mut git = git::cmd::in_workspace(dir)?;
         // git runs it with the shell, which reads the path from the
         // environment, whatever its bytes.
         let monitor = "core.fsmonitor=\"$GITFOLD_FSMONITOR\"";
-        git.args(["-c", "core.splitIndex=false", "-c", "index.sparse=false"])
+        git.args(git::cmd::REPOSITORY_SAFE)
             .args([
                 "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
                 "index.skipHash=true",
+                "-c",
+                "core.untrackedCache=true",
             ])
-            .args(["-c", "core.untrackedCache=true", "-c", monitor])
-            .args(["-c", "core.fsmonitorHookVersion=2"])
-            .env("GIT_INDEX_FILE", index)
-            .env("GITFOLD_FSMONITOR", self.hook()?)
+            .args(["-c", monitor, "-c", "core.fsmonitorHookVersion=2"])
+            .env("GIT_INDEX_FILE", told.join("index"))
+            .env("GITFOLD_FSMONITOR", hook(&self.dir))
             .env("GITFOLD_LIVE", told);
         self.to_private(&mut git);
         Ok(git)
     }
-}
-
-/// `path` with `suffix` appended.
-fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut p = path.as_os_str().to_owned();
-    p.push(suffix);
-    PathBuf::from(p)
 }
 
 /// The token of a refresh: none (0) is no token git holds.

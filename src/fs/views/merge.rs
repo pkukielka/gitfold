@@ -67,7 +67,8 @@ pub struct Private {
     /// The repository's object format, and so the private one's.
     hash: gix::hash::Kind,
     /// Held by each merge, each live tree (`live`) and each garbage
-    /// collection: one would prune what another just wrote.
+    /// collection: one would prune what another just wrote. It holds what
+    /// git was told of each workspace, which only live trees read.
     pub(super) lock: Mutex<super::live::Told>,
 }
 
@@ -116,6 +117,7 @@ impl Private {
         for remote in git::promisor::remotes() {
             private.run(&["config", &format!("remote.{remote}.promisor"), "true"])?;
         }
+        super::live::install(&private.dir)?;
         git::open_private(&private.dir)?;
         Ok(private)
     }
