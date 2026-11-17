@@ -542,7 +542,7 @@ impl Filesystem for GitFold {
     ) {
         bump(&self.counters.read);
         let view = self.view_of(ino.0);
-        let _serving = view.as_deref().map(ViewDir::serving);
+        let _serving = view.as_deref().map(ViewDir::reading);
         let _t = IoTimer::start(&self.counters);
         match self.content(ino, offset, size) {
             Ok(Content::Whole(data)) => {

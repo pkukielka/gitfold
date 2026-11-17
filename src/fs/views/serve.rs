@@ -128,12 +128,21 @@ impl Rest {
     /// Accessed: if it rests, its watch is woken, and this waits for it to
     /// be refreshed (a while at most: then it shows what it last did).
     fn reached(&self) {
+        self.accessed(true);
+    }
+
+    /// Accessed: if it rests, its watch is woken, and with `wait` this waits
+    /// (as `reached`).
+    fn accessed(&self, wait: bool) {
         self.accessed.store(now_ms(), Ordering::Relaxed);
         if !self.resting.load(Ordering::Acquire) {
             return;
         }
         let mut lock = self.lock.lock();
         self.woken.notify_all();
+        if !wait {
+            return;
+        }
         // Not every request thread: git reads the workspaces through them.
         let Some(_waiting) = Waiting::take() else {
             return;
@@ -251,6 +260,15 @@ impl ViewDir {
     /// it is awake (`reached`).
     pub fn serving(&self) -> RwLockReadGuard<'_, ()> {
         self.reached();
+        self.gate.read()
+    }
+
+    /// Held while a read in it is served: as `serving`, but a read doesn't
+    /// wait for a resting view to wake. It holds a page of the file, which
+    /// the wake tells the kernel to drop (the lookups and attributes before
+    /// it waited).
+    pub fn reading(&self) -> RwLockReadGuard<'_, ()> {
+        self.rest.accessed(false);
         self.gate.read()
     }
 

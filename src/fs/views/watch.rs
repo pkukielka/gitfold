@@ -200,7 +200,7 @@ impl Watch {
 /// accessed for `rests_after()`); an access wakes it (`ViewDir::reached`), and
 /// it is refreshed at once.
 pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
-    let name = format!("view {}", ctx.branch);
+    let name = format!("view {}", ctx.name);
     let spawned = thread::Builder::new().name(name).spawn(move || {
         loop {
             let Some(view) = view.upgrade() else { return };
