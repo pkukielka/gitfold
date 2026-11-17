@@ -197,8 +197,9 @@ gitfold parent --claude-hook <EVENT>
 ```
 
 Commands other than `mount` work on the repository the current directory is
-in, as git does (a workspace under the mount included). `-C <PATH>` runs any
-command as if started in `<PATH>`, as `git -C` does. For `mount`, `<REPO>` is
+in, as git does (a workspace or snapshot under the mount included), or, from
+elsewhere in a mount (its root, a view), on the mounted one. `-C <PATH>` runs
+any command as if started in `<PATH>`, as `git -C` does. For `mount`, `<REPO>` is
 the repository's top-level work tree or its git directory (not a
 subdirectory). `<MOUNTPOINT>` must be an existing directory you own; use an
 empty one, since its contents are hidden while mounted. A repository can be
@@ -585,7 +586,9 @@ Commands people guess (`gitfold sync`, `pull`, `restack`, `rebase`, `branch
 branch and path, sorted by path, with `committed` (its own commits, since it
 left its parent, else not yet in the main branch) or `uncommitted` (in its
 workspace). Directories match everything below them; `-z` works as for
-`changes`, `--stat` is refused.
+`changes`, `--stat` is refused. Paths are taken as git takes them, from the
+current directory: in a view, from its top as from a work tree's; from the
+mount root, from the top of the repository.
 
 ```
 api	committed	src/lexer.rs

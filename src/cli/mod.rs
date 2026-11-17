@@ -27,9 +27,51 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 /// The repository commands work on: the one the current directory is in (its
-/// git directory).
+/// git directory), found as git finds it; or, below a gitfold mount where git
+/// finds none (its root, a view, a namespace directory), the mounted one
+/// (`mounted_here`).
 pub fn repo() -> Result<PathBuf> {
-    crate::git::discover(Path::new("."))
+    match crate::git::discover(Path::new(".")) {
+        Ok(repo) => Ok(repo),
+        Err(e) => mounted_here()?.ok_or(e),
+    }
+}
+
+/// The git common directory of the gitfold mount the current directory is
+/// in, if it is in one. There, git run on paths as typed (`git::cmd::here`)
+/// takes them from the top of the view the current directory is in
+/// (`@live/<branch>`, `@committed/<branch>`); elsewhere in the mount (its
+/// root, `@live`, a namespace directory), from the current directory, which
+/// stands for the top of the work tree.
+fn mounted_here() -> Result<Option<PathBuf>> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Ok(None);
+    };
+    // The innermost, should one be mounted in another.
+    let Some((mount, common_dir)) = (crate::mount_table::mounts()?.into_iter())
+        .filter(|(mount, _)| cwd.starts_with(mount))
+        .max_by_key(|(mount, _)| mount.components().count())
+    else {
+        return Ok(None);
+    };
+    crate::git::init(&common_dir)?;
+    let names: Vec<_> = (cwd.strip_prefix(&mount)?.components())
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect();
+    // A view's branch: the first of the names below `@live` or `@committed`
+    // that is one, as the mount resolves them.
+    let view = match names.split_first() {
+        Some((kind, below)) if kind == "@live" || kind == "@committed" => (1..=below.len())
+            .find(|&n| crate::git::branch_exists(&below[..n].join("/")))
+            .map(|n| n + 1),
+        _ => None,
+    };
+    let top = match view {
+        Some(n) => names[..n].iter().fold(mount, |top, name| top.join(&**name)),
+        None => cwd,
+    };
+    crate::git::cmd::set_here(&common_dir, &top);
+    Ok(Some(common_dir))
 }
 
 /// `branch` if given, else the branch of the workspace the current directory is
