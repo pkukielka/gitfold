@@ -11,9 +11,10 @@
 //! too (`git::open_private`). No object or ref is written into the repository
 //! (merge drivers run in its top, as in any merge). git is given commits by
 //! id, so conflict markers name the sides by id; the summary names the
-//! branches. The private repository's only refs are the view's: the tree it
+//! branches. The private repository's only refs are the views': the tree each
 //! shows (`refs/gitfold/views/<view>`) and, until it shows it, the new one
-//! (`refs/gitfold/next/<view>`). It is made anew at each mount, and
+//! (`refs/gitfold/next/<view>`); and each workspace's live tree
+//! (`refs/gitfold/live/<id>`, `live`). It is made anew at each mount, and
 //! garbage-collected as git's `gc --auto` decides (more loose objects than
 //! `gc.auto`'s default): what no view shows goes. Missing objects aren't
 //! fetched: in a partial clone, gitfold fetches what a merge needs first, as
@@ -27,16 +28,15 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result};
 use gix::ObjectId;
 use log::warn;
-use parking_lot::Mutex;
+use parking_lot::RwLock;
 
 use crate::git;
 
-/// A branch merged into a view: its tip, and its merge point with its parent
-/// (none: unrelated histories).
+/// A branch merged into a view: its tip, and its merge point with its parent.
 pub struct Member<'a> {
     pub branch: &'a str,
     pub tip: ObjectId,
-    pub base: Option<ObjectId>,
+    pub base: ObjectId,
 }
 
 /// What git says conflicts in a view.
@@ -59,14 +59,15 @@ pub struct Merged {
 
 /// The private repository, and where git runs for the merges.
 pub struct Private {
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
     /// The repository's git dir, its work tree's top (git's current
     /// directory there; its git dir if it has none).
     git_dir: PathBuf,
     top: PathBuf,
-    /// Held by each merge and its garbage collection: one would prune what
-    /// the other just wrote.
-    lock: Mutex<()>,
+    /// Shared by the merges and live trees (`live`), which write objects
+    /// before a ref holds them, exclusive for a garbage collection, which
+    /// would prune them.
+    pub(super) lock: RwLock<()>,
 }
 
 impl Private {
@@ -78,14 +79,16 @@ impl Private {
         crate::state::retire::remove_dir(&dir)?;
         std::fs::create_dir_all(&dir)?;
         let objects = common_dir.join("objects").canonicalize()?;
-        let git_dir = git::with_repo(|repo| repo.git_dir().to_path_buf());
+        let (git_dir, hash) =
+            git::with_repo(|repo| (repo.git_dir().to_path_buf(), repo.object_hash()));
         let private = Private {
             dir,
             top: git::work_tree().unwrap_or_else(|| git_dir.clone()),
             git_dir,
-            lock: Mutex::new(()),
+            lock: RwLock::new(()),
         };
-        private.run(&["init", "-q", "--bare"])?;
+        // In the repository's object format: git writes its objects there.
+        private.run(&["init", "-q", "--bare", &format!("--object-format={hash}")])?;
         std::fs::create_dir_all(private.dir.join("objects/info"))?;
         std::fs::write(
             private.dir.join("objects/info/alternates"),
@@ -136,49 +139,54 @@ impl Private {
     /// first).
     fn in_repository(&self) -> Result<Command> {
         let mut git = git::cmd::command_in_other(&self.git_dir)?;
-        git.current_dir(&self.top)
-            .env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
-            .env("GIT_NO_LAZY_FETCH", "1");
+        git.current_dir(&self.top);
+        self.to_private(&mut git);
         Ok(git)
+    }
+
+    /// `git`, its objects read from the repository and the private one and
+    /// written to the private one only, missing ones not fetched.
+    pub(super) fn to_private<'a>(&self, git: &'a mut Command) -> &'a mut Command {
+        git.env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
+            .env("GIT_NO_LAZY_FETCH", "1")
     }
 
     /// A commit of `tree`, with no parent (nothing of any history to keep),
     /// unsigned whatever the settings.
-    fn commit(&self, tree: &ObjectId, message: &str) -> Result<ObjectId> {
+    pub(super) fn commit(&self, tree: &ObjectId, message: &str) -> Result<ObjectId> {
         let hex = tree.to_string();
-        let out = self.run(&["commit-tree", "--no-gpg-sign", &hex, "-m", message])?;
-        Ok(ObjectId::from_hex(
-            String::from_utf8_lossy(&out).trim().as_bytes(),
-        )?)
+        oid(&self.run(&["commit-tree", "--no-gpg-sign", &hex, "-m", message])?)
     }
 
     /// Runs `git update-ref --stdin` with `commands`.
-    fn refs(&self, commands: String) -> Result<()> {
+    pub(super) fn refs(&self, commands: String) -> Result<()> {
         let args = ["update-ref", "--stdin"];
         let input = Some(commands.into_bytes());
         git::cmd::output_of(&mut self.private_git()?, &args, input).map(drop)
     }
 
-    /// The view of `branch`: its commit and tree `own` (the tip of `branch`
-    /// or of its origin root) with `members` merged in turn. git is given
-    /// commits by id, so conflict markers name the sides by id; the summary
-    /// names them by branch. Its commit is kept (`refs/gitfold/next/<branch>`)
-    /// until `shown` says it is the one shown.
+    /// View `view` (`committed/<id>`, `live/<id>`: its kind and its branch's
+    /// workspace id, as refs can't nest) of `branch`: its commit and tree
+    /// `own` (the tip of `branch` or of its origin root, or its workspace as it
+    /// is) with `members` merged in turn. git is given commits by id, so
+    /// conflict markers name the sides by id; the summary names them by
+    /// branch. Its commit is kept (`refs/gitfold/next/<view>`) until `shown`
+    /// says it is the one shown.
     pub fn merge(
         &self,
+        view: &str,
         branch: &str,
         own: (ObjectId, ObjectId),
         members: &[Member],
     ) -> Result<Merged> {
-        let _lock = self.lock.lock();
+        let _writing = self.lock.read();
         // The view so far: its commit (a commit of each fold's tree: git
         // 2.44 takes no tree there), and how the summary names it.
         let (mut ours, mut side) = (own.0, branch.to_string());
         let mut tree = own.1;
         let mut conflicts = Vec::new();
         for (i, m) in members.iter().enumerate() {
-            let base = (m.base).unwrap_or_else(|| ObjectId::empty_tree(gix::hash::Kind::Sha1));
-            let base = format!("--merge-base={base}");
+            let base = format!("--merge-base={}", m.base);
             let (ours_hex, theirs) = (ours.to_string(), m.tip.to_string());
             // Attributes (`merge=union`) from the view so far, as a merge in a
             // checkout of it reads them.
@@ -217,7 +225,7 @@ impl Private {
             true => self.commit(&tree, branch)?,
             false => ours,
         };
-        self.refs(format!("update refs/gitfold/next/{branch} {commit}\n"))?;
+        self.refs(format!("update refs/gitfold/next/{view} {commit}\n"))?;
         Ok(Merged {
             tree,
             commit,
@@ -225,15 +233,16 @@ impl Private {
         })
     }
 
-    /// The view of `branch` now shows `commit` (from `merge`): it is kept
+    /// View `view` (as for `merge`) now shows `commit` (from `merge`): it is kept
     /// instead of the one before, and git garbage-collects as it decides
     /// (`gc --auto`, with `gc.auto`'s default whatever the settings say,
     /// pruning at once): what no view shows goes. A failure of that is only
     /// logged.
-    pub fn shown(&self, branch: &str, commit: ObjectId) -> Result<()> {
-        let _lock = self.lock.lock();
+    pub fn shown(&self, view: &str, commit: ObjectId) -> Result<()> {
+        // Refs too: another garbage collection packs them.
+        let _collecting = self.lock.write();
         self.refs(format!(
-            "update refs/gitfold/views/{branch} {commit}\ndelete refs/gitfold/next/{branch}\n"
+            "update refs/gitfold/views/{view} {commit}\ndelete refs/gitfold/next/{view}\n"
         ))?;
         let packs = self.dir.join("objects/pack");
         let before = std::fs::metadata(&packs).and_then(|m| m.modified()).ok();
@@ -257,6 +266,13 @@ impl Private {
         }
         Ok(())
     }
+}
+
+/// The object id git printed (and a newline).
+pub(super) fn oid(out: &[u8]) -> Result<ObjectId> {
+    Ok(ObjectId::from_hex(
+        String::from_utf8_lossy(out).trim().as_bytes(),
+    )?)
 }
 
 /// How the summary names the view so far after `member`, the `merged`th
@@ -328,12 +344,13 @@ mod tests {
                 Member {
                     branch: b,
                     tip: id(&run(&["rev-parse", &b_ref])),
-                    base: Some(id(&run(&["merge-base", &b_ref, &p_ref]))),
+                    base: id(&run(&["merge-base", &b_ref, &p_ref])),
                 }
             })
             .collect();
         private()
             .merge(
+                &format!("committed/{n}"),
                 n,
                 (
                     id(&run(&["rev-parse", n])),
@@ -495,7 +512,7 @@ mod tests {
         let member = |branch| Member {
             branch,
             tip,
-            base: None,
+            base: tip,
         };
         let x = "x".repeat(120);
         let members = [member("ui"), member("api+ui"), member(&x)];
