@@ -694,16 +694,17 @@ R branch core; "$BIN" -C "$REPO" branch mid --parent core >/dev/null; on mid mid
 R branch core2 core; "$BIN" -C "$REPO" branch mid2 --parent core2 >/dev/null; on mid2 mid2.txt one
 "$BIN" -C "$REPO" branch leaf2 --parent mid2 >/dev/null; on leaf2 leaf2.txt mine
 R switch -q core; R merge -q --no-ff --no-edit mid; R switch -q core2; R merge -q --no-ff --no-edit mid2; R switch -q main
-check "into its parent's parent: reported, with how to get there" says 0 "mid looks merged into core: \`gitfold parent leaf --set core\` moves leaf there with only its own commits (or delete mid, \`git branch -d mid\`, and leaf moves there by itself)" parent leaf --update --auto
+check "into its parent's parent: reported, with how to get there" says 0 "mid looks merged into core: \`gitfold parent leaf --set core\` moves leaf there with only its own commits" parent leaf --update --auto
+check "  not by deleting mid (its own parent forgotten with it)" lacks 0 "by itself" parent leaf --update --auto
 R update-ref -d refs/heads/mid
 check "  deleted, its settings kept: lands there" says 0 "mid landed in core; leaf is now built on core" parent leaf --update --auto
 landed_in leaf core
 R branch -D -q mid2
-check "  deleted by git branch -D: not known, only the root checked" says 0 "leaf2's parent mid2 is gone, with no landing of it found in the root" parent leaf2 --update --auto
+check "  deleted by git branch -D: not known, only the root checked" says 0 "leaf2's parent mid2 is gone, with no landing of it found" parent leaf2 --update --auto
 # Gone without landing: its commits kept, noted.
 built gone ug; before=$(R rev-parse ug)
 R branch -D -q gone
-check "gone, not landed: noted, with --set and --none" says 0 "ug's parent gone is gone, with no landing of it found in the root: ug keeps its commits as they are (\`gitfold parent ug --set P\` moves its own onto P; \`gitfold parent ug --none\`" parent ug --update --auto
+check "gone, not landed: noted, with --set and --none" says 0 "ug's parent gone is gone, with no landing of it found: ug keeps its commits as they are (\`gitfold parent ug --set P\` moves its own onto P; \`gitfold parent ug --none\`" parent ug --update --auto
 eq "  nothing moved" "$before refs/heads/gone" "$(R rev-parse ug) $(R config branch.ug.gitfoldParent)"
 check "  shown" says 0 "ug is built on gone (parent gone)" parent ug
 # Landed on origin's main only (merged by the forge, fetched).

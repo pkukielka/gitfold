@@ -111,12 +111,16 @@ fn walk(
         let Ok(tip) = git::branch_tip(branch) else {
             continue; // the branch gone meanwhile
         };
-        // Its parent's tip; gone (T3), the root's, where the parent may have
-        // landed (spec section 4).
+        // Its parent's tip; gone (T3), the tips of where it may have landed
+        // (spec section 4): its own parent while its settings say so, the
+        // root.
         let on: Vec<ObjectId> = match git::resolve(parent) {
             Ok(on) => vec![on.id],
-            Err(_) => (tree.root_refs().iter())
-                .filter_map(|r| git::resolve(r).ok().map(|c| c.id))
+            Err(_) => (parent.strip_prefix("refs/heads/"))
+                .and_then(|p| local.parents().remove(p))
+                .into_iter()
+                .chain(tree.root_refs())
+                .filter_map(|r| git::resolve(&r).ok().map(|c| c.id))
                 .collect(),
         };
         let state = StateDir::of(common_dir, branch);

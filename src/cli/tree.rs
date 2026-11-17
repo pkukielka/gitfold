@@ -149,8 +149,8 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
             Ok(Some(to)) => {
                 let gone = tree.parent_gone(&name);
                 let parent = tree.parent(&name).expect("landed: a parent");
-                let follows = tree.follows(&name);
-                println!("{}", landed_hint(&name, parent, &to, gone, follows));
+                let itself = !gone && tree.follows(&name) && tree.root_refs().contains(&to);
+                println!("{}", landed_hint(&name, parent, &to, gone, itself));
             }
             Ok(None) => {}
             Err(e) => log::warn!("{name}: whether its parent landed: {e:#}"),
@@ -376,7 +376,7 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
             None => {
                 let parent = crate::tree::short(parent);
                 return Ok(Followed::Noted(format!(
-                    "{name}'s parent {parent} is gone, with no landing of it found in the root: \
+                    "{name}'s parent {parent} is gone, with no landing of it found: \
                      {name} keeps its commits as they are (`gitfold parent {name} --set P` moves \
                      its own onto P; `gitfold parent {name} --none` counts {parent}'s as its own)"
                 )));
@@ -404,7 +404,10 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
         // Only a note: its failure doesn't pause following.
         Ok(
             match landed_in(common_dir, &tree, &local, name, Some(plan.base), true) {
-                Ok(Some(to)) => Followed::Noted(landed_hint(name, parent, &to, false, true)),
+                Ok(Some(to)) => {
+                    let itself = tree.root_refs().contains(&to);
+                    Followed::Noted(landed_hint(name, parent, &to, false, itself))
+                }
                 Ok(None) => Followed::Nothing,
                 Err(e) => {
                     log::warn!("{name}: whether its parent landed: {e:#}");
@@ -523,14 +526,15 @@ fn landed_said(parent: &str, to: &str, gone: bool) -> String {
     }
 }
 
-/// `landed_said`, with how `name` gets there: `--set`, or (while its parent
-/// exists, if it `follows` it) the parent's branch deleted.
-fn landed_hint(name: &str, parent: &str, to: &str, gone: bool, follows: bool) -> String {
+/// `landed_said`, with how `name` gets there: `--set`, or (`itself`: it
+/// follows its parent, which landed in the root and still exists) the
+/// parent's branch deleted (its own parent is forgotten with it).
+fn landed_hint(name: &str, parent: &str, to: &str, gone: bool, itself: bool) -> String {
     let landed = landed_said(parent, to, gone);
     let (short, to) = (crate::tree::short(parent), crate::tree::short(to));
     let set =
         format!("`gitfold parent {name} --set {to}` moves {name} there with only its own commits");
-    match !gone && follows {
+    match itself {
         true => format!(
             "{landed}: {set} (or delete {short}, `git branch -d {short}`, and {name} moves there \
              by itself)"
