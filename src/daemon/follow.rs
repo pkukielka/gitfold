@@ -111,14 +111,12 @@ fn walk(
         let Ok(tip) = git::branch_tip(branch) else {
             continue; // the branch gone meanwhile
         };
-        // Its parent's tip; gone (T3), those of where the parent may have
-        // landed (spec section 4): the root, the targets checked before.
+        // Its parent's tip; gone (T3), the root's, where the parent may have
+        // landed (spec section 4).
         let on: Vec<ObjectId> = match git::resolve(parent) {
             Ok(on) => vec![on.id],
-            Err(_) => (crate::follow::recorded_base(branch).into_iter())
-                .flat_map(|base| crate::follow::checked_targets(&local, branch, base))
-                .chain(tree.root_refs())
-                .filter_map(|r| git::resolve(&r).ok().map(|c| c.id))
+            Err(_) => (tree.root_refs().iter())
+                .filter_map(|r| git::resolve(r).ok().map(|c| c.id))
                 .collect(),
         };
         let state = StateDir::of(common_dir, branch);
@@ -148,8 +146,8 @@ fn drain<R: Read + Send + 'static>(mut from: R) -> thread::JoinHandle<String> {
 
 /// `gitfold parent BRANCH --update --auto` for `branch`, in a process
 /// group of its own (the git it runs killed with it after `TIMEOUT`): what
-/// it said.
-fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<String> {
+/// it said, and whether it succeeded (a note) or not (a pause).
+fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(String, bool)> {
     let mut child = Command::new("/proc/self/exe")
         .arg("-C")
         .arg(common_dir)
@@ -165,7 +163,10 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<String> {
     let out = drain(child.stdout.take().expect("piped"));
     let err = drain(child.stderr.take().expect("piped"));
     let started = Instant::now();
-    while child.try_wait()?.is_none() {
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
         if started.elapsed() > TIMEOUT {
             // SAFETY: a plain syscall, on the group of our own child.
             unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
@@ -177,17 +178,19 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<String> {
             );
         }
         thread::sleep(Duration::from_millis(50));
-    }
-    Ok(out.join().unwrap_or_default() + &err.join().unwrap_or_default())
+    };
+    let said = out.join().unwrap_or_default() + &err.join().unwrap_or_default();
+    Ok((said, status.success()))
 }
 
 /// Moves the branch of `state` (at `tip`, built on `parent`): a move (the
 /// branch isn't at `tip` any more, or its parent landed and it is built
-/// elsewhere) logged and kept for its agent, anything else said logged as a
-/// pause, unless it is the one logged last (`paused`).
+/// elsewhere) logged and kept for its agent, anything else said logged, a
+/// note as information, a pause as a warning, unless it is the one logged
+/// last (`paused`).
 fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, parent: &str, paused: &mut String) {
     let branch = &state.branch;
-    let said = run_update(common_dir, branch).unwrap_or_else(|e| format!("{e:#}\n"));
+    let (said, ok) = run_update(common_dir, branch).unwrap_or_else(|e| (format!("{e:#}\n"), false));
     let moved = git::branch_tip(branch).is_ok_and(|now| now.id != tip);
     if moved || Tree::read(common_dir).is_ok_and(|t| t.parent(branch) != Some(parent)) {
         paused.clear();
@@ -198,7 +201,10 @@ fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, parent: &str, paus
     } else if said.trim().is_empty() {
         paused.clear();
     } else if said != *paused {
-        warn!("following {branch}: {}", said.trim_end());
+        match ok {
+            true => info!("following {branch}: {}", said.trim_end()),
+            false => warn!("following {branch}: {}", said.trim_end()),
+        }
         *paused = said;
     }
 }

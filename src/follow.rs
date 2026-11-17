@@ -737,23 +737,11 @@ impl Checked {
     }
 }
 
-/// The targets a landing of the parent of `branch` was checked against, as
-/// recorded for `base` (`Checked`): its parent's own parent among them, which a deleted
-/// parent's settings don't keep (`git branch -D` drops them).
-pub fn checked_targets(local: &Local, branch: &str, base: ObjectId) -> Vec<String> {
-    let checked = (local.landing(branch).as_deref())
-        .and_then(Checked::decode)
-        .filter(|c| c.base == base);
-    (checked.into_iter())
-        .flat_map(|c| c.targets)
-        .map(|(target, ..)| target)
-        .collect()
-}
-
 /// The first of `targets` (full refs) that the commits of the parent of
 /// `branch` it sits on, up to `base`, landed in (spec section 4): see
 /// `landed`; `fresh` while the parent's branch exists. Incremental: the
-/// commits of a target checked before (`Checked`) aren't checked again.
+/// commits of a target checked before (`Checked`) aren't checked again;
+/// what it checks is recorded if `record`.
 pub fn landing(
     common_dir: &Path,
     local: &Local,
@@ -761,6 +749,7 @@ pub fn landing(
     base: ObjectId,
     targets: &[String],
     fresh: bool,
+    record: bool,
 ) -> Result<Option<String>> {
     let recorded = local.landing(branch);
     let before = (recorded.as_deref())
@@ -792,7 +781,7 @@ pub fn landing(
         }
     }
     let text = checked.encode();
-    if recorded.as_deref() != Some(text.as_str()) {
+    if record && recorded.as_deref() != Some(text.as_str()) {
         settings::set_landing(common_dir, branch, &text)?;
     }
     Ok(found)

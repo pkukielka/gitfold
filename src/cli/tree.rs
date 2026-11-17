@@ -144,11 +144,13 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
             Err(e) => log::warn!("{name}: whether it can take its parent's commits: {e:#}"),
         }
         let local = settings::Local::read_checked(&common_dir)?;
-        match landed_in(&common_dir, &tree, &local, &name, None) {
+        // Computed, not recorded: showing writes nothing.
+        match landed_in(&common_dir, &tree, &local, &name, None, false) {
             Ok(Some(to)) => {
                 let gone = tree.parent_gone(&name);
                 let parent = tree.parent(&name).expect("landed: a parent");
-                println!("{}", landed_said(&name, parent, &to, gone, true));
+                let follows = tree.follows(&name);
+                println!("{}", landed_hint(&name, parent, &to, gone, follows));
             }
             Ok(None) => {}
             Err(e) => log::warn!("{name}: whether its parent landed: {e:#}"),
@@ -282,7 +284,7 @@ fn update_auto(common_dir: &Path, name: &str) -> Result<()> {
     tree.check_follow(name).map_err(refuse)?;
     match follow_once(common_dir, name) {
         Followed::Nothing => Ok(()),
-        Followed::Moved(said) => {
+        Followed::Moved(said) | Followed::Landed(said) => {
             print!("{said}");
             Ok(())
         }
@@ -302,6 +304,8 @@ pub enum Followed {
     Nothing,
     /// Its parent's new commits taken: what `--update` says.
     Moved(String),
+    /// Its parent gone and landed: built where it landed, and what moved.
+    Landed(String),
     /// Following paused: why in full, and in one line.
     Paused { full: String, short: String },
     /// Nothing moved, but its parent looks merged elsewhere: what to do.
@@ -357,12 +361,12 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     let (onto, landed) = match gone {
         false => (parent.to_string(), String::new()),
         // (A check that fails finds none: only noted, as when it finds none.)
-        true => match landed_in(common_dir, &tree, &local, name, None).unwrap_or_else(|e| {
+        true => match landed_in(common_dir, &tree, &local, name, None, true).unwrap_or_else(|e| {
             log::warn!("{name}: whether its parent landed: {e:#}");
             None
         }) {
             Some(to) => {
-                let landed = landed_said(name, parent, &to, true, false);
+                let landed = landed_said(parent, &to, true);
                 let said = format!(
                     "{landed}; {name} is now built on {}\n",
                     crate::tree::short(&to)
@@ -372,9 +376,9 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
             None => {
                 let parent = crate::tree::short(parent);
                 return Ok(Followed::Noted(format!(
-                    "{name}'s parent {parent} is gone, with no landing of it found: {name} keeps \
-                     its commits as they are (`gitfold parent {name} --none` counts {parent}'s as \
-                     its own)"
+                    "{name}'s parent {parent} is gone, with no landing of it found in the root: \
+                     {name} keeps its commits as they are (`gitfold parent {name} --set P` moves \
+                     its own onto P; `gitfold parent {name} --none` counts {parent}'s as its own)"
                 )));
             }
         },
@@ -395,12 +399,12 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     // Nothing moved: whether its parent looks merged somewhere, said once.
     let nothing = || -> Result<Followed> {
         if gone {
-            return Ok(Followed::Moved(landed.clone()));
+            return Ok(Followed::Landed(landed.clone()));
         }
         // Only a note: its failure doesn't pause following.
         Ok(
-            match landed_in(common_dir, &tree, &local, name, Some(plan.base)) {
-                Ok(Some(to)) => Followed::Noted(landed_said(name, parent, &to, false, true)),
+            match landed_in(common_dir, &tree, &local, name, Some(plan.base), true) {
+                Ok(Some(to)) => Followed::Noted(landed_hint(name, parent, &to, false, true)),
                 Ok(None) => Followed::Nothing,
                 Err(e) => {
                     log::warn!("{name}: whether its parent landed: {e:#}");
@@ -449,7 +453,13 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     let said = said_to(&mut out, name, short, &plan, moved).map_err(|e| format!("{e:#}"));
     Ok(match summary {
         // Moved, its work put back conflicting maybe.
-        None => Followed::Moved(out + &said.err().map(|e| e + "\n").unwrap_or_default()),
+        None => {
+            let said = out + &said.err().map(|e| e + "\n").unwrap_or_default();
+            match gone {
+                true => Followed::Landed(said),
+                false => Followed::Moved(said),
+            }
+        }
         Some(short) => Followed::Paused {
             full: landed + &(full.or(said.err())).unwrap_or_else(|| short.clone()),
             short,
@@ -458,16 +468,18 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
 }
 
 /// Where the commits of the parent of `name` that it sits on landed (spec
-/// section 4), if they did: the parent's own parent, else the root (local,
-/// then origin's), each one `name` may be built on. A parent gone counts
-/// only with where its own commits start recorded. `base`: where they
-/// start, if known.
+/// section 4), if they did: the parent's own parent while it is known (its
+/// settings kept), else the root (local, then origin's), each one `name`
+/// may be built on. A parent gone counts only with where its own commits
+/// start recorded. `base`: where they start, if known; what is checked is
+/// recorded if `record` (`follow::landing`).
 fn landed_in(
     common_dir: &Path,
     tree: &Tree,
     local: &settings::Local,
     name: &str,
     base: Option<ObjectId>,
+    record: bool,
 ) -> Result<Option<String>> {
     let Some(parent) = tree.parent(name) else {
         return Ok(None);
@@ -485,8 +497,7 @@ fn landed_in(
         return Ok(None);
     }
     // Its stored parent, as the config holds it (a deleted branch's
-    // settings may outlive it, T2), or as checked before (deleted with
-    // them).
+    // settings may outlive it, T2; `git branch -D` drops them).
     let own = (parent.strip_prefix("refs/heads/"))
         .and_then(|p| local.parents().remove(p))
         .map(|p| match p.starts_with("refs/") {
@@ -494,30 +505,37 @@ fn landed_in(
             false => format!("refs/heads/{p}"),
         });
     let mut targets: Vec<String> = Vec::new();
-    let checked = follow::checked_targets(local, name, base);
-    for target in own.into_iter().chain(checked).chain(roots) {
+    for target in own.into_iter().chain(roots) {
         if target != parent && !targets.contains(&target) && tree.check(name, &target).is_ok() {
             targets.push(target);
         }
     }
-    follow::landing(common_dir, local, name, base, &targets, !gone)
+    follow::landing(common_dir, local, name, base, &targets, !gone, record)
 }
 
-/// What is said of `name`'s `parent` landing in `to` (full refs): it
-/// landed (`gone`), or looks merged while its branch exists; with `hint`,
-/// the command to build `name` there.
-fn landed_said(name: &str, parent: &str, to: &str, gone: bool, hint: bool) -> String {
+/// What is said of `parent` landing in `to` (full refs): it landed
+/// (`gone`), or looks merged while its branch exists.
+fn landed_said(parent: &str, to: &str, gone: bool) -> String {
     let (parent, to) = (crate::tree::short(parent), crate::tree::short(to));
-    let landed = match gone {
+    match gone {
         true => format!("{parent} landed in {to}"),
         false => format!("{parent} looks merged into {to}"),
-    };
-    match hint {
+    }
+}
+
+/// `landed_said`, with how `name` gets there: `--set`, or (while its parent
+/// exists, if it `follows` it) the parent's branch deleted.
+fn landed_hint(name: &str, parent: &str, to: &str, gone: bool, follows: bool) -> String {
+    let landed = landed_said(parent, to, gone);
+    let (short, to) = (crate::tree::short(parent), crate::tree::short(to));
+    let set =
+        format!("`gitfold parent {name} --set {to}` moves {name} there with only its own commits");
+    match !gone && follows {
         true => format!(
-            "{landed}: `gitfold parent {name} --set {to}` moves {name} there with only its own \
-             commits"
+            "{landed}: {set} (or delete {short}, `git branch -d {short}`, and {name} moves there \
+             by itself)"
         ),
-        false => landed,
+        false => format!("{landed}: {set}"),
     }
 }
 

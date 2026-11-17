@@ -518,6 +518,17 @@ recorded against the parent's tip, and never mount the repository again:
 the daemon and the turn start both run that policy, which is also `gitfold
 parent B --update --auto` (hidden; the daemon runs it as a child process).
 
+When a parent lands (a merge commit, squash, rebase merge or fast-forward)
+in the main branch, local or origin's, or in its own parent while that is
+known, git tells (`git merge-base --is-ancestor`, `git merge-tree`). While
+the parent's branch exists, that is only said, with the `gitfold parent B
+--set` that moves B there. Once it is deleted (as forges do after a merge),
+a following branch is built where the parent landed and moves there with
+only its own commits, told once. A parent deleted without landing leaves
+the branch's commits as they are, noted. gitfold never fetches: a merge on
+the forge is seen once a fetch or pull brings it in, so fetch to let
+gitfold see merges.
+
 Commands people guess (`gitfold sync`, `pull`, `restack`, `rebase`, `branch
 --on`, `branch --merge`) exit 2 naming the right one.
 

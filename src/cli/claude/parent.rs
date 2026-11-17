@@ -114,6 +114,10 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
             state.set_told(session, None)?;
             format!("gitfold: {branch} took its parent's new commits:\n{said}")
         }
+        Followed::Landed(said) => {
+            state.set_told(session, None)?;
+            format!("gitfold: {said}")
+        }
         // Told once (to each session).
         Followed::Noted(said) => match state.told(session).as_deref() == Some(&said) {
             true => String::new(),
