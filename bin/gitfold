@@ -105,13 +105,22 @@ field() {
     sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' | head -n 1
 }
 
+# Whether the repository of directory $1 is used with gitfold (its git common
+# dir holds gitfold's state); not when $1 is in no repository.
+used_with_gitfold() {
+    common=$(git -C "$1" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) &&
+        [ -n "$common" ] && [ -d "$common/gitfold" ]
+}
+
 # Without gitfold, the hooks do what Claude Code does without them, as
 # src/cli/claude/worktree.rs does where gitfold isn't used (keep the two alike): the
-# inbox hooks nothing, the worktree hooks git worktrees; but in a repository
-# used with gitfold (state in <git common dir>/gitfold), creating one fails.
+# inbox, parent and track-reads hooks nothing (no presence to keep, nothing to
+# follow without gitfold), the worktree hooks git worktrees; but in a
+# repository used with gitfold (state in <git common dir>/gitfold), creating
+# one fails.
 without() {
     case "$*" in
-        "inbox --claude-hook "* | "track-reads --claude-hook "*) exit 0 ;;
+        "inbox --claude-hook "* | "track-reads --claude-hook "* | "parent --claude-hook "*) exit 0 ;;
         "branch --claude-hook worktree-create")
             input=$(cat)
             name=$(echo "$input" | field name)
@@ -120,7 +129,7 @@ without() {
                 echo "gitfold: can't read the hook's input" >&2
                 exit 1
             fi
-            if [ -d "$(git -C "$cwd" rev-parse --path-format=absolute --git-common-dir)/gitfold" ]; then
+            if used_with_gitfold "$cwd"; then
                 echo "gitfold: this repository is used with gitfold, but gitfold can't run here" >&2
                 exit 1
             fi
