@@ -15,6 +15,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -116,11 +117,11 @@ fn walk(
             continue;
         }
         seen.tried = Some(now);
-        // Up to date (a process saved), or a conflict recorded against the
-        // parent's tip: paused until it moves on (as `follow_once`).
+        // A conflict recorded against the parent's tip, which it doesn't
+        // sit on: paused until the parent moves on (as `follow_once`).
         let conflict = local.conflict(branch).map(|(at, _)| at);
         if conflict == Some(on.id.to_string())
-            || follow::is_ancestor(common_dir, on.id, tip.id).unwrap_or(false)
+            && !follow::is_ancestor(common_dir, on.id, tip.id).unwrap_or(true)
         {
             continue;
         }
@@ -139,14 +140,18 @@ fn drain<R: Read + Send + 'static>(mut from: R) -> thread::JoinHandle<String> {
     })
 }
 
-/// `gitfold parent BRANCH --update` for `branch`
-/// as a child process, killed after `TIMEOUT`: whether it succeeded, what
-/// it said.
+/// `gitfold parent BRANCH --update` for `branch`, in a process group of its
+/// own (the git it runs killed with it after `TIMEOUT`): whether it
+/// succeeded, what it said.
 fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(bool, String)> {
     let mut child = Command::new(std::env::current_exe()?)
         .arg("-C")
         .arg(common_dir)
         .args(["parent", branch, "--update"])
+        // The mount is the daemon's: gone, it isn't mounted again.
+        .env(crate::cli::mount::NO_MOUNT_AGAIN, "1")
+        // Its own process group: killed with the git it runs.
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -159,7 +164,8 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(bool, String)>
             break status;
         }
         if started.elapsed() > TIMEOUT {
-            let _ = child.kill();
+            // SAFETY: a plain syscall, on the group of our own child.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
             let _ = child.wait();
             anyhow::bail!(
                 "gitfold parent {branch} --update took longer than {}s: killed, what git did \
@@ -174,18 +180,21 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(bool, String)>
 }
 
 /// Moves the branch of `state` (at `tip`), logged; a move kept for its
-/// agent (moved: the branch isn't at `tip` any more, even if its work, put
+/// agent. Moved: the branch isn't at `tip` any more (even if its work, put
 /// back, conflicted).
 fn update(common_dir: &Path, state: &StateDir, tip: ObjectId) {
     let branch = &state.branch;
-    match run_update(common_dir, branch) {
-        Ok((ok, said)) if ok || git::branch_tip(branch).is_ok_and(|now| now.id != tip) => {
+    let result = run_update(common_dir, branch);
+    let moved = git::branch_tip(branch).is_ok_and(|now| now.id != tip);
+    match result {
+        Ok((_, said)) if moved => {
             info!("following: {}", said.trim_end().replace('\n', "; "));
             if let Err(e) = state.add_followed(&said) {
                 warn!("following: {branch}: keeping the move for its agent: {e:#}");
             }
         }
-        Ok((_, said)) => warn!("following {branch} paused: {}", said.trim_end()),
+        Ok((true, said)) => log::debug!("following: {}", said.trim_end()),
+        Ok((false, said)) => warn!("following {branch} paused: {}", said.trim_end()),
         Err(e) => warn!("following {branch}: {e:#}"),
     }
 }

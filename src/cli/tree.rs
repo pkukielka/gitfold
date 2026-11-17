@@ -277,17 +277,34 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     if !follows(&Tree::read(common_dir)?) {
         return Ok(Followed::Nothing);
     }
-    let _moving = follow::lock(common_dir, name)?;
+    // A move under way (the daemon's, begun before the agent came): waited
+    // for, so it doesn't go on into the turn.
+    let started = std::time::Instant::now();
+    let _moving = loop {
+        match follow::lock(common_dir, name) {
+            Err(e)
+                if Refusal::of(&e) == Some(Refusal::InUse)
+                    && started.elapsed() < std::time::Duration::from_secs(60) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            lock => break lock?,
+        }
+    };
     let tree = Tree::read(common_dir)?;
     let Some(parent) = tree.parent(name).filter(|_| follows(&tree)) else {
         return Ok(Followed::Nothing);
     };
     let short = crate::tree::short(parent);
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
+    let local = settings::Local::read_checked(common_dir)?;
     if plan.up_to_date() {
+        // Rebased by hand after a conflict: forgotten, as `--update` does.
+        if local.conflict(name).is_some() {
+            plan.run(common_dir, false, || Ok(None))?;
+        }
         return Ok(Followed::Nothing);
     }
-    let local = settings::Local::read_checked(common_dir)?;
     let moved = match plan.conflict(common_dir, &local)? {
         Some(paths) => follow::Moved::Conflict(paths),
         None => plan.run(common_dir, false, || movable(common_dir, name))?,

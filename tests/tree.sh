@@ -554,11 +554,14 @@ r=$(turn)
 check "a conflict: said in full once" test "$([[ $r == "gitfold: following paused: ui's commits conflict with api's on u.txt. Rebase by hand (git rebase api ui)"* ]] && echo yes)" = yes
 eq "  then a one-line reminder each turn" "gitfold: following still paused: conflict on u.txt (see \`gitfold parent\`) " "$(turn)"
 eq "  and again" "gitfold: following still paused: conflict on u.txt (see \`gitfold parent\`) " "$(turn)"
+r=$(hook user-prompt-submit parent '"session_id":"s2"')
+check "  another session: in full" test "$([[ $r == "gitfold: following paused: ui's commits conflict"* ]] && echo yes)" = yes
 "$BIN" -C "$REPO" parent ui --no-follow >/dev/null
 eq "not following: nothing said" "" "$(turn)"
 "$BIN" -C "$REPO" parent ui --follow >/dev/null
 W ui rebase -q api -X theirs >/dev/null 2>&1
 eq "rebased by hand: nothing said" "" "$(turn)"
+check "  the conflict forgotten" fails R config branch.ui.gitfoldConflict
 # Presence: one file per session or subagent, refreshed by its hooks.
 hook post-tool-use inbox '"session_id":"s1","agent_id":"a1"' >/dev/null
 eq "a subagent's tool call: it is present" "a1" "$(cat "$AGENTS/a1")"

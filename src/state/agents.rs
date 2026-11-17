@@ -10,7 +10,8 @@
 //!   agent counts as present while a file is younger than `TIMEOUT`: a
 //!   session that dies without ending stops counting then.
 //! - **Told:** `following`, the pause of following last reported to the
-//!   agent in full (its one-line summary): then only a reminder each turn.
+//!   agent in full, with its session (and its one-line summary): then that
+//!   session gets only a reminder each turn.
 //! - **Followed:** `followed`, the moves following made while no agent was
 //!   there, said at its agent's next turn start.
 

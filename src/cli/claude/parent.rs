@@ -46,7 +46,7 @@ fn run(event: ParentHook, input: &str) -> Result<()> {
         ParentHook::SubagentStop => unmark(&state, field(input, "agent_id").as_deref()),
         ParentHook::UserPromptSubmit => {
             mark(&state, session.as_deref())?;
-            print!("{}", turn_start(&common_dir, &state)?);
+            print!("{}", turn_start(&common_dir, &state, session.as_deref())?);
             Ok(())
         }
     }
@@ -92,8 +92,9 @@ fn unmark(state: &StateDir, id: Option<&str>) -> Result<()> {
 
 /// What the agent of the workspace of `state` is told at its turn start,
 /// its branch having followed its parent (`follow_once`): a move in full, a
-/// pause in full once, then a one-line reminder each turn while it lasts.
-fn turn_start(common_dir: &Path, state: &StateDir) -> Result<String> {
+/// pause in full once (to each session), then a one-line reminder each turn
+/// while it lasts.
+fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Result<String> {
     let branch = &state.branch;
     // Moves made while no agent was here (the daemon's).
     let mut out = match state.take_followed()? {
@@ -111,13 +112,19 @@ fn turn_start(common_dir: &Path, state: &StateDir) -> Result<String> {
             state.set_told(None)?;
             format!("gitfold: {branch} took its parent's new commits:\n{said}")
         }
-        Followed::Paused { full, short } => match state.told().as_deref() == Some(&short) {
-            true => format!("gitfold: following still paused: {short} (see `gitfold parent`)\n"),
-            false => {
-                state.set_told(Some(&short))?;
-                format!("gitfold: following paused: {full}\n")
+        Followed::Paused { full, short } => {
+            // Told per session: a new one hears it in full.
+            let told = format!("{}\n{short}", session.unwrap_or_default());
+            match state.told().as_deref() == Some(&told) {
+                true => {
+                    format!("gitfold: following still paused: {short} (see `gitfold parent`)\n")
+                }
+                false => {
+                    state.set_told(Some(&told))?;
+                    format!("gitfold: following paused: {full}\n")
+                }
             }
-        },
+        }
     };
     Ok(out)
 }
