@@ -12,7 +12,7 @@ use fuser::Errno;
 use log::{error, info};
 use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard};
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::lives::Lives;
 use super::merge::Private;
@@ -48,7 +48,7 @@ pub const LIVE_TTL: Duration = Duration::from_secs(1);
 /// How long a view goes unaccessed before it rests (no refreshes): a minute,
 /// or `GITFOLD_VIEW_REST_SECS`.
 pub fn rests_after() -> Duration {
-    static AFTER: std::sync::OnceLock<Duration> = std::sync::OnceLock::new();
+    static AFTER: OnceLock<Duration> = OnceLock::new();
     *AFTER.get_or_init(|| {
         let secs = std::env::var("GITFOLD_VIEW_REST_SECS").ok();
         Duration::from_secs(secs.and_then(|s| s.parse().ok()).unwrap_or(60))
@@ -73,10 +73,32 @@ pub enum Tick {
     Refresh,
     /// Refreshes it at once: it was accessed resting.
     Wake,
-    /// It rests from now on.
-    Rested,
+    /// Not accessed for long: it is to rest (`Rest::rest`).
+    Idle,
     /// Nothing: it rests on.
     Rests,
+}
+
+/// A request waiting for a view to wake, counted: at most half the CPUs
+/// (the request threads, by default) wait at once.
+struct Waiting;
+
+static WAITING: AtomicUsize = AtomicUsize::new(0);
+
+impl Waiting {
+    fn take() -> Option<Waiting> {
+        let most = std::thread::available_parallelism().map_or(1, |n| n.get() / 2);
+        let taken = WAITING.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < most).then_some(n + 1)
+        });
+        taken.is_ok().then_some(Waiting)
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        WAITING.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Milliseconds since the first call.
@@ -104,6 +126,10 @@ impl Rest {
         }
         let mut lock = self.lock.lock();
         self.woken.notify_all();
+        // Not every request thread: git reads the workspaces through them.
+        let Some(_waiting) = Waiting::take() else {
+            return;
+        };
         let until = Instant::now() + WAKE_WAIT;
         while self.resting.load(Ordering::Acquire) {
             if self.woken.wait_until(&mut lock, until).timed_out() {
@@ -126,12 +152,14 @@ impl Rest {
         match (self.resting.load(Ordering::Acquire), idle()) {
             (true, true) => Tick::Rests,
             (true, false) => Tick::Wake,
-            (false, true) => {
-                self.resting.store(true, Ordering::Release);
-                Tick::Rested
-            }
+            (false, true) => Tick::Idle,
             (false, false) => Tick::Refresh,
         }
+    }
+
+    /// For the watch: it rests from now on.
+    pub fn rest(&self) {
+        self.resting.store(true, Ordering::Release);
     }
 
     /// For the watch: refreshed after a wake; the requests waiting go on.
@@ -385,9 +413,14 @@ impl Views {
         self.list.read().len()
     }
 
+    /// The open view `name`.
+    fn find(&self, name: &str) -> Option<Arc<ViewDir>> {
+        self.list.read().iter().find(|v| v.name == name).cloned()
+    }
+
     /// The root inode of the open view `name`, reached (`ViewDir::reached`).
     pub fn existing(&self, name: &str) -> Option<u64> {
-        let view = self.list.read().iter().find(|v| v.name == name).cloned()?;
+        let view = self.find(name)?;
         view.reached();
         Some(inode::view(view.slot, 0))
     }
@@ -407,8 +440,8 @@ impl Views {
     /// then kept current (`watch`). EIO if it can't be built.
     pub fn open(&self, name: &str, branch: &str, kind: Kind, parent: u64) -> Result<u64, Errno> {
         let _creating = self.creating.lock();
-        if let Some(ino) = self.existing(name) {
-            return Ok(ino);
+        if let Some(view) = self.find(name) {
+            return Ok(inode::view(view.slot, 0));
         }
         let ctx = watch::Context {
             common_dir: self.common_dir.clone(),

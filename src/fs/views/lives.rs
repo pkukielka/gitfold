@@ -4,6 +4,7 @@
 //! the latest some seconds into a burst.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -12,7 +13,6 @@ use parking_lot::Mutex;
 
 use super::members::Tip;
 use super::watch::{Context, Stamp, stamp};
-use crate::inode;
 use crate::state::StateDir;
 
 /// How long a workspace is quiet before its live tree is made again.
@@ -20,10 +20,11 @@ const QUIET: Duration = Duration::from_secs(2);
 /// How long into a burst of changes at most.
 const AT_MOST: Duration = Duration::from_secs(10);
 
-/// The live trees, by branch.
+/// The live trees, by branch: each behind a lock of its own, held while
+/// git makes it (the others go on meanwhile).
 #[derive(Default)]
 pub struct Lives {
-    trees: Mutex<HashMap<String, Made>>,
+    trees: Mutex<HashMap<String, Arc<Mutex<Option<Made>>>>>,
 }
 
 /// A live tree, and what it was made at.
@@ -59,14 +60,18 @@ impl Lives {
         };
         if opened_now {
             // A new name in the root and namespace listings.
-            let mut dirs = vec![inode::ROOT];
-            dirs.extend(ctx.workspaces.namespace_inodes());
-            ctx.names.changed(&dirs);
+            ctx.names.changed(&ctx.workspaces.names_dirs());
         }
         let state = StateDir::of(ctx.workspaces.common_dir(), branch);
         let signal = (ws.writes(), ws.base().0, tip, stamp(&state.index()));
-        let mut trees = self.trees.lock();
-        if let Some(made) = trees.get_mut(branch) {
+        let entry = self
+            .trees
+            .lock()
+            .entry(branch.to_string())
+            .or_default()
+            .clone();
+        let mut entry = entry.lock();
+        if let Some(made) = &mut *entry {
             if made.at == signal {
                 made.changing = None;
                 return Ok(Some(made.tip));
@@ -74,8 +79,10 @@ impl Lives {
             let at = Instant::now();
             let (first, last) = match &made.changing {
                 Some((s, first, last)) if *s == signal => (*first, *last),
-                Some((_, first, _)) => (*first, at),
-                None => (at, at),
+                // Changing on: the burst goes on, unless it ended a while
+                // ago (unbuilt: the view rested).
+                Some((_, first, last)) if at - *last < QUIET => (*first, at),
+                _ => (at, at),
             };
             made.changing = Some((signal, first, last));
             if !now && at - last < QUIET && at - first < AT_MOST {
@@ -86,12 +93,11 @@ impl Lives {
         let dir = ctx.workspaces.mount_point().join(branch);
         let live = ctx.private.live(branch, &dir, &state.index())?;
         let tip = (live.commit, live.tree);
-        let made = Made {
+        *entry = Some(Made {
             at: signal,
             tip,
             changing: None,
-        };
-        trees.insert(branch.to_string(), made);
+        });
         Ok(Some(tip))
     }
 }

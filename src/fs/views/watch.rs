@@ -17,7 +17,7 @@ use gix::ObjectId;
 use log::error;
 
 use super::lives::Lives;
-use super::members::{self, Bases, BuiltOn, Refs};
+use super::members::{self, Bases, BuiltOn, Note, Refs, Tip};
 use super::merge::{Member, Private};
 use super::serve::{Kind, Tick, ViewDir};
 use super::shown::{Changed, Shown, Times};
@@ -118,16 +118,29 @@ impl Watch {
         self.bases.next_round();
         if ctx.kind == Kind::Live && trees != Trees::Tips {
             let now = trees == Trees::Now;
-            // Each workspace as it is: its live tree for its tip.
-            // (Opening the workspaces not open yet: `Workspaces::open_quietly`.)
-            if let Some(live) = ctx.lives.tip(ctx, branch, refs.local, now)? {
-                refs.own = live;
+            // Each workspace as it is: its live tree for its tip (one that
+            // can't be read: its tip, noted). Opens the workspaces not open
+            // yet (`Workspaces::open_quietly`).
+            let mut notes = Vec::new();
+            let mut live =
+                |branch: &str, tip: &mut Tip| match ctx.lives.tip(ctx, branch, tip.0, now) {
+                    Ok(Some(live)) => *tip = live,
+                    Ok(None) => {}
+                    Err(e) => notes.push(Note {
+                        kind: "unread",
+                        what: branch.to_string(),
+                        why: format!("its workspace: {e:#}; the view has its tip"),
+                    }),
+                };
+            // Not when the view shows its origin root's files (its local
+            // branch only behind them).
+            if refs.own.0 == refs.local {
+                live(branch, &mut refs.own);
             }
             for (member, tip, _) in &mut refs.members {
-                if let Some(live) = ctx.lives.tip(ctx, member, tip.0, now)? {
-                    *tip = live;
-                }
+                live(member, tip);
             }
+            refs.notes.extend(notes);
         }
         if let Some((m, r, c)) = &self.built
             && (m, r, *c) == (&members, &refs, config)
@@ -169,8 +182,10 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
             let woken = match view.rest.tick(INTERVAL) {
                 Tick::Refresh => false,
                 Tick::Wake => true,
-                Tick::Rested => {
+                Tick::Idle => {
+                    // Told first: a lookup through it then waits for nothing.
                     resting(&ctx.names, &view);
+                    view.rest.rest();
                     continue;
                 }
                 Tick::Rests => continue,
@@ -184,6 +199,11 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                         // Waits for requests served from the old view: their
                         // replies can't land after the kernel is told.
                         view.swap(shown, &changed);
+                        // Woken: the requests waiting go on first; they hold
+                        // their directories, which telling the kernel takes.
+                        if woken {
+                            view.rest.woke();
+                        }
                         tell(&ctx.names, &view, &changed);
                         if let Err(e) = ctx.private.shown(&ctx.key, commit) {
                             error!("view {}: {e:#}", view.name);

@@ -161,6 +161,15 @@ impl Workspaces {
         }
     }
 
+    /// The root and every namespace directory, the root first (it is what
+    /// gets listed right after opening something): the listings a new name
+    /// changes.
+    pub fn names_dirs(&self) -> Vec<u64> {
+        let mut dirs = vec![inode::ROOT];
+        dirs.extend(self.namespace_inodes());
+        dirs
+    }
+
     /// Inodes of the namespace directories.
     pub fn namespace_inodes(&self) -> Vec<u64> {
         let list = self.list.read();

@@ -307,7 +307,12 @@ impl Filesystem for GitFold {
             // again on every run.
             Err(Errno::ENOENT) => {
                 let cached = !names_dir || name.as_bytes().starts_with(b".");
-                let ttl = if cached { &IMMUTABLE_TTL } else { &NO_CACHE };
+                // In an `@live` view, briefly (`ttl`).
+                let ttl = if cached {
+                    ttl(view.as_deref())
+                } else {
+                    &NO_CACHE
+                };
                 let negative = self.negative_attr();
                 reply.entry_with_ttls(&NO_CACHE, ttl, &negative, Generation(0))
             }
