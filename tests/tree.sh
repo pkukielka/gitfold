@@ -566,6 +566,10 @@ check "  the conflict forgotten" fails R config branch.ui.gitfoldConflict
 R merge -q --no-ff --no-edit api
 eq "the parent merged: said once" "gitfold: api looks merged into main: \`gitfold parent ui --set main\` moves ui there with only its own commits (or delete api, \`git branch -d api\`, and ui moves there by itself) " "$(turn)"
 eq "  then nothing" "" "$(turn)"
+R config branch.ui.gitfoldFollow maybe
+eq "following set to no boolean: warned once, as unset" "1" "$(turn | grep -c 'branch.ui.gitfoldFollow is not a boolean (taken as unset)')"
+check "  not for another branch" lacks 0 "not a boolean" parent api
+R config --unset branch.ui.gitfoldFollow
 R branch -D -q api
 r=$(turn)
 check "  deleted: ui moved onto main, said" test "$([[ $r == "gitfold: api landed in main; ui is now built on main moved "*" of ui onto main"* ]] && echo yes)" = yes

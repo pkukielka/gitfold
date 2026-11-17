@@ -15,6 +15,7 @@
 //! writes them (not included files), at the moment they are needed: the
 //! daemon's repository handle has the config as it was at mount time.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -176,9 +177,11 @@ impl Local {
     }
 
     /// Whether `branch` takes its parent's new commits by itself
-    /// (`gitfoldFollow`), if set (`Tree::follows` applies the rules).
-    pub fn follow(&self, branch: &str) -> Option<bool> {
-        self.branch_bool(branch, FOLLOW)
+    /// (`gitfoldFollow`), if set (`Tree::follows` applies the rules); a value
+    /// that isn't a boolean an error saying so (warned about by `Tree` only
+    /// where that branch's following is asked).
+    pub fn follow(&self, branch: &str) -> Result<Option<bool>, String> {
+        self.branch_bool_checked(branch, FOLLOW)
     }
 
     /// The conflict recorded for `branch` (`gitfoldConflict`): the parent's
@@ -209,16 +212,31 @@ impl Local {
     }
 
     /// `branch.<branch>.<key>` as a boolean, if set; a value that isn't one is
-    /// warned about and counts as unset.
+    /// warned about (`warn_once`) and counts as unset.
     fn branch_bool(&self, branch: &str, key: &str) -> Option<bool> {
-        let config = self.0.as_ref()?;
-        match config.boolean_by("branch", Some(branch.as_bytes().into()), key) {
-            Ok(value) => value,
-            Err(_) => {
-                warn!("{} is not a boolean", branch_key(branch, key));
+        self.branch_bool_checked(branch, key)
+            .unwrap_or_else(|e| {
+                warn_once(&e);
                 None
-            }
-        }
+            })
+    }
+
+    /// `branch_bool`, a value that isn't a boolean an error saying so.
+    fn branch_bool_checked(&self, branch: &str, key: &str) -> Result<Option<bool>, String> {
+        let Some(config) = self.0.as_ref() else {
+            return Ok(None);
+        };
+        (config.boolean_by("branch", Some(branch.as_bytes().into()), key))
+            .map_err(|_| format!("{} is not a boolean (taken as unset)", branch_key(branch, key)))
+    }
+}
+
+/// Warns `message` once in this process: the config is read again and again.
+pub fn warn_once(message: &str) {
+    static WARNED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.insert(message.to_string()) {
+        warn!("{message}");
     }
 }
 
