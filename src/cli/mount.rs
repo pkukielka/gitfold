@@ -205,11 +205,11 @@ pub fn mount(args: MountArgs) -> Result<()> {
     start(&mountpoint, &log)?;
     // Recorded before returning, once the mount answers: a caller (one
     // mounting it again) writes the config only after.
-    let recorded = std::path::absolute(&args.repo)
-        .map_err(anyhow::Error::from)
-        .and_then(|repo| crate::git::init(&repo))
-        .and_then(|common_dir| settings::set_mountpoint(&common_dir, &mountpoint, &args.flags()));
-    if let Err(e) = recorded {
+    let record = || -> Result<()> {
+        let common_dir = crate::git::init(&std::path::absolute(&args.repo)?)?;
+        settings::set_mountpoint(&common_dir, &mountpoint, &args.flags())
+    };
+    if let Err(e) = record() {
         eprintln!("warning: recording the mount point in the git config: {e:#}");
     }
     println!(

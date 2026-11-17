@@ -16,6 +16,8 @@
 //! daemon's repository handle has the config as it was at mount time.
 
 use std::path::{Path, PathBuf};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
@@ -316,15 +318,42 @@ pub fn set_follow(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 /// mounted with (`gitfold.mountOptions`, one per line), given its git
 /// directory or one of its worktrees'.
 pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result<()> {
-    // Each written even if the other can't be (the config locked meanwhile).
-    let key = format!("gitfold.{MOUNTPOINT}");
-    let place = (mountpoint.to_str())
-        .context("a mount point that isn't UTF-8")
-        .and_then(|value| git::cmd::run(git_dir, &["config", "--local", &key, value]));
-    let key = format!("gitfold.{MOUNT_OPTIONS}");
-    let options = git::cmd::run(git_dir, &["config", "--local", &key, &flags.join("\n")]);
-    place.and(options)
+    let value = mountpoint
+        .to_str()
+        .context("a mount point that isn't UTF-8");
+    // Each written even if the other can't be, each retried a while: another
+    // git command may hold the config's lock.
+    let write = |key: &str, value: &str| -> Result<()> {
+        let key = format!("gitfold.{key}");
+        let started = Instant::now();
+        loop {
+            let out = (git::cmd::command(git_dir))
+                .args(["config", "--local", &key, value])
+                .output()?;
+            match out.status.code() {
+                Some(0) => return Ok(()),
+                // The file not written (4, git config's exit code) or its
+                // lock held (255, what git exits with then): retried; any
+                // other failure waiting doesn't change.
+                Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
+                    sleep(Duration::from_millis(100));
+                    continue;
+                }
+                _ => {}
+            }
+            anyhow::bail!(
+                "git config {key} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    };
+    let place = value.and_then(|value| write(MOUNTPOINT, value));
+    write(MOUNT_OPTIONS, &flags.join("\n")).and(place)
 }
+
+/// How long writing a setting is retried while it fails (the config locked).
+const CONFIG_WAIT: Duration = Duration::from_secs(2);
 
 /// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
 /// own config file (where it is read), given the repository's or one of its
