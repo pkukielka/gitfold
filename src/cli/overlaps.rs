@@ -187,21 +187,9 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     Ok(if lines.is_empty() { 0 } else { FOUND })
 }
 
-/// The remote's default branch (`origin/HEAD`, normally `origin/main`), else
-/// `main`. Not the branch's upstream: after `git push -u` that is its own
-/// remote branch, which its work is ahead of.
+/// What to compare with by default: `git::default_compare_target`.
 fn default_target(common_dir: &Path) -> Result<String> {
-    let out = git::cmd::command(common_dir)
-        .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
-        .output()?;
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if out.status.success() && !name.is_empty() && name != "origin/HEAD" {
-        return Ok(name);
-    }
-    match git::resolve("refs/heads/main") {
-        Ok(_) => Ok("main".to_string()),
-        Err(_) => bail!("no origin/HEAD and no branch main: name a target with --against"),
-    }
+    git::default_compare_target(common_dir)
 }
 
 /// Target `rev`: what it changed since it diverged from `base`, and, for a

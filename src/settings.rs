@@ -2,7 +2,11 @@
 //!
 //! - per branch, `branch.<branch>.<key>`, which git keeps with the branch
 //!   (renamed and deleted with it): `gitfoldPrewarm` (a workspace's prewarm
-//!   mode) and `gitfoldTrackReads` (whether it records reads);
+//!   mode), `gitfoldTrackReads` (whether it records reads), `gitfoldParent`
+//!   (the branch it is built on, see `tree`; read here, written by `gitfold
+//!   parent` as it lands). A parent is a setting of the child: renaming or
+//!   deleting the parent with git leaves the child naming the old branch
+//!   ("parent gone");
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
 //!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
 //!   mounted it, for Claude Code's worktree hook to mount it there again).
@@ -24,6 +28,8 @@ use crate::prewarm::Prewarm;
 const PREWARM: &str = "gitfoldPrewarm";
 /// `branch.<branch>.gitfoldTrackReads`: a boolean.
 const TRACK_READS: &str = "gitfoldTrackReads";
+/// `branch.<branch>.gitfoldParent`: the branch it is built on.
+const PARENT: &str = "gitfoldParent";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -45,8 +51,19 @@ pub struct Local(Option<gix::config::File>);
 impl Local {
     /// The repository's config file as it is now.
     pub fn read(common_dir: &Path) -> Local {
+        Local::read_checked(common_dir).unwrap_or(Local(None))
+    }
+
+    /// The repository's config file as it is now, failing (naming it) if it
+    /// can't be read or parsed: for settings whose absence would be wrong
+    /// rather than a default (the tree of parents, whose cycle check an
+    /// empty config would silently disable).
+    pub fn read_checked(common_dir: &Path) -> Result<Local> {
         let path = common_dir.join("config");
-        Local(gix::config::File::from_path_no_includes(path, gix::config::Source::Local).ok())
+        let file =
+            gix::config::File::from_path_no_includes(path.clone(), gix::config::Source::Local)
+                .with_context(|| format!("reading {}", path.display()))?;
+        Ok(Local(Some(file)))
     }
 
     /// `gitfold.<key>`, trimmed, if set and not empty.
@@ -120,6 +137,18 @@ impl Local {
     /// `branch_bool`).
     pub fn track_reads(&self, branch: &str) -> Option<bool> {
         self.branch_bool(branch, TRACK_READS)
+    }
+
+    /// Every branch's parent (`gitfoldParent`), by branch.
+    pub fn parents(&self) -> std::collections::BTreeMap<String, String> {
+        let branches = (self.0.as_ref())
+            .and_then(|config| config.sections_by_name("branch"))
+            .into_iter()
+            .flatten()
+            .filter_map(|section| Some(section.header().subsection_name()?.to_string()));
+        branches
+            .filter_map(|branch| Some((branch.clone(), self.branch(&branch, PARENT)?)))
+            .collect()
     }
 
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
@@ -198,7 +227,8 @@ fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()
 /// Gives branch `to` the settings set for branch `from` (a fork); one that
 /// can't be written is warned about.
 pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
-    // Every per-branch setting.
+    // Every per-branch setting but the parent: a fork starts at its source,
+    // with no relation to it.
     let copied = [
         (
             PREWARM,

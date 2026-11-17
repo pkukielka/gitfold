@@ -6,6 +6,8 @@
 //! - `remove`: `remove`, `prune`.
 //! - `mount`: `mount` in the background, `unmount`, `version`.
 //! - `overlaps`: what a workspace read or changed that changed elsewhere since.
+//! - `tree`: branches built on branches: `parent`, and the hints for
+//!   commands people guess.
 //! - `claude`: Claude Code's hooks: its worktrees as workspaces (`branch` and
 //!   `remove` with `--claude-hook`), the files it reads (`track-reads
 //!   --claude-hook`).
@@ -18,6 +20,7 @@ pub mod list;
 pub mod mount;
 pub mod overlaps;
 pub mod remove;
+pub mod tree;
 
 use std::path::{Path, PathBuf};
 

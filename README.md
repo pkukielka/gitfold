@@ -147,11 +147,18 @@ gitfold writes into the repository: worktree registrations under
 gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
 gitfold unmount <MOUNTPOINT>                  # stops it
 gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
-gitfold branch <BRANCH> [-w] [--from <REV>] [--prewarm <MODE>] [--track-reads on|off]
+gitfold branch <BRANCH> [-w] [--from <REV>]... [--prewarm <MODE>] [--track-reads on|off]
                                               # create a branch for a workspace
-                                              # (-w: with a workspace's changes)
+                                              # (-w: with a workspace's changes;
+                                              # several --from: merged, not yet)
+gitfold branch <BRANCH> --parent <P> [--no-follow]
+                                              # a branch built on P (not yet)
+gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
+                                              # show or change what it is built
+                                              # on (not yet)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
+gitfold changes -- <PATH>...                  # who is changing them (not yet)
 gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
                                               # a message to a task's inbox
 gitfold inbox [<BRANCH>] [--wait [--timeout <SECS>]] [--peek] [--json] [--claude-hook <EVENT>]
@@ -458,6 +465,15 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
   stash with `git stash drop`. `git clean -fdx` only warns about the link.
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
+
+### Branches built on branches (in progress)
+
+A branch can be built on another branch, its parent: its own commits sit on
+the parent's, and it takes the parent's new commits. Branches built on
+branches form a tree. The command-line contract is in place; the commands
+marked "not yet" above parse their arguments, then say `not implemented yet`
+(exit 1). Commands people guess (`gitfold sync`, `pull`, `restack`,
+`rebase`, `branch --on`, `branch --merge`) exit 2 naming the right one.
 
 ### Partial clones
 
