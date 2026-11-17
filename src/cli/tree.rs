@@ -208,12 +208,17 @@ pub(crate) fn paused(
 /// Where `name` moves: its workspace, through the mount (mounted again
 /// where it last was if it isn't now and `again`: `mount::mount_or_again`),
 /// or `None` (no worktree has it). Refused checked out in another git
-/// worktree (git rebase there), with a git operation under way or a
-/// conflict left unresolved in its workspace, or if the repository isn't
-/// mounted (and never was, or not `again`).
+/// worktree (git rebase there: `rebase`, if known), with a git operation
+/// under way or a conflict left unresolved in its workspace, or if the
+/// repository isn't mounted (and never was, or not `again`).
 /// (With `--set`, its parent is written by then: each refusal names
 /// `--update` to finish.)
-fn movable(common_dir: &Path, name: &str, again: bool) -> Result<Option<PathBuf>> {
+fn movable(
+    common_dir: &Path,
+    name: &str,
+    again: bool,
+    rebase: Option<&str>,
+) -> Result<Option<PathBuf>> {
     match follow::checked_out(common_dir, name) {
         None => Ok(None),
         Some(follow::CheckedOut::Workspace) => {
@@ -246,10 +251,13 @@ fn movable(common_dir: &Path, name: &str, again: bool) -> Result<Option<PathBuf>
             }
             Ok(Some(dir))
         }
-        Some(follow::CheckedOut::Worktree(path)) => Err(Refusal::InUse.error(format!(
-            "{name} is checked out in {path}: gitfold doesn't move it there; take the new \
-             commits with git rebase in it"
-        ))),
+        Some(follow::CheckedOut::Worktree(path)) => {
+            let rebase = rebase.map(|r| format!(" ({r})")).unwrap_or_default();
+            Err(Refusal::InUse.error(format!(
+                "{name} is checked out in {path}: gitfold doesn't move it there; take the new \
+                 commits with git rebase in it{rebase}"
+            )))
+        }
     }
 }
 
@@ -272,7 +280,8 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
         );
     }
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    match plan.run(common_dir, yes, |_| movable(common_dir, name, true))? {
+    let moving = |_| movable(common_dir, name, true, Some(&plan.by_hand(short)));
+    match plan.run(common_dir, yes, moving)? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
             Ok(())
@@ -478,7 +487,9 @@ fn try_follow(common_dir: &Path, name: &str, tree: &Tree) -> Result<Followed> {
     let moved = match plan.conflict(common_dir, &local)?.filter(|_| !gone) {
         Some(paths) => follow::Moved::Conflict(paths),
         None => plan
-            .run(common_dir, false, |_| movable(common_dir, name, false))
+            .run(common_dir, false, |_| {
+                movable(common_dir, name, false, Some(&plan.by_hand(short)))
+            })
             .map_err(|e| match gone {
                 // Built there all the same: said.
                 true => e.context(landed.trim_end().to_string()),
@@ -627,7 +638,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // Checked out in another git worktree: refused before anything changes
     // (where its workspace is is found once it moves).
     if let Some(follow::CheckedOut::Worktree(_)) = follow::checked_out(common_dir, name) {
-        movable(common_dir, name, true)?;
+        movable(common_dir, name, true, None)?;
     }
     let _moving = follow::lock(common_dir, name)?;
     // The plan first (git walks history; the tree lock isn't held for
@@ -655,7 +666,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // Refused or failed from here, it is built on P all the same.
     let moved = plan
         .run(common_dir, false, |moves| {
-            let workspace = movable(common_dir, name, true)?;
+            let workspace = movable(common_dir, name, true, Some(&plan.by_hand(short)))?;
             if moves {
                 println!("moves {} of {name} onto {short}", commits(plan.own));
             }

@@ -384,7 +384,7 @@ R config branch.ui.gitfoldParent refs/heads/api
 R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
 # Checked out in a git worktree: never moved by gitfold.
 R worktree add -q "$T/wt" ui
-check "checked out in a git worktree: refused (exit 5)" says 5 "ui is checked out in $T/wt" parent ui --update
+check "checked out in a git worktree: refused (exit 5), with the git rebase" says 5 "ui is checked out in $T/wt: gitfold doesn't move it there; take the new commits with git rebase in it (git rebase api ui)" parent ui --update
 R worktree remove "$T/wt"
 # Checked out in a git worktree meanwhile (by a hook, while it moves): git
 # rebase there, not --update (which refuses it).
