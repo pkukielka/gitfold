@@ -64,15 +64,15 @@ pub fn tree_lock(common_dir: &Path) -> Result<Lock> {
     let dir = moves_dir(common_dir);
     fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let started = std::time::Instant::now();
+    // Tests shorten the wait (`GITFOLD_TEST_TREE_WAIT`, seconds).
+    let wait = std::env::var("GITFOLD_TEST_TREE_WAIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .map_or(TREE_WAIT, std::time::Duration::from_secs);
     loop {
         if let Some(lock) = crate::lock::try_file(&dir.join(".tree.lock"))? {
             return Ok(lock);
         }
-        // Tests shorten the wait (`GITFOLD_TEST_TREE_WAIT`, seconds).
-        let wait = std::env::var("GITFOLD_TEST_TREE_WAIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .map_or(TREE_WAIT, std::time::Duration::from_secs);
         if started.elapsed() > wait {
             return Err(Refusal::InUse
                 .error("another gitfold command is changing the parents of branches; retry"));
@@ -183,16 +183,14 @@ impl Scratch {
     /// git in the worktree, as `cmd::in_other_worktree` runs git in another
     /// worktree than the caller's.
     fn command(&self) -> Result<Command> {
-        let mut command = Command::new("git");
-        super::cmd::in_other_worktree(&mut command)?;
+        let mut command = super::cmd::in_workspace(&self.path)?;
         command
-            .arg("-C")
-            .arg(&self.path)
             .args(["-c", "core.sparseCheckout=true"])
             .args(["-c", "core.sparseCheckoutCone=true"])
             .args(["-c", "index.sparse=true"])
-            // A conflict here is reported, not resolved, and records no
-            // resolution of its own.
+            // Unlike a person's rebase, nobody is here to check a recorded
+            // resolution (rerere) before it is taken: a conflict stops the
+            // move and is reported, and the rebase aborted records none.
             .args(["-c", "rerere.enabled=false"])
             .stdin(Stdio::null());
         Ok(command)

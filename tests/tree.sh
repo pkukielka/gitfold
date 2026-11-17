@@ -2,7 +2,7 @@
 # End-to-end test of the command-line contract of branches built on branches
 # (gitfold parent, branch --parent, branch with several --from, changes --
 # PATH, the hints for guessed commands): what parses, what is refused, and
-# what says "not implemented yet" (exit 1) until it is built.
+# what the commands do.
 # usage: tests/tree.sh (or with the others: tests/run.sh); sections as in
 # tests/lib.sh, each on a fresh repository (tests/fixture.sh).
 set -uo pipefail
@@ -76,7 +76,7 @@ echo m >>"$REPO/a.txt"; R commit -qam m
 check "compare: local main" says 6 "W	main	a.txt" overlaps w
 check "R4: root: main" says 2 "main is the root of the tree" parent main --set w
 check "S7: building on the root: allowed (a conflict here: nothing moved, exit 4)" says 4 "w's commits conflict with main's on a.txt" parent w --set main
-R config --unset branch.w.gitfoldParent
+"$BIN" -C "$REPO" parent w --none >/dev/null
 # A clone: origin/main at main, origin/HEAD pointing at it; local main
 # gets an unpushed commit of its own.
 remote_main
@@ -384,9 +384,9 @@ R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
 R worktree add -q "$T/wt" ui
 check "checked out in a git worktree: refused (exit 5)" says 5 "ui is checked out in $T/wt" parent ui --update
 R worktree remove "$T/wt"
-# A workspace's branch: not yet.
+# A workspace's branch in a repository never mounted: mount it first.
 mkdir -p "$REPO/.git/gitfold/ui"
-check "a workspace's branch: not implemented yet" says 1 "gitfold parent --update for a workspace's branch: not implemented yet" parent ui --update
+check "a workspace's branch, never mounted: mount it first" says 1 "mount it first (\`gitfold mount\`)" parent ui --update
 rmdir "$REPO/.git/gitfold/ui"
 # A move a crash interrupted after git moved the branch: its base recorded.
 R update-ref refs/gitfold-base/ui main~1
@@ -434,6 +434,50 @@ check "--none: the base forgotten" says 0 "ui no longer has a parent" parent ui 
 check "  the ref gone" fails R rev-parse -q --verify refs/gitfold-base/ui
 }
 
+# A workspace's branch moves in its workspace, through the mount, by git
+# there: its uncommitted work carried along (git's autostash).
+# git in workspace $1 of the mount.
+W() { git -C "$MNT/$1" -c user.name=t -c user.email=t@t "${@:2}"; }
+# Line $2 of file $1 in workspace ui replaced by $3, uncommitted.
+edit_line() { sed -i "$2s/.*/$3/" "$MNT/ui/$1"; }
+
+workspaces() {
+identity
+seq 1 10 >"$REPO/g.txt"; R add g.txt; R commit -qm "main: g"
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+mount_fs
+echo one >"$MNT/ui/u.txt"; W ui add u.txt; W ui commit -qm "ui: one"
+edit_line g.txt 2 mine; echo dirty >"$MNT/ui/d.txt"
+R switch -q api; sed -i '9s/.*/theirs/' "$REPO/g.txt"; R commit -qam "api: g"; echo new >"$REPO/a.txt"; R add a.txt; R commit -qm "api: a"; R switch -q main
+check "a workspace: moved through the mount" says 0 "moved 1 commit of ui onto api" parent ui --update
+check "  ui sits on api" R merge-base --is-ancestor api ui
+eq "  its files moved" "new" "$(cat "$MNT/ui/a.txt")"
+eq "  its uncommitted work carried along, merged" "mine theirs" "$(sed -n '2p;9p' "$MNT/ui/g.txt" | tr '\n' ' ' | sed 's/ $//')"
+eq "  git sees only that work" " M g.txt|?? d.txt" "$(W ui status --porcelain | tr '\n' '|' | sed 's/|$//')"
+eq "  its base recorded" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/ui)"
+# Uncommitted work that conflicts with the move: nothing moves.
+edit_line g.txt 5 mine-too
+R switch -q api; sed -i '5s/.*/theirs-too/' "$REPO/g.txt"; R commit -qam "api: g again"; R switch -q main
+before=$(R rev-parse ui)
+check "uncommitted work in conflict: nothing moves (exit 4)" says 4 "ui's commits conflict with api's on g.txt" parent ui --update
+eq "  the branch where it was" "$before" "$(R rev-parse ui)"
+eq "  the work as it was" "mine-too" "$(sed -n 5p "$MNT/ui/g.txt")"
+check "  no rebase left in it" sh -c "! git -C '$MNT/ui' status | grep -q rebase"
+edit_line g.txt 5 5
+# git busy in the workspace: not moved.
+W ui switch -q --detach
+check "git busy in the workspace: refused (exit 4)" says 4 "in its workspace" parent ui --update
+W ui switch -q ui
+check "  then moved" says 0 "moved 1 commit of ui onto api" parent ui --update
+# Unmounted: mounted again where it last was, then moved.
+unmount_fs
+on api a.txt more
+check "unmounted: mounted again, then moved" says 0 "moved 1 commit of ui onto api" parent ui --update
+check "  mounted" mountpoint -q "$MNT"
+eq "  its files moved" "new more" "$(cat "$MNT/ui/a.txt" | tr '\n' ' ' | sed 's/ $//')"
+"$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
+}
+
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
 section "tree: rules R (the root)" the_root
@@ -445,4 +489,5 @@ section "tree: the relation (F, T)" relation
 section "tree: moves (--update, --set)" moves
 section "tree: pushed commits" pushed
 section "tree: what isn't moved, and crashes" not_moved
+section "tree: workspaces moved through the mount" workspaces
 finish

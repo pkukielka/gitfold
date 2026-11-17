@@ -196,10 +196,6 @@ const LONG_VERSION: &str = env!("GITFOLD_LONG_VERSION");
 fn main() -> std::process::ExitCode {
     let code = match run() {
         Ok(code) => code,
-        Err(e) if e.is::<cli::tree::NotImplemented>() => {
-            eprintln!("{e}");
-            1
-        }
         Err(e) if e.is::<cli::tree::Usage>() => {
             eprintln!("{e}");
             2

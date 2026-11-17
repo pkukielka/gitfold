@@ -1,10 +1,9 @@
 //! The tree of branches: a branch built on another (its parent) takes the
 //! parent's new commits. The command-line contract of the design (`gitfold
 //! parent`, `branch --parent`, `branch` with several `--from`, `changes --
-//! PATH`) and the hints for commands people guess; what isn't built yet
-//! parses its arguments as specified and says so (`not_implemented`, exit 1).
+//! PATH`) and the hints for commands people guess.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
@@ -14,19 +13,6 @@ use crate::refusal::Refusal;
 use crate::settings;
 use crate::state::retire::check_name;
 use crate::tree::{Refused, Tree};
-
-/// A command whose arguments parse but that isn't built yet: printed as
-/// `<command>: not implemented yet` (no `Error:` prefix), exit 1.
-#[derive(Debug)]
-pub struct NotImplemented(String);
-
-impl std::fmt::Display for NotImplemented {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: not implemented yet", self.0)
-    }
-}
-
-impl std::error::Error for NotImplemented {}
 
 /// A refusal of the arguments as given: printed as is (no `Error:` prefix),
 /// exit 2, like clap's own usage errors.
@@ -52,11 +38,6 @@ fn refused(what: &str, branch: &str, parent: &str, refused: Refused) -> anyhow::
         Refused::NoRoot => anyhow::anyhow!(message),
         Refused::Root | Refused::Own | Refused::Cycle | Refused::NoParent => Usage(message).into(),
     }
-}
-
-/// The error of a command whose arguments parse but that isn't built yet.
-pub fn not_implemented(what: &str) -> anyhow::Error {
-    NotImplemented(what.to_string()).into()
 }
 
 /// The arguments of `gitfold parent`.
@@ -179,7 +160,7 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
         return Ok(None);
     };
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    if plan.up_to_date(common_dir)? {
+    if plan.up_to_date() {
         return Ok(None);
     }
     let local = settings::Local::read_checked(common_dir)?;
@@ -194,15 +175,30 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
     Ok(pushed.map(|p| format!("following paused: {}", pushed_said(name, &p))))
 }
 
-/// Refuses moving `name` where gitfold doesn't move it (`what`: the flag):
-/// in a workspace (not yet), or checked out in another git worktree (never:
-/// git rebase there).
-fn movable(common_dir: &Path, name: &str, what: &str) -> Result<()> {
+/// Where `name` moves: its workspace, through the mount (mounted again
+/// where it last was if it isn't now: `mount::mount_or_again`), or `None`
+/// (no worktree has it). Refused checked out in another git worktree (git
+/// rebase there), with a git operation under way in its workspace, or if
+/// the repository was never mounted.
+fn movable(common_dir: &Path, name: &str) -> Result<Option<PathBuf>> {
     match follow::checked_out(common_dir, name) {
-        None => Ok(()),
-        Some(follow::CheckedOut::Workspace) => Err(not_implemented(&format!(
-            "gitfold parent {what} for a workspace's branch"
-        ))),
+        None => Ok(None),
+        Some(follow::CheckedOut::Workspace) => {
+            let Some(mount) = super::mount::mount_or_again(common_dir)? else {
+                bail!(
+                    "{} isn't mounted: mount it first (`gitfold mount`); {name} moves in its \
+                     workspace",
+                    common_dir.display()
+                );
+            };
+            let state = crate::state::StateDir::of(common_dir, name);
+            if let Some(why) = state.git_busy() {
+                return Err(Refusal::Changes.error(format!(
+                    "{name}: {why} in its workspace; once it is done, retry"
+                )));
+            }
+            Ok(Some(mount.join(name)))
+        }
         Some(follow::CheckedOut::Worktree(path)) => Err(Refusal::InUse.error(format!(
             "{name} is checked out in {path}: gitfold doesn't move it there; take the new \
              commits with git rebase in it"
@@ -220,16 +216,17 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
     // F6, S4: only a branch with a parent.
     let refuse = |r| refused("gitfold parent", name, "", r);
     tree.check_follow(name).map_err(refuse)?;
-    let parent = tree.parent(name).ok_or(Refused::NoParent).map_err(refuse)?;
+    let parent = tree.parent(name).expect("check_follow: a parent (F6)");
     let short = crate::tree::short(parent);
-    movable(common_dir, name, "--update")?;
     if tree.parent_gone(name) {
         bail!(
             "{name}'s parent {short} is gone: no new commits to take (`gitfold parent {name} \
              --none` keeps its history as it is)"
         );
     }
-    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
+    let workspace = movable(common_dir, name)?;
+    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?
+        .checked_out_in(workspace);
     match plan.run(common_dir, yes, || {})? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
@@ -264,13 +261,14 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         return Ok(());
     }
     let old = tree.parent(name).map(String::from);
-    movable(common_dir, name, "--set")?;
     let _moving = follow::lock(common_dir, name)?;
+    let workspace = movable(common_dir, name)?;
     // The plan first (git walks history; the tree lock isn't held for
     // that), on the old parent; a merge among its own commits is refused
     // before anything changes.
-    let plan = follow::Plan::new(common_dir, name, old.as_deref(), &tree.root_refs(), &full)?;
-    if !plan.up_to_date(common_dir)? && plan.merges(common_dir)? {
+    let plan = follow::Plan::new(common_dir, name, old.as_deref(), &tree.root_refs(), &full)?
+        .checked_out_in(workspace);
+    if !plan.up_to_date() && plan.merges(common_dir)? {
         return said(name, short, &plan, follow::Moved::Merge);
     }
     {
@@ -280,7 +278,8 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         let tree = Tree::read(common_dir)?;
         let now = tree.check(name, given).map_err(refuse)?;
         if now != full || tree.parent(name) != old.as_deref() {
-            bail!("{name}'s parent or {given} changed meanwhile; retry");
+            let why = format!("{name}'s parent or {given} changed meanwhile; retry");
+            return Err(Refusal::InUse.error(why));
         }
         follow::set_base(common_dir, name, plan.base)?;
         settings::set_parent(common_dir, name, &full)?;
@@ -308,7 +307,9 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
             println!("{name} is now built on {short}{paused}");
             said(name, short, &plan, moved)
         }
-        _ => {
+        // Refused before anything was written (above), the count kept.
+        follow::Moved::Merge => unreachable!("a merge refused before the write"),
+        follow::Moved::UpToDate | follow::Moved::Done { .. } => {
             println!("{name} is now built on {short}");
             said(name, short, &plan, moved)
         }
