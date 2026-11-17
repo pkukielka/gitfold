@@ -161,3 +161,22 @@ pub fn run(args: &[&str]) -> String {
 pub fn tip(commit: &str) -> crate::git::Commit {
     crate::git::resolve(commit).unwrap()
 }
+
+/// Runs git in `dir` (a worktree of the test repository); its output.
+pub fn run_in(dir: &Path, args: &[&str]) -> String {
+    git(dir, args, None, None)
+}
+
+/// A new worktree of the test repository at `commit` (detached), named
+/// `name`; its directory.
+pub fn worktree(name: &str, commit: &str) -> PathBuf {
+    let dir = repo().join("worktrees").join(name);
+    let path = dir.to_str().unwrap();
+    git(
+        repo(),
+        &["worktree", "add", "-q", "--detach", path, commit],
+        None,
+        None,
+    );
+    dir
+}

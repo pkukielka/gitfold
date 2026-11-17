@@ -11,6 +11,9 @@
 //! - `watch`: keeping each view current, and telling the kernel.
 
 pub mod members;
+// Its caller, the `@live` views' watch, comes next.
+#[cfg_attr(not(test), allow(dead_code))]
+mod live;
 pub mod merge;
 mod serve;
 pub mod shown;

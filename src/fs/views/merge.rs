@@ -59,16 +59,16 @@ pub struct Merged {
 
 /// The private repository, and where git runs for the merges.
 pub struct Private {
-    dir: PathBuf,
+    pub(super) dir: PathBuf,
     /// The repository's git dir, its work tree's top (git's current
     /// directory there; its git dir if it has none).
     git_dir: PathBuf,
     top: PathBuf,
     /// The repository's object format, and so the private one's.
     hash: gix::hash::Kind,
-    /// Held by each merge and its garbage collection: one would prune what
-    /// the other just wrote.
-    lock: Mutex<()>,
+    /// Held by each merge, each live tree (`live`) and each garbage
+    /// collection: one would prune what another just wrote.
+    pub(super) lock: Mutex<()>,
 }
 
 impl Private {
@@ -149,7 +149,7 @@ impl Private {
 
     /// A commit of `tree`, with no parent (nothing of any history to keep),
     /// unsigned whatever the settings.
-    fn commit(&self, tree: &ObjectId, message: &str) -> Result<ObjectId> {
+    pub(super) fn commit(&self, tree: &ObjectId, message: &str) -> Result<ObjectId> {
         let hex = tree.to_string();
         let out = self.run(&["commit-tree", "--no-gpg-sign", &hex, "-m", message])?;
         Ok(ObjectId::from_hex(
@@ -158,7 +158,7 @@ impl Private {
     }
 
     /// Runs `git update-ref --stdin` with `commands`.
-    fn refs(&self, commands: String) -> Result<()> {
+    pub(super) fn refs(&self, commands: String) -> Result<()> {
         let args = ["update-ref", "--stdin"];
         let input = Some(commands.into_bytes());
         git::cmd::output_of(&mut self.private_git()?, &args, input).map(drop)
