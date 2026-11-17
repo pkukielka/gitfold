@@ -108,8 +108,7 @@ fn drop_ref(common_dir: &Path, name: &str) -> Result<()> {
 
 /// Takes the lock of the moves of `branch` (see `git::rebase::lock`), held
 /// to the end of the move, and cleans up what a move that died left: its
-/// worktree (its rebase aborted, which may put the branch back), then the
-/// record of where it was moving (`recover`).
+/// worktree, then the record of where it was moving (`recover`).
 pub fn lock(common_dir: &Path, branch: &str) -> Result<crate::lock::Lock> {
     let lock = rebase::lock(common_dir, branch)?;
     rebase::clean_up(common_dir, branch)?;
@@ -143,8 +142,9 @@ pub fn tree_lock(common_dir: &Path) -> Result<crate::lock::Lock> {
 
 /// A move under way, recorded before it (see the module doc).
 struct Moving {
-    /// The branch's tip before: still there, nothing moved (git moves a
-    /// branch only when its rebase finishes).
+    /// The branch's tip before: still there, nothing moved (the branch
+    /// moves in one step, by `update-ref` or by git's rebase in its
+    /// workspace, when that finishes).
     from: ObjectId,
     /// What it moves onto: its base after.
     onto: ObjectId,
@@ -279,14 +279,6 @@ enum Applied {
     Work(Vec<Vec<u8>>),
 }
 
-/// The paths of NUL-terminated `out` up to an empty field.
-fn nul_paths(out: &[u8]) -> Vec<Vec<u8>> {
-    (out.split(|b| *b == 0))
-        .take_while(|p| !p.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect()
-}
-
 /// Moves the checkout of workspace `dir` (through the mount) of `branch`,
 /// at `tip`, to `new`, the uncommitted work carried along, all by git: if
 /// git was used there since (HEAD elsewhere, the branch moved), refused,
@@ -310,21 +302,26 @@ fn move_workspace(
     let head = git(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_default();
     let on_branch = String::from_utf8_lossy(&head).trim() == format!("refs/heads/{branch}");
     if !on_branch || git::branch_tip(branch)?.id != tip {
-        let why = format!("{branch} moved in its workspace meanwhile; retry");
+        let why = format!(
+            "{branch} moved in its workspace meanwhile; again: `gitfold parent {branch} --update`"
+        );
         return Err(Refusal::InUse.error(why));
     }
+    // A conflict git left unresolved there (a move's work put back, say).
+    let unmerged = cmd::nul_paths(&git(&["diff", "-z", "--name-only", "--diff-filter=U"])?);
+    if !unmerged.is_empty() {
+        return Ok(Applied::Work(unmerged));
+    }
     let (tip, new_hex) = (tip.to_string(), new.to_string());
-    // Untracked files where the move adds files: git would refuse them.
-    let diff = [
-        "diff",
-        "-z",
-        "--name-only",
-        "--diff-filter=A",
-        &tip,
-        &new_hex,
-    ];
-    let added = nul_paths(&cmd::output(common_dir, &diff)?);
-    if !added.is_empty() {
+    // Untracked files where the move adds files (renames included: the
+    // plumbing diff pairs none): git would refuse them.
+    let diff = ["diff-tree", "-r", "-z", "--name-only", "--diff-filter=A"];
+    let added = cmd::nul_paths(&cmd::output(
+        common_dir,
+        &[&diff[..], &[&tip, &new_hex]].concat(),
+    )?);
+    // In batches: a large import adds more paths than one command line holds.
+    for batch in added.chunks(1000) {
         let mut ls = cmd::in_workspace(dir)?;
         let args = [
             "--literal-pathspecs",
@@ -335,9 +332,9 @@ fn move_workspace(
         ];
         ls.args(args)
             .arg("--")
-            .args(added.iter().map(|p| OsStr::from_bytes(p)));
+            .args(batch.iter().map(|p| OsStr::from_bytes(p)));
         // (The paths given already, as bytes.)
-        let in_the_way = nul_paths(&cmd::output_of(&mut ls, &[], None)?);
+        let in_the_way = cmd::nul_paths(&cmd::output_of(&mut ls, &[], None)?);
         if !in_the_way.is_empty() {
             return Ok(Applied::Work(in_the_way));
         }
@@ -356,7 +353,7 @@ fn move_workspace(
             // The tree, then the conflicted paths, then an empty field.
             Some(1) => {
                 let paths = out.stdout.splitn(2, |b| *b == 0).nth(1).unwrap_or_default();
-                return Ok(Applied::Work(nul_paths(paths)));
+                return Ok(Applied::Work(cmd::nul_paths(paths)));
             }
             _ => bail!(
                 "git merge-tree of the uncommitted work in {} failed ({}): {}",
@@ -372,7 +369,7 @@ fn move_workspace(
     cmd::output_of(&mut rebase, &[&args[..], &[&new_hex, &tip]].concat(), None)?;
     // Moved (git exits 0 even if the work, put back, conflicted: then the
     // paths are unmerged, and the work stays in the stash).
-    let unmerged = nul_paths(&git(&["diff", "-z", "--name-only", "--diff-filter=U"])?);
+    let unmerged = cmd::nul_paths(&git(&["diff", "-z", "--name-only", "--diff-filter=U"])?);
     Ok(Applied::Done(git::branch_tip(branch)?.id, unmerged))
 }
 
@@ -530,7 +527,9 @@ impl Plan {
             return move_workspace(common_dir, dir, branch, self.tip, new);
         }
         if checked_out(common_dir, branch).is_some() {
-            let why = format!("{branch} was checked out meanwhile; retry");
+            let why = format!(
+                "{branch} was checked out meanwhile; then: `gitfold parent {branch} --update`"
+            );
             return Err(Refusal::InUse.error(why));
         }
         let name = format!("refs/heads/{branch}");
@@ -538,9 +537,9 @@ impl Plan {
         match git::worktree::set_ref(common_dir, &name, &new, Some(&self.tip), &why) {
             Ok(()) => Ok(Applied::Done(new, Vec::new())),
             // Git refused the swap: it moved meanwhile.
-            Err(_) if git::branch_tip(branch)?.id != self.tip => {
-                Err(Refusal::InUse.error(format!("{branch} moved meanwhile; retry")))
-            }
+            Err(_) if git::branch_tip(branch)?.id != self.tip => Err(Refusal::InUse.error(
+                format!("{branch} moved meanwhile; again: `gitfold parent {branch} --update`"),
+            )),
             Err(e) => Err(e),
         }
     }

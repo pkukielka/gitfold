@@ -71,8 +71,7 @@ pub struct ParentArgs {
 /// `gitfold parent`: the checks of the rules table (S1-S6, F6), then shows
 /// the parent (`show`), forgets it (`--none`, F5), turns following on or
 /// off, moves the branch onto another parent (`--set`) or onto its parent's
-/// new commits (`--update`); see `follow`. Moving a workspace's branch is
-/// not implemented yet.
+/// new commits (`--update`); see `follow`.
 pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
     let given = super::branch_or_current(args.branch, repo)?;
     let common_dir = git::init(repo)?;
@@ -194,7 +193,7 @@ fn movable(common_dir: &Path, name: &str) -> Result<Option<PathBuf>> {
             let state = crate::state::StateDir::of(common_dir, name);
             if let Some(why) = state.git_busy() {
                 return Err(Refusal::Changes.error(format!(
-                    "{name}: {why} in its workspace; once it is done, retry"
+                    "{name}: {why} in its workspace; once it is done: `gitfold parent {name} --update`"
                 )));
             }
             Ok(Some(mount.join(name)))
@@ -310,14 +309,10 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
             println!("{name} is now built on {short}{paused}");
             said(name, short, &plan, moved)
         }
-        // Built on P, its work in the way (not recorded: retried as is).
-        follow::Moved::Work(_) => {
-            println!("{name} is now built on {short}");
-            said(name, short, &plan, moved)
-        }
         // Refused before anything was written (above), the count kept.
         follow::Moved::Merge => unreachable!("a merge refused before the write"),
-        follow::Moved::UpToDate | follow::Moved::Done { .. } => {
+        // (With its work in the way: built on P, not recorded.)
+        follow::Moved::Work(_) | follow::Moved::UpToDate | follow::Moved::Done { .. } => {
             println!("{name} is now built on {short}");
             said(name, short, &plan, moved)
         }
@@ -355,7 +350,7 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
         }
         follow::Moved::Work(paths) => Err(Refusal::Changes.error(format!(
             "nothing moved: {name}'s uncommitted work is in the way of {parent}'s commits on {}: \
-             commit or stash it, then retry",
+             commit or stash it, then: `gitfold parent {name} --update`",
             paths.join(", ")
         ))),
         follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),

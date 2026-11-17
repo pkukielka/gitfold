@@ -229,12 +229,9 @@ impl Scratch {
             self.git(&["rebase", "--abort"])?;
         }
         match paths {
-            Ok(paths) if stopped && !paths.is_empty() => Ok(Rebased::Conflict(
-                (paths.split(|b| *b == 0))
-                    .filter(|p| !p.is_empty())
-                    .map(<[u8]>::to_vec)
-                    .collect(),
-            )),
+            Ok(paths) if stopped && !paths.is_empty() => {
+                Ok(Rebased::Conflict(super::cmd::nul_paths(&paths)))
+            }
             _ => bail!(
                 "git rebase {} failed ({}): {}",
                 range.join(" "),

@@ -478,12 +478,17 @@ eq "  the file as it was" "mine" "$(cat "$MNT/ui/n.txt")"
 check "  not recorded as a conflict" fails R config branch.ui.gitfoldConflict
 rm "$MNT/ui/n.txt"
 check "  moved once it is out of the way" says 0 "moved 1 commit of ui onto api" parent ui --update
+# The same where the parent renames a file onto an untracked one.
+echo mine >"$MNT/ui/ren.txt"; R switch -q api; R mv a.txt ren.txt; R commit -qm "api: rename"; R switch -q main
+check "an untracked file where the parent renames one to: in the way (exit 4)" says 4 "in the way of api's commits on ren.txt" parent ui --update
+rm "$MNT/ui/ren.txt"
+check "  moved once it is out of the way" says 0 "moved 1 commit of ui onto api" parent ui --update
 # Unmounted: mounted again where it last was, then moved.
 unmount_fs
 on api a.txt more
 check "unmounted: mounted again, then moved" says 0 "moved 1 commit of ui onto api" parent ui --update
 check "  mounted" mountpoint -q "$MNT"
-eq "  its files moved" "new more" "$(cat "$MNT/ui/a.txt" | tr '\n' ' ' | sed 's/ $//')"
+eq "  its files moved" "more" "$(cat "$MNT/ui/a.txt" | tr '\n' ' ' | sed 's/ $//')"
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
 }
 
