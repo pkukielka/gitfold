@@ -32,12 +32,15 @@
 //!   the branch sits on that tip (rebased by hand).
 //! - **Merges** among its own commits aren't moved: rebased by hand.
 
+use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 
 use crate::git::{self, cmd, rebase};
+use crate::refusal::Refusal;
 use crate::settings::{self, Local};
 
 /// The ref keeping where the own commits of `branch` start.
@@ -266,40 +269,94 @@ pub fn checked_out(common_dir: &Path, branch: &str) -> Option<CheckedOut> {
         .map(CheckedOut::Worktree)
 }
 
-/// Moves the checkout of workspace `dir` (through the mount), at `tip`, to
-/// `new`, the uncommitted work carried along, all by git there: the work as
-/// `git stash create` takes it (nothing changes); if it conflicts with the
-/// move (`git merge-tree` of it onto `new`, from `tip`), nothing moves and
+/// How moving the branch to its rebased commits went.
+enum Applied {
+    /// Moved to this tip; the paths where its uncommitted work, put back,
+    /// conflicted all the same (git keeps the work in the stash).
+    Done(ObjectId, Vec<Vec<u8>>),
+    /// Not moved: its uncommitted work conflicts with the move on these
+    /// paths (untracked files included).
+    Work(Vec<Vec<u8>>),
+}
+
+/// The paths of NUL-terminated `out` up to an empty field.
+fn nul_paths(out: &[u8]) -> Vec<Vec<u8>> {
+    (out.split(|b| *b == 0))
+        .take_while(|p| !p.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
+/// Moves the checkout of workspace `dir` (through the mount) of `branch`,
+/// at `tip`, to `new`, the uncommitted work carried along, all by git: if
+/// git was used there since (HEAD elsewhere, the branch moved), refused,
+/// to retry; untracked files where `new` adds files, or uncommitted work
+/// (as `git stash create` takes it, nothing changed) that conflicts with
+/// the move (`git merge-tree` of it onto `new`, from `tip`): nothing moves,
 /// the paths are said; else `git rebase --autostash --onto <new> <tip>`,
-/// which replays nothing but commits made since `tip`, so the branch and its
+/// which replays nothing (the branch was at `tip`), so the branch and its
 /// files go to `new`, and puts the work back (staged changes come back
 /// unstaged, as with git's autostash). If git stops half-way anyway (a
 /// hook, a race), its state stays as git leaves it: a rebase in progress,
 /// the work kept in the stash.
 fn move_workspace(
+    common_dir: &Path,
     dir: &Path,
     branch: &str,
     tip: ObjectId,
     new: ObjectId,
-) -> Result<rebase::Rebased> {
+) -> Result<Applied> {
+    let git = |args: &[&str]| cmd::output_of(&mut cmd::in_workspace(dir)?, args, None);
+    let head = git(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_default();
+    let on_branch = String::from_utf8_lossy(&head).trim() == format!("refs/heads/{branch}");
+    if !on_branch || git::branch_tip(branch)?.id != tip {
+        let why = format!("{branch} moved in its workspace meanwhile; retry");
+        return Err(Refusal::InUse.error(why));
+    }
     let (tip, new_hex) = (tip.to_string(), new.to_string());
-    let stash = cmd::output_of(&mut cmd::in_workspace(dir)?, &["stash", "create"], None)?;
-    let work = String::from_utf8_lossy(&stash).trim().to_string();
+    // Untracked files where the move adds files: git would refuse them.
+    let diff = [
+        "diff",
+        "-z",
+        "--name-only",
+        "--diff-filter=A",
+        &tip,
+        &new_hex,
+    ];
+    let added = nul_paths(&cmd::output(common_dir, &diff)?);
+    if !added.is_empty() {
+        let mut ls = cmd::in_workspace(dir)?;
+        let args = [
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+        ];
+        ls.args(args)
+            .arg("--")
+            .args(added.iter().map(|p| OsStr::from_bytes(p)));
+        // (The paths given already, as bytes.)
+        let in_the_way = nul_paths(&cmd::output_of(&mut ls, &[], None)?);
+        if !in_the_way.is_empty() {
+            return Ok(Applied::Work(in_the_way));
+        }
+    }
+    let work = String::from_utf8_lossy(&git(&["stash", "create"])?)
+        .trim()
+        .to_string();
     if !work.is_empty() {
+        let mut check = cmd::command(common_dir);
         let args = ["merge-tree", "--write-tree", "-z", "--name-only"];
-        let out = (cmd::in_workspace(dir)?.args(args))
+        let out = (check.args(args))
             .args(["--merge-base", &tip, &new_hex, &work])
             .output()?;
         match out.status.code() {
             Some(0) => {}
             // The tree, then the conflicted paths, then an empty field.
             Some(1) => {
-                let mut paths: Vec<Vec<u8>> = (out.stdout.split(|b| *b == 0).skip(1))
-                    .take_while(|p| !p.is_empty())
-                    .map(<[u8]>::to_vec)
-                    .collect();
-                paths.dedup();
-                return Ok(rebase::Rebased::Conflict(paths));
+                let paths = out.stdout.splitn(2, |b| *b == 0).nth(1).unwrap_or_default();
+                return Ok(Applied::Work(nul_paths(paths)));
             }
             _ => bail!(
                 "git merge-tree of the uncommitted work in {} failed ({}): {}",
@@ -313,8 +370,10 @@ fn move_workspace(
     rebase.env("GIT_EDITOR", ":");
     let args = ["rebase", "-q", "--autostash", "--no-update-refs", "--onto"];
     cmd::output_of(&mut rebase, &[&args[..], &[&new_hex, &tip]].concat(), None)?;
-    // Checked out there, the branch moved with it.
-    Ok(rebase::Rebased::Done(git::branch_tip(branch)?.id))
+    // Moved (git exits 0 even if the work, put back, conflicted: then the
+    // paths are unmerged, and the work stays in the stash).
+    let unmerged = nul_paths(&git(&["diff", "-z", "--name-only", "--diff-filter=U"])?);
+    Ok(Applied::Done(git::branch_tip(branch)?.id, unmerged))
 }
 
 /// What a move of a branch did, or why it didn't.
@@ -323,14 +382,30 @@ pub enum Moved {
     /// It sits on the parent's tip already.
     UpToDate,
     /// Moved: `kept` of its own commits onto the parent's tip (the others
-    /// were there already); `push`, the force-push if they had been pushed.
-    Done { kept: usize, push: Option<String> },
+    /// were there already); `push`, the force-push if they had been pushed;
+    /// `unmerged`, where its uncommitted work, put back, conflicted (quoted).
+    Done {
+        kept: usize,
+        push: Option<String>,
+        unmerged: Vec<String>,
+    },
     /// Not moved: commits are pushed (moved only with `yes`).
     Pushed(Pushed),
     /// Not moved: a merge among its own commits.
     Merge,
-    /// Not moved: its commits conflict with the parent's on these paths.
+    /// Not moved: its commits conflict with the parent's on these paths
+    /// (quoted; recorded).
     Conflict(Vec<String>),
+    /// Not moved: its uncommitted work (untracked files included) is in
+    /// the way on these paths (quoted; not recorded: it is the work's).
+    Work(Vec<String>),
+}
+
+/// `paths` as git quotes them (a newline in one can't split it).
+fn quoted(paths: &[Vec<u8>]) -> Vec<String> {
+    (paths.iter())
+        .map(|p| String::from_utf8_lossy(&crate::cli::quote(p)).into_owned())
+        .collect()
 }
 
 /// A move of `branch` from `base` (where its own commits start) onto
@@ -352,8 +427,6 @@ pub struct Plan {
     up_to_date: bool,
     /// Whether a merge is among the commits it replays, once asked.
     merges: std::cell::Cell<Option<bool>>,
-    /// Its workspace, mounted (`None`: no worktree has it).
-    workspace: Option<PathBuf>,
 }
 
 impl Plan {
@@ -381,7 +454,6 @@ impl Plan {
             on_history,
             up_to_date: on_history && is_ancestor(common_dir, onto_id, tip)?,
             merges: Default::default(),
-            workspace: None,
         };
         let [tip, from] = plan.own_range();
         plan.own = count(common_dir, &[&tip, &from])?;
@@ -448,25 +520,29 @@ impl Plan {
         }))
     }
 
-    /// The move of a branch checked out in its workspace, mounted at
-    /// `workspace` (`None`: no worktree has it).
-    pub fn checked_out_in(mut self, workspace: Option<PathBuf>) -> Plan {
-        self.workspace = workspace;
-        self
-    }
-
-    /// Moves the branch to `new`, its commits rebased: its ref, if no
-    /// worktree has it (`update-ref`, refused if it moved meanwhile); in its
-    /// workspace, through the mount, by git there (see `move_workspace`).
-    /// The new tip, or the conflict of its uncommitted work with `new`.
-    fn apply(&self, common_dir: &Path, new: ObjectId) -> Result<rebase::Rebased> {
-        let Some(dir) = &self.workspace else {
-            let name = format!("refs/heads/{}", self.branch);
-            let why = format!("gitfold: rebase onto {}", self.onto_ref);
-            git::worktree::set_ref(common_dir, &name, &new, Some(&self.tip), &why)?;
-            return Ok(rebase::Rebased::Done(new));
-        };
-        move_workspace(dir, &self.branch, self.tip, new)
+    /// Moves the branch to `new`, its commits rebased: in its `workspace`,
+    /// through the mount, by git there (see `move_workspace`); else its
+    /// ref, if no worktree has it by now (`update-ref`, refused if it moved
+    /// meanwhile).
+    fn apply(&self, common_dir: &Path, workspace: Option<&Path>, new: ObjectId) -> Result<Applied> {
+        let branch = &self.branch;
+        if let Some(dir) = workspace {
+            return move_workspace(common_dir, dir, branch, self.tip, new);
+        }
+        if checked_out(common_dir, branch).is_some() {
+            let why = format!("{branch} was checked out meanwhile; retry");
+            return Err(Refusal::InUse.error(why));
+        }
+        let name = format!("refs/heads/{branch}");
+        let why = format!("gitfold: rebase onto {}", self.onto_ref);
+        match git::worktree::set_ref(common_dir, &name, &new, Some(&self.tip), &why) {
+            Ok(()) => Ok(Applied::Done(new, Vec::new())),
+            // Git refused the swap: it moved meanwhile.
+            Err(_) if git::branch_tip(branch)?.id != self.tip => {
+                Err(Refusal::InUse.error(format!("{branch} moved meanwhile; retry")))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Whether a merge is among the commits it would replay (which aren't
@@ -484,8 +560,14 @@ impl Plan {
     /// Moves it (see the module doc): its base recorded, a conflict cleared
     /// or recorded. Not with a merge among its own commits, nor commits
     /// already pushed unless `yes`. `moving` is called once it is sure to
-    /// try. The caller holds `lock`.
-    pub fn run(&self, common_dir: &Path, yes: bool, moving: impl FnOnce()) -> Result<Moved> {
+    /// try, and says where the branch is checked out: its workspace (a
+    /// directory through the mount), or `None`. The caller holds `lock`.
+    pub fn run(
+        &self,
+        common_dir: &Path,
+        yes: bool,
+        moving: impl FnOnce() -> Result<Option<PathBuf>>,
+    ) -> Result<Moved> {
         let branch = &self.branch;
         let outcome = Moving {
             from: self.tip,
@@ -504,38 +586,37 @@ impl Plan {
         if !yes && let Some(pushed) = pushed {
             return Ok(Moved::Pushed(pushed));
         }
-        moving();
+        let workspace = moving()?;
         let upstream = (!self.on_history).then_some(self.base);
         settings::set_moving(common_dir, branch, Some(&outcome.encode()))?;
         // On an error (git may have moved it) the record stays, for
         // `recover`.
-        let rebased = match rebase::rebase(common_dir, branch, self.tip, self.onto, upstream)? {
-            rebase::Rebased::Done(new) => self.apply(common_dir, new)?,
-            conflict => conflict,
-        };
-        match rebased {
-            rebase::Rebased::Done(_) => outcome.finish(common_dir, branch)?,
-            rebase::Rebased::Conflict(_) => settings::set_moving(common_dir, branch, None)?,
-        }
-        Ok(match rebased {
-            rebase::Rebased::Done(tip) => {
-                clear_conflict(common_dir, branch)?;
-                let kept = count(common_dir, &[&tip.to_string(), &format!("^{}", self.onto)])?;
-                Moved::Done {
-                    kept,
-                    push: pushed.map(|p| p.push),
-                }
-            }
+        let new = match rebase::rebase(common_dir, branch, self.tip, self.onto, upstream)? {
+            rebase::Rebased::Done(new) => new,
             rebase::Rebased::Conflict(paths) => {
-                // As git quotes paths: a newline in one can't split it.
-                let paths: Vec<String> = (paths.iter())
-                    .map(|p| String::from_utf8_lossy(&crate::cli::quote(p)).into_owned())
-                    .collect();
+                settings::set_moving(common_dir, branch, None)?;
+                let paths = quoted(&paths);
                 let at = self.onto.to_string();
                 settings::set_conflict(common_dir, branch, Some((&at, &paths)))?;
-                Moved::Conflict(paths)
+                return Ok(Moved::Conflict(paths));
             }
-        })
+        };
+        match self.apply(common_dir, workspace.as_deref(), new)? {
+            Applied::Work(paths) => {
+                settings::set_moving(common_dir, branch, None)?;
+                Ok(Moved::Work(quoted(&paths)))
+            }
+            Applied::Done(tip, unmerged) => {
+                outcome.finish(common_dir, branch)?;
+                clear_conflict(common_dir, branch)?;
+                let kept = count(common_dir, &[&tip.to_string(), &format!("^{}", self.onto)])?;
+                Ok(Moved::Done {
+                    kept,
+                    push: pushed.map(|p| p.push),
+                    unmerged: quoted(&unmerged),
+                })
+            }
+        }
     }
 
     /// The conflict recorded for it, if it still holds: recorded against

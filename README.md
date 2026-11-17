@@ -132,7 +132,7 @@ gitfold writes into the repository: worktree registrations under
   mode gitfold depends on.
 - git with linked worktree and index v4 support (any git from the last decade;
   tested with 2.49). Moving branches built on branches (`gitfold parent
-  --update`, `--set`) needs git 2.38 or newer.
+  --update`, `--set`) needs git 2.40 or newer.
 - A full clone, or a partial clone (`git clone --filter=blob:none`, or
   `tree:0`; git 2.29 or newer) whose promisor remote gitfold can fetch from
   without a prompt (an ssh agent, a credential helper); see [Partial

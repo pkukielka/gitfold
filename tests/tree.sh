@@ -459,7 +459,7 @@ eq "  its base recorded" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/u
 edit_line g.txt 5 mine-too
 R switch -q api; sed -i '5s/.*/theirs-too/' "$REPO/g.txt"; R commit -qam "api: g again"; R switch -q main
 before=$(R rev-parse ui)
-check "uncommitted work in conflict: nothing moves (exit 4)" says 4 "ui's commits conflict with api's on g.txt" parent ui --update
+check "uncommitted work in conflict: nothing moves (exit 4)" says 4 "ui's uncommitted work is in the way of api's commits on g.txt" parent ui --update
 eq "  the branch where it was" "$before" "$(R rev-parse ui)"
 eq "  the work as it was" "mine-too" "$(sed -n 5p "$MNT/ui/g.txt")"
 check "  no rebase left in it" sh -c "! git -C '$MNT/ui' status | grep -q rebase"
@@ -469,6 +469,15 @@ W ui switch -q --detach
 check "git busy in the workspace: refused (exit 4)" says 4 "in its workspace" parent ui --update
 W ui switch -q ui
 check "  then moved" says 0 "moved 1 commit of ui onto api" parent ui --update
+# An untracked file where the parent adds one: in the way, nothing moves.
+echo mine >"$MNT/ui/n.txt"; on api n.txt theirs
+before=$(R rev-parse ui)
+check "an untracked file in the way: nothing moves (exit 4)" says 4 "ui's uncommitted work is in the way of api's commits on n.txt" parent ui --update
+eq "  the branch where it was" "$before" "$(R rev-parse ui)"
+eq "  the file as it was" "mine" "$(cat "$MNT/ui/n.txt")"
+check "  not recorded as a conflict" fails R config branch.ui.gitfoldConflict
+rm "$MNT/ui/n.txt"
+check "  moved once it is out of the way" says 0 "moved 1 commit of ui onto api" parent ui --update
 # Unmounted: mounted again where it last was, then moved.
 unmount_fs
 on api a.txt more

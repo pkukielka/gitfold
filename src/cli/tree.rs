@@ -224,10 +224,8 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
              --none` keeps its history as it is)"
         );
     }
-    let workspace = movable(common_dir, name)?;
-    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?
-        .checked_out_in(workspace);
-    match plan.run(common_dir, yes, || {})? {
+    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
+    match plan.run(common_dir, yes, || movable(common_dir, name))? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
             Ok(())
@@ -261,13 +259,16 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         return Ok(());
     }
     let old = tree.parent(name).map(String::from);
+    // Checked out in another git worktree: refused before anything changes
+    // (where its workspace is is found once it moves).
+    if let Some(follow::CheckedOut::Worktree(_)) = follow::checked_out(common_dir, name) {
+        movable(common_dir, name)?;
+    }
     let _moving = follow::lock(common_dir, name)?;
-    let workspace = movable(common_dir, name)?;
     // The plan first (git walks history; the tree lock isn't held for
     // that), on the old parent; a merge among its own commits is refused
     // before anything changes.
-    let plan = follow::Plan::new(common_dir, name, old.as_deref(), &tree.root_refs(), &full)?
-        .checked_out_in(workspace);
+    let plan = follow::Plan::new(common_dir, name, old.as_deref(), &tree.root_refs(), &full)?;
     if !plan.up_to_date() && plan.merges(common_dir)? {
         return said(name, short, &plan, follow::Moved::Merge);
     }
@@ -287,7 +288,9 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         settings::set_conflict(common_dir, name, None)?;
     }
     let moved = plan.run(common_dir, false, || {
-        println!("moves {} of {name} onto {short}", commits(plan.own))
+        let workspace = movable(common_dir, name)?;
+        println!("moves {} of {name} onto {short}", commits(plan.own));
+        Ok(workspace)
     })?;
     let paused = match follow.unwrap_or(true) {
         true => "; following paused",
@@ -307,6 +310,11 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
             println!("{name} is now built on {short}{paused}");
             said(name, short, &plan, moved)
         }
+        // Built on P, its work in the way (not recorded: retried as is).
+        follow::Moved::Work(_) => {
+            println!("{name} is now built on {short}");
+            said(name, short, &plan, moved)
+        }
         // Refused before anything was written (above), the count kept.
         follow::Moved::Merge => unreachable!("a merge refused before the write"),
         follow::Moved::UpToDate | follow::Moved::Done { .. } => {
@@ -321,7 +329,11 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
 fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> Result<()> {
     match moved {
         follow::Moved::UpToDate => Ok(()),
-        follow::Moved::Done { kept, push } => {
+        follow::Moved::Done {
+            kept,
+            push,
+            unmerged,
+        } => {
             println!("moved {} of {name} onto {parent}", commits(kept));
             if plan.own > kept {
                 println!(
@@ -332,8 +344,20 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
             if let Some(push) = push {
                 println!("its history was rewritten; force-push with: {push}");
             }
-            Ok(())
+            match unmerged.is_empty() {
+                true => Ok(()),
+                false => Err(Refusal::Changes.error(format!(
+                    "its uncommitted work, put back, conflicts on {}: resolve it in its \
+                     workspace (git keeps the work in the stash, `git stash list`)",
+                    unmerged.join(", ")
+                ))),
+            }
         }
+        follow::Moved::Work(paths) => Err(Refusal::Changes.error(format!(
+            "nothing moved: {name}'s uncommitted work is in the way of {parent}'s commits on {}: \
+             commit or stash it, then retry",
+            paths.join(", ")
+        ))),
         follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),
         follow::Moved::Merge => bail!(
             "{name}'s own commits include a merge, which gitfold doesn't move: rebase it by hand \
