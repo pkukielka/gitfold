@@ -298,12 +298,14 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         settings::set_follow(common_dir, name, follow.unwrap_or(true))?;
         settings::set_conflict(common_dir, name, None)?;
     }
-    let moved = plan.run(common_dir, false, || {
-        let workspace = movable(common_dir, name)
-            .inspect_err(|_| println!("{name} is now built on {short}"))?;
-        println!("moves {} of {name} onto {short}", commits(plan.own));
-        Ok(workspace)
-    })?;
+    // Refused or failed from here, it is built on P all the same.
+    let moved = plan
+        .run(common_dir, false, || {
+            let workspace = movable(common_dir, name)?;
+            println!("moves {} of {name} onto {short}", commits(plan.own));
+            Ok(workspace)
+        })
+        .inspect_err(|_| println!("{name} is now built on {short}"))?;
     let paused = match follow.unwrap_or(true) {
         true => "; following paused",
         false => "",
@@ -372,7 +374,8 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
         ))),
         follow::Moved::Refused(said) => Err(Refusal::Changes.error(format!(
             "nothing moved: git refused in {name}'s workspace; then: `gitfold parent {name} \
-             --update`\n{said}"
+             --update`{}{said}",
+            if said.is_empty() { "" } else { "\n" }
         ))),
         follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),
         follow::Moved::Merge => bail!(

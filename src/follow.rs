@@ -364,9 +364,11 @@ fn move_workspace(
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
         // Git's state, not its message: no rebase under way (HEAD on the
-        // branch), the branch where it was.
+        // branch, no operation's file: a ref locked by another git says
+        // nothing of this one), the branch where it was.
         let busy = crate::state::StateDir::of(common_dir, branch).git_busy();
-        if busy.is_none() && git::branch_tip(branch)?.id == tip {
+        let started = !matches!(busy, None | Some(git::worktree::GitBusy::RefLocked));
+        if !started && git::branch_tip(branch)?.id == tip {
             return Ok(Applied::Refused(said));
         }
         bail!(
