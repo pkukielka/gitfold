@@ -12,6 +12,7 @@
 
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use gix::ObjectId;
@@ -32,21 +33,20 @@ impl Private {
     pub fn live(&self, branch: &str, dir: &Path, index: &Path) -> Result<Live> {
         let _writing = self.lock.read();
         let id = crate::state::workspace_id(branch);
-        let copy = self.dir.join("live").join(&id);
+        // A copy of its own (two views may ask at once), removed after.
+        static COPIES: AtomicU64 = AtomicU64::new(0);
+        let n = COPIES.fetch_add(1, Ordering::Relaxed);
+        let copy = self.dir.join("live").join(format!("{id}.{n}"));
         std::fs::create_dir_all(copy.parent().expect("in live/"))?;
-        // Its lock too, if a git killed meanwhile left one.
-        let mut lock = copy.clone().into_os_string();
-        lock.push(".lock");
-        if let Err(e) = std::fs::remove_file(&lock)
-            && !crate::fsutil::not_found(&e)
-        {
-            return Err(e.into());
-        }
-        copy_index(index, &copy)?;
-        let git = || in_workspace(self, dir, &copy);
-        git::cmd::output_of(&mut git()?, &["add", "-A"], None)?;
-        let args = ["write-tree", "--missing-ok"];
-        let tree = oid(&git::cmd::output_of(&mut git()?, &args, None)?)?;
+        let tree = copy_index(index, &copy).and_then(|()| {
+            let git = || in_workspace(self, dir, &copy);
+            git::cmd::output_of(&mut git()?, &["add", "-A"], None)?;
+            let args = ["write-tree", "--missing-ok"];
+            oid(&git::cmd::output_of(&mut git()?, &args, None)?)
+        });
+        // Left if it fails: the private repository is made anew at each mount.
+        let _ = std::fs::remove_file(&copy);
+        let tree = tree?;
         let commit = self.commit(&tree, branch)?;
         // By id: branch names nest (`a`, `a/b`), refs can't.
         self.refs(format!("update refs/gitfold/live/{id} {commit}\n"))?;
@@ -58,22 +58,18 @@ impl Private {
 /// time: git tells racily clean entries by it (a file changed within the
 /// index's timestamp is checked). No index: git starts from an empty one.
 fn copy_index(index: &Path, copy: &Path) -> Result<()> {
-    let modified = match std::fs::metadata(index) {
-        Ok(m) => m.modified()?,
-        Err(e) if crate::fsutil::not_found(&e) => {
-            return match std::fs::remove_file(copy) {
-                Err(e) if !crate::fsutil::not_found(&e) => Err(e.into()),
-                _ => Ok(()),
-            };
-        }
-        Err(e) => return Err(e).with_context(|| format!("reading {}", index.display())),
+    let mut from = match std::fs::File::open(index) {
+        Ok(file) => file,
+        Err(e) if crate::fsutil::not_found(&e) => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("opening {}", index.display())),
     };
-    std::fs::copy(index, copy).with_context(|| format!("copying {}", index.display()))?;
-    std::fs::File::options()
-        .write(true)
-        .open(copy)?
-        .set_modified(modified)?;
-    Ok(())
+    let mut copying = || -> std::io::Result<()> {
+        let modified = from.metadata()?.modified()?;
+        let mut to = std::fs::File::create(copy)?;
+        std::io::copy(&mut from, &mut to)?;
+        to.set_modified(modified)
+    };
+    copying().with_context(|| format!("copying {} to {}", index.display(), copy.display()))
 }
 
 /// git in the workspace at `dir`, on index `index`, its objects going to the

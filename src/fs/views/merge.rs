@@ -13,7 +13,8 @@
 //! id, so conflict markers name the sides by id; the summary names the
 //! branches. The private repository's only refs are the view's: the tree it
 //! shows (`refs/gitfold/views/<view>`) and, until it shows it, the new one
-//! (`refs/gitfold/next/<view>`). It is made anew at each mount, and
+//! (`refs/gitfold/next/<view>`), by its branch's workspace id (`a` and `a/b`
+//! can't both be refs). It is made anew at each mount, and
 //! garbage-collected as git's `gc --auto` decides (more loose objects than
 //! `gc.auto`'s default): what no view shows goes. Missing objects aren't
 //! fetched: in a partial clone, gitfold fetches what a merge needs first, as
@@ -171,7 +172,7 @@ impl Private {
     /// The view of `branch`: its commit and tree `own` (the tip of `branch`
     /// or of its origin root) with `members` merged in turn. git is given
     /// commits by id, so conflict markers name the sides by id; the summary
-    /// names them by branch. Its commit is kept (`refs/gitfold/next/<branch>`)
+    /// names them by branch. Its commit is kept (`refs/gitfold/next/<id>`)
     /// until `shown` says it is the one shown.
     pub fn merge(
         &self,
@@ -226,7 +227,8 @@ impl Private {
             true => self.commit(&tree, branch)?,
             false => ours,
         };
-        self.refs(format!("update refs/gitfold/next/{branch} {commit}\n"))?;
+        let id = crate::state::workspace_id(branch);
+        self.refs(format!("update refs/gitfold/next/{id} {commit}\n"))?;
         Ok(Merged {
             tree,
             commit,
@@ -240,10 +242,11 @@ impl Private {
     /// pruning at once): what no view shows goes. A failure of that is only
     /// logged.
     pub fn shown(&self, branch: &str, commit: ObjectId) -> Result<()> {
-        let _collecting = self.lock.write();
+        let id = crate::state::workspace_id(branch);
         self.refs(format!(
-            "update refs/gitfold/views/{branch} {commit}\ndelete refs/gitfold/next/{branch}\n"
+            "update refs/gitfold/views/{id} {commit}\ndelete refs/gitfold/next/{id}\n"
         ))?;
+        let _collecting = self.lock.write();
         let packs = self.dir.join("objects/pack");
         let before = std::fs::metadata(&packs).and_then(|m| m.modified()).ok();
         let gc = self.run(&[
