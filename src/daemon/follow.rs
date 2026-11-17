@@ -115,9 +115,10 @@ fn walk(
         // landed (spec section 4): the root, the targets checked before.
         let on: Vec<ObjectId> = match git::resolve(parent) {
             Ok(on) => vec![on.id],
-            Err(_) => (crate::follow::checked_targets(&local, branch).iter())
-                .chain(&tree.root_refs())
-                .filter_map(|r| git::resolve(r).ok().map(|c| c.id))
+            Err(_) => (crate::follow::recorded_base(branch).into_iter())
+                .flat_map(|base| crate::follow::checked_targets(&local, branch, base))
+                .chain(tree.root_refs())
+                .filter_map(|r| git::resolve(&r).ok().map(|c| c.id))
                 .collect(),
         };
         let state = StateDir::of(common_dir, branch);

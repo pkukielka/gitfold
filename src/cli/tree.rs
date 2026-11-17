@@ -317,7 +317,7 @@ pub enum Followed {
 /// unmounted repository isn't mounted again. Its parent landed (`landed_in`,
 /// spec section 4): once the parent's branch is deleted, it is built on
 /// where the parent landed and moves there; while it exists, noted. A parent
-/// gone without landing pauses it (section 5).
+/// gone without landing is noted (section 5).
 pub fn follow_once(common_dir: &Path, name: &str) -> Followed {
     try_follow(common_dir, name).unwrap_or_else(|e| {
         let full = format!("{e:#}");
@@ -356,7 +356,11 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     // written first as `--set` does; else it keeps its commits (section 5).
     let (onto, landed) = match gone {
         false => (parent.to_string(), String::new()),
-        true => match landed_in(common_dir, &tree, &local, name, None)? {
+        // (A check that fails finds none: only noted, as when it finds none.)
+        true => match landed_in(common_dir, &tree, &local, name, None).unwrap_or_else(|e| {
+            log::warn!("{name}: whether its parent landed: {e:#}");
+            None
+        }) {
             Some(to) => {
                 let landed = landed_said(name, parent, &to, true, false);
                 let said = format!(
@@ -381,7 +385,7 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
         let _tree = follow::tree_lock(common_dir)?;
         let now = Tree::read(common_dir)?;
         if now.parent(name) != Some(parent) || now.check(name, &onto).is_err() {
-            let why = format!("{name}'s parent or {onto} changed meanwhile; retry");
+            let why = format!("{name}'s parent or {short} changed meanwhile; retry");
             return Err(Refusal::InUse.error(why));
         }
         follow::set_base(common_dir, name, plan.base)?;
@@ -490,7 +494,7 @@ fn landed_in(
             false => format!("refs/heads/{p}"),
         });
     let mut targets: Vec<String> = Vec::new();
-    let checked = follow::checked_targets(local, name);
+    let checked = follow::checked_targets(local, name, base);
     for target in own.into_iter().chain(checked).chain(roots) {
         if target != parent && !targets.contains(&target) && tree.check(name, &target).is_ok() {
             targets.push(target);

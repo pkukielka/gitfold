@@ -738,10 +738,12 @@ impl Checked {
 }
 
 /// The targets a landing of the parent of `branch` was checked against, as
-/// recorded (`Checked`): its parent's own parent among them, which a deleted
+/// recorded for `base` (`Checked`): its parent's own parent among them, which a deleted
 /// parent's settings don't keep (`git branch -D` drops them).
-pub fn checked_targets(local: &Local, branch: &str) -> Vec<String> {
-    let checked = local.landing(branch).as_deref().and_then(Checked::decode);
+pub fn checked_targets(local: &Local, branch: &str, base: ObjectId) -> Vec<String> {
+    let checked = (local.landing(branch).as_deref())
+        .and_then(Checked::decode)
+        .filter(|c| c.base == base);
     (checked.into_iter())
         .flat_map(|c| c.targets)
         .map(|(target, ..)| target)
@@ -897,6 +899,8 @@ fn squashed(
     let touching = String::from_utf8_lossy(&touching);
     let mut commits: Vec<(&str, &str)> = (touching.lines())
         .filter_map(|line| line.split_once(' '))
+        // The tip merged into already.
+        .filter(|(commit, _)| *commit != tip_hex)
         .collect();
     if commits.len() > MAX_TRIED {
         log::warn!(
