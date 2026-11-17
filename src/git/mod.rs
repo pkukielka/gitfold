@@ -228,11 +228,117 @@ pub fn branch_tip(name: &str) -> Result<Commit> {
     resolve(&format!("refs/heads/{name}"))
 }
 
+// Two questions about "the main branch" that look alike but must stay
+// separate (layers-design/15-tree-spec.md, section 2):
+// - `default_compare_target`: which commit to compare a branch with by
+//   default (`overlaps`). Local `main` and `origin/main` are DIFFERENT
+//   commits here: unpushed work on local `main` counts.
+// - `root_branch`: which branch is the root of the tree of branches built on
+//   branches (`tree`). Local `main` and `origin/main` are the SAME root here.
+// Merging them into one function broke `overlaps main` in a clone
+// (2026-11-16): tests/tree.sh "two questions about main" pins the
+// difference.
+
+/// The ref to compare with by default (`gitfold overlaps`): the remote's
+/// default branch (`origin/HEAD`, normally `origin/main`), else `main`. Not
+/// the branch's upstream: after `git push -u` that is its own remote branch,
+/// which its work is ahead of. Not `root_branch` (see the note above).
+pub fn default_compare_target(common_dir: &Path) -> Result<String> {
+    let out = cmd::command(common_dir)
+        .args(["rev-parse", "--abbrev-ref", "origin/HEAD"])
+        .output()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && !name.is_empty() && name != "origin/HEAD" {
+        return Ok(name);
+    }
+    match resolve("refs/heads/main") {
+        Ok(_) => Ok("main".to_string()),
+        Err(_) => bail!("no origin/HEAD and no branch main: name a target with --against"),
+    }
+}
+
+/// The root of the tree of branches, as a local branch name: `origin/HEAD`'s
+/// branch (`main` for `origin/main`), else `main`, else `master`, else
+/// `origin/main`'s or `origin/master`'s name; each only if it exists (a
+/// clone's `origin/HEAD` can point nowhere). `None`: no known root. Local
+/// `main` and `origin/main` are the same root. Not `default_compare_target`
+/// (see the note above).
+pub fn root_branch(common_dir: &Path) -> Option<String> {
+    let head = cmd::output(
+        common_dir,
+        &["symbolic-ref", "-q", "refs/remotes/origin/HEAD"],
+    )
+    .ok()
+    .map(|out| String::from_utf8_lossy(&out).trim().to_string());
+    let candidates = head.into_iter().chain(
+        [
+            "refs/heads/main",
+            "refs/heads/master",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/master",
+        ]
+        .map(String::from),
+    );
+    candidates
+        .filter(|refname| resolve(refname).is_ok())
+        .find_map(|refname| {
+            let name = (refname.strip_prefix("refs/heads/"))
+                .or_else(|| refname.strip_prefix("refs/remotes/origin/"))?;
+            Some(name.to_string())
+        })
+}
+
 /// Whether `refs/heads/<name>` exists.
 pub fn branch_exists(name: &str) -> bool {
     with_repo(|repo| {
         repo.try_find_reference(format!("refs/heads/{name}").as_str())
             .is_ok_and(|r| r.is_some())
+    })
+}
+
+/// The full ref that `name` stands for, as git takes it: a short name by
+/// git's rules (gitrevisions, "<refname>": `$GIT_DIR/<name>` for names
+/// like `HEAD`, then
+/// `refs/<name>`, `refs/tags/<name>`, `refs/heads/<name>`,
+/// `refs/remotes/<name>`, `refs/remotes/<name>/HEAD`, the first that
+/// exists), and a symbolic ref followed to the ref it points at
+/// (`origin/HEAD` stands for `refs/remotes/origin/main`, as `git rev-parse
+/// --symbolic-full-name` says).
+pub fn full_ref(name: &str) -> Option<String> {
+    with_repo(|repo| followed(repo, name))
+}
+
+fn followed(repo: &gix::Repository, name: &str) -> Option<String> {
+    let mut reference = repo.try_find_reference(name).ok()??;
+    // git gives up on longer chains of symbolic refs too.
+    for _ in 0..5 {
+        match reference.follow() {
+            None => return Some(reference.name().as_bstr().to_string()),
+            Some(next) => reference = next.ok()?,
+        }
+    }
+    None
+}
+
+/// The remote-tracking branch `<remote>/<branch>` of a configured remote, as
+/// a full ref (`origin`'s if there are several), if it exists and is a
+/// branch itself (`origin/HEAD` is a symbolic ref, not one). Never for
+/// `HEAD`, which git refuses as a branch name.
+pub fn remote_tracking(branch: &str) -> Option<String> {
+    if branch == "HEAD" {
+        return None;
+    }
+    with_repo(|repo| {
+        (repo.remote_names().iter())
+            .map(|remote| {
+                (
+                    *remote != "origin",
+                    format!("refs/remotes/{remote}/{branch}"),
+                )
+            })
+            .filter(|(_, full)| followed(repo, full).as_ref() == Some(full))
+            .min_by_key(|(not_origin, _)| *not_origin)
+            .map(|(_, full)| full)
     })
 }
 
