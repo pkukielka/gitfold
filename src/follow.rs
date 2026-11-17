@@ -32,7 +32,6 @@
 //!   the branch sits on that tip (rebased by hand).
 //! - **Merges** among its own commits aren't moved: rebased by hand.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -356,15 +355,14 @@ fn move_workspace(
     }
     let (tip_hex, new_hex) = (tip.to_string(), new.to_string());
     // Git refuses here too (paths unmerged meanwhile, say): nothing moved.
-    let stash = cmd::in_workspace(dir)?
-        .args(["stash", "create"])
-        .stdin(std::process::Stdio::null())
-        .output()?;
-    if !stash.status.success() {
-        let said = String::from_utf8_lossy(&stash.stderr).trim().to_string();
-        return Ok(Applied::Refused(said));
-    }
-    let work = String::from_utf8_lossy(&stash.stdout).trim().to_string();
+    let stash = match git(&["stash", "create"]) {
+        Ok(stash) => stash,
+        Err(e) => {
+            let said = e.downcast::<cmd::Failed>()?.stderr.trim().to_string();
+            return Ok(Applied::Refused(said));
+        }
+    };
+    let work = String::from_utf8_lossy(&stash).trim().to_string();
     if !work.is_empty() {
         let mut check = cmd::command(common_dir);
         let args = ["merge-tree", "--write-tree", "-z", "--name-only"];
@@ -387,28 +385,32 @@ fn move_workspace(
         }
     }
     let mut rebase = cmd::in_workspace(dir)?;
-    rebase
-        .env("GIT_EDITOR", ":")
-        .stdin(std::process::Stdio::null());
+    rebase.env("GIT_EDITOR", ":");
     let args = ["rebase", "-q", "--autostash", "--no-update-refs", "--onto"];
-    let out = rebase.args(args).args([&new_hex, &tip_hex]).output()?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if let Err(e) = cmd::output_of(
+        &mut rebase,
+        &[&args[..], &[&new_hex, &tip_hex]].concat(),
+        None,
+    ) {
+        let failed = e.downcast::<cmd::Failed>()?;
+        let said = failed.stderr.trim().to_string();
         // Git's state, not its message: no rebase under way (HEAD on the
         // branch, no rebase's directory: a lock another git holds says
         // nothing of this one), the branch where it was.
         let state = crate::state::StateDir::of(common_dir, branch);
-        let started = matches!(state.git_busy(), Some(GitBusy::HeadElsewhere { .. }))
-            || ["rebase-merge", "rebase-apply"]
-                .iter()
-                .any(|d| fs::symlink_metadata(state.admin.join(d)).is_ok());
+        let started = matches!(
+            state.git_busy(),
+            Some(
+                GitBusy::HeadElsewhere { .. } | GitBusy::Operation("rebase-merge" | "rebase-apply")
+            )
+        );
         if !started && git::branch_tip(branch)?.id == tip {
             return Ok(Applied::Refused(said));
         }
         bail!(
             "git rebase in {} stopped ({}), left as git leaves it: {said}",
             dir.display(),
-            out.status
+            failed.status
         );
     }
     // Moved (git exits 0 even if the work, put back, conflicted: then the

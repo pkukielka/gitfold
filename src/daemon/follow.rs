@@ -168,20 +168,25 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(String, bool)>
     let err = drain(child.stderr.take().expect("piped"));
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        let waited = child.try_wait();
+        match waited {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() <= TIMEOUT => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            _ => {}
         }
-        if started.elapsed() > TIMEOUT {
-            // SAFETY: a plain syscall, on the group of our own child.
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-            let _ = child.wait();
-            anyhow::bail!(
-                "gitfold parent {branch} --update --auto took longer than {}s: killed, what \
-                 git did left as it is",
-                TIMEOUT.as_secs()
-            );
-        }
-        thread::sleep(Duration::from_millis(50));
+        // Timed out, or it can't be waited for: killed with what it runs.
+        // SAFETY: a plain syscall, on the group of our own child.
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let _ = child.wait();
+        waited?;
+        anyhow::bail!(
+            "gitfold parent {branch} --update --auto took longer than {}s: killed, what git did \
+             left as it is",
+            TIMEOUT.as_secs()
+        );
     };
     let said = out.join().unwrap_or_default() + &err.join().unwrap_or_default();
     Ok((said, status.success()))

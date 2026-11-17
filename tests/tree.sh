@@ -265,6 +265,8 @@ on() { R switch -q "$1"; echo "$3" >>"$REPO/$2"; R add "$2"; R commit -qm "$1: $
 own() { R rev-list --count "$1..$2"; }
 # refs/gitfold-base/ui put back as it was ($1, or none), after a --set.
 put_base() { if [ -n "$1" ]; then R update-ref refs/gitfold-base/ui "$1"; else R update-ref -d refs/gitfold-base/ui; fi; }
+# branch.ui.gitfoldFollow put back as it was ($1, or unset), after a --set.
+put_follow() { if [ -n "$1" ]; then R config branch.ui.gitfoldFollow "$1"; else R config --unset branch.ui.gitfoldFollow || true; fi; }
 # git rebase commits: it needs a committer, as anywhere.
 identity() { R config user.name t; R config user.email t@t; }
 
@@ -379,8 +381,9 @@ check "a merge among its own commits: not moved" says 1 "ui's own commits includ
 R branch elsewhere main; on elsewhere e.txt e
 check "--set with such a merge: refused" says 1 "ui's own commits include a merge" parent ui --set elsewhere
 eq "  its parent unchanged" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
+follow=$(R config branch.ui.gitfoldFollow)
 check "--set where it sits already, merge and all: up to date" says 0 "ui is now built on main" parent ui --set main
-R config branch.ui.gitfoldParent refs/heads/api
+R config branch.ui.gitfoldParent refs/heads/api; put_follow "$follow"
 R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
 # Checked out in a git worktree: never moved by gitfold.
 R worktree add -q "$T/wt" ui
@@ -400,10 +403,10 @@ rm "$REPO/.git/hooks/post-rewrite"; R worktree remove "$T/wt"
 # A workspace's branch in a repository never mounted: mount it first.
 mkdir -p "$REPO/.git/gitfold/ui"
 check "a workspace's branch, never mounted: mount it first" says 1 "mount it first (\`gitfold mount\`)" parent ui --update
-base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set elsewhere)
+follow=$(R config branch.ui.gitfoldFollow); base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set elsewhere)
 check "--set, never mounted: written, then --update finishes" test "${r%% *} $([[ $r == *"ui is now built on elsewhere "*"isn't mounted: mount it first (\`gitfold mount\`), then: \`gitfold parent ui --update\`"* ]] && echo yes)" = "1 yes"
 eq "  its parent written" "refs/heads/elsewhere" "$(R config branch.ui.gitfoldParent)"
-R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"
+R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"; put_follow "$follow"
 rmdir "$REPO/.git/gitfold/ui"
 # A move a crash interrupted after git moved the branch: its base recorded.
 R update-ref refs/gitfold-base/ui main~1
@@ -500,9 +503,9 @@ eq "  the branch where it was" "$before" "$(R rev-parse ui)"
 R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui
 check "  said before its commits being pushed" says 4 "ui has a conflict left unresolved" parent ui --update
 R update-ref -d refs/remotes/origin/ui; R remote remove origin
-base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set main)
+follow=$(R config branch.ui.gitfoldFollow); base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set main)
 eq "--set with it: refused before it says what moves" "4 yes no" "${r%% *} $([[ $r == *"resolve it"* ]] && echo yes || echo no) $([[ $r == *"moves "* ]] && echo yes || echo no)"
-R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"
+R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"; put_follow "$follow"
 W ui reset -q -- g.txt
 check "  moved once resolved" says 0 "moved 1 commit of ui onto api" parent ui --update
 # An untracked file where the parent adds one: git refuses, nothing moves.
