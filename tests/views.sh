@@ -211,6 +211,26 @@ eq "a resting @live view wakes current" "e2" "$(cat "$MNT/@live/api/ui.txt")"
 eq "a resting @committed view wakes current" "web2" "$(cat "$MNT/@committed/api/web.txt")"
 }
 
+live_trees_side_by_side() {
+commit_on api main a.txt=$'a\n'
+for b in ui web db; do commit_on "$b" api "$b.txt=$b"; built_on "$b" api; done
+# git making a live tree takes 2 s: one after another, the three would
+# take 6 s, past the 5 s the first access waits.
+mkdir "$T/slow"
+printf '#!/bin/sh\ncase " $* " in *" add -A "*) sleep 2 ;; esac\nexec %s "$@"\n' \
+    "$(command -v git)" >"$T/slow/git"
+chmod +x "$T/slow/git"
+PATH=$T/slow:$PATH mount_fs
+for b in ui web db; do echo "$b: edited" >"$MNT/$b/$b.txt"; done
+s=$(date +%s%N)
+cat "$MNT/@live/api/.gitfold-conflicts" >/dev/null
+took=$(( ($(date +%s%N) - s) / 1000000 ))
+for b in ui web db; do
+    eq "the first access shows $b's edit" "$b: edited" "$(cat "$MNT/@live/api/$b.txt")"
+done
+check "made side by side (took $took ms)" test "$took" -lt 4500
+}
+
 unrelated_history() {
 commit_on api main a.txt=$'a\n'
 R update-ref refs/heads/lone "$(R commit-tree "$(R mktree </dev/null)" -m lone)"
@@ -258,6 +278,7 @@ section "views: the root shows opened branches" root_shows_opened_branches
 section "views: refreshes under readers" refresh_under_readers
 section "views: @live, the workspaces as they are" live_views
 section "views: resting, and woken current" resting_views
+section "views: @live makes its live trees side by side" live_trees_side_by_side
 section "views: a branch with unrelated history left out" unrelated_history
 section "views: garbage collection in a partial clone" gc_in_a_partial_clone
 finish

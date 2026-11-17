@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -15,6 +16,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use gix::ObjectId;
 use log::error;
+use parking_lot::Mutex;
 
 use super::lives::Lives;
 use super::members::{self, Bases, BuiltOn, Note, Refs, Tip};
@@ -31,6 +33,8 @@ use crate::tree::Tree;
 
 /// How often a view's refs are read.
 const INTERVAL: Duration = Duration::from_secs(1);
+/// How many live trees a view's watch makes at once.
+const LIVE_AT_ONCE: usize = 4;
 /// How often the tree is read again even when the config didn't change (a
 /// new `origin/HEAD` moves the root without touching it).
 const TREE_EVERY: u32 = 30;
@@ -124,42 +128,47 @@ impl Watch {
             let now = trees == Trees::Now;
             // Each workspace as it is: its live tree for its tip (one that
             // can't be read: its tip, noted). Opens the workspaces not open
-            // yet (`Workspaces::open_quietly`).
+            // yet (`Workspaces::open_quietly`). The members' and its own are
+            // made side by side (`live_trees`).
+            let mut asked: Vec<(&str, ObjectId)> = (refs.members.iter())
+                .map(|(member, tip, _)| (member.as_str(), tip.0))
+                .collect();
+            asked.push((branch, refs.local.0));
+            let mut made = live_trees(ctx, &asked, now);
+            let own_made = made.pop().expect("its own asked for");
             let mut notes = Vec::new();
             // Errors logged once, while they last.
             let before = std::mem::take(&mut self.live_failed);
             let failed = &mut self.live_failed;
             let view = &ctx.name;
-            let mut live =
-                |branch: &str, tip: &mut Tip| match ctx.lives.tip(ctx, branch, tip.0, now) {
-                    Ok(Some(live)) => *tip = live,
-                    Ok(None) => {}
-                    Err(e) => {
-                        // Logged once; noted as such (the error's words may vary).
-                        let e = format!("{e:#}");
-                        if before.get(branch) != Some(&e) {
-                            error!("view {view}: the workspace of {branch}: {e}");
-                        }
-                        failed.insert(branch.to_string(), e);
-                        notes.push(Note {
-                            kind: "unread",
-                            what: branch.to_string(),
-                            why: "its workspace (see the log); its uncommitted work is left out"
-                                .into(),
-                        });
+            let mut live = |branch: &str, tip: &mut Tip, made| match made {
+                Ok(Some(live)) => *tip = live,
+                Ok(None) => {}
+                Err(e) => {
+                    // Logged once; noted as such (the error's words may vary).
+                    let e = format!("{e:#}");
+                    if before.get(branch) != Some(&e) {
+                        error!("view {view}: the workspace of {branch}: {e}");
                     }
-                };
-            for (member, tip, _) in &mut refs.members {
-                live(member, tip);
+                    failed.insert(branch.to_string(), e);
+                    notes.push(Note {
+                        kind: "unread",
+                        what: branch.to_string(),
+                        why: "its workspace (see the log); its uncommitted work is left out".into(),
+                    });
+                }
+            };
+            for ((member, tip, _), made) in refs.members.iter_mut().zip(made) {
+                live(member, tip, made);
             }
             if refs.own == refs.local {
-                live(branch, &mut refs.own);
+                live(branch, &mut refs.own, own_made);
             } else {
                 // The view shows its origin root's files (its local branch only
                 // behind them): the workspace's work merged in first, against
                 // the local tip, if it has any.
                 let mut own = refs.local;
-                live(branch, &mut own);
+                live(branch, &mut own, own_made);
                 if own.1 != refs.local.1 {
                     let name = format!("{branch}'s workspace");
                     refs.members.insert(0, (name, own, refs.local.0));
@@ -196,11 +205,47 @@ impl Watch {
     }
 }
 
+/// The live trees of the workspaces of `asked` (branch, tip), in its order
+/// (`Lives::tip`): made side by side, at most `LIVE_AT_ONCE` at a time (each
+/// is git reading a workspace through the mount, mostly waiting on it), this
+/// thread making some too. Threads of their own, not a rayon pool: opening a
+/// workspace loads trees with `par_iter` under `Workspaces::creating`, and a
+/// pool thread waiting there could take up another live tree, which waits for
+/// that very lock.
+fn live_trees(ctx: &Context, asked: &[(&str, ObjectId)], now: bool) -> Vec<Result<Option<Tip>>> {
+    let next = AtomicUsize::new(0);
+    let made: Vec<Mutex<Option<Result<Option<Tip>>>>> =
+        asked.iter().map(|_| Mutex::default()).collect();
+    let work = || {
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            let Some(&(branch, tip)) = asked.get(i) else {
+                return;
+            };
+            *made[i].lock() = Some(ctx.lives.tip(ctx, branch, tip, now));
+        }
+    };
+    thread::scope(|scope| {
+        for _ in 1..asked.len().min(LIVE_AT_ONCE) {
+            // Without a thread (process limits), fewer at once.
+            let name = format!("view {}", ctx.name);
+            if (thread::Builder::new().name(name).spawn_scoped(scope, work)).is_err() {
+                break;
+            }
+        }
+        work();
+    });
+    (made.into_iter())
+        .map(|m| m.into_inner().expect("each made"))
+        .collect()
+}
+
 /// Keeps `view` current while it exists: every second, unless it rests (not
 /// accessed for `rests_after()`); an access wakes it (`ViewDir::reached`), and
 /// it is refreshed at once.
 pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
     let name = format!("view {}", ctx.name);
+    let mut walk = ctx.kind == Kind::Live;
     let spawned = thread::Builder::new().name(name).spawn(move || {
         loop {
             let Some(view) = view.upgrade() else { return };
@@ -219,9 +264,11 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
             let trees = if woken { Trees::Now } else { Trees::Quiet };
             // Requests wait for a woken view until it is refreshed.
             let mut waiting = woken;
+            let mut worked = false;
             match watch.next(&ctx, Some(&before), trees) {
                 Ok(next) => {
                     watch.last_error.clear();
+                    worked = true;
                     if let Some((shown, changed, commit)) = next {
                         // Waits for requests served from the old view: their
                         // replies can't land after the kernel is told.
@@ -254,6 +301,13 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
             if waiting {
                 view.rest.woke();
             }
+            // An `@live` view is walked once it first shows the workspaces
+            // (a refresh that worked): before, its walk would wait for them,
+            // taking wake slots from the requests (`ViewDir::reached`).
+            if walk && worked {
+                walk = false;
+                ctx.workspaces.walk(&ctx.name);
+            }
         }
     });
     if let Err(e) = spawned {
@@ -262,8 +316,8 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
 }
 
 /// `view` rests: the kernel forgets its root's entry, so that the next path
-/// through it asks again, which wakes it (an `@committed` view's are cached
-/// long; an `@live` view's ask again soon anyway).
+/// through it asks again, which wakes it (its entries are cached long; a
+/// listing in it asks gitfold anyway).
 fn resting(names: &NameChanges, view: &ViewDir) {
     names.entry(view.parent, name(view.name.as_bytes()));
 }

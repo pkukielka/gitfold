@@ -42,9 +42,6 @@ impl Kind {
     }
 }
 
-/// How long the kernel keeps an `@live` view's entries and attributes: it
-/// asks again soon, so an access wakes a dormant view (`ViewDir::reached`).
-pub const LIVE_TTL: Duration = Duration::from_secs(1);
 /// How long a view goes unaccessed before it rests (no refreshes): a minute,
 /// or `GITFOLD_VIEW_REST_SECS`.
 pub fn rests_after() -> Duration {
@@ -219,7 +216,6 @@ pub struct ViewDir {
     pub slot: u32,
     /// Below the mount root, e.g. `@committed/api`.
     pub name: String,
-    pub kind: Kind,
     /// The directory its root is listed in (`@committed`, or a namespace
     /// below it).
     pub parent: u64,
@@ -473,7 +469,7 @@ impl Views {
     /// of local branch `branch`, listed in directory `parent`: built now,
     /// then kept current (`watch`). EIO if it can't be built.
     pub fn open(&self, name: &str, branch: &str, kind: Kind, parent: u64) -> Result<u64, Errno> {
-        let _creating = self.creating.lock();
+        let creating = self.creating.lock();
         if let Some(view) = self.find(name) {
             return Ok(inode::view(view.slot, 0));
         }
@@ -505,7 +501,6 @@ impl Views {
         let view = Arc::new(ViewDir {
             slot,
             name: name.to_string(),
-            kind,
             parent,
             // An `@live` view opens with the tips: its first requests wait for
             // the workspaces (`ViewDir::reached`).
@@ -520,6 +515,13 @@ impl Views {
         drop(list);
         info!("view {name} opened");
         watch::spawn(Arc::downgrade(&view), ctx, watch);
+        drop(creating);
+        // Walked once, as a snapshot is: not when it wakes (what changed
+        // meanwhile the kernel was told to forget); an `@live` view once it
+        // shows the workspaces (`watch::spawn`).
+        if kind == Kind::Committed {
+            self.workspaces.walk(name);
+        }
         Ok(inode::view(slot, 0))
     }
 }

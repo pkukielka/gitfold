@@ -5,6 +5,7 @@
 //! - `follow`: following without an agent.
 //! - `serve`: the daemon in the foreground.
 
+pub mod commit_graph;
 pub mod control;
 pub mod follow;
 pub mod serve;

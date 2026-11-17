@@ -751,3 +751,73 @@ Notes:
   `-w` took 12.2 s, where the log shows the two sources being opened in this mount first
   (resumed 4 s apart). Not broken down further.
 - The landing check is cheap (56-73 ms), recorded or not.
+
+## 2026-11-17, views performance and commit-graph
+
+Same machine, clone and command as the section above (`bench/tree.sh ~/work/bench/chromium
+PermissionRequestManager`), before (main at a0b1f64, re-run today) and after four changes:
+
+- `@live` makes its members' live trees side by side (at most 4 at once) instead of one after
+  another;
+- views are walked by the metadata prewarm when they open, as snapshots are (cold runs now start
+  once it is done, as for `@HEAD`; the new column "prewarmed" is from the first access);
+- `@live`'s entries and attributes are cached long, as `@committed`'s (they were cached 1 s);
+- the mount daemon keeps the commit-graph current, at the lowest priority: git's own `git
+  maintenance run --task=commit-graph --auto`, which writes it with `git commit-graph write
+  --reachable --split` once 100 commits are missing. (Measured with an earlier form that ran
+  that write itself when a branch tip was missing; the write is the same.) **The bench clone has
+  had a commit-graph since this run** (written by gitfold at a mount, 15.4 s, 125 MB, 2.18M
+  commits): later baselines of commit walks on it are with one.
+
+The views rows were measured without a commit-graph first (its upkeep turned off), then all
+again with it: they agreed within a few %, the second shown. ms, first / repeat:
+
+| | before | after |
+|---|---:|---:|
+| `@committed/n` first access (made, merged) | 785-795 | 776-790 |
+| `@committed/n` prewarm done (from the first access) | none | 1856-1908 |
+| `@committed/n` find, cold / warm | 2876 / 748 | 352 / 356 |
+| `@committed/n` Claude grep | 9039 / 4618 | 5483 / 4141 |
+| `@committed/n` rg | 3682 / 432 | 2866 / 353 |
+| `@committed/n` reads | 94 / 29 | 60 / 30 |
+| `@live/n` first access | 5779-5802 | 5777-5793 |
+| `@live/n` complete (all three edits shown) | 16058-16571 | 6198-6287 |
+| `@live/n` prewarm done | none | 7275-7331 |
+| `@live/n` find | 2820 / 766 | 353 / 361 |
+| `@live/n` Claude grep | 8856 / 5304 | 5495 / 4149 |
+| `@live/n` rg | 3583 / 1410 | 2869 / 359 |
+| `@live/n` reads | 91 / 28 | 56 / 29 |
+| daemon RSS, `@committed` / `@live` runs | 85 / 262 MB | 146 / 320 MB |
+| `@live` resting, nothing changed, first access | 347, 4 | 3, 3 |
+| `@live` resting, an edit meanwhile, first access | 1066, 972 | 1072, 993 |
+| `gitfold changes -- AUTHORS` | 9043 / 9038 | 829 / 819 |
+| `gitfold changes -- docs` | 9047 / 9056 | 836 / 809 |
+
+`@HEAD`, refresh, the other rest rows, trial merges, moves and the landing check are unchanged
+(within noise): `@HEAD` find 349-353, rg 2606-2638 / 402-427; an edit shows in `@live` in
+3.99-4.05 s, a commit in `@committed` in 0.6-0.7 s; `branch t --from a --from c` 3.8 s;
+`parent u2 --update` 1.9 s clean, 4.8-4.9 s dirty; landing 56-77 ms. The commit-graph doesn't
+speed those: they are dominated by worktree work, not commit walks.
+
+Notes:
+
+- **The 1 s TTL was the cause of slow warm `@live` reads, verified:** a dedicated mount (`n` and
+  one child with a workspace, `@live/n` complete, then rg once cold and 1 or 3 times warm, op
+  counts from the daemon at unmount, the difference per warm run): before, each warm rg cost
+  278k lookups (and 1.4 s, 0.8-0.9 s when run back to back within the second); after, 0 lookups,
+  as `@committed` (0 before and after), and 0.35 s. A resting view still wakes on the next path
+  from above it (the kernel forgets its root's entry when it rests, as for `@committed`) and on
+  any listing in it.
+- **`@live` complete: 16 s to 6.2 s**, the three live trees made at once (each `git add -A`
+  through a workspace with nothing cached takes ~5 s alone, a little more side by side). The
+  first access still returns at the 5 s wake limit (5.8 s, the tips' merge included): the
+  slowest live tree takes longer than that.
+- **Cold reads in views now match `@HEAD`'s** (find 0.35 s vs 2.8-2.9 s): the walk loads the
+  metadata, 1.9 s after `@committed`'s first access, 7.3 s after `@live`'s (measured with its
+  walk waiting for the live trees; it now starts once they are in). The cost: the daemon holds
+  the walked nodes, ~60 MB more for a Chromium-sized view. A view is walked once, when it opens;
+  not when it wakes, and not for what a refresh changed (the kernel was told to forget those
+  paths; reading them loads them again).
+- **`changes -- PATH`: 9.0 s to 0.83 s.** The commit-graph write took 15.4 s at mount (nice 19,
+  idle I/O class), in the background; an incremental one (`--split`, a branch moved) takes
+  0.14 s. Requests never wait for it.

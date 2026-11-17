@@ -60,12 +60,13 @@ pub use removal::Removal;
 use snapshots::Snapshots;
 use stats::{Counters, IoTimer, bump};
 use view::Content;
-use views::{Kind, LIVE_TTL, ViewDir, Views};
+use views::{ViewDir, Views};
 use workspace::{Obj, Workspace};
 pub use workspaces::Workspaces;
 
-/// Snapshots never change, and workspaces change only through this file system
-/// (which the kernel sees); let the kernel cache them "forever". The root and
+/// Snapshots never change, workspaces change only through this file system
+/// (which the kernel sees), and views tell the kernel what changed
+/// (`views::watch`): let the kernel cache them "forever". The root and
 /// namespace directories gain names on first lookup; the kernel is told then
 /// (see `names`).
 const IMMUTABLE_TTL: Duration = Duration::from_secs(365 * 24 * 3600);
@@ -209,20 +210,10 @@ fn ws_node_ino(ino: u64) -> Option<(u32, u64)> {
     }
 }
 
-/// How long the kernel keeps entries and attributes in `view` (none: not
-/// in a view): `@live` views' briefly, so that an access reaches gitfold
-/// and wakes a resting one (`ViewDir::reached`).
-fn ttl(view: Option<&ViewDir>) -> &'static Duration {
-    match view.map(|v| v.kind) {
-        Some(Kind::Live) => &LIVE_TTL,
-        _ => &IMMUTABLE_TTL,
-    }
-}
-
-/// Replies with `attr` (kept `ttl`), or the error.
-fn reply_attr(result: Result<FileAttr, Errno>, ttl: &Duration, reply: ReplyAttr) {
+/// Replies with `attr` (kept long), or the error.
+fn reply_attr(result: Result<FileAttr, Errno>, reply: ReplyAttr) {
     match result {
-        Ok(attr) => reply.attr(ttl, &attr),
+        Ok(attr) => reply.attr(&IMMUTABLE_TTL, &attr),
         Err(e) => reply.error(e),
     }
 }
@@ -301,22 +292,18 @@ impl Filesystem for GitFold {
             self.names.changed(&self.names_dirs());
         }
         match result {
-            // Names go away only through `gitfold remove`, which tells the kernel.
-            Ok(attr) => reply.entry(ttl(view.as_deref()), &attr, Generation(0)),
-            // A negative entry (inode 0): cached forever in snapshots and workspaces
-            // (their names change only through this mount, which the kernel sees)
-            // and for dot names everywhere (never refs, nor revs), not at all for
-            // other names in the root and namespace directories. Without it, tools
-            // probing every directory for `.gitignore`, `.ignore` or `.git` (rg) ask
-            // again on every run.
+            // Names go away only through `gitfold remove` or a view's refresh, which
+            // tell the kernel.
+            Ok(attr) => reply.entry(&IMMUTABLE_TTL, &attr, Generation(0)),
+            // A negative entry (inode 0): cached forever in snapshots, workspaces and
+            // views (the kernel is told when their names change: by this mount, or a
+            // view's refresh), and for dot names everywhere (never refs, nor revs),
+            // not at all for other names in the root and namespace directories.
+            // Without it, tools probing every directory for `.gitignore`, `.ignore`
+            // or `.git` (rg) ask again on every run.
             Err(Errno::ENOENT) => {
                 let cached = !names_dir || name.as_bytes().starts_with(b".");
-                // In an `@live` view, briefly (`ttl`).
-                let ttl = if cached {
-                    ttl(view.as_deref())
-                } else {
-                    &NO_CACHE
-                };
+                let ttl = if cached { &IMMUTABLE_TTL } else { &NO_CACHE };
                 let negative = self.negative_attr();
                 reply.entry_with_ttls(&NO_CACHE, ttl, &negative, Generation(0))
             }
@@ -328,7 +315,7 @@ impl Filesystem for GitFold {
         bump(&self.counters.getattr);
         let view = self.view_of(ino.0);
         let _serving = view.as_deref().map(ViewDir::serving);
-        reply_attr(self.attr(ino.0), ttl(view.as_deref()), reply)
+        reply_attr(self.attr(ino.0), reply)
     }
 
     fn setattr(
@@ -364,7 +351,7 @@ impl Filesystem for GitFold {
             )?;
             self.attr(ino.0)
         });
-        reply_attr(result, &IMMUTABLE_TTL, reply)
+        reply_attr(result, reply)
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
@@ -669,7 +656,7 @@ impl Filesystem for GitFold {
                 INodeNo(child),
                 next,
                 OsStr::from_bytes(name),
-                ttl(view.as_deref()),
+                &IMMUTABLE_TTL,
                 &attr,
                 Generation(0),
             )

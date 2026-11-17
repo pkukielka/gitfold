@@ -257,6 +257,45 @@ check "and serves the repository" test -d "$MNT/@HEAD"
 check "unmount" "$BIN" unmount "$MNT"
 }
 
+the_commit_graph_kept_current() {
+graphs=$COMMON/objects/info/commit-graphs
+written() { grep -c "commit-graph: written" "$LOG"; }
+until_written() { # n: until the log says it was written n times
+    for _ in $(seq 200); do [ "$(written)" -ge "$1" ] && return; sleep 0.05; done
+}
+check "no commit-graph to begin with" fails test -e "$COMMON/objects/info/commit-graph" -o -e "$graphs"
+GITFOLD_COMMIT_GRAPH_SECS=1 mount_fs
+cat "$MNT/@HEAD/a.txt" >/dev/null
+sleep 2.5
+check "not for fewer missing commits than git's maintenance waits for (100)" fails test -e "$graphs"
+unmount_fs
+R config maintenance.commit-graph.auto 1
+GITFOLD_COMMIT_GRAPH_SECS=1 mount_fs
+until_written 1
+check "written at mount once enough are missing, split, as git maintenance writes it" test -f "$graphs/commit-graph-chain"
+check "git takes it" R commit-graph verify
+tip=$(R commit-tree -p main -m new "main^{tree}")
+R update-ref refs/heads/moved "$tip"
+until_written 2
+eq "written again once a branch moved" 2 "$(written)"
+sleep 2.5
+eq "not again while nothing moved" 2 "$(written)"
+unmount_fs
+for off in core.commitGraph=false maintenance.commit-graph.auto=0 maintenance.auto=false; do
+    rm -rf "$graphs"
+    R config "${off%%=*}" "${off#*=}"
+    : >"$LOG"
+    GITFOLD_COMMIT_GRAPH_SECS=1 mount_fs
+    cat "$MNT/@HEAD/a.txt" >/dev/null
+    sleep 2.5
+    check "none with $off" fails test -e "$graphs"
+    eq "nor said" 0 "$(written)"
+    unmount_fs
+    R config maintenance.commit-graph.auto 1
+    R config --unset core.commitGraph; R config --unset maintenance.auto
+done
+}
+
 section "background mount and unmount" background_mount_and_unmount
 section "unmount: paths, odd repository names, the daemon's directory" unmount_paths_odd_repository_names_the_d
 section "names that appear later, and negative entries" names_that_appear_later_and_negative_ent
@@ -266,4 +305,5 @@ section "unmount of a stopped daemon" unmount_of_a_stopped_daemon
 section "version" version
 section "an unmount that fails lets prewarm resume" an_unmount_that_fails_lets_prewarm_resum
 section "-C for mount: relative paths from there" c_for_mount_relative_paths_from_there
+section "the commit-graph kept current" the_commit_graph_kept_current
 finish

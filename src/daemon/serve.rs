@@ -9,7 +9,7 @@ use anyhow::Result;
 use fuser::{Config, MountOption};
 
 use super::control::{self, Request};
-use super::follow;
+use super::{commit_graph, follow};
 use crate::fs::{self, GitFold, NameChanges};
 use crate::mount_table;
 use crate::prewarm::{self, Prewarm};
@@ -135,6 +135,7 @@ pub fn run(options: Options) -> Result<()> {
     })?;
     // Once mounted: a move runs git through the mount.
     follow::spawn(common_dir.clone(), following);
+    commit_graph::spawn(common_dir.clone());
     session.run()?;
     Ok(())
 }

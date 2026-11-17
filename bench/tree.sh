@@ -7,8 +7,8 @@
 # through a temporary index) and workspaces, and a native git worktree for
 # comparison, and deletes them at the end; the checkout and other branches
 # are untouched. ms; "cold" = fresh mount (kernel FUSE caches empty), "warm" =
-# repeat; git pack files in page cache. Views have no prewarm; @HEAD is
-# measured after it, as bench.sh does.
+# repeat; git pack files in page cache. Cold runs start once the target's
+# metadata prewarm is done, as bench.sh does.
 set -euo pipefail
 
 REPO=$(realpath "$1")
@@ -93,6 +93,14 @@ remount() { # [env assignments for the daemon]
     for _ in $(seq 100); do mountpoint -q "$MNT" && break; sleep 0.05; done
 }
 
+prewarmed() { # ms-start target -> ms until its prewarm walk is done (60 s at most)
+    for _ in $(seq 1200); do
+        grep -qF "prewarm done for $MNT/$2:" "$LOG" && { ms "$1"; return; }
+        sleep 0.05
+    done
+    echo "timeout"
+}
+
 opened() { # target -> ms of the first access (a view: made, merged)
     local s; s=$(date +%s%N)
     case $1 in
@@ -160,16 +168,18 @@ echo "@live/$N conflicts: $(tr '\t\n' ' ;' <"$MNT/@live/$N/.gitfold-conflicts")"
 
 echo
 echo "1, 2. Bulk reads. first: the first access (@HEAD: its opening; a view: made, merged; @live waits"
-echo "      5 s at most); complete: until @live shows every member's uncommitted edit"
-printf '%-12s %-24s %8s %9s %9s %9s  %s\n' cmd target first complete cold warm results
+echo "      5 s at most); complete: until @live shows every member's uncommitted edit; prewarmed: until"
+echo "      the view's metadata prewarm is done (from the first access)"
+printf '%-12s %-24s %8s %9s %9s %9s %9s  %s\n' cmd target first complete prewarmed cold warm results
 for target in @HEAD "@committed/$N" "@live/$N"; do
     for c in "${ORDER[@]}"; do
         remount
-        s=$(date +%s%N); o=$(opened "$target"); full=-
+        s=$(date +%s%N); o=$(opened "$target"); full=- pw=-
         [ "$target" = "@live/$N" ] && full=$(live_complete "$s")ms
+        [ "$target" = @HEAD ] || pw=$(prewarmed "$s" "$target")ms
         read -r m1 r < <(run "$MNT/$target" "${CMDS[$c]}")
         read -r m2 _ < <(run "$MNT/$target" "${CMDS[$c]}")
-        printf '%-12s %-24s %6sms %9s %7sms %7sms  %s\n' "$c" "$target" "$o" "$full" "$m1" "$m2" "$r"
+        printf '%-12s %-24s %6sms %9s %9s %7sms %7sms  %s\n' "$c" "$target" "$o" "$full" "$pw" "$m1" "$m2" "$r"
     done
     echo "             daemon $(grep RssAnon /proc/$DAEMON/status | tr -s ' ')"
     unmount; echo "             $(grep -o "ops:.*" "$LOG")"
