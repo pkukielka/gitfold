@@ -22,7 +22,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         with_changes,
         from,
         parent,
-        no_follow: _,
+        no_follow,
         prewarm,
         track_reads,
         claude_hook: _,
@@ -31,8 +31,30 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     } = args;
     let name = name.as_deref().context("name the branch")?;
     if let Some(parent) = &parent {
-        super::tree::check_new_parent(repo, name, parent)?;
-        return Err(super::tree::not_implemented("gitfold branch --parent"));
+        // N5: created at P's tip, then built on P. With no upstream from P
+        // (`--no-track`, whatever `branch.autoSetupMerge` says): the parent
+        // isn't git's upstream (spec, section 2); pull and push stay the
+        // branch's own.
+        let full = super::tree::check_new_parent(repo, name, parent)?;
+        git::cmd::output(repo, &["branch", "--no-track", "--", name, &full])?;
+        // Following set either way: a deleted branch's settings may be left
+        // (T2). Without its settings the branch goes again, so the command
+        // can be retried.
+        let set = settings::set_parent(repo, name, &full)
+            .and_then(|()| settings::set_follow(repo, name, !no_follow))
+            .and_then(|()| set_branch_settings(repo, name, prewarm, track_reads));
+        if let Err(e) = set {
+            if let Err(undo) = git::cmd::output(repo, &["branch", "-D", "--", name]) {
+                log::warn!("deleting branch {name} again: {undo:#}");
+            }
+            return Err(e);
+        }
+        println!(
+            "created branch {name} on {} ({}); open it as <mountpoint>/{name}",
+            crate::tree::short(&full),
+            super::tree::following(!no_follow)
+        );
+        return Ok(());
     }
     if from.len() > 1 {
         return Err(super::tree::not_implemented(
@@ -45,8 +67,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     if with_changes {
         // `git branch` checks names itself; `update-ref` would take `HEAD`, and
         // refuse other bad names only after the copy.
-        let valid = git::cmd::output(&common_dir, &["check-ref-format", "--branch", name]);
-        ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
+        check_branch_name(&common_dir, name)?;
         // A workspace to copy: `from`, or the one we are in.
         let source = super::branch_or_current(from, repo).map_err(|_| {
             anyhow::anyhow!("not in a gitfold workspace: name the source with --from")
@@ -87,6 +108,14 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
         git::branch_exists(name) || !StateDir::of(common_dir, name).dir.exists(),
         "a workspace of an earlier branch {name} is still stored; `gitfold remove` it first"
     );
+    Ok(())
+}
+
+/// Refuses `name` if git doesn't take it as a branch name, as `git branch`
+/// does before anything else.
+pub fn check_branch_name(common_dir: &Path, name: &str) -> Result<()> {
+    let valid = git::cmd::output(common_dir, &["check-ref-format", "--branch", name]);
+    ensure!(valid.is_ok(), "{name:?} is not a valid branch name");
     Ok(())
 }
 
