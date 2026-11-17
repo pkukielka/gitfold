@@ -384,9 +384,24 @@ R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
 R worktree add -q "$T/wt" ui
 check "checked out in a git worktree: refused (exit 5)" says 5 "ui is checked out in $T/wt" parent ui --update
 R worktree remove "$T/wt"
+# Checked out in a git worktree meanwhile (by a hook, while it moves): git
+# rebase there, not --update (which refuses it).
+cat >"$REPO/.git/hooks/post-rewrite" <<EOF
+#!/bin/sh
+env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE git -C '$REPO' worktree add -q '$T/wt' ui
+EOF
+chmod +x "$REPO/.git/hooks/post-rewrite"
+before=$(R rev-parse ui)
+check "checked out in a git worktree meanwhile: git rebase there (exit 5)" says 5 "ui was checked out in $T/wt meanwhile: gitfold doesn't move it there; take the new commits with git rebase in it (git rebase api ui)" parent ui --update
+eq "  nothing moved" "$before" "$(R rev-parse ui)"
+rm "$REPO/.git/hooks/post-rewrite"; R worktree remove "$T/wt"
 # A workspace's branch in a repository never mounted: mount it first.
 mkdir -p "$REPO/.git/gitfold/ui"
 check "a workspace's branch, never mounted: mount it first" says 1 "mount it first (\`gitfold mount\`)" parent ui --update
+r=$(gf parent ui --set elsewhere)
+check "--set, never mounted: written, then --update finishes" test "${r%% *} $([[ $r == *"ui is now built on elsewhere "*"isn't mounted: mount it first (\`gitfold mount\`), then: \`gitfold parent ui --update\`"* ]] && echo yes)" = "1 yes"
+eq "  its parent written" "refs/heads/elsewhere" "$(R config branch.ui.gitfoldParent)"
+R config branch.ui.gitfoldParent refs/heads/api
 rmdir "$REPO/.git/gitfold/ui"
 # A move a crash interrupted after git moved the branch: its base recorded.
 R update-ref refs/gitfold-base/ui main~1
@@ -469,18 +484,36 @@ W ui switch -q --detach
 check "git busy in the workspace: refused (exit 4)" says 4 "in its workspace" parent ui --update
 W ui switch -q ui
 check "  then moved" says 0 "moved 1 commit of ui onto api" parent ui --update
-# An untracked file where the parent adds one: in the way, nothing moves.
+# A conflict left unresolved in the workspace (no git operation under way,
+# as a stash popped onto a change leaves it): neither committed nor stashed
+# until resolved. Refused before anything is said or moved.
+blob=$(W ui rev-parse HEAD:g.txt)
+printf '0 %s 0\tg.txt\n100644 %s 1\tg.txt\n100644 %s 2\tg.txt\n100644 %s 3\tg.txt\n' \
+    "$(printf '0%.0s' {1..40})" "$blob" "$blob" "$blob" | W ui update-index --index-info
+on api a.txt unresolved
+before=$(R rev-parse ui)
+check "a conflict left unresolved: resolve it (exit 4)" says 4 "ui has a conflict left unresolved in its workspace on g.txt: resolve it, then: \`gitfold parent ui --update\`" parent ui --update
+eq "  the branch where it was" "$before" "$(R rev-parse ui)"
+r=$(gf parent ui --set main)
+eq "--set with it: refused before it says what moves" "4 yes no" "${r%% *} $([[ $r == *"resolve it"* ]] && echo yes || echo no) $([[ $r == *"moves "* ]] && echo yes || echo no)"
+R config branch.ui.gitfoldParent refs/heads/api
+W ui reset -q -- g.txt
+check "  moved once resolved" says 0 "moved 1 commit of ui onto api" parent ui --update
+# An untracked file where the parent adds one: git refuses, nothing moves.
 echo mine >"$MNT/ui/n.txt"; on api n.txt theirs
 before=$(R rev-parse ui)
-check "an untracked file in the way: nothing moves (exit 4)" says 4 "ui's uncommitted work is in the way of api's commits on n.txt" parent ui --update
+check "an untracked file in the way: git refuses, nothing moves (exit 4)" says 4 "nothing moved: git refused in ui's workspace" parent ui --update
+check "  git's message said" says 4 "n.txt" parent ui --update
 eq "  the branch where it was" "$before" "$(R rev-parse ui)"
 eq "  the file as it was" "mine" "$(cat "$MNT/ui/n.txt")"
+check "  no rebase left in it" sh -c "! git -C '$MNT/ui' status | grep -q rebase"
 check "  not recorded as a conflict" fails R config branch.ui.gitfoldConflict
+check "  no move recorded" fails R config branch.ui.gitfoldMoving
 rm "$MNT/ui/n.txt"
 check "  moved once it is out of the way" says 0 "moved 1 commit of ui onto api" parent ui --update
 # The same where the parent renames a file onto an untracked one.
 echo mine >"$MNT/ui/ren.txt"; R switch -q api; R mv a.txt ren.txt; R commit -qm "api: rename"; R switch -q main
-check "an untracked file where the parent renames one to: in the way (exit 4)" says 4 "in the way of api's commits on ren.txt" parent ui --update
+check "an untracked file where the parent renames one to: git refuses (exit 4)" says 4 "nothing moved: git refused in ui's workspace" parent ui --update
 rm "$MNT/ui/ren.txt"
 check "  moved once it is out of the way" says 0 "moved 1 commit of ui onto api" parent ui --update
 # Unmounted: mounted again where it last was, then moved.

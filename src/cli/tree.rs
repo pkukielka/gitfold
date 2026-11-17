@@ -177,16 +177,18 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
 /// Where `name` moves: its workspace, through the mount (mounted again
 /// where it last was if it isn't now: `mount::mount_or_again`), or `None`
 /// (no worktree has it). Refused checked out in another git worktree (git
-/// rebase there), with a git operation under way in its workspace, or if
-/// the repository was never mounted.
+/// rebase there), with a git operation under way or a conflict left
+/// unresolved in its workspace, or if the repository was never mounted.
+/// (With `--set`, its parent is written by then: each refusal names
+/// `--update` to finish.)
 fn movable(common_dir: &Path, name: &str) -> Result<Option<PathBuf>> {
     match follow::checked_out(common_dir, name) {
         None => Ok(None),
         Some(follow::CheckedOut::Workspace) => {
             let Some(mount) = super::mount::mount_or_again(common_dir)? else {
                 bail!(
-                    "{} isn't mounted: mount it first (`gitfold mount`); {name} moves in its \
-                     workspace",
+                    "{} isn't mounted: mount it first (`gitfold mount`), then: `gitfold parent \
+                     {name} --update` ({name} moves in its workspace)",
                     common_dir.display()
                 );
             };
@@ -196,7 +198,17 @@ fn movable(common_dir: &Path, name: &str) -> Result<Option<PathBuf>> {
                     "{name}: {why} in its workspace; once it is done: `gitfold parent {name} --update`"
                 )));
             }
-            Ok(Some(mount.join(name)))
+            let dir = mount.join(name);
+            // Neither committed nor stashed while paths are unmerged: resolved.
+            let unmerged = follow::unmerged(&dir)?;
+            if !unmerged.is_empty() {
+                return Err(Refusal::Changes.error(format!(
+                    "{name} has a conflict left unresolved in its workspace on {}: resolve it, \
+                     then: `gitfold parent {name} --update`",
+                    follow::quoted(&unmerged).join(", ")
+                )));
+            }
+            Ok(Some(dir))
         }
         Some(follow::CheckedOut::Worktree(path)) => Err(Refusal::InUse.error(format!(
             "{name} is checked out in {path}: gitfold doesn't move it there; take the new \
@@ -287,7 +299,8 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         settings::set_conflict(common_dir, name, None)?;
     }
     let moved = plan.run(common_dir, false, || {
-        let workspace = movable(common_dir, name)?;
+        let workspace = movable(common_dir, name)
+            .inspect_err(|_| println!("{name} is now built on {short}"))?;
         println!("moves {} of {name} onto {short}", commits(plan.own));
         Ok(workspace)
     })?;
@@ -311,8 +324,12 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         }
         // Refused before anything was written (above), the count kept.
         follow::Moved::Merge => unreachable!("a merge refused before the write"),
-        // (With its work in the way: built on P, not recorded.)
-        follow::Moved::Work(_) | follow::Moved::UpToDate | follow::Moved::Done { .. } => {
+        // (With its work in the way, or git refusing: built on P, not
+        // recorded.)
+        follow::Moved::Work(_)
+        | follow::Moved::Refused(_)
+        | follow::Moved::UpToDate
+        | follow::Moved::Done { .. } => {
             println!("{name} is now built on {short}");
             said(name, short, &plan, moved)
         }
@@ -352,6 +369,10 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
             "nothing moved: {name}'s uncommitted work is in the way of {parent}'s commits on {}: \
              commit or stash it, then: `gitfold parent {name} --update`",
             paths.join(", ")
+        ))),
+        follow::Moved::Refused(said) => Err(Refusal::Changes.error(format!(
+            "nothing moved: git refused in {name}'s workspace; then: `gitfold parent {name} \
+             --update`\n{said}"
         ))),
         follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),
         follow::Moved::Merge => bail!(

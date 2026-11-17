@@ -32,8 +32,6 @@
 //!   the branch sits on that tip (rebased by hand).
 //! - **Merges** among its own commits aren't moved: rebased by hand.
 
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -275,22 +273,47 @@ enum Applied {
     /// conflicted all the same (git keeps the work in the stash).
     Done(ObjectId, Vec<Vec<u8>>),
     /// Not moved: its uncommitted work conflicts with the move on these
-    /// paths (untracked files included).
+    /// paths.
     Work(Vec<Vec<u8>>),
+    /// Not moved: git refused (untracked files in the way, say), saying
+    /// this.
+    Refused(String),
+}
+
+/// The paths with a conflict git left unresolved in workspace `dir`, as
+/// `git ls-files -u` reads them from its index.
+pub fn unmerged(dir: &Path) -> Result<Vec<Vec<u8>>> {
+    let out = cmd::output_of(
+        &mut cmd::in_workspace(dir)?,
+        &["ls-files", "-u", "-z"],
+        None,
+    )?;
+    // `<mode> <id> <stage>\t<path>`, one entry per stage.
+    let mut paths: Vec<Vec<u8>> = (out.split(|b| *b == 0))
+        .filter_map(|e| {
+            e.iter()
+                .position(|b| *b == b'\t')
+                .map(|t| e[t + 1..].to_vec())
+        })
+        .collect();
+    paths.dedup();
+    Ok(paths)
 }
 
 /// Moves the checkout of workspace `dir` (through the mount) of `branch`,
 /// at `tip`, to `new`, the uncommitted work carried along, all by git: if
 /// git was used there since (HEAD elsewhere, the branch moved), refused,
-/// to retry; untracked files where `new` adds files, or uncommitted work
-/// (as `git stash create` takes it, nothing changed) that conflicts with
-/// the move (`git merge-tree` of it onto `new`, from `tip`): nothing moves,
-/// the paths are said; else `git rebase --autostash --onto <new> <tip>`,
-/// which replays nothing (the branch was at `tip`), so the branch and its
-/// files go to `new`, and puts the work back (staged changes come back
-/// unstaged, as with git's autostash). If git stops half-way anyway (a
-/// hook, a race), its state stays as git leaves it: a rebase in progress,
-/// the work kept in the stash.
+/// to retry; uncommitted work (as `git stash create` takes it, nothing
+/// changed) that conflicts with the move (`git merge-tree` of it onto
+/// `new`, from `tip`): nothing moves, the paths are said; else
+/// `git rebase --autostash --onto <new> <tip>`, which replays nothing (the
+/// branch was at `tip`), so the branch and its files go to `new`, and puts
+/// the work back (staged changes come back unstaged, as with git's
+/// autostash). Git refusing (untracked files in the way, say) is read from
+/// its state, not its message: no rebase under way, the branch where it
+/// was; then nothing moved, and git's message is said. If git stops
+/// half-way (a hook, a race), its state stays as git leaves it: a rebase in
+/// progress, the work kept in the stash.
 fn move_workspace(
     common_dir: &Path,
     dir: &Path,
@@ -307,38 +330,7 @@ fn move_workspace(
         );
         return Err(Refusal::InUse.error(why));
     }
-    // A conflict git left unresolved there (a move's work put back, say).
-    let unmerged = cmd::nul_paths(&git(&["diff", "-z", "--name-only", "--diff-filter=U"])?);
-    if !unmerged.is_empty() {
-        return Ok(Applied::Work(unmerged));
-    }
-    let (tip, new_hex) = (tip.to_string(), new.to_string());
-    // Untracked files where the move adds files (renames included: the
-    // plumbing diff pairs none): git would refuse them.
-    let diff = ["diff-tree", "-r", "-z", "--name-only", "--diff-filter=A"];
-    let added = cmd::nul_paths(&cmd::output(
-        common_dir,
-        &[&diff[..], &[&tip, &new_hex]].concat(),
-    )?);
-    // In batches: a large import adds more paths than one command line holds.
-    for batch in added.chunks(1000) {
-        let mut ls = cmd::in_workspace(dir)?;
-        let args = [
-            "--literal-pathspecs",
-            "ls-files",
-            "-z",
-            "--others",
-            "--exclude-standard",
-        ];
-        ls.args(args)
-            .arg("--")
-            .args(batch.iter().map(|p| OsStr::from_bytes(p)));
-        // (The paths given already, as bytes.)
-        let in_the_way = cmd::nul_paths(&cmd::output_of(&mut ls, &[], None)?);
-        if !in_the_way.is_empty() {
-            return Ok(Applied::Work(in_the_way));
-        }
-    }
+    let (tip_hex, new_hex) = (tip.to_string(), new.to_string());
     let work = String::from_utf8_lossy(&git(&["stash", "create"])?)
         .trim()
         .to_string();
@@ -346,7 +338,7 @@ fn move_workspace(
         let mut check = cmd::command(common_dir);
         let args = ["merge-tree", "--write-tree", "-z", "--name-only"];
         let out = (check.args(args))
-            .args(["--merge-base", &tip, &new_hex, &work])
+            .args(["--merge-base", &tip_hex, &new_hex, &work])
             .output()?;
         match out.status.code() {
             Some(0) => {}
@@ -364,13 +356,28 @@ fn move_workspace(
         }
     }
     let mut rebase = cmd::in_workspace(dir)?;
-    rebase.env("GIT_EDITOR", ":");
+    rebase
+        .env("GIT_EDITOR", ":")
+        .stdin(std::process::Stdio::null());
     let args = ["rebase", "-q", "--autostash", "--no-update-refs", "--onto"];
-    cmd::output_of(&mut rebase, &[&args[..], &[&new_hex, &tip]].concat(), None)?;
+    let out = rebase.args(args).args([&new_hex, &tip_hex]).output()?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // Git's state, not its message: no rebase under way (HEAD on the
+        // branch), the branch where it was.
+        let busy = crate::state::StateDir::of(common_dir, branch).git_busy();
+        if busy.is_none() && git::branch_tip(branch)?.id == tip {
+            return Ok(Applied::Refused(said));
+        }
+        bail!(
+            "git rebase in {} stopped ({}), left as git leaves it: {said}",
+            dir.display(),
+            out.status
+        );
+    }
     // Moved (git exits 0 even if the work, put back, conflicted: then the
     // paths are unmerged, and the work stays in the stash).
-    let unmerged = cmd::nul_paths(&git(&["diff", "-z", "--name-only", "--diff-filter=U"])?);
-    Ok(Applied::Done(git::branch_tip(branch)?.id, unmerged))
+    Ok(Applied::Done(git::branch_tip(branch)?.id, unmerged(dir)?))
 }
 
 /// What a move of a branch did, or why it didn't.
@@ -393,13 +400,15 @@ pub enum Moved {
     /// Not moved: its commits conflict with the parent's on these paths
     /// (quoted; recorded).
     Conflict(Vec<String>),
-    /// Not moved: its uncommitted work (untracked files included) is in
-    /// the way on these paths (quoted; not recorded: it is the work's).
+    /// Not moved: its uncommitted work is in the way on these paths
+    /// (quoted; not recorded: it is the work's).
     Work(Vec<String>),
+    /// Not moved: git refused in its workspace, saying this (not recorded).
+    Refused(String),
 }
 
 /// `paths` as git quotes them (a newline in one can't split it).
-fn quoted(paths: &[Vec<u8>]) -> Vec<String> {
+pub fn quoted(paths: &[Vec<u8>]) -> Vec<String> {
     (paths.iter())
         .map(|p| String::from_utf8_lossy(&crate::cli::quote(p)).into_owned())
         .collect()
@@ -526,11 +535,21 @@ impl Plan {
         if let Some(dir) = workspace {
             return move_workspace(common_dir, dir, branch, self.tip, new);
         }
-        if checked_out(common_dir, branch).is_some() {
-            let why = format!(
-                "{branch} was checked out meanwhile; then: `gitfold parent {branch} --update`"
-            );
-            return Err(Refusal::InUse.error(why));
+        match checked_out(common_dir, branch) {
+            None => {}
+            Some(CheckedOut::Workspace) => {
+                return Err(Refusal::InUse.error(format!(
+                    "{branch} was checked out in a workspace meanwhile; then: `gitfold parent \
+                     {branch} --update`"
+                )));
+            }
+            Some(CheckedOut::Worktree(path)) => {
+                return Err(Refusal::InUse.error(format!(
+                    "{branch} was checked out in {path} meanwhile: gitfold doesn't move it \
+                     there; take the new commits with git rebase in it ({})",
+                    self.by_hand(crate::tree::short(&self.onto_ref))
+                )));
+            }
         }
         let name = format!("refs/heads/{branch}");
         let why = format!("gitfold: rebase onto {}", self.onto_ref);
@@ -604,6 +623,10 @@ impl Plan {
             Applied::Work(paths) => {
                 settings::set_moving(common_dir, branch, None)?;
                 Ok(Moved::Work(quoted(&paths)))
+            }
+            Applied::Refused(said) => {
+                settings::set_moving(common_dir, branch, None)?;
+                Ok(Moved::Refused(said))
             }
             Applied::Done(tip, unmerged) => {
                 outcome.finish(common_dir, branch)?;
