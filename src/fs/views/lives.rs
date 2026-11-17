@@ -79,9 +79,9 @@ impl Lives {
             let at = Instant::now();
             let (first, last) = match &made.changing {
                 Some((s, first, last)) if *s == signal => (*first, *last),
-                // Changing on: the burst goes on, unless it ended a while
-                // ago (unbuilt: the view rested).
-                Some((_, first, last)) if at - *last < QUIET => (*first, at),
+                // Changing on: the burst goes on, unless it ended long ago
+                // (unbuilt: the view rested).
+                Some((_, first, last)) if at - *last < AT_MOST => (*first, at),
                 _ => (at, at),
             };
             made.changing = Some((signal, first, last));

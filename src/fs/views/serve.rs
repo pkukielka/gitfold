@@ -80,14 +80,16 @@ pub enum Tick {
 }
 
 /// A request waiting for a view to wake, counted: at most half the CPUs
-/// (the request threads, by default) wait at once.
+/// (the request threads, by default), and at least one, wait at once.
 struct Waiting;
 
 static WAITING: AtomicUsize = AtomicUsize::new(0);
 
 impl Waiting {
     fn take() -> Option<Waiting> {
-        let most = std::thread::available_parallelism().map_or(1, |n| n.get() / 2);
+        let most = std::thread::available_parallelism()
+            .map_or(1, |n| n.get() / 2)
+            .max(1);
         let taken = WAITING.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
             (n < most).then_some(n + 1)
         });

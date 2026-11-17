@@ -5,7 +5,7 @@
 //! paths changed, so its long-cached entries, attributes and pages stay
 //! right.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -75,6 +75,8 @@ pub struct Watch {
     times: Times,
     bases: Bases,
     last_error: String,
+    /// The last error of each workspace whose live tree failed.
+    live_failed: HashMap<String, String>,
 }
 
 /// A file's modification time and size, if it has them.
@@ -122,23 +124,45 @@ impl Watch {
             // can't be read: its tip, noted). Opens the workspaces not open
             // yet (`Workspaces::open_quietly`).
             let mut notes = Vec::new();
+            let failed = &mut self.live_failed;
             let mut live =
                 |branch: &str, tip: &mut Tip| match ctx.lives.tip(ctx, branch, tip.0, now) {
-                    Ok(Some(live)) => *tip = live,
-                    Ok(None) => {}
-                    Err(e) => notes.push(Note {
-                        kind: "unread",
-                        what: branch.to_string(),
-                        why: format!("its workspace: {e:#}; the view has its tip"),
-                    }),
+                    Ok(found) => {
+                        failed.remove(branch);
+                        if let Some(live) = found {
+                            *tip = live;
+                        }
+                    }
+                    Err(e) => {
+                        // Logged once; noted as such (the error's words may vary).
+                        let e = format!("{e:#}");
+                        if failed.get(branch) != Some(&e) {
+                            error!("view {}: the workspace of {branch}: {e}", ctx.key);
+                            failed.insert(branch.to_string(), e);
+                        }
+                        notes.push(Note {
+                            kind: "unread",
+                            what: branch.to_string(),
+                            why: "its workspace (see the log); the view has its tip".into(),
+                        });
+                    }
                 };
-            // Not when the view shows its origin root's files (its local
-            // branch only behind them).
             if refs.own.0 == refs.local {
                 live(branch, &mut refs.own);
+            } else {
+                // The view shows its origin root's files (its local branch only
+                // behind them): the workspace's work merged in, against the
+                // local tip.
+                let mut own = (refs.local, git::resolve(&refs.local.to_string())?.tree);
+                live(branch, &mut own);
+                if own.0 != refs.local {
+                    refs.members.insert(0, (branch.clone(), own, refs.local));
+                }
             }
             for (member, tip, _) in &mut refs.members {
-                live(member, tip);
+                if member != branch {
+                    live(member, tip);
+                }
             }
             refs.notes.extend(notes);
         }
@@ -192,6 +216,8 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
             };
             let before = view.shown();
             let trees = if woken { Trees::Now } else { Trees::Quiet };
+            // Requests wait for a woken view until it is refreshed.
+            let mut waiting = woken;
             match watch.next(&ctx, Some(&before), trees) {
                 Ok(next) => {
                     watch.last_error.clear();
@@ -201,7 +227,7 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                         view.swap(shown, &changed);
                         // Woken: the requests waiting go on first; they hold
                         // their directories, which telling the kernel takes.
-                        if woken {
+                        if std::mem::take(&mut waiting) {
                             view.rest.woke();
                         }
                         tell(&ctx.names, &view, &changed);
@@ -219,7 +245,7 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                     }
                 }
             }
-            if woken {
+            if waiting {
                 view.rest.woke();
             }
         }
