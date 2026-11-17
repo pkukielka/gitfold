@@ -203,7 +203,7 @@ would share, and corrupt, the stored workspace changes. The mount is read-write
 Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
 error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress (for `parent`,
-also a move a conflict stopped), 5 in use or busy.
+also a move stopped by a conflict or by git), 5 in use or busy.
 Three commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
 `inbox --claude-hook rewake` (2, to wake the session).
