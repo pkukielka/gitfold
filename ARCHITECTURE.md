@@ -134,6 +134,7 @@ Then, per request (`fs/workspace/`):
 | `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory, registration and base pin; the files in it), ids, its base and branch files, paths below its root, whether an upper file matches a stored one |
 | `src/state/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/state/reads.rs` | the read log's format (`gitfold overlaps`) |
+| `src/state/agents.rs` | the agents present in a workspace (a file per session, 30 minutes), and what following told them |
 | `src/state/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`) |
 | `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
@@ -155,6 +156,7 @@ Then, per request (`fs/workspace/`):
 | `src/mount_table.rs` | the mount table: where a gitfold mount is (or a repository's), its source name (the repository) |
 | `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm` and `track-reads` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/serve.rs` | the daemon in the foreground: mounting with FUSE, the control requests it answers, until unmounted |
+| `src/daemon/follow.rs` | following without an agent: the tree walked every second, `parent B --update --auto` run as a child process |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process; the prewarm modes |
 | `src/cli/mod.rs` | what commands share: the repository (`repo`), the workspace the current directory is in (`branch_or_current`), printing paths as git quotes them (`quote`, `write_path`), the repository lock or a daemon request (`local_or_daemon`) |
 | `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
@@ -163,6 +165,7 @@ Then, per request (`fs/workspace/`):
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
 | `src/cli/claude/worktree.rs` | its `WorktreeCreate`/`WorktreeRemove` hooks (`branch`/`remove --claude-hook`): its worktrees as workspaces of the repository's mount (mounted again at `gitfold.mountpoint` if needed); a git worktree where gitfold isn't used |
+| `src/cli/claude/parent.rs` | its presence and turn-start hooks (`parent --claude-hook`): an agent present in its workspace, its branch following at its turn start |
 | `src/cli/claude/reads.rs` | its `PreToolUse` hook (`track-reads --claude-hook`): the files its Read tool and Bash commands read, sent to the mount's daemon |
 | `src/shell.rs` | what a shell command reads: the files simple viewers and `<` name, from its syntax tree (`rable`) |
 | `bin/gitfold`, `hooks/hooks.json`, `.claude-plugin/` | the Claude Code plugin (with `skills/`): its hooks, and the launcher they run, which uses a gitfold on `PATH` or downloads the release |
@@ -1258,6 +1261,40 @@ unmounted, and anything can read or write the files.
 nudge` drives tmux): tied to tmux and to how each harness reads input;
 `asyncRewake` does it inside the harness. Messages through the daemon's socket
 (would need it mounted, and a protocol instead of files).
+
+### Following: one policy, at safe moments
+
+**What:** a branch that follows its parent takes the parent's new commits by
+itself (`src/cli/tree.rs` `follow_once`, which moves it as `gitfold parent
+--update` does, `src/follow.rs`). It runs at an agent's turn start (the
+`UserPromptSubmit` hook, `parent --claude-hook user-prompt-submit`, whose
+output becomes the agent's context), and in the daemon (`src/daemon/follow.rs`):
+every second it walks the tree, each branch before its children, and moves a
+branch whose workspace has no agent present and was idle for a few seconds
+(no writes through the mount, `Workspace::writes`; no git operation under
+way), or a branch without a workspace once its parent moved. An agent is
+present while a file of its own in the workspace's state is younger than 30
+minutes (`src/state/agents.rs`): the session and tool-call hooks refresh it,
+session end and a subagent's stop remove it.
+
+**Why:**
+
+- **One policy:** the daemon runs `gitfold parent B --update --auto`
+  (hidden), the same `follow_once` as the turn start: a conflict recorded
+  against the parent's tip isn't retried, pushed commits are never moved, the
+  repository is never mounted again. Two policies (the daemon's checks and
+  `--update`'s) drifted in review on each of these.
+- **A child process, not a thread:** the move runs git in the workspace
+  through the daemon's own mount. In a child, the daemon holds nothing FUSE
+  requests need meanwhile, and a git that hangs is killed with its process
+  group after ten minutes, its state left as git leaves it. It is
+  `/proc/self/exe`, which an upgrade in place leaves.
+- **Presence is current:** a workspace that once had an agent was treated as
+  agent-driven forever; the timeout covers sessions that die without ending.
+  One file per session or subagent, so a subagent's stop leaves its session.
+- **Told once:** a pause is said in full once per session (`told/<session>`),
+  then as a one-line reminder each turn; moves the daemon made are said at
+  the next turn start (`followed`).
 
 ## Rejected ideas (index)
 

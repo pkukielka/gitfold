@@ -121,6 +121,11 @@ pub fn set_base(common_dir: &Path, branch: &str, at: ObjectId) -> Result<()> {
     set_ref(common_dir, &base_ref(branch), at)
 }
 
+/// Where the own commits of `branch` start, as recorded.
+pub fn recorded_base(branch: &str) -> Option<ObjectId> {
+    rev(&base_ref(branch))
+}
+
 /// Forgets where the own commits of `branch` start (it has no parent).
 pub fn drop_base(common_dir: &Path, branch: &str) -> Result<()> {
     drop_ref(common_dir, &base_ref(branch))

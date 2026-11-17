@@ -9,6 +9,7 @@ use anyhow::Result;
 use fuser::{Config, MountOption};
 
 use super::control::{self, Request};
+use super::follow;
 use crate::fs::{self, GitFold, NameChanges};
 use crate::mount_table;
 use crate::prewarm::{self, Prewarm};
@@ -94,6 +95,7 @@ pub fn run(options: Options) -> Result<()> {
         .ok();
     let removal = fs.removal();
     let workspaces = fs.workspaces();
+    let following = fs.workspaces();
     let mounted = mountpoint.clone();
     let session = fuser::Session::new(fs, &mountpoint, &config)?;
     // Mounted: where and how commands mount it again (`cli::mount::mount_again`).
@@ -131,6 +133,8 @@ pub fn run(options: Options) -> Result<()> {
             }
         })?;
     }
+    // Once mounted: a move runs git through the mount.
+    follow::spawn(common_dir.clone(), following);
     session.run()?;
     Ok(())
 }

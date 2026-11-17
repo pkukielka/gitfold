@@ -2,9 +2,11 @@
 //! (fusermount), signals.
 //!
 //! - `control`: the control socket.
+//! - `follow`: following without an agent.
 //! - `serve`: the daemon in the foreground.
 
 pub mod control;
+pub mod follow;
 pub mod serve;
 
 use std::fs;

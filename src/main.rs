@@ -257,6 +257,11 @@ fn run() -> Result<i32> {
         Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
+        // As a hook, it finds the repository from Claude Code's input.
+        Command::Parent(cli::tree::ParentArgs {
+            claude_hook: Some(event),
+            ..
+        }) => cli::claude::parent_hook(event)?,
         Command::Parent(args) => cli::tree::parent(&cli::repo()?, args)?,
         Command::Sync(_) => return usage(cli::tree::guessed("sync")),
         Command::Pull(_) => return usage(cli::tree::guessed("pull")),
