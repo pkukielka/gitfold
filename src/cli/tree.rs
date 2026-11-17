@@ -335,8 +335,9 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
     let local = settings::Local::read_checked(common_dir)?;
     if plan.up_to_date() {
-        // Rebased by hand after a conflict: forgotten, as `--update` does.
-        if local.conflict(name).is_some() {
+        // Rebased by hand: its base recorded and a conflict forgotten, as
+        // `--update` does (written only then).
+        if follow::recorded_base(name) != Some(plan.onto) || local.conflict(name).is_some() {
             plan.run(common_dir, false, || Ok(None))?;
         }
         return Ok(Followed::Nothing);

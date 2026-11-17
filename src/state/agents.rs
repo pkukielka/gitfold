@@ -53,7 +53,7 @@ impl StateDir {
         // Those of agents gone without a word (expired) go.
         for entry in fs::read_dir(self.agents())?.flatten() {
             if !fresh(&entry) {
-                remove(&entry.path())?;
+                let _ = fs::remove_file(entry.path());
             }
         }
         Ok(())
@@ -61,6 +61,8 @@ impl StateDir {
 
     /// Agent `id` left the workspace.
     pub fn unmark_agent(&self, id: &str) -> Result<()> {
+        // What it was told goes with it.
+        remove(&self.told_file(id))?;
         remove(&self.agents().join(workspace_id(id)))
     }
 

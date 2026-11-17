@@ -49,6 +49,8 @@ struct Seen {
     /// The state last tried: its tip, its parent's, its workspace's
     /// writes.
     tried: Option<(ObjectId, ObjectId, Option<u64>)>,
+    /// The pause it last logged: the same one isn't logged again.
+    paused: String,
 }
 
 /// Starts the thread following the branches of `common_dir`, mounted with
@@ -98,6 +100,7 @@ fn walk(
             writes,
             since: Instant::now(),
             tried: None,
+            paused: String::new(),
         });
         if seen.writes != writes {
             (seen.writes, seen.since) = (writes, Instant::now());
@@ -118,7 +121,7 @@ fn walk(
             continue;
         }
         seen.tried = Some(now);
-        update(common_dir, &state, tip.id);
+        update(common_dir, &state, tip.id, &mut seen.paused);
     }
     Ok(())
 }
@@ -141,6 +144,8 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<String> {
         .arg("-C")
         .arg(common_dir)
         .args(["parent", branch, "--update", "--auto"])
+        // What it says, not its log, is what the agent is told.
+        .env("RUST_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -168,16 +173,20 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<String> {
 
 /// Moves the branch of `state` (at `tip`): a move (the branch isn't at
 /// `tip` any more) logged and kept for its agent, anything else said
-/// logged as a pause.
-fn update(common_dir: &Path, state: &StateDir, tip: ObjectId) {
+/// logged as a pause, unless it is the one logged last (`paused`).
+fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, paused: &mut String) {
     let branch = &state.branch;
     let said = run_update(common_dir, branch).unwrap_or_else(|e| format!("{e:#}\n"));
     if git::branch_tip(branch).is_ok_and(|now| now.id != tip) {
+        paused.clear();
         info!("following: {}", said.trim_end().replace('\n', "; "));
         if let Err(e) = state.add_followed(&said) {
             warn!("following: {branch}: keeping the move for its agent: {e:#}");
         }
-    } else if !said.trim().is_empty() {
+    } else if said.trim().is_empty() {
+        paused.clear();
+    } else if said != *paused {
         warn!("following {branch}: {}", said.trim_end());
+        *paused = said;
     }
 }
