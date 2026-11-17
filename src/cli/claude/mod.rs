@@ -6,7 +6,10 @@
 //!   `WorktreeRemove`).
 //! - `reads`: the files its Read tool and Bash commands read, for read
 //!   tracking (`PreToolUse`).
+//! - `parent`: following at an agent's turn start, and its presence
+//!   (`SessionStart`, `SessionEnd`, `SubagentStop`, `UserPromptSubmit`).
 
+mod parent;
 mod reads;
 mod worktree;
 
@@ -16,6 +19,7 @@ use anyhow::Result;
 
 use super::hook::field;
 
+pub use parent::{ParentHook, parent_hook, tool_used};
 pub use reads::reads_hook;
 pub use worktree::{worktree_create, worktree_remove};
 

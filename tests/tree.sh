@@ -461,7 +461,8 @@ edit_line() { sed -i "$2s/.*/$3/" "$MNT/ui/$1"; }
 workspaces() {
 identity
 seq 1 10 >"$REPO/g.txt"; R add g.txt; R commit -qm "main: g"
-R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+# Not following: the daemon would move it by itself (see daemon_follows).
+R branch api; "$BIN" -C "$REPO" branch ui --parent api --no-follow >/dev/null
 mount_fs
 echo one >"$MNT/ui/u.txt"; W ui add u.txt; W ui commit -qm "ui: one"
 edit_line g.txt 2 mine; echo dirty >"$MNT/ui/d.txt"
@@ -527,6 +528,136 @@ eq "  its files moved" "more" "$(cat "$MNT/ui/a.txt" | tr '\n' ' ' | sed 's/ $//
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
 }
 
+# Following at an agent's turn start, and its presence (the plugin's hooks:
+# parent --claude-hook EVENT, inbox --claude-hook post-tool-use).
+# Hook $1 (of command $2) run as Claude Code runs it in workspace ui, with
+# input fields $3 (`"key":"value",...`): its output on one line.
+hook() { printf '{%s"cwd":"%s"}' "${3:+$3,}" "$MNT/ui" | (cd / && "$BIN" "$2" --claude-hook "$1" 2>&1) | tr '\n' ' '; }
+turn() { hook user-prompt-submit parent '"session_id":"s1"'; }
+agents() {
+AGENTS=$REPO/.git/gitfold/ui/agents
+identity
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+mount_fs
+echo one >"$MNT/ui/u.txt"; W ui add u.txt; W ui commit -qm "ui: one"
+hook session-start parent '"session_id":"s1"' >/dev/null
+eq "session start: the agent present" "s1" "$(cat "$AGENTS/s1")"
+eq "a turn start, nothing new: nothing said" "" "$(turn)"
+on api n.txt new
+r=$(turn)
+check "a turn start: the parent's new commits taken" test "$([[ $r == *"ui took its parent's new commits: moved 1 commit of ui onto api"* ]] && echo yes)" = yes
+check "  ui sits on api" R merge-base --is-ancestor api ui
+eq "  its files moved" "new" "$(cat "$MNT/ui/n.txt")"
+eq "  the next turn: nothing said" "" "$(turn)"
+on api u.txt theirs
+r=$(turn)
+check "a conflict: said in full once" test "$([[ $r == "gitfold: following paused: ui's commits conflict with api's on u.txt. Rebase by hand (git rebase api ui)"* ]] && echo yes)" = yes
+eq "  then a one-line reminder each turn" "gitfold: following still paused: conflict on u.txt (see \`gitfold parent\`) " "$(turn)"
+eq "  and again" "gitfold: following still paused: conflict on u.txt (see \`gitfold parent\`) " "$(turn)"
+r=$(hook user-prompt-submit parent '"session_id":"s2"')
+check "  another session: in full" test "$([[ $r == "gitfold: following paused: ui's commits conflict"* ]] && echo yes)" = yes
+"$BIN" -C "$REPO" parent ui --no-follow >/dev/null
+eq "not following: nothing said" "" "$(turn)"
+"$BIN" -C "$REPO" parent ui --follow >/dev/null
+W ui rebase -q api -X theirs >/dev/null 2>&1
+eq "rebased by hand: nothing said" "" "$(turn)"
+check "  the conflict forgotten" fails R config branch.ui.gitfoldConflict
+# Presence: one file per session or subagent, refreshed by its hooks.
+hook post-tool-use inbox '"session_id":"s1","agent_id":"a1"' >/dev/null
+eq "a subagent's tool call: it is present" "a1" "$(cat "$AGENTS/a1")"
+hook subagent-stop parent '"session_id":"s1","agent_id":"a1"' >/dev/null
+check "its stop: gone" test ! -e "$AGENTS/a1"
+check "  its session stays" test -e "$AGENTS/s1"
+touch -d '2 hours ago' "$AGENTS/s1"; : >"$AGENTS/old"; touch -d '2 hours ago' "$AGENTS/old"
+hook post-tool-use inbox '"session_id":"s1"' >/dev/null
+check "a tool call refreshes it" test -n "$(find "$AGENTS/s1" -mmin -1)"
+check "  expired ones go" test ! -e "$AGENTS/old"
+hook session-end parent '"session_id":"other"' >/dev/null
+check "another session's end: stays" test -e "$AGENTS/s1"
+hook session-end parent '"session_id":"s1"' >/dev/null
+check "session end: gone" test ! -e "$AGENTS/s1"
+eq "outside a workspace: nothing, exit 0" "0 " "$(cd / && printf '{"cwd":"/"}' | "$BIN" parent --claude-hook user-prompt-submit 2>&1; echo "$? ")"
+check "--claude-hook: hidden" lacks 0 "claude-hook" parent --help
+check "--claude-hook with a branch: refused" says 2 "cannot be used with" parent ui --claude-hook session-start
+"$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
+}
+
+# Following without an agent: the daemon moves a branch once its
+# workspace is idle and no agent is present, a branch without a workspace
+# when its parent moves, each before its children.
+# Waits up to 20 s for `$@` to succeed.
+until_ok() { for _ in $(seq 80); do "$@" >/dev/null 2>&1 && return; sleep 0.25; done; false; }
+daemon_follows() {
+AGENTS=$REPO/.git/gitfold/ui/agents
+identity
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+"$BIN" -C "$REPO" branch leaf --parent ui >/dev/null
+mount_fs
+echo one >"$MNT/ui/u.txt"; W ui add u.txt; W ui commit -qm "ui: one"
+check "a branch without a workspace: moved when its parent moves" until_ok R merge-base --is-ancestor ui leaf
+hook session-start parent '"session_id":"s1"' >/dev/null
+on api n.txt new
+sleep 6
+check "an agent present: not moved" fails R merge-base --is-ancestor api ui
+# The session dies without ending: no hook for longer than the timeout.
+touch -d '31 minutes ago' "$AGENTS/s1"
+check "the agent gone (timed out): moved" until_ok R merge-base --is-ancestor api ui
+eq "  its files moved, through the mount" "new" "$(cat "$MNT/ui/n.txt")"
+check "  its child after it" until_ok R merge-base --is-ancestor ui leaf
+check "  logged" until_ok grep -q "following: moved 1 commit of ui onto api" "$LOG"
+r=$(turn)
+check "  said at the agent's next turn start" test "$([[ $r == *"since your last turn, ui took its parent's new commits: moved 1 commit of ui onto api"* ]] && echo yes)" = yes
+eq "  once" "" "$(turn)"
+hook session-end parent '"session_id":"s1"' >/dev/null
+# Writes in the workspace hold it off until it is idle.
+on api n.txt newer
+for i in $(seq 16); do echo "$i" >"$MNT/ui/w.txt"; sleep 0.25; done
+check "written to: not moved" fails R merge-base --is-ancestor api ui
+check "  idle: moved" until_ok R merge-base --is-ancestor api ui
+eq "  the work carried along" "16" "$(cat "$MNT/ui/w.txt")"
+# A conflict: paused, logged once, nothing moved.
+on api u.txt theirs
+check "a conflict: logged" until_ok grep -q "following ui: .*following paused: ui.s commits conflict with api.s on u.txt" "$LOG"
+check "  nothing moved" fails R merge-base --is-ancestor api ui
+sleep 3
+eq "  logged once" "1" "$(grep -c "following ui: " "$LOG")"
+"$BIN" -C "$REPO" parent leaf --no-follow >/dev/null
+W ui rebase -q api -X theirs >/dev/null 2>&1
+sleep 5
+check "not following: not moved" fails R merge-base --is-ancestor ui leaf
+"$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
+}
+
+# --update --auto (hidden): the automation's policy, as the daemon and an
+# agent's turn start take the parent's new commits.
+update_auto() {
+identity; on main f.txt base
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+on ui u.txt mine
+check "--auto needs --update" says 2 "--update" parent ui --auto
+check "--auto with --yes: refused" says 2 "cannot be used with" parent ui --update --auto --yes
+check "--auto: hidden" lacks 0 "--auto" parent --help
+eq "up to date: nothing said" "0 " "$(gf parent ui --update --auto)"
+on api a.txt new
+check "moved: said" says 0 "moved 1 commit of ui onto api" parent ui --update --auto
+on api u.txt theirs
+check "a conflict: paused (exit 4)" says 4 "following paused: ui's commits conflict with api's on u.txt" parent ui --update --auto
+# Its commit replaced by one that doesn't conflict, the parent as it was.
+R branch -f ui ui~1; on ui v.txt other
+check "a recorded conflict: not tried again" says 4 "following paused: ui's commits conflict with api's on u.txt" parent ui --update --auto
+check "  --update tries it" says 0 "moved 1 commit of ui onto api" parent ui --update
+check "  then it is forgotten" fails R config branch.ui.gitfoldConflict
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui
+on api b.txt more
+check "pushed commits: paused (exit 4)" says 4 "following paused: 1 commit is pushed" parent ui --update --auto
+check "  nothing moved" fails R merge-base --is-ancestor api ui
+check "  --update --yes moves them" says 0 "moved 1 commit of ui onto api" parent ui --update --yes
+R update-ref -d refs/remotes/origin/ui
+mount_fs; ls "$MNT/ui" >/dev/null; unmount_fs
+on api c.txt more
+check "a workspace, unmounted: refused (exit 4)" says 4 "isn't mounted: mount it first" parent ui --update --auto
+check "  not mounted again" fails mountpoint -q "$MNT"
+}
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
 section "tree: rules R (the root)" the_root
@@ -539,4 +670,7 @@ section "tree: moves (--update, --set)" moves
 section "tree: pushed commits" pushed
 section "tree: what isn't moved, and crashes" not_moved
 section "tree: workspaces moved through the mount" workspaces
+section "tree: --update --auto" update_auto
+section "tree: following at turn start, agent presence" agents
+section "tree: following without an agent (the daemon)" daemon_follows
 finish

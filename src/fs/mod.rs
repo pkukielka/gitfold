@@ -62,7 +62,7 @@ use stats::{Counters, IoTimer, bump};
 use view::Content;
 use views::{ViewDir, Views};
 use workspace::{Obj, Workspace};
-use workspaces::Workspaces;
+pub use workspaces::Workspaces;
 
 /// Snapshots never change, and workspaces change only through this file system
 /// (which the kernel sees); let the kernel cache them "forever". The root and

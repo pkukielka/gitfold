@@ -66,6 +66,14 @@ pub struct ParentArgs {
     /// With --update: move commits that are pushed already.
     #[arg(long, requires = "update")]
     pub yes: bool,
+    // As the daemon and agents' turn starts take them (`follow_once`).
+    #[arg(long, hide = true, requires = "update", conflicts_with = "yes")]
+    pub auto: bool,
+    // As Claude Code's hooks (`session-start`, `session-end`,
+    // `subagent-stop`, `user-prompt-submit`): an agent's presence in its
+    // workspace, and following at its turn start (`cli::claude::parent`).
+    #[arg(long, value_enum, value_name = "EVENT", exclusive = true, hide = true)]
+    pub claude_hook: Option<super::claude::ParentHook>,
 }
 
 /// `gitfold parent`: the checks of the rules table (S1-S6, F6), then shows
@@ -90,7 +98,10 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         return set(&common_dir, &name, parent, follow);
     }
     if args.update {
-        update(&common_dir, &name, args.yes)?;
+        match args.auto {
+            true => update_auto(&common_dir, &name)?,
+            false => update(&common_dir, &name, args.yes)?,
+        }
         // Changed only once the update went through.
         if args.follow || args.no_follow {
             settings::set_follow(&common_dir, &name, args.follow)?;
@@ -175,17 +186,22 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
 }
 
 /// Where `name` moves: its workspace, through the mount (mounted again
-/// where it last was if it isn't now: `mount::mount_or_again`), or `None`
-/// (no worktree has it). Refused checked out in another git worktree (git
-/// rebase there), with a git operation under way or a conflict left
-/// unresolved in its workspace, or if the repository was never mounted.
+/// where it last was if it isn't now and `again`: `mount::mount_or_again`),
+/// or `None` (no worktree has it). Refused checked out in another git
+/// worktree (git rebase there), with a git operation under way or a
+/// conflict left unresolved in its workspace, or if the repository isn't
+/// mounted (and never was, or not `again`).
 /// (With `--set`, its parent is written by then: each refusal names
 /// `--update` to finish.)
-fn movable(common_dir: &Path, name: &str) -> Result<Option<PathBuf>> {
+fn movable(common_dir: &Path, name: &str, again: bool) -> Result<Option<PathBuf>> {
     match follow::checked_out(common_dir, name) {
         None => Ok(None),
         Some(follow::CheckedOut::Workspace) => {
-            let Some(mount) = super::mount::mount_or_again(common_dir)? else {
+            let mount = match again {
+                true => super::mount::mount_or_again(common_dir)?,
+                false => crate::mount_table::mount_of(common_dir)?,
+            };
+            let Some(mount) = mount else {
                 bail!(
                     "{} isn't mounted: mount it first (`gitfold mount`), then: `gitfold parent \
                      {name} --update` ({name} moves in its workspace)",
@@ -236,13 +252,127 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
         );
     }
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    match plan.run(common_dir, yes, || movable(common_dir, name))? {
+    match plan.run(common_dir, yes, || movable(common_dir, name, true))? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
             Ok(())
         }
         moved => said(name, short, &plan, moved),
     }
+}
+
+/// `gitfold parent NAME --update --auto`: its parent's new commits taken as
+/// the automation takes them (`follow_once`), if it follows its parent: a
+/// move said, a pause refused (exit 4).
+fn update_auto(common_dir: &Path, name: &str) -> Result<()> {
+    // F6, S4: only a branch with a parent.
+    let tree = Tree::read(common_dir)?;
+    let refuse = |r| refused("gitfold parent", name, "", r);
+    tree.check_follow(name).map_err(refuse)?;
+    match follow_once(common_dir, name) {
+        Followed::Nothing => Ok(()),
+        Followed::Moved(said) => {
+            print!("{said}");
+            Ok(())
+        }
+        Followed::Paused { full, .. } => {
+            Err(Refusal::Changes.error(format!("following paused: {full}")))
+        }
+    }
+}
+
+/// What following did for a branch at a safe moment (`follow_once`).
+pub enum Followed {
+    /// Nothing to take, or it doesn't follow (F1, F2).
+    Nothing,
+    /// Its parent's new commits taken: what `--update` says.
+    Moved(String),
+    /// Following paused: why in full, and in one line.
+    Paused { full: String, short: String },
+}
+
+/// Takes its parent's new commits for `name`, if it follows its parent
+/// (spec section 3): the automation's policy (`--update --auto`, the
+/// daemon, an agent's turn start). As `--update` without `--yes`, but a
+/// conflict recorded against the parent's tip isn't tried again (paused
+/// until the parent moves on, or it is rebased by hand; forgotten once it
+/// is up to date), a move under way is waited for (up to a minute), and an
+/// unmounted repository isn't mounted again.
+pub fn follow_once(common_dir: &Path, name: &str) -> Followed {
+    try_follow(common_dir, name).unwrap_or_else(|e| {
+        let full = format!("{e:#}");
+        let short = full.lines().next().unwrap_or_default().to_string();
+        Followed::Paused { full, short }
+    })
+}
+
+fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
+    let follows = |tree: &Tree| tree.follows(name) && !tree.parent_gone(name);
+    if !follows(&Tree::read(common_dir)?) {
+        return Ok(Followed::Nothing);
+    }
+    // A move under way (the daemon's, begun before the agent came): waited
+    // for, so it doesn't go on into the turn.
+    let started = std::time::Instant::now();
+    let _moving = loop {
+        match follow::lock(common_dir, name) {
+            Err(e) if Refusal::of(&e) == Some(Refusal::InUse) => {
+                if started.elapsed() >= std::time::Duration::from_secs(60) {
+                    let short = "a move is under way".to_string();
+                    let full = format!("a move of {name} is under way; `gitfold parent` once done");
+                    return Ok(Followed::Paused { full, short });
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            lock => break lock?,
+        }
+    };
+    let tree = Tree::read(common_dir)?;
+    let Some(parent) = tree.parent(name).filter(|_| follows(&tree)) else {
+        return Ok(Followed::Nothing);
+    };
+    let short = crate::tree::short(parent);
+    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
+    let local = settings::Local::read_checked(common_dir)?;
+    if plan.up_to_date() {
+        // Rebased by hand: its base recorded and a conflict forgotten, as
+        // `--update` does (written only then).
+        if follow::recorded_base(name) != Some(plan.onto) || local.conflict(name).is_some() {
+            plan.run(common_dir, false, || Ok(None))?;
+        }
+        return Ok(Followed::Nothing);
+    }
+    let moved = match plan.conflict(common_dir, &local)? {
+        Some(paths) => follow::Moved::Conflict(paths),
+        None => plan.run(common_dir, false, || movable(common_dir, name, false))?,
+    };
+    let summary = match &moved {
+        follow::Moved::UpToDate => return Ok(Followed::Nothing),
+        follow::Moved::Done { .. } => None,
+        follow::Moved::Conflict(paths) => Some(format!("conflict on {}", paths.join(", "))),
+        follow::Moved::Pushed(pushed) => Some(pushed_count(pushed)),
+        follow::Moved::Work(paths) => Some(format!(
+            "uncommitted work in the way on {}",
+            paths.join(", ")
+        )),
+        follow::Moved::Merge => Some("a merge among its own commits".to_string()),
+        follow::Moved::Refused(_) => Some("git refused in its workspace".to_string()),
+    };
+    // A conflict as `gitfold parent` says it.
+    let full = match &moved {
+        follow::Moved::Conflict(paths) => Some(conflict_said(name, short, &plan, paths)),
+        _ => None,
+    };
+    let mut out = String::new();
+    let said = said_to(&mut out, name, short, &plan, moved).map_err(|e| format!("{e:#}"));
+    Ok(match summary {
+        // Moved, its work put back conflicting maybe.
+        None => Followed::Moved(out + &said.err().map(|e| e + "\n").unwrap_or_default()),
+        Some(short) => Followed::Paused {
+            full: (full.or(said.err())).unwrap_or_else(|| short.clone()),
+            short,
+        },
+    })
 }
 
 /// `gitfold parent NAME --set P` (P as `given`): P its parent, following it
@@ -273,7 +403,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // Checked out in another git worktree: refused before anything changes
     // (where its workspace is is found once it moves).
     if let Some(follow::CheckedOut::Worktree(_)) = follow::checked_out(common_dir, name) {
-        movable(common_dir, name)?;
+        movable(common_dir, name, true)?;
     }
     let _moving = follow::lock(common_dir, name)?;
     // The plan first (git walks history; the tree lock isn't held for
@@ -301,7 +431,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // Refused or failed from here, it is built on P all the same.
     let moved = plan
         .run(common_dir, false, || {
-            let workspace = movable(common_dir, name)?;
+            let workspace = movable(common_dir, name, true)?;
             println!("moves {} of {name} onto {short}", commits(plan.own));
             Ok(workspace)
         })
@@ -341,6 +471,21 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
 /// What a move of `name` onto `parent` (short) did, or why it didn't, said
 /// (on standard output) or refused.
 fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> Result<()> {
+    let mut out = String::new();
+    let result = said_to(&mut out, name, parent, plan, moved);
+    print!("{out}");
+    result
+}
+
+/// `said`, its lines written to `out`.
+fn said_to(
+    out: &mut String,
+    name: &str,
+    parent: &str,
+    plan: &follow::Plan,
+    moved: follow::Moved,
+) -> Result<()> {
+    use std::fmt::Write;
     match moved {
         follow::Moved::UpToDate => Ok(()),
         follow::Moved::Done {
@@ -348,15 +493,13 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
             push,
             unmerged,
         } => {
-            println!("moved {} of {name} onto {parent}", commits(kept));
+            writeln!(out, "moved {} of {name} onto {parent}", commits(kept))?;
             if plan.own > kept {
-                println!(
-                    "({} already in {parent}: dropped)",
-                    commits(plan.own - kept)
-                );
+                let dropped = commits(plan.own - kept);
+                writeln!(out, "({dropped} already in {parent}: dropped)")?;
             }
             if let Some(push) = push {
-                println!("its history was rewritten; force-push with: {push}");
+                writeln!(out, "its history was rewritten; force-push with: {push}")?;
             }
             match unmerged.is_empty() {
                 true => Ok(()),
@@ -390,13 +533,17 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
     }
 }
 
+/// How many of its commits are `pushed`: `2 commits are pushed`.
+fn pushed_count(pushed: &follow::Pushed) -> String {
+    let are = if pushed.count == 1 { "is" } else { "are" };
+    format!("{} {are} pushed", commits(pushed.count))
+}
+
 /// Why `name` doesn't move: `pushed`.
 fn pushed_said(name: &str, pushed: &follow::Pushed) -> String {
-    let are = if pushed.count == 1 { "is" } else { "are" };
     format!(
-        "{} {are} pushed. `gitfold parent {name} --update --yes` moves them; then force-push \
-         with: {}",
-        commits(pushed.count),
+        "{}. `gitfold parent {name} --update --yes` moves them; then force-push with: {}",
+        pushed_count(pushed),
         pushed.push
     )
 }
