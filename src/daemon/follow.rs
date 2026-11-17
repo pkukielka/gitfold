@@ -46,7 +46,7 @@ struct Seen {
     /// it is that.
     writes: Option<u64>,
     since: Instant,
-    /// The state last tried: its tip, its parent's and the root's, its
+    /// The state last tried: its tip, its parent's (gone: the root's), its
     /// workspace's writes.
     tried: Option<(ObjectId, Vec<ObjectId>, Option<u64>)>,
     /// The pause it last logged: the same one isn't logged again.
@@ -111,11 +111,14 @@ fn walk(
         let Ok(tip) = git::branch_tip(branch) else {
             continue; // the branch gone meanwhile
         };
-        // Its parent's tip (none: gone, T3) and the root's, where the parent
-        // may land (spec section 4).
-        let on: Vec<ObjectId> = (std::iter::once(parent.to_string()).chain(tree.root_refs()))
-            .filter_map(|r| git::resolve(&r).ok().map(|c| c.id))
-            .collect();
+        // Its parent's tip; gone (T3), the root's, where the parent may
+        // have landed (spec section 4).
+        let on: Vec<ObjectId> = match git::resolve(parent) {
+            Ok(on) => vec![on.id],
+            Err(_) => (tree.root_refs().iter())
+                .filter_map(|r| git::resolve(r).ok().map(|c| c.id))
+                .collect(),
+        };
         let state = StateDir::of(common_dir, branch);
         let now = (tip.id, on, writes);
         if seen.tried.as_ref() == Some(&now) || state.agent_present() {

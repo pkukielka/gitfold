@@ -761,15 +761,15 @@ pub fn landing(
     let mut found = None;
     for target in targets {
         let Some(tip) = rev(target) else { continue };
-        let mut since = None;
-        for (t, at, yes) in before.iter().flat_map(|c| &c.targets) {
-            if t == target && is_ancestor(common_dir, *at, tip)? {
-                since = Some((*at, *yes));
+        // Checked at that tip, or one before it (still in its history).
+        let since = match (before.iter().flat_map(|c| &c.targets)).find(|(t, ..)| t == target) {
+            Some(&(_, at, yes)) if at == tip || is_ancestor(common_dir, at, tip)? => {
+                Some((at, yes))
             }
-        }
+            _ => None,
+        };
         let yes = match since {
-            Some((_, true)) => true,
-            Some((at, false)) if at == tip => false,
+            Some((at, yes)) if yes || at == tip => yes,
             _ => landed(common_dir, base, tip, since.map(|(at, _)| at), fresh)?,
         };
         checked.targets.push((target.clone(), tip, yes));
@@ -816,11 +816,12 @@ fn landed(
     // The oldest commit of the target's first-parent line after the base
     // (and `since`): a merge has the base as a second parent; on the line,
     // as its first.
-    let mut args = vec![tip.to_string(), format!("^{base}")];
+    let mut args = ["rev-list", "--first-parent", "--parents"]
+        .map(String::from)
+        .to_vec();
+    args.extend([tip.to_string(), format!("^{base}")]);
     args.extend(since.map(|at| format!("^{at}")));
-    let args: Vec<&str> = (["rev-list", "--first-parent", "--parents"].into_iter())
-        .chain(args.iter().map(String::as_str))
-        .collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let line = cmd::output(common_dir, &args)?;
     let line = String::from_utf8_lossy(&line);
     let first_parent = line.lines().last().and_then(|l| l.split(' ').nth(1));

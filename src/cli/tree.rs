@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use gix::ObjectId;
 
 use crate::follow;
 use crate::git;
@@ -143,7 +144,7 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
             Err(e) => log::warn!("{name}: whether it can take its parent's commits: {e:#}"),
         }
         let local = settings::Local::read_checked(&common_dir)?;
-        match landed_in(&common_dir, &tree, &local, &name) {
+        match landed_in(&common_dir, &tree, &local, &name, None) {
             Ok(Some(to)) => {
                 let gone = tree.parent_gone(&name);
                 let parent = tree.parent(&name).expect("landed: a parent");
@@ -355,7 +356,7 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     // written first as `--set` does; else it keeps its commits (section 5).
     let (onto, landed) = match gone {
         false => (parent.to_string(), String::new()),
-        true => match landed_in(common_dir, &tree, &local, name)? {
+        true => match landed_in(common_dir, &tree, &local, name, None)? {
             Some(to) => {
                 let landed = landed_said(name, parent, &to, true, false);
                 let said = format!(
@@ -392,10 +393,12 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
         if gone {
             return Ok(Followed::Moved(landed.clone()));
         }
-        Ok(match landed_in(common_dir, &tree, &local, name)? {
-            Some(to) => Followed::Noted(landed_said(name, parent, &to, false, true)),
-            None => Followed::Nothing,
-        })
+        Ok(
+            match landed_in(common_dir, &tree, &local, name, Some(plan.base))? {
+                Some(to) => Followed::Noted(landed_said(name, parent, &to, false, true)),
+                None => Followed::Nothing,
+            },
+        )
     };
     if plan.up_to_date() {
         // Rebased by hand: its base recorded and a conflict forgotten, as
@@ -448,12 +451,14 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
 /// Where the commits of the parent of `name` that it sits on landed (spec
 /// section 4), if they did: the parent's own parent, else the root (local,
 /// then origin's), each one `name` may be built on. A parent gone counts
-/// only with where its own commits start recorded.
+/// only with where its own commits start recorded. `base`: where they
+/// start, if known.
 fn landed_in(
     common_dir: &Path,
     tree: &Tree,
     local: &settings::Local,
     name: &str,
+    base: Option<ObjectId>,
 ) -> Result<Option<String>> {
     let Some(parent) = tree.parent(name) else {
         return Ok(None);
@@ -463,7 +468,10 @@ fn landed_in(
         return Ok(None);
     }
     let gone = tree.parent_gone(name);
-    let base = follow::own_start(common_dir, name, Some(parent), &roots)?;
+    let base = match base {
+        Some(base) => base,
+        None => follow::own_start(common_dir, name, Some(parent), &roots)?,
+    };
     if gone && follow::recorded_base(name) != Some(base) {
         return Ok(None);
     }
