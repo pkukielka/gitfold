@@ -29,6 +29,9 @@ pub struct Tree {
     root: Option<String>,
     /// The branches of `parents` whose following is set off.
     unfollowed: BTreeSet<String>,
+    /// The branches of `parents` whose following isn't a boolean (counted
+    /// as unset), with the warning that says so.
+    malformed: BTreeMap<String, String>,
 }
 
 /// Why a parent can't be given or set.
@@ -126,10 +129,13 @@ impl Tree {
             git::root_branch(common_dir),
             git::branch_exists,
         );
-        tree.unfollowed = (tree.parents.keys())
-            .filter(|branch| local.follow(branch) == Some(false))
-            .cloned()
-            .collect();
+        for branch in tree.parents.keys() {
+            match local.follow(branch) {
+                Ok(Some(false)) => _ = tree.unfollowed.insert(branch.clone()),
+                Ok(_) => {}
+                Err(e) => _ = tree.malformed.insert(branch.clone(), e),
+            }
+        }
         Ok(tree)
     }
 
@@ -162,6 +168,7 @@ impl Tree {
             children,
             root,
             unfollowed: BTreeSet::new(),
+            malformed: BTreeMap::new(),
         }
     }
 
@@ -171,8 +178,12 @@ impl Tree {
     }
 
     /// Whether local branch `branch` takes its parent's new commits by
-    /// itself: it has a parent (F2), and following isn't set off (F1).
+    /// itself: it has a parent (F2), and following isn't set off (F1). A
+    /// setting that isn't a boolean counts as unset, warned about (once).
     pub fn follows(&self, branch: &str) -> bool {
+        if let Some(e) = self.malformed.get(branch) {
+            crate::settings::warn_once(e);
+        }
         self.parents.contains_key(branch) && !self.unfollowed.contains(branch)
     }
 

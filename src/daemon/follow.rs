@@ -168,20 +168,25 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(String, bool)>
     let err = drain(child.stderr.take().expect("piped"));
     let started = Instant::now();
     let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+        let waited = child.try_wait();
+        match waited {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() <= TIMEOUT => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            _ => {}
         }
-        if started.elapsed() > TIMEOUT {
-            // SAFETY: a plain syscall, on the group of our own child.
-            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
-            let _ = child.wait();
-            anyhow::bail!(
-                "gitfold parent {branch} --update --auto took longer than {}s: killed, what \
-                 git did left as it is",
-                TIMEOUT.as_secs()
-            );
-        }
-        thread::sleep(Duration::from_millis(50));
+        // Timed out, or it can't be waited for: killed with what it runs.
+        // SAFETY: a plain syscall, on the group of our own child.
+        unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+        let _ = child.wait();
+        waited?;
+        anyhow::bail!(
+            "gitfold parent {branch} --update --auto took longer than {}s: killed, what git did \
+             left as it is",
+            TIMEOUT.as_secs()
+        );
     };
     let said = out.join().unwrap_or_default() + &err.join().unwrap_or_default();
     Ok((said, status.success()))
@@ -196,10 +201,17 @@ fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, parent: &str, paus
     let branch = &state.branch;
     let (said, ok) = run_update(common_dir, branch).unwrap_or_else(|e| (format!("{e:#}\n"), false));
     let moved = git::branch_tip(branch).is_ok_and(|now| now.id != tip);
-    if moved || Tree::read(common_dir).is_ok_and(|t| t.parent(branch) != Some(parent)) {
+    // Built on another parent: its parent landed (said so first).
+    let landed = Tree::read(common_dir).is_ok_and(|t| t.parent(branch) != Some(parent));
+    if moved || landed {
         paused.clear();
         info!("following: {}", said.trim_end().replace('\n', "; "));
-        if let Err(e) = state.add_followed(&said) {
+        // What its agent is told.
+        let told = match landed {
+            true => said,
+            false => crate::follow::moved_said(branch, &said),
+        };
+        if let Err(e) = state.add_followed(&told) {
             warn!("following: {branch}: keeping the move for its agent: {e:#}");
         }
     } else if said.trim().is_empty() {

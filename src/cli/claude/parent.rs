@@ -12,8 +12,10 @@ use anyhow::Result;
 use super::cwd;
 use crate::cli::hook::field;
 use crate::cli::tree::{Followed, follow_once};
+use crate::follow::moved_said;
 use crate::git;
 use crate::state::StateDir;
+use crate::tree::Tree;
 
 /// The Claude Code hooks `gitfold parent` serves.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -96,13 +98,17 @@ fn unmark(state: &StateDir, id: Option<&str>) -> Result<()> {
 fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Result<String> {
     let branch = &state.branch;
     let session = session.unwrap_or_default();
-    let followed = follow_once(common_dir, branch);
+    // A tree that can't be read: said plainly, once (to each session), and
+    // what the daemon kept told all the same.
+    let followed = match Tree::read(common_dir) {
+        Ok(tree) => follow_once(common_dir, branch, &tree),
+        Err(e) => Followed::Noted(format!("can't read the tree of branches: {e:#}")),
+    };
     // Moves made while no agent was here (the daemon's): taken after
-    // `follow_once`, which waits for one under way.
+    // `follow_once`, which waits for one under way (not when the tree
+    // can't be read: then whatever is kept by now).
     let mut out = match state.take_followed()? {
-        Some(said) => format!(
-            "gitfold: since your last turn, {branch} took its parent's new commits:\n{said}"
-        ),
+        Some(said) => format!("gitfold: since your last turn, {said}"),
         None => String::new(),
     };
     out += &match followed {
@@ -110,13 +116,13 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
             state.set_told(session, None)?;
             String::new()
         }
-        Followed::Moved(said) => {
+        Followed::Moved(took) => {
             state.set_told(session, None)?;
-            format!("gitfold: {branch} took its parent's new commits:\n{said}")
+            format!("gitfold: {}", moved_said(branch, &took.told()))
         }
-        Followed::Landed(said) => {
+        Followed::Landed(took) => {
             state.set_told(session, None)?;
-            format!("gitfold: {said}")
+            format!("gitfold: {}", took.told())
         }
         // Told once (to each session).
         Followed::Noted(said) => match state.told(session).as_deref() == Some(&said) {
@@ -126,13 +132,17 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
                 format!("gitfold: {said}\n")
             }
         },
-        Followed::Paused { full, short } => match state.told(session).as_deref() == Some(&short) {
-            true => format!("gitfold: following still paused: {short} (see `gitfold parent`)\n"),
-            false => {
-                state.set_told(session, Some(&short))?;
-                format!("gitfold: following paused: {full}\n")
+        Followed::Paused { full, short, .. } => {
+            match state.told(session).as_deref() == Some(&short) {
+                true => {
+                    format!("gitfold: following still paused: {short} (see `gitfold parent`)\n")
+                }
+                false => {
+                    state.set_told(session, Some(&short))?;
+                    format!("gitfold: following paused: {full}\n")
+                }
             }
-        },
+        }
     };
     Ok(out)
 }

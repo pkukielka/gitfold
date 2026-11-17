@@ -188,6 +188,11 @@ echo mine >"$MNT/api/api.txt"
 check "the view's own workspace" until_ok has "$MNT/$L/api.txt" mine
 check "read-only" fails touch "$MNT/$L/other"
 eq "listed under @live once opened" "api" "$(ls "$MNT/@live")"
+P() { git -C "$COMMON/gitfold/.views.git" "$@"; }
+check "a workspace's live tree kept" P rev-parse -q --verify refs/gitfold/live/ui
+"$BIN" -C "$REPO" remove --force ui >/dev/null
+check "dropped when it is removed" fails P rev-parse -q --verify refs/gitfold/live/ui
+check "the view shows the tip again" until_ok has "$MNT/$L/ui.txt" ui
 }
 
 resting_views() {
@@ -214,6 +219,35 @@ mount_fs
 eq "left out, noted" "skipped	lone	no history in common with refs/heads/api" "$(grep lone "$MNT/@committed/api/.gitfold-conflicts")"
 }
 
+# The private repository garbage-collected in a partial clone (blob:none, of
+# a local remote): a blob its trees name that the clone hasn't fetched (one
+# no view opened, here by hand) is the promisor remote's, left alone.
+gc_in_a_partial_clone() {
+commit_on api main a.txt=$'a\n'
+commit_on ui api $'ui.txt=ui\n' $'a.txt=ui\na\n'
+commit_on web api $'web.txt=web\n' $'a.txt=a\nweb\n'
+commit_on far main $'far.txt=far\n'
+git clone -q --bare "$REPO" "$T/remote.git"
+git -C "$T/remote.git" config uploadpack.allowFilter true
+rm -rf "$REPO"
+git clone -q --no-checkout --filter=blob:none "file://$T/remote.git" "$REPO"
+for b in api ui web; do R branch -q "$b" "origin/$b"; done
+built_on ui api; built_on web api
+mount_fs
+eq "the view, merged" $'ui\na\nweb' "$(cat "$MNT/$V/a.txt")"
+unmount_fs
+# git in the private repository with the mount's settings (no hook, no lazy
+# fetch).
+P() { GIT_NO_LAZY_FETCH=1 git -C "$COMMON/gitfold/.views.git" -c core.hooksPath=/dev/null "$@"; }
+far=$(R rev-parse origin/far:far.txt)
+check "a blob not fetched" fails env GIT_NO_LAZY_FETCH=1 git -C "$REPO" cat-file -e "$far"
+P update-ref refs/gitfold/views/far "$(P commit-tree -m far "$(printf '100644 blob %s\tfar.txt\n' "$far" | P mktree --missing)")"
+# What the mount's `gc --auto` runs past its thresholds: an incremental
+# repack (loose objects), and a full gc (too many packs), pruning at once.
+check "an incremental repack there" P repack -d -l -q
+check "a full gc there" P -c gc.pruneExpire=now gc --quiet
+eq "the view's tree kept" $'ui\na\nweb' "$(P show refs/gitfold/views/committed/api:a.txt)"
+}
 
 section "views: merged with what is built on it" merged_with_whats_built_on_it
 section "views: conflicts" conflicts
@@ -225,4 +259,5 @@ section "views: refreshes under readers" refresh_under_readers
 section "views: @live, the workspaces as they are" live_views
 section "views: resting, and woken current" resting_views
 section "views: a branch with unrelated history left out" unrelated_history
+section "views: garbage collection in a partial clone" gc_in_a_partial_clone
 finish

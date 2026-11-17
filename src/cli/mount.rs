@@ -55,7 +55,8 @@ pub struct MountArgs {
     /// ~/.local/state/gitfold/<mount point>.log).
     #[arg(long)]
     pub log: Option<PathBuf>,
-    /// FUSE worker threads (default: number of CPUs).
+    /// FUSE worker threads (default, or 0: number of CPUs). At most half of
+    /// them wait for a resting view to wake.
     #[arg(long)]
     pub threads: Option<usize>,
     /// Have the kernel send open/release for every file (slower; for

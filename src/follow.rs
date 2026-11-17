@@ -32,7 +32,6 @@
 //!   the branch sits on that tip (rebased by hand).
 //! - **Merges** among its own commits aren't moved: rebased by hand.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -291,6 +290,25 @@ pub fn checked_out(common_dir: &Path, branch: &str) -> Option<CheckedOut> {
         .map(CheckedOut::Worktree)
 }
 
+/// The refusal to move `branch`, checked out in git worktree `path`
+/// (`meanwhile`: since the move began): git rebase there, `rebase` if known.
+pub fn in_worktree(
+    branch: &str,
+    path: &str,
+    meanwhile: bool,
+    rebase: Option<&str>,
+) -> anyhow::Error {
+    let (is, meanwhile) = match meanwhile {
+        true => ("was", " meanwhile"),
+        false => ("is", ""),
+    };
+    let rebase = rebase.map(|r| format!(" ({r})")).unwrap_or_default();
+    Refusal::InUse.error(format!(
+        "{branch} {is} checked out in {path}{meanwhile}: gitfold doesn't move it there; take \
+         the new commits with git rebase in it{rebase}"
+    ))
+}
+
 /// How moving the branch to its rebased commits went.
 enum Applied {
     /// Moved to this tip; the paths where its uncommitted work, put back,
@@ -304,11 +322,12 @@ enum Applied {
     Refused(String),
 }
 
-/// The paths with a conflict git left unresolved in workspace `dir`, as
+/// The paths with a conflict git left unresolved in the index of the
+/// worktree with admin directory `admin` (no work tree needed), as
 /// `git ls-files -u` reads them from its index.
-pub fn unmerged(dir: &Path) -> Result<Vec<Vec<u8>>> {
+pub fn unmerged(admin: &Path) -> Result<Vec<Vec<u8>>> {
     let out = cmd::output_of(
-        &mut cmd::in_workspace(dir)?,
+        &mut cmd::command_in_other(admin)?,
         &["ls-files", "-u", "-z"],
         None,
     )?;
@@ -346,8 +365,9 @@ fn move_workspace(
     new: ObjectId,
 ) -> Result<Applied> {
     let git = |args: &[&str]| cmd::output_of(&mut cmd::in_workspace(dir)?, args, None);
-    let head = git(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_default();
-    let on_branch = String::from_utf8_lossy(&head).trim() == format!("refs/heads/{branch}");
+    // HEAD read from its admin directory, as git keeps it.
+    let state = crate::state::StateDir::of(common_dir, branch);
+    let on_branch = !matches!(state.git_busy(), Some(GitBusy::HeadElsewhere { .. }));
     if !on_branch || git::branch_tip(branch)?.id != tip {
         let why = format!(
             "{branch} moved in its workspace meanwhile; again: `gitfold parent {branch} --update`"
@@ -356,15 +376,14 @@ fn move_workspace(
     }
     let (tip_hex, new_hex) = (tip.to_string(), new.to_string());
     // Git refuses here too (paths unmerged meanwhile, say): nothing moved.
-    let stash = cmd::in_workspace(dir)?
-        .args(["stash", "create"])
-        .stdin(std::process::Stdio::null())
-        .output()?;
-    if !stash.status.success() {
-        let said = String::from_utf8_lossy(&stash.stderr).trim().to_string();
-        return Ok(Applied::Refused(said));
-    }
-    let work = String::from_utf8_lossy(&stash.stdout).trim().to_string();
+    let stash = match git(&["stash", "create"]) {
+        Ok(stash) => stash,
+        Err(e) => {
+            let said = e.downcast::<cmd::Failed>()?.stderr.trim().to_string();
+            return Ok(Applied::Refused(said));
+        }
+    };
+    let work = String::from_utf8_lossy(&stash).trim().to_string();
     if !work.is_empty() {
         let mut check = cmd::command(common_dir);
         let args = ["merge-tree", "--write-tree", "-z", "--name-only"];
@@ -387,33 +406,39 @@ fn move_workspace(
         }
     }
     let mut rebase = cmd::in_workspace(dir)?;
-    rebase
-        .env("GIT_EDITOR", ":")
-        .stdin(std::process::Stdio::null());
+    rebase.env("GIT_EDITOR", ":");
     let args = ["rebase", "-q", "--autostash", "--no-update-refs", "--onto"];
-    let out = rebase.args(args).args([&new_hex, &tip_hex]).output()?;
-    if !out.status.success() {
-        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    if let Err(e) = cmd::output_of(
+        &mut rebase,
+        &[&args[..], &[&new_hex, &tip_hex]].concat(),
+        None,
+    ) {
+        let failed = e.downcast::<cmd::Failed>()?;
+        let said = failed.stderr.trim().to_string();
         // Git's state, not its message: no rebase under way (HEAD on the
         // branch, no rebase's directory: a lock another git holds says
         // nothing of this one), the branch where it was.
-        let state = crate::state::StateDir::of(common_dir, branch);
-        let started = matches!(state.git_busy(), Some(GitBusy::HeadElsewhere { .. }))
-            || ["rebase-merge", "rebase-apply"]
-                .iter()
-                .any(|d| fs::symlink_metadata(state.admin.join(d)).is_ok());
+        let started = matches!(
+            state.git_busy(),
+            Some(
+                GitBusy::HeadElsewhere { .. } | GitBusy::Operation("rebase-merge" | "rebase-apply")
+            )
+        );
         if !started && git::branch_tip(branch)?.id == tip {
             return Ok(Applied::Refused(said));
         }
         bail!(
             "git rebase in {} stopped ({}), left as git leaves it: {said}",
             dir.display(),
-            out.status
+            failed.status
         );
     }
     // Moved (git exits 0 even if the work, put back, conflicted: then the
     // paths are unmerged, and the work stays in the stash).
-    Ok(Applied::Done(git::branch_tip(branch)?.id, unmerged(dir)?))
+    Ok(Applied::Done(
+        git::branch_tip(branch)?.id,
+        unmerged(&state.admin)?,
+    ))
 }
 
 /// What a move of a branch did, or why it didn't.
@@ -580,11 +605,8 @@ impl Plan {
                 )));
             }
             Some(CheckedOut::Worktree(path)) => {
-                return Err(Refusal::InUse.error(format!(
-                    "{branch} was checked out in {path} meanwhile: gitfold doesn't move it \
-                     there; take the new commits with git rebase in it ({})",
-                    self.by_hand(crate::tree::short(&self.onto_ref))
-                )));
+                let rebase = self.by_hand(crate::tree::short(&self.onto_ref));
+                return Err(in_worktree(branch, &path, true, Some(&rebase)));
             }
         }
         let name = format!("refs/heads/{branch}");
@@ -613,14 +635,16 @@ impl Plan {
 
     /// Moves it (see the module doc): its base recorded, a conflict cleared
     /// or recorded. Not with a merge among its own commits, nor commits
-    /// already pushed unless `yes`. `moving` is called once it is sure to
-    /// try, and says where the branch is checked out: its workspace (a
-    /// directory through the mount), or `None`. The caller holds `lock`.
+    /// already pushed unless `yes`. `moving` is called before the pushed
+    /// commits are checked (what is in the way in its workspace is said
+    /// first), with whether it moves (no pushed commits in the way), and
+    /// says where the branch is checked out: its workspace (a directory
+    /// through the mount), or `None`. The caller holds `lock`.
     pub fn run(
         &self,
         common_dir: &Path,
         yes: bool,
-        moving: impl FnOnce() -> Result<Option<PathBuf>>,
+        moving: impl FnOnce(bool) -> Result<Option<PathBuf>>,
     ) -> Result<Moved> {
         let branch = &self.branch;
         let outcome = Moving {
@@ -637,10 +661,10 @@ impl Plan {
             return Ok(Moved::Merge);
         }
         let pushed = self.pushed(common_dir)?;
+        let workspace = moving(yes || pushed.is_none())?;
         if !yes && let Some(pushed) = pushed {
             return Ok(Moved::Pushed(pushed));
         }
-        let workspace = moving()?;
         let upstream = (!self.on_history).then_some(self.base);
         settings::set_moving(common_dir, branch, Some(&outcome.encode()))?;
         // On an error (git may have moved it) the record stays, for
@@ -955,4 +979,10 @@ fn no_op_merge(
         fields.by_ref().take_while(|f| !f.is_empty()).for_each(drop);
     }
     Ok(false)
+}
+
+/// What the agent of `branch` is told of a move of it (`said`, what
+/// `--update` says): by its turn start, or kept by the daemon.
+pub fn moved_said(branch: &str, said: &str) -> String {
+    format!("{branch} took its parent's new commits:\n{said}")
 }

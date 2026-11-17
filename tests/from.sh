@@ -181,6 +181,12 @@ check "  with the flags it last had: logging where it last did" grep -q "mountin
 "$BIN" mount --prewarm content "$REPO" "$MNT" >/dev/null
 eq "gitfold mount in the background: its flags recorded before it returns" "--prewarm=content --prewarm-walks=2" "$(mount_options)"
 "$BIN" unmount "$MNT" >/dev/null
+# The daemon it starts: it would record them once mounted, before it answers
+# on its control socket (`gitfold version`).
+GITFOLD_RECORDED_BY_MOUNT=1 mount_fs --prewarm none
+check "  the daemon answering on its control socket" "$BIN" version "$MNT"
+eq "  not by the daemon it starts, at a moment after" "--prewarm=content --prewarm-walks=2" "$(mount_options)"
+unmount_fs
 mount_fs
 check "an explicit gitfold mount: its own flags, recorded" recorded "--prewarm=meta --prewarm-walks=2"
 unmount_fs
@@ -217,6 +223,20 @@ check "-w, the branches conflicting, no changes at all: refused too" says 1 "the
 check "  nothing left behind" nothing_of w7
 check "-w, a revision that is no branch: no changes from it" says 0 "created branch w4" branch w4 -w --from api --from "$(R rev-parse ui)"
 eq "  the others' changes" "api changed" "$(cat "$MNT/w4/api.txt")"
+R tag api api
+r=$(gf branch w9 -w --from api --from x)
+check "a first source git finds ambiguous: refused as git branch refuses it (exit 1)" test "${r%% *}" = 1
+check "  git's refusal" eq_ok "$r" "fatal: ambiguous object name: 'api'"
+eq "  git's warning said once" 1 "$(grep -o "warning: refname 'api' is ambiguous." <<<"$r" | wc -l)"
+check "  nothing left behind" nothing_of w9
+r=$(gf branch w11 -w --from x --from api)
+check "a later source git finds ambiguous: created" eq_ok "$r" "created branch w11"
+check "  git's warning said" eq_ok "$r" "warning: refname 'api' is ambiguous."
+check "  no changes from it (it names no branch)" test ! -e "$MNT/w11/new.txt"
+R tag -d api >/dev/null
+for i in $(seq -w 12); do for b in api ui x; do echo "p by $b" >"$MNT/$b/p$i.txt"; done; done
+check "-w, many paths conflicting: the first 10 named, of all" says 1 "ui's on a.txt, p01.txt, p02.txt, p03.txt, p04.txt, p05.txt, p06.txt, p07.txt, p08.txt, p09.txt and x's … and 15 more; in" branch w10 -w --from api --from ui --from x
+for b in api ui x; do W "$b" clean -fq -- 'p??.txt'; done
 gf branch mp --from api --from clash >/dev/null
 check "-w, a source with a git operation in progress: refused (exit 4)" says 4 "in progress" branch w5 -w --from mp --from ui
 check "  nothing left behind" nothing_of w5
