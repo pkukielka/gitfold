@@ -897,11 +897,32 @@ is 715 MB in 1,677 files:
 | incremental (one source file touched) | 1.85 s | 3.91 s |
 | no-op | 0.17 s | 0.36 s |
 
+Branches built on branches and views, on the same Chromium clone (`bench/tree.sh`: a branch with
+three children, each with commits and a workspace with an uncommitted edit; first / repeat):
+
+| | gitfold | native git |
+|---|---:|---:|
+| `@committed/<branch>`, first access (built and merged by git) | 0.78 s | |
+| a commit visible in `@committed` | 0.6-0.75 s | |
+| an edit visible in `@live` (2 s quiet period included) | 4.0 s | |
+| `@live/<branch>` on a fresh mount: first access / complete | 5.8 / 16 s | |
+| `parent --update`, branch without a workspace | 0.11 s | 0.08 s (`git replay`) |
+| `parent --update`, a clean workspace | 1.95 s | 1.94 s (`git rebase`) |
+| `parent --update`, a workspace with uncommitted work | 4.9 s | 5.1 s (`git rebase --autostash`) |
+| `branch t --from a --from c` (with `-w`) | 3.8 s (7.2-8.0 s) | 1.6-2.1 s (switch + merge) |
+| landing check (`gitfold parent`) | 0.06-0.07 s | |
+| `changes -- PATH`, 11 branches and workspaces | 9.1 s | |
+
+Moves cost what git's own rebase costs. `changes -- PATH` spends 8.3 of its 9.1 s in git's
+`for-each-ref --no-merged`, which walks every commit when the repository has no commit-graph: in a
+large repository, run `git commit-graph write --reachable` once (or keep it current with
+`git maintenance start`), and the same query takes milliseconds.
+
 ## Development
 
 Benchmark scripts are in `bench/`: `bench.sh` compares native and mounted runs of
 the commands an agent issues, `probe.sh` isolates content reads, `writes.sh`
-measures write workloads. `bench.sh` must run inside Claude Code (it uses Claude Code's grep and needs
+measures write workloads. `tree.sh` times branches built on branches and views. `bench.sh` must run inside Claude Code (it uses Claude Code's grep and needs
 `CLAUDE_CODE_EXECPATH`).
 
 Tests: `cargo test` runs the unit tests (logic without a mount or git:
