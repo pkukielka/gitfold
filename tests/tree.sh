@@ -49,12 +49,12 @@ check "--none and --follow: refused" says 2 "cannot be used with" parent api --n
 check "--yes needs --update" says 2 "--update" parent api --yes
 check "--update and --set: refused" says 2 "cannot be used with" parent api --update --set main
 check "outside a workspace, the branch must be named" says 1 "not in a gitfold workspace" parent
-check "changes -- PATH: not implemented yet" says 1 "not implemented yet" changes -- a.txt
+eq "changes -- PATH: nobody changes it (exit 0)" "0 " "$(gf changes -- a.txt)"
 check "changes BRANCH -- PATH: refused" says 2 "drop BRANCH" changes api -- a.txt
-check "changes -z -- PATH: not implemented yet" says 1 "not implemented yet" changes -z -- a.txt
+eq "changes -z -- PATH: nobody changes it (exit 0)" "0 " "$(gf changes -z -- a.txt)"
 check "changes --stat -- PATH: refused" says 2 "cannot be used with" changes --stat -- a.txt
 eq "changes without PATH: as before (no workspace yet: nothing, exit 0)" "0 " "$(gf changes api)"
-check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a 2>&1 | grep -q 'not implemented'"
+check "changes -- PATH outside a repository: no repository" sh -c "cd / && ! '$BIN' changes -- a && '$BIN' changes -- a 2>&1 | grep -q 'no git repository'"
 for g in sync pull restack rebase; do
     check "$g: a hint" says 2 "gitfold parent --update" "$g" --whatever x
     check "$g --help: the hint too" says 2 "gitfold parent --update" "$g" --help

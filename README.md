@@ -158,7 +158,7 @@ gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--updat
                                               # on (--set, --update: not yet)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
-gitfold changes -- <PATH>...                  # who is changing them (not yet)
+gitfold changes -- <PATH>...                  # who is changing them, on every branch
 gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
                                               # a message to a task's inbox
 gitfold inbox [<BRANCH>] [--wait [--timeout <SECS>]] [--peek] [--json] [--claude-hook <EVENT>]
