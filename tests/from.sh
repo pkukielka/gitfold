@@ -181,6 +181,12 @@ check "  with the flags it last had: logging where it last did" grep -q "mountin
 "$BIN" mount --prewarm content "$REPO" "$MNT" >/dev/null
 eq "gitfold mount in the background: its flags recorded before it returns" "--prewarm=content --prewarm-walks=2" "$(mount_options)"
 "$BIN" unmount "$MNT" >/dev/null
+# The daemon it starts: it would record them once mounted, before it answers
+# on its control socket (`gitfold version`).
+GITFOLD_RECORDED_BY_MOUNT=1 mount_fs --prewarm none
+"$BIN" version "$MNT" >/dev/null
+eq "  not by the daemon it starts, at a moment after" "--prewarm=content --prewarm-walks=2" "$(mount_options)"
+unmount_fs
 mount_fs
 check "an explicit gitfold mount: its own flags, recorded" recorded "--prewarm=meta --prewarm-walks=2"
 unmount_fs
