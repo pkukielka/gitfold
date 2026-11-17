@@ -9,9 +9,9 @@
 //!   stop): one per id, so a subagent stopping leaves its session's. An
 //!   agent counts as present while a file is younger than `TIMEOUT`: a
 //!   session that dies without ending stops counting then.
-//! - **Told:** `following`, the pause of following last reported to the
-//!   agent in full, with its session (and its one-line summary): then that
-//!   session gets only a reminder each turn.
+//! - **Told:** `told/<session>`, the pause of following last reported to
+//!   the session in full (its one-line summary): then it
+//!   gets only a reminder each turn.
 //! - **Followed:** `followed`, the moves following made while no agent was
 //!   there, said at its agent's next turn start.
 
@@ -70,20 +70,24 @@ impl StateDir {
         })
     }
 
-    fn told_file(&self) -> PathBuf {
-        self.dir.join("following")
+    fn told_file(&self, session: &str) -> PathBuf {
+        self.dir.join("told").join(workspace_id(session))
     }
 
-    /// The pause of following last reported in full to its agent.
-    pub fn told(&self) -> Option<String> {
-        fs::read_to_string(self.told_file()).ok()
+    /// The pause of following last reported in full to `session`.
+    pub fn told(&self, session: &str) -> Option<String> {
+        fs::read_to_string(self.told_file(session)).ok()
     }
 
-    /// Records the pause reported in full (`None`: none holds).
-    pub fn set_told(&self, pause: Option<&str>) -> Result<()> {
-        let path = self.told_file();
+    /// Records the pause reported in full to `session` (`None`: none
+    /// holds).
+    pub fn set_told(&self, session: &str, pause: Option<&str>) -> Result<()> {
+        let path = self.told_file(session);
         match pause {
-            Some(pause) => Ok(crate::fsutil::write_atomic(&path, pause.as_bytes())?),
+            Some(pause) => {
+                fs::create_dir_all(self.dir.join("told"))?;
+                Ok(crate::fsutil::write_atomic(&path, pause.as_bytes())?)
+            }
             None => remove(&path),
         }
     }

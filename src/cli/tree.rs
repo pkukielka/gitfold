@@ -327,17 +327,12 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
         _ => None,
     };
     let mut out = String::new();
-    let said = said_to(&mut out, name, short, &plan, moved);
-    Ok(match (summary, said) {
+    let said = said_to(&mut out, name, short, &plan, moved).map_err(|e| format!("{e:#}"));
+    Ok(match summary {
         // Moved, its work put back conflicting maybe.
-        (None, said) => {
-            if let Err(e) = said {
-                out += &format!("{e:#}\n");
-            }
-            Followed::Moved(out)
-        }
-        (Some(short), said) => Followed::Paused {
-            full: full.unwrap_or_else(|| format!("{:#}", said.expect_err("not moved"))),
+        None => Followed::Moved(out + &said.err().map(|e| e + "\n").unwrap_or_default()),
+        Some(short) => Followed::Paused {
+            full: (full.or(said.err())).unwrap_or_else(|| short.clone()),
             short,
         },
     })

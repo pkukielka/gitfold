@@ -35,7 +35,7 @@ pub fn parent_hook(event: ParentHook) -> Result<()> {
 }
 
 fn run(event: ParentHook, input: &str) -> Result<()> {
-    let Some((common_dir, state)) = workspace(input)? else {
+    let Some((repo, state)) = workspace(input) else {
         return Ok(());
     };
     let session = field(input, "session_id");
@@ -46,24 +46,23 @@ fn run(event: ParentHook, input: &str) -> Result<()> {
         ParentHook::SubagentStop => unmark(&state, field(input, "agent_id").as_deref()),
         ParentHook::UserPromptSubmit => {
             mark(&state, session.as_deref())?;
+            let common_dir = git::init(&repo)?;
             print!("{}", turn_start(&common_dir, &state, session.as_deref())?);
             Ok(())
         }
     }
 }
 
-/// The repository and the state of the workspace the hook with `input`
-/// runs in, if it runs in one.
-fn workspace(input: &str) -> Result<Option<(PathBuf, StateDir)>> {
-    let Ok(repo) = git::discover(&cwd(input)?) else {
-        return Ok(None);
-    };
-    let Ok(branch) = crate::cli::branch_or_current(None, &repo) else {
-        return Ok(None);
-    };
-    let common_dir = git::init(&repo)?;
-    let state = StateDir::of(&common_dir, &branch);
-    Ok(Some((common_dir, state)))
+/// The git directory and the state of the workspace the hook with `input`
+/// runs in, if it runs in one. Found without opening the repository: an
+/// `inbox` hook opens the one of its own directory.
+fn workspace(input: &str) -> Option<(PathBuf, StateDir)> {
+    let repo = git::discover(&cwd(input).ok()?).ok()?;
+    let branch = crate::cli::branch_or_current(None, &repo).ok()?;
+    // `<common>/worktrees/gitfold-ws-<id>` (see `branch_or_current`).
+    let common_dir = repo.parent()?.parent()?;
+    let state = StateDir::of(common_dir, &branch);
+    Some((repo, state))
 }
 
 /// A tool call (`inbox --claude-hook post-tool-use`, with `input`): its
@@ -71,10 +70,10 @@ fn workspace(input: &str) -> Result<Option<(PathBuf, StateDir)>> {
 /// workspace it runs in. Errors only logged.
 pub fn tool_used(input: &str) {
     let id = field(input, "agent_id").or_else(|| field(input, "session_id"));
-    let marked = workspace(input).and_then(|ws| match ws {
-        Some((_, state)) => mark(&state, id.as_deref()),
-        None => Ok(()),
-    });
+    let Some((_, state)) = workspace(input) else {
+        return;
+    };
+    let marked = mark(&state, id.as_deref());
     if let Err(e) = marked {
         log::warn!("gitfold inbox --claude-hook: marking the agent present: {e:#}");
     }
@@ -96,35 +95,32 @@ fn unmark(state: &StateDir, id: Option<&str>) -> Result<()> {
 /// while it lasts.
 fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Result<String> {
     let branch = &state.branch;
-    // Moves made while no agent was here (the daemon's).
+    let session = session.unwrap_or_default();
+    let followed = follow_once(common_dir, branch);
+    // Moves made while no agent was here (the daemon's): taken after
+    // `follow_once`, which waits for one under way.
     let mut out = match state.take_followed()? {
         Some(said) => format!(
             "gitfold: since your last turn, {branch} took its parent's new commits:\n{said}"
         ),
         None => String::new(),
     };
-    out += &match follow_once(common_dir, branch) {
+    out += &match followed {
         Followed::Nothing => {
-            state.set_told(None)?;
+            state.set_told(session, None)?;
             String::new()
         }
         Followed::Moved(said) => {
-            state.set_told(None)?;
+            state.set_told(session, None)?;
             format!("gitfold: {branch} took its parent's new commits:\n{said}")
         }
-        Followed::Paused { full, short } => {
-            // Told per session: a new one hears it in full.
-            let told = format!("{}\n{short}", session.unwrap_or_default());
-            match state.told().as_deref() == Some(&told) {
-                true => {
-                    format!("gitfold: following still paused: {short} (see `gitfold parent`)\n")
-                }
-                false => {
-                    state.set_told(Some(&told))?;
-                    format!("gitfold: following paused: {full}\n")
-                }
+        Followed::Paused { full, short } => match state.told(session).as_deref() == Some(&short) {
+            true => format!("gitfold: following still paused: {short} (see `gitfold parent`)\n"),
+            false => {
+                state.set_told(session, Some(&short))?;
+                format!("gitfold: following paused: {full}\n")
             }
-        }
+        },
     };
     Ok(out)
 }

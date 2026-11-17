@@ -76,7 +76,7 @@ pub enum Hook {
 pub fn inbox(args: InboxArgs) -> Result<i32> {
     let hook = args.claude_hook.is_some();
     if args.claude_hook == Some(Hook::PostToolUse) {
-        let input = hook_input()?;
+        let input = hook_input().unwrap_or_default();
         super::claude::tool_used(&input);
         // A subagent's context isn't the session's.
         if super::hook::field(&input, "agent_id").is_some() {

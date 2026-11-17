@@ -184,17 +184,16 @@ fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(bool, String)>
 /// back, conflicted).
 fn update(common_dir: &Path, state: &StateDir, tip: ObjectId) {
     let branch = &state.branch;
-    let result = run_update(common_dir, branch);
-    let moved = git::branch_tip(branch).is_ok_and(|now| now.id != tip);
-    match result {
-        Ok((_, said)) if moved => {
-            info!("following: {}", said.trim_end().replace('\n', "; "));
-            if let Err(e) = state.add_followed(&said) {
-                warn!("following: {branch}: keeping the move for its agent: {e:#}");
-            }
+    let (ok, said) = run_update(common_dir, branch)
+        .unwrap_or_else(|e| (false, format!("following {branch}: {e:#}\n")));
+    if git::branch_tip(branch).is_ok_and(|now| now.id != tip) {
+        info!("following: {}", said.trim_end().replace('\n', "; "));
+        if let Err(e) = state.add_followed(&said) {
+            warn!("following: {branch}: keeping the move for its agent: {e:#}");
         }
-        Ok((true, said)) => log::debug!("following: {}", said.trim_end()),
-        Ok((false, said)) => warn!("following {branch} paused: {}", said.trim_end()),
-        Err(e) => warn!("following {branch}: {e:#}"),
+    } else if ok {
+        log::debug!("following: {}", said.trim_end());
+    } else {
+        warn!("following {branch} paused: {}", said.trim_end());
     }
 }
