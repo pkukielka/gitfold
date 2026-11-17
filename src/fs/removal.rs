@@ -195,7 +195,7 @@ impl Removal {
             Some(ws) => ws.sync(store),
             None => workspace::catch_up(store, common_dir, branch),
         };
-        retire::check_workspace(store, common_dir, branch, force, &catch_up)
+        retire::check_workspace(store, common_dir, branch, force, &catch_up, true)
     }
 
     /// Refuses once the mount is being unmounted (`closed`), or detached

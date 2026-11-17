@@ -44,6 +44,9 @@ fn inbox_dir(common_dir: &Path, branch: &str) -> Result<PathBuf> {
         .join(local.inbox()))
 }
 
+/// The exit code of a wait that timed out (`--timeout`), as GNU `timeout`'s.
+const TIMED_OUT: i32 = 124;
+
 /// `now + secs`, or `None` (no deadline) if that overflows or no time is given.
 fn deadline(secs: Option<u64>) -> Option<Instant> {
     secs.and_then(|s| Instant::now().checked_add(Duration::from_secs(s)))
@@ -103,7 +106,8 @@ pub fn inbox(args: InboxArgs) -> Result<i32> {
 
 /// Takes the messages in the inbox of `branch` and prints them (each as
 /// written, an empty line between; or one JSON object per line). With `wait`,
-/// if there are none, waits for one (up to `timeout`, if given). With `peek`,
+/// if there are none, waits for one (up to `timeout`, if given: then exits
+/// `TIMED_OUT`, printing nothing). With `peek`,
 /// only lists them, taking nothing: `from` and `subject` (or the body's first
 /// line), one per line; nothing when empty. With `claude_hook`, hands them to
 /// a Claude Code hook instead. Returns the exit code.
@@ -187,6 +191,8 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
     };
     let intro = "New messages in your gitfold inbox (each is taken: it won't be shown again):\n\n";
     let code = match args.claude_hook {
+        // Waited, and the time ran out first.
+        None if wait && taken.is_empty() => TIMED_OUT,
         None => {
             print!("{text}");
             0
@@ -305,7 +311,8 @@ pub struct InboxArgs {
     /// If there are none, wait for one.
     #[arg(long)]
     pub wait: bool,
-    /// With --wait: give up after this many seconds.
+    /// With --wait: give up after this many seconds, printing nothing (exit
+    /// 124).
     #[arg(long, value_name = "SECS", requires = "wait")]
     pub timeout: Option<u64>,
     /// Only list them, taking nothing: sender and subject (or first line),

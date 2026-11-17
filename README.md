@@ -13,6 +13,8 @@ Built for coding agents and code review on big monorepos. Give every agent its
 own branch and every reviewer any revision, side by side, without
 `git worktree add` copying gigabytes for each one. Linux only (FUSE).
 
+New here? Start with the [user guide](docs/guide.md).
+
 ## Why gitfold
 
 - **Opens in under a second.** A branch of Chromium (512k files, 4.4 GB) opens
@@ -155,39 +157,43 @@ branches](#branches-built-on-branches)), and settings in its git config
 ## Usage
 
 ```
-gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>   # starts in the background
-gitfold unmount <MOUNTPOINT>                  # stops it
-gitfold version [<MOUNTPOINT>]                # this build, and its daemon's
+# Mount a repository (starts in the background), stop it, show versions
+gitfold mount [OPTIONS] <REPO> <MOUNTPOINT>
+gitfold unmount <MOUNTPOINT>
+gitfold version [<MOUNTPOINT>]
+
+# Create a branch for a workspace (-w: with a workspace's changes;
+# several --from: git merge of the others, run in its workspace)
 gitfold branch <BRANCH> [-w] [--from <REV>]... [--prewarm <MODE>] [--track-reads on|off]
-                                              # create a branch for a workspace
-                                              # (-w: with a workspace's changes;
-                                              # several --from: git merge of the
-                                              # others, run in its workspace)
+
+# Branches built on branches: create one on P; show or change what one is built on
 gitfold branch <BRANCH> --parent <P> [--no-follow]
-                                              # a branch built on P
 gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
-                                              # show or change what it is built
-                                              # on
-gitfold list [--stat]                         # workspaces, their changes, the tree
-gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
-gitfold changes -- <PATH>...                  # who is changing them, on every branch
-gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
-                                              # a message to a task's inbox
-gitfold inbox [<BRANCH>] [--wait [--timeout <SECS>]] [--peek] [--json] [--claude-hook <EVENT>]
-                                              # take the messages in it
-gitfold watch [<BRANCH>:]<DIR> [--timeout <SECS>] [--json]
-                                              # wait for a change in a task folder
+
+# See what changed: workspaces and the tree; a workspace's paths; who changes a path
+gitfold list [--stat]
+gitfold changes [<BRANCH>] [-z] [--stat]
+gitfold changes -- <PATH>...
+
+# What a workspace read or changed that changed elsewhere since
 gitfold overlaps [<BRANCH>] [--against <REV>]... [--against-workspaces] [--reads|--writes] [-z]
-                                              # what it read or changed that
-                                              # changed elsewhere since
+
+# Messages: send to a task's inbox; take them; wait for a change in a task folder
+gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
+gitfold inbox [<BRANCH>] [--wait [--timeout <SECS>]] [--peek] [--json] [--claude-hook <EVENT>]
+gitfold watch [<BRANCH>:]<DIR> [--timeout <SECS>] [--json]
+
+# Housekeeping: delete a workspace (or a snapshot's), snapshot registrations;
+# a workspace's prewarm mode; record a workspace's reads
 gitfold remove <BRANCH|@REV> [--force] [--check] [--wait <SECS>]
-                                              # delete a workspace, or a snapshot's
-gitfold prune                                 # delete snapshot registrations
-gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
-gitfold track-reads <BRANCH> on|off           # record a workspace's reads
-gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
-gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
-gitfold parent --claude-hook <EVENT>          # its presence and turn-start hooks
+gitfold prune
+gitfold prewarm <BRANCH> <MODE>
+gitfold track-reads <BRANCH> on|off
+
+# Claude Code hooks (the plugin's; see the skill): worktrees, presence, turn start
+gitfold branch --claude-hook worktree-create
+gitfold remove --claude-hook worktree-remove
+gitfold parent --claude-hook <EVENT>
 ```
 
 Commands other than `mount` work on the repository the current directory is
@@ -204,9 +210,11 @@ Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
 error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress (for `parent`,
 also a move stopped by a conflict or by git), 5 in use or busy.
-Three commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
-daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
-`inbox --claude-hook rewake` (2, to wake the session).
+Some commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
+daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
+`inbox --claude-hook rewake` (2, to wake the session), and `inbox --wait
+--timeout` and `watch --timeout` (124 if the time runs out first, as GNU
+`timeout`; nothing printed).
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
 several `--from`, it starts at the first, and `git merge` of the others runs in
 its workspace (mounting the repository again where and as it last was, if it isn't
@@ -407,9 +415,9 @@ folder's directory: by default inside `.git`, which committing needs anyway.
 inbox, `inbox/` in its task folder (`gitfold.inbox` names it); the branch
 needs no workspace yet. `gitfold inbox` takes the messages in the inbox of the
 workspace you are in (or of `<BRANCH>`) and prints them: each is taken once,
-however many read at a time. `--wait` waits for one if there are none (up to
-`--timeout <SECS>`); `--peek` lists them without taking; `--json` for
-programs. A fork (`branch -w`) leaves the inbox behind: its messages were for
+however many read at a time (none to take is no error: exit 0). `--wait` waits
+for one if there are none (up to `--timeout <SECS>`, then exit 124); `--peek`
+lists them without taking; `--json` for programs. A fork (`branch -w`) leaves the inbox behind: its messages were for
 the source's agent.
 `--claude-hook` hands them to Claude Code's hooks: injected into the
 conversation when a prompt is sent and after each tool call (not a
@@ -417,9 +425,9 @@ subagent's: its context isn't the session's), and waking an idle session when
 one arrives (the skill has the configuration). `gitfold watch
 [<BRANCH>:]<DIR>` is the general form: it waits until a file in a directory of
 a task folder changes, prints which (`C` or `D` and the name, each name's
-last change), and exits (`D .` if the directory itself goes); a supervisor
-can wait on another task's folder (`agent/b:.`) for its handoff, an agent on
-`reviews/` for work.
+last change), and exits (`D .` if the directory itself goes; with `--timeout
+<SECS>`, exit 124 if nothing changed by then); a supervisor can wait on another
+task's folder (`agent/b:.`) for its handoff, an agent on `reviews/` for work.
 
 The format is plain files, for anything to read and write without gitfold:
 one file per message in the inbox directory, named `<nanoseconds since the
@@ -438,12 +446,13 @@ with `gitfold remove <BRANCH>`, mounted or not (see
 how many files each workspace has changed and deleted, and how many ignored
 files (build output) it holds, how long ago it last changed (`last`: a file
 written, created or deleted, or a commit; a stalled agent stands out), with a
-note if its branch was deleted or its base is behind the branch tip (mount once
-to update it); `--stat` adds the lines added and removed in total, reading
-every changed file. It shows the tree of branches too: each branch under its
-parent (`└─`; the main branch's children at the top), branches without a
-workspace only if they have a parent or children, whether each follows its
-parent (`follow`: on or off), and a note when something needs doing:
+note if its branch was deleted or its base is behind the branch tip (unmounted:
+mount once to update it; mounted, the mount catches up); `--stat` adds the
+lines added and removed in total, reading every changed file. It shows the
+tree of branches too: each branch under its parent (`└─`; the main branch's
+children at the top), branches without a workspace only if they have a parent
+or children, whether each follows its parent (`follow`: on or off), and a note
+when something needs doing:
 following paused (`conflict on PATH`, `following paused: pushed`), the
 parent landed (`api looks merged into main`, as last checked by following,
 or `api landed in main`) or `parent gone`. `gitfold changes

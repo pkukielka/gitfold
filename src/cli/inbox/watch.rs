@@ -13,7 +13,7 @@ use crate::inotify::{self, Inotify};
 use crate::state::task::TaskDir;
 
 use super::message::{is_message, json_str};
-use super::{deadline, remaining};
+use super::{TIMED_OUT, deadline, remaining};
 
 /// How long a watch keeps collecting events after the first, so one burst
 /// (a file written then renamed, several messages) comes out together.
@@ -24,8 +24,9 @@ const SETTLE: Duration = Duration::from_millis(100);
 /// given) is written, created, moved in, deleted or moved out, then prints
 /// what (`C` or `D`, a tab and the name, each name's last change; or JSON),
 /// collecting a burst of them, and exits; `D` and `.` if the directory itself
-/// goes. Prints nothing if `timeout` passes first.
-pub fn watch(repo: &Path, args: WatchArgs) -> Result<()> {
+/// goes. Returns the exit code: 0, or `TIMED_OUT` (printing nothing) if
+/// `timeout` passes first.
+pub fn watch(repo: &Path, args: WatchArgs) -> Result<i32> {
     let WatchArgs {
         target,
         timeout,
@@ -98,14 +99,15 @@ pub fn watch(repo: &Path, args: WatchArgs) -> Result<()> {
             false => println!("{kind}\t{name}"),
         }
     }
-    Ok(())
+    // Nothing seen: the time ran out first.
+    Ok(if events.is_empty() { TIMED_OUT } else { 0 })
 }
 
 /// The arguments of `gitfold watch`.
 #[derive(clap::Args)]
 pub struct WatchArgs {
     pub target: String,
-    /// Give up after this many seconds, printing nothing.
+    /// Give up after this many seconds, printing nothing (exit 124).
     #[arg(long, value_name = "SECS")]
     pub timeout: Option<u64>,
     /// One JSON object per line: {"event": "changed"|"deleted", "path"}.

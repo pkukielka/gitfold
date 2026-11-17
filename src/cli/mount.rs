@@ -308,10 +308,7 @@ pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
         // No socket answering: the daemon gone (killed, crashed) leaves its
         // mount answering ENOTCONN; else it is starting, exiting or older
         // than the control socket.
-        Ok(None)
-            if fs::metadata(&mountpoint)
-                .is_err_and(|e| e.raw_os_error() == Some(libc::ENOTCONN)) =>
-        {
+        Ok(None) if daemon::is_stale(&mountpoint) => {
             bail!(
                 "the daemon of {shown} is gone (killed?): `gitfold unmount {shown}`, then mount again"
             )

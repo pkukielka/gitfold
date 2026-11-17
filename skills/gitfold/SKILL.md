@@ -80,7 +80,7 @@ A fork (`gitfold branch -w`) copies it. Use `git stash -u` rather than
 ```
 gitfold send agent/task-18 -s "lexer API" "I renamed Lexer::next to Lexer::advance"
 gitfold inbox                  # take (and print) the messages sent to you
-gitfold inbox --wait --timeout 600   # none yet? wait up to 10 minutes for one
+gitfold inbox --wait --timeout 600   # none yet? wait up to 10 minutes for one (exit 124 if none came)
 gitfold inbox --peek           # list them without taking
 gitfold watch agent/b:.        # wait until something in agent/b's task folder changes
 ```

@@ -26,6 +26,12 @@ pub fn mount_of(common_dir: &Path) -> Result<Option<PathBuf>> {
         .map(|(mount, _)| mount))
 }
 
+/// Whether the repository of git common directory `common_dir` is mounted by
+/// gitfold.
+pub fn mounted(common_dir: &Path) -> bool {
+    mount_of(common_dir).is_ok_and(|mount| mount.is_some())
+}
+
 /// Every gitfold mount: its mount point and the git common directory of its
 /// repository.
 pub fn mounts() -> Result<Vec<(PathBuf, PathBuf)>> {

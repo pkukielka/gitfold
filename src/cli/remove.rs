@@ -97,7 +97,7 @@ fn remove_once(common_dir: &Path, name: &str, force: bool, check: bool) -> Resul
         }
         let store = Store::default();
         let caught_up = || catch_up(&store, common_dir, name);
-        let ignored = check_workspace(&store, common_dir, name, force, &caught_up)?;
+        let ignored = check_workspace(&store, common_dir, name, force, &caught_up, false)?;
         Ok(match check {
             true => removable_workspace(name, ignored),
             false => delete_workspace(common_dir, name, ignored)?,
