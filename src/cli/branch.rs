@@ -149,13 +149,17 @@ fn merged(
     );
     // Where the user stands, before anything is made (or mounted). `-` is
     // the previous branch, as for `git merge -`, except as the start point.
-    // Only the merged ones go to git by name.
     let sources = (from.iter().enumerate())
         .map(|(i, rev)| {
             let rev = if rev == "-" && i > 0 { "@{-1}" } else { rev };
-            Source::resolve(repo, rev, i > 0)
+            Source::resolve(repo, rev)
         })
         .collect::<Result<Vec<_>>>()?;
+    // The workspaces whose changes are taken, checked before mounting too.
+    let copied = match with_changes {
+        true => Changes::workspaces(common_dir, &sources)?,
+        false => Vec::new(),
+    };
     let Some(mount) = super::mount::mount_or_again(common_dir)? else {
         bail!(
             "{} isn't mounted: mount it first (`gitfold mount`); git merges several --from \
@@ -163,11 +167,7 @@ fn merged(
             common_dir.display()
         )
     };
-    let changes = if with_changes {
-        Changes::take(repo, common_dir, &mount, &sources)?
-    } else {
-        Changes::default()
-    };
+    let changes = Changes::take(common_dir, &mount, &copied)?;
     let (first, others) = sources.split_first().expect("several --from");
     // Without an upstream: no relation afterwards.
     git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.id])?;
@@ -194,14 +194,15 @@ fn merged(
                 .collect::<Result<Vec<_>>>()?;
             run_merge(&workspace, &revs)
         });
-    // The changes go on the merge git made. On one it didn't make (stopped
-    // by a conflict), they can't, as `git cherry-pick` can't: that undoes it.
+    // With -w, the changes go on the merge git made; one it didn't make
+    // (stopped by a conflict or a hook) is refused, as `git cherry-pick`
+    // refuses to go on it: that undoes it.
     let merge = merge.and_then(|merged| match merged {
         true => changes.apply(&workspace).map(Some),
-        false if changes.is_empty() => Ok(None),
+        false if !with_changes => Ok(None),
         false => bail!(
-            "the merge didn't complete (see above): the uncommitted changes go only on a \
-             merge made"
+            "the merge didn't complete (see above): with --with-changes, the uncommitted \
+             changes go only on a merge made"
         ),
     });
     match merge {
@@ -210,12 +211,17 @@ fn merged(
             Ok(())
         }
         // As `git cherry-pick` exits after a conflict.
-        Ok(Some(conflicts)) => bail!(
-            "created branch {name}; the uncommitted changes of {} conflict: in the files as \
-             markers, in {}",
-            and_list(&conflicts),
-            workspace.display()
-        ),
+        Ok(Some(conflicts)) => {
+            let said: Vec<String> = (conflicts.iter())
+                .map(|(branch, paths)| format!("{branch}'s on {}", paths.join(", ")))
+                .collect();
+            let said: Vec<&str> = said.iter().map(String::as_str).collect();
+            bail!(
+                "created branch {name}; the uncommitted changes conflict (see above): {}; in {}",
+                and_list(&said),
+                workspace.display()
+            )
+        }
         // Stopped by a conflict, or by a hook or an empty message: git says.
         Ok(None) if state.admin.join("MERGE_HEAD").is_file() => bail!(
             "created branch {name} with its merge in progress (see above): finish it in {} \
@@ -274,19 +280,20 @@ impl Made<'_> {
 const UNDO_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A `--from` as git takes it where the user stands: as typed, its commit,
-/// and the ref it names, shortened as git shortens it (`ui` for `HEAD` on
-/// ui), if it names one.
+/// and the ref it names (`refs/heads/ui` for `HEAD` on ui), in full and
+/// shortened as git shortens it, if it names one.
 struct Source {
     rev: String,
     id: String,
+    full: Option<String>,
     name: Option<String>,
 }
 
 impl Source {
-    /// `rev` in the worktree of git directory `repo`, and if `named`, the
-    /// ref it names; refused as `git merge` refuses what isn't a commit;
-    /// git's own error if it fails otherwise.
-    fn resolve(repo: &Path, rev: &str, named: bool) -> Result<Source> {
+    /// `rev` in the worktree of git directory `repo`, and the ref it names;
+    /// refused as `git merge` refuses what isn't a commit; git's own error
+    /// if it fails otherwise.
+    fn resolve(repo: &Path, rev: &str) -> Result<Source> {
         let line = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
         let commit = format!("{rev}^{{commit}}");
         let args = ["rev-parse", "--verify", "-q", "--end-of-options", &commit];
@@ -306,18 +313,31 @@ impl Source {
             String::from_utf8_lossy(&out.stderr).trim()
         );
         let id = line(out.stdout);
-        // Names starting with `-` are no refs (`check-ref-format`).
-        let args = ["rev-parse", "--verify", "-q", "--abbrev-ref", rev];
-        let name = (named && !rev.starts_with('-'))
-            .then(|| git::cmd::output(repo, &args).ok())
+        // Names starting with `-` are no refs (`check-ref-format`); a name
+        // git finds ambiguous names none (git warns).
+        let rev_parse = |how: &str, rev: &str| {
+            (git::cmd::output(repo, &["rev-parse", "--verify", "-q", how, rev]).ok())
+                .map(line)
+                .filter(|n| !n.is_empty() && n != "HEAD")
+        };
+        let full = (!rev.starts_with('-'))
+            .then(|| rev_parse("--symbolic-full-name", rev))
             .flatten()
-            .map(line)
-            .filter(|n| !n.is_empty() && n != "HEAD");
+            .filter(|full| full.starts_with("refs/"));
+        let name = full
+            .as_ref()
+            .and_then(|full| rev_parse("--abbrev-ref", full));
         Ok(Source {
             rev: rev.to_string(),
             id,
+            full,
             name,
         })
+    }
+
+    /// The local branch it names, if any.
+    fn branch(&self) -> Option<&str> {
+        self.full.as_deref()?.strip_prefix("refs/heads/")
     }
 
     /// What to give `git merge` in the worktree of git directory `admin`:
@@ -348,74 +368,63 @@ impl Source {
 struct Changes(Vec<(String, String)>);
 
 impl Changes {
-    /// Those of `sources` (branches, as git takes them where the user
-    /// stands, in the worktree of git directory `repo`) with a workspace
-    /// under `mount` and changes; refused if one is no branch, or git is
-    /// busy in its workspace (a merge, a rebase).
-    fn take(repo: &Path, common_dir: &Path, mount: &Path, sources: &[Source]) -> Result<Changes> {
-        let index = common_dir.join(format!("gitfold-snapshot-{}", std::process::id()));
-        let mut changes = Changes::default();
-        for source in sources {
-            let args = [
-                "rev-parse",
-                "--verify",
-                "-q",
-                "--symbolic-full-name",
-                &source.rev,
-            ];
-            let out = git::cmd::command(repo).args(args).output()?;
-            // `--verify -q`: exit 1 for what names nothing; git's own error
-            // otherwise.
-            ensure!(
-                out.status.success() || out.status.code() == Some(1),
-                "git rev-parse {} failed ({}): {}",
-                source.rev,
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-            let full = String::from_utf8_lossy(&out.stdout);
-            let Some(branch) = full.trim().strip_prefix("refs/heads/") else {
-                let message = format!(
-                    "--with-changes copies branches' workspaces: no branch {}",
-                    source.rev
-                );
-                return Err(Refusal::NotFound.error(message));
-            };
-            // Once each, as git merges a source given twice once.
-            if changes.0.iter().any(|(taken, _)| taken == branch) {
+    /// The workspaces of `sources` to take changes from: the local
+    /// branches' that have one, each once (a source that isn't one, or has
+    /// none, has no changes). Refused if git is busy in one (a merge, a
+    /// rebase), or its index has unmerged paths, as `git stash` refuses.
+    fn workspaces(common_dir: &Path, sources: &[Source]) -> Result<Vec<String>> {
+        let mut branches: Vec<String> = Vec::new();
+        for branch in sources.iter().filter_map(Source::branch) {
+            let state = StateDir::of(common_dir, branch);
+            if !state.opened() || branches.iter().any(|b| b == branch) {
                 continue;
             }
-            let taken = Changes::of(common_dir, mount, branch, &index);
+            let then = "branch from it once that is done";
+            crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
+            let unmerged = git::cmd::command_in_other(&state.admin)?
+                .args(["ls-files", "-u"])
+                .output()?;
+            if !unmerged.stdout.is_empty() {
+                let message = format!("{branch}: its index has unmerged paths; {then}");
+                return Err(Refusal::Changes.error(message));
+            }
+            branches.push(branch.to_string());
+        }
+        Ok(branches)
+    }
+
+    /// The changes of the workspaces of `branches` under `mount`, those that
+    /// have any.
+    fn take(common_dir: &Path, mount: &Path, branches: &[String]) -> Result<Changes> {
+        let index = common_dir.join(format!("gitfold-snapshot-{}", std::process::id()));
+        let mut changes = Changes::default();
+        for branch in branches {
+            let state = StateDir::of(common_dir, branch);
+            let taken = Changes::of(&state, &mount.join(branch), &index);
             let _ = fs::remove_file(&index);
             if let Some(commit) = taken? {
-                changes.0.push((branch.to_string(), commit));
+                changes.0.push((branch.clone(), commit));
             }
         }
         Ok(changes)
     }
 
-    /// The changes of the workspace of `branch`, if it has one and they are
-    /// any, with `index` for a copy of its index.
-    fn of(common_dir: &Path, mount: &Path, branch: &str, index: &Path) -> Result<Option<String>> {
-        let state = StateDir::of(common_dir, branch);
-        if !state.opened() {
-            return Ok(None);
-        }
-        let then = "branch from it once that is done";
-        crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
-        let workspace = mount.join(branch);
-        // On the copy, as a plain index (nothing of it written into the
-        // repository); its throwaway commit unsigned and by gitfold, as `git
-        // stash create` makes one by git where no one is configured.
+    /// The changes of workspace `workspace` (stored in `state`), if any,
+    /// with `index` for a copy of its index.
+    fn of(state: &StateDir, workspace: &Path, index: &Path) -> Result<Option<String>> {
+        // On the copy, safely for the repository (nothing of it written
+        // there; its untracked cache and fsmonitor used as git uses them);
+        // its throwaway commit unsigned and by gitfold, as `git stash
+        // create` makes one by git where no one is configured.
         let git = |args: &[&str]| -> Result<String> {
-            let mut git = git::cmd::in_workspace(&workspace)?;
+            let mut git = git::cmd::in_workspace(workspace)?;
             git.env("GIT_INDEX_FILE", index);
             for (var, value) in [("NAME", "gitfold"), ("EMAIL", "gitfold@localhost")] {
                 git.env(format!("GIT_COMMITTER_{var}"), value);
                 git.env(format!("GIT_AUTHOR_{var}"), value);
             }
             let unsigned = ["-c", "commit.gpgSign=false"];
-            let args: Vec<&str> = (git::cmd::PLAIN_INDEX.iter().chain(&unsigned))
+            let args: Vec<&str> = (git::cmd::REPOSITORY_SAFE.iter().chain(&unsigned))
                 .chain(args)
                 .copied()
                 .collect();
@@ -437,19 +446,15 @@ impl Changes {
         if tree == head_tree {
             return Ok(None);
         }
-        let message = format!("uncommitted changes of {branch}");
+        let message = format!("uncommitted changes of {}", state.branch);
         git(&["commit-tree", &tree, "-p", head, "-m", &message]).map(Some)
     }
 
-    fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// Applies them in workspace `workspace`, each as `git cherry-pick -n`
-    /// does (a conflict between them left in the files as markers), then
-    /// unstages them (`git reset`); the branches whose changes conflicted.
-    /// Refused if git refuses one.
-    fn apply(&self, workspace: &Path) -> Result<Vec<&str>> {
+    /// does, then unstages them (`git reset`); the branches whose changes
+    /// conflicted, with the paths git said conflict (each left as git
+    /// leaves it). Refused if git refuses one.
+    fn apply(&self, workspace: &Path) -> Result<Vec<(&str, Vec<String>)>> {
         if self.0.is_empty() {
             return Ok(Vec::new());
         }
@@ -468,8 +473,11 @@ impl Changes {
                 !unmerged.is_empty(),
                 "git cherry-pick of the uncommitted changes of {branch} failed"
             );
-            conflicts.push(branch.as_str());
-            // Staged with their markers, so the next one merges with them
+            let paths = (unmerged.split(|&b| b == 0))
+                .filter(|p| !p.is_empty())
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect();
+            // Staged as they are, so the next one merges with them
             // (`cherry-pick -n` staged the rest).
             if n + 1 < self.0.len() {
                 let args = [
@@ -480,6 +488,7 @@ impl Changes {
                 ];
                 git::cmd::output_of(&mut git()?, &args, Some(unmerged))?;
             }
+            conflicts.push((branch.as_str(), paths));
         }
         // Unstaged; only the index is reset (no refresh of every file).
         git::cmd::output_of(&mut git()?, &["reset", "-q", "--no-refresh"], None)?;

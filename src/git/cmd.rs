@@ -148,6 +148,19 @@ pub fn in_workspace(dir: &Path) -> Result<Command> {
     Ok(git)
 }
 
+/// The options of git on a copy of a worktree's index (a snapshot) that keep
+/// the repository safe: nothing of the copy (a split index's shared part, a
+/// sparse index's trees) written into it, and no hook hearing of it. Its
+/// untracked cache and fsmonitor are used as the repository has them.
+pub const REPOSITORY_SAFE: [&str; 6] = [
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "index.sparse=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
 /// The options of git on a throwaway index: a plain index, whatever the
 /// repository's are like, so that nothing of it (a split index's shared
 /// part, a sparse index's trees) is written into the repository and no hook
