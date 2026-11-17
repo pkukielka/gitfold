@@ -69,6 +69,10 @@ eq "-z" "W	main	d/c.txt" "$("$BIN" -C "$REPO" overlaps st1 --writes -z 2>&1 | tr
 eq "a fork inherits the reads" "R	main	a.txt
 R	main	n.txt" "$("$BIN" -C "$REPO" branch -w --from st1 st1f >/dev/null 2>&1; "$BIN" -C "$REPO" overlaps st1f --reads 2>&1)"
 eq "and the setting" true "$(R config --get branch.st1f.gitfoldTrackReads)"
+chmod 555 "$COMMON/gitfold/.tasks"
+out=$("$BIN" -C "$REPO" branch -w --from st1 st1g 2>&1); rc=$?
+chmod 755 "$COMMON/gitfold/.tasks"
+eq "a fork without its source's task folder: made, said (exit 1)" "1 yes yes" "$rc $(grep -q 'created branch st1g at st1.*not copied from st1: its task folder' <<<"$out" && echo yes) $(R rev-parse -q --verify st1g >/dev/null && echo yes)"
 printf '[branch "st3"]\n\tgitfoldTrackReads\n' >>"$COMMON/config"
 "$BIN" -C "$REPO" branch -w --from st3 st3f >/dev/null 2>&1
 eq "a valueless gitfoldTrackReads (true, for git) is copied as true" true "$(R config --get branch.st3f.gitfoldTrackReads)"
@@ -264,6 +268,8 @@ eq "removed from inside it, changes discarded, its branch kept" "0 no yes" "$rc 
 eq "  a worktree already gone: done" "0" "$( (remove "$MNT/worktree-w2" >/dev/null 2>&1); echo $?)"
 unmount_fs
 eq "gitfold mount recorded where" "$MNT" "$(R config gitfold.mountpoint)"
+out=$(printf '{"cwd":"%s","worktree_path":"%s"}' "$REPO" "$MNT/worktree-main" | "$BIN" remove --claude-hook worktree-remove 2>&1); rc=$?
+eq "unmounted: removed all the same, its repository found from the session's directory" "0 no" "$rc $([ -e "$COMMON/gitfold/worktree-main" ] && echo yes || echo no)"
 rmdir "$MNT"
 out=$(create "$REPO" w4 2>"$T/err"); rc=$?
 eq "not mounted: mounted again there (made again, as a tmpfs after a reboot), then a workspace" "0 $MNT/worktree-w4 yes" "$rc $out $(mountpoint -q "$MNT" && echo yes)"

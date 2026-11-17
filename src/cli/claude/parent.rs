@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use super::cwd;
 use crate::cli::hook::field;
@@ -26,14 +26,13 @@ pub enum ParentHook {
     UserPromptSubmit,
 }
 
-/// `gitfold parent --claude-hook EVENT`: nothing outside a workspace; errors
-/// only logged (the hook runs in every session).
-pub fn parent_hook(event: ParentHook) -> Result<()> {
-    let input = std::io::read_to_string(std::io::stdin())?;
-    if let Err(e) = run(event, &input) {
-        log::warn!("gitfold parent --claude-hook: {e:#}");
+/// `gitfold parent --claude-hook EVENT`: nothing outside a workspace; its
+/// exit code: 1 for an error inside one (`hook::failed`).
+pub fn parent_hook(event: ParentHook) -> i32 {
+    match run(event, &crate::cli::hook::input()) {
+        Ok(()) => 0,
+        Err(e) => crate::cli::hook::failed("gitfold parent --claude-hook", e),
     }
-    Ok(())
 }
 
 fn run(event: ParentHook, input: &str) -> Result<()> {
@@ -69,16 +68,13 @@ fn workspace(input: &str) -> Option<(PathBuf, StateDir)> {
 
 /// A tool call (`inbox --claude-hook post-tool-use`, with `input`): its
 /// agent (a subagent's own id, else its session's) is present in the
-/// workspace it runs in. Errors only logged.
-pub fn tool_used(input: &str) {
+/// workspace it runs in, if it runs in one.
+pub fn tool_used(input: &str) -> Result<()> {
     let id = field(input, "agent_id").or_else(|| field(input, "session_id"));
     let Some((_, state)) = workspace(input) else {
-        return;
+        return Ok(());
     };
-    let marked = mark(&state, id.as_deref());
-    if let Err(e) = marked {
-        log::warn!("gitfold inbox --claude-hook: marking the agent present: {e:#}");
-    }
+    mark(&state, id.as_deref()).context("marking the agent present")
 }
 
 /// Marks agent `id` present in the workspace of `state` (see

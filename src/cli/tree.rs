@@ -623,8 +623,8 @@ fn landed_hint(name: &str, parent: &str, to: &str, gone: bool, itself: bool) -> 
 /// check that it makes no cycle (S1-S6); then its own commits moved onto
 /// P's tip. A move cut short leaves it built on P with P's commits to take
 /// (`--update`). With commits already pushed, it stays built on P without
-/// the move (following paused until `--update --yes`); with a conflict too
-/// (recorded against P: paused until P changes), exit 4. A merge among its
+/// the move (following paused until `--update --yes`), exit 4; with a
+/// conflict too (recorded against P: paused until P changes). A merge among its
 /// own commits is refused before anything is written. Going back is `--set`
 /// the old parent.
 fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Result<()> {
@@ -682,13 +682,9 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         false => "",
     };
     match &moved {
-        follow::Moved::Pushed(pushed) => {
-            println!("{built}{paused}: {}", pushed_said(name, pushed));
-            Ok(())
-        }
-        // Built on P all the same, its conflict recorded: going back is
-        // `--set` the old parent.
-        follow::Moved::Conflict(_) => {
+        // Built on P all the same, nothing moved (exit 4): commits pushed,
+        // or its conflict recorded. Going back is `--set` the old parent.
+        follow::Moved::Pushed(_) | follow::Moved::Conflict(_) => {
             said(name, short, &plan, moved, Some(&format!("{built}{paused}")))
         }
         // Refused before anything was written (above), the count kept.
@@ -775,7 +771,7 @@ fn said_to(
              out of the way: `gitfold parent {name} --update`",
             if said.is_empty() { "" } else { ":\n" }
         ))),
-        follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),
+        follow::Moved::Pushed(pushed) => Err(Refusal::Changes.error(pushed_said(name, &pushed))),
         follow::Moved::Merge => bail!(
             "{name}'s own commits include a merge, which gitfold doesn't move: rebase it by hand \
              ({})",

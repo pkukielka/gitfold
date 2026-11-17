@@ -424,9 +424,9 @@ fn exit_code(e: &anyhow::Error) -> Option<i32> {
     e.downcast_ref::<git::cmd::Failed>()?.status.code()
 }
 
-/// Gives branch `to` the settings set for branch `from` (a fork); one that
-/// can't be written is warned about.
-pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
+/// Gives branch `to` the settings set for branch `from` (a fork); those that
+/// can't be written, said (what and why).
+pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) -> Vec<String> {
     // Every per-branch setting but the parent: a fork starts at its source,
     // with no relation to it.
     let copied = [
@@ -443,9 +443,10 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) {
                 .map(|on| set_track_reads(common_dir, to, on)),
         ),
     ];
-    for (key, result) in copied {
-        if let Some(Err(e)) = result {
-            warn!("copying {} to {to}: {e:#}", branch_key(from, key));
-        }
-    }
+    (copied.into_iter())
+        .filter_map(|(key, result)| match result {
+            Some(Err(e)) => Some(format!("{} ({e:#})", branch_key(from, key))),
+            _ => None,
+        })
+        .collect()
 }

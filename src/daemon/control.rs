@@ -11,7 +11,8 @@
 //! limited to 107 bytes. The daemon only answers processes of its own user.
 //! One request per connection: the client writes it and shuts its side down;
 //! the daemon answers `ok` or `error`, a newline, then the message (for a
-//! refusal, then `refusal: <kind>` on a last line).
+//! refusal, then `refusal: <kind>` on a last line; `incomplete`, the one kind
+//! that isn't a refusal, for an `error` whose message says what was done).
 
 use std::fs::{self, File};
 use std::io::{ErrorKind, Read, Write};

@@ -110,13 +110,18 @@ pub fn prune(repo: &Path) -> Result<()> {
     let common_dir = git::init(repo)?;
     let _lock = exclusive(&common_dir)?;
     let mut removed = 0;
-    if let Ok(entries) = fs::read_dir(common_dir.join("worktrees")) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if worktree::is_snapshot_registration(&name) {
-                remove_dir(&entry.path())?;
-                removed += 1;
-            }
+    let dir = common_dir.join("worktrees");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries.collect(),
+        // None yet: nothing registered.
+        Err(e) if crate::fsutil::not_found(&e) => Ok(Vec::new()),
+        Err(e) => Err(e),
+    };
+    for entry in entries.with_context(|| format!("reading {}", dir.display()))? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if worktree::is_snapshot_registration(&name) {
+            remove_dir(&entry.path())?;
+            removed += 1;
         }
     }
     println!("removed {removed} snapshot registrations");

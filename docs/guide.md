@@ -447,7 +447,7 @@ leaves in the workspace.
 
 **`following paused: pushed`.** The branch's commits are already on its
 remote branch, and moving them would rewrite pushed history, so gitfold asks
-first:
+first (`parent --update` and `--set` move nothing then: exit 4):
 
 ```
 $ gitfold parent

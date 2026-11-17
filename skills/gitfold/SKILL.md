@@ -191,7 +191,10 @@ It runs the `gitfold` on `PATH`, or else the release matching the plugin
 The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove
 --claude-hook worktree-remove`, the `inbox --claude-hook` ones above, and
 `gitfold parent --claude-hook session-start`, `session-end`, `subagent-stop`
-and `user-prompt-submit` (your presence, and following at turn start). A
+and `user-prompt-submit` (your presence, and following at turn start).
+Outside a workspace they do nothing; an error inside one exits 1, shown to
+the user, never blocking. `worktree-remove` removes the workspace even while
+the repository isn't mounted. A
 plugin's `WorktreeCreate` hook doesn't run for `claude --worktree --tmux`; for
 that, put the two worktree hooks in `settings.json` instead.
 
@@ -283,7 +286,8 @@ changing a file: `gitfold changes -- <PATH>...` (one line per branch,
   diverged. `--against <REV>` picks
   another target. `--against <BRANCH>` of another workspace includes its
   uncommitted changes, and `--against-workspaces` checks every other one: two
-  agents editing the same files. It exits 6 if anything overlaps, 0 if not,
+  agents editing the same files. It exits 6 if anything overlaps, 0 if not
+  (1 if a workspace it couldn't compare with was skipped, said),
   so it's a cheap check before pushing or a poll for a supervisor. A `W` path
   often merges cleanly; the merge preview below tells for sure.
 - **Recording reads:** `R` lines need read tracking, off by default. Turn it

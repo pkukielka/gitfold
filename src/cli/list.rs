@@ -86,7 +86,8 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
 /// own commits (since it diverged from its parent, if that still exists,
 /// else from main: `git::default_compare_target`) on branches not merged
 /// into main; with no main branch, only uncommitted. Uncommitted: what
-/// `gitfold changes` says of each workspace. Its exit code.
+/// `gitfold changes` says of each workspace. Its exit code: 1 if a
+/// workspace or branch was skipped (an incomplete answer).
 pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
     let common_dir = git::init(repo)?;
     // git checks the paths first, once: listing an empty index (one that
@@ -104,6 +105,8 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
     let mounted = mount_table::mounted(&common_dir);
     let store = Store::default();
     let mut workspaces = Vec::new();
+    // Workspaces and branches that couldn't be read: an incomplete answer.
+    let mut skipped = 0;
     for w in state::list(&common_dir)? {
         if !w.state.opened() {
             continue;
@@ -114,14 +117,17 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
                 let paths: Vec<Vec<u8>> = s.changed.into_iter().chain(s.deleted).collect();
                 workspaces.push((w.branch, paths, note));
             }
-            Err(e) => eprintln!("skipping workspace {}: {e:#}", w.branch),
+            Err(e) => {
+                eprintln!("skipping workspace {}: {e:#}", w.branch);
+                skipped += 1;
+            }
         }
     }
     let all = workspaces.iter().flat_map(|(_, paths, _)| paths);
     let matching = matching(all, &args.paths, &dir)?;
     let mut lines = BTreeSet::new();
     match git::default_compare_target(&common_dir)? {
-        Some(main) => committed(&common_dir, &main, &args.paths, &mut lines)?,
+        Some(main) => skipped += committed(&common_dir, &main, &args.paths, &mut lines)?,
         None => eprintln!("note: no main branch to compare with: uncommitted changes only"),
     }
     for (branch, paths, note) in workspaces {
@@ -140,22 +146,28 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
         write_path(&mut out, path, args.nul)?;
     }
     out.flush()?;
+    if skipped > 0 {
+        eprintln!("incomplete: {skipped} workspace(s) or branch(es) skipped (see above)");
+        return Ok(1);
+    }
     Ok(0)
 }
 
 /// Adds to `lines` the paths matching `typed` that each branch not merged
 /// into `main` changed in its own commits: since it diverged from its
 /// parent, if that still exists, else from `main`. A branch with no history
-/// shared with that (as `gh-pages` often has) changes nothing there.
+/// shared with that (as `gh-pages` often has) changes nothing there. How
+/// many branches it skipped (git couldn't diff them).
 fn committed(
     common_dir: &Path,
     main: &str,
     typed: &[String],
     lines: &mut BTreeSet<(Vec<u8>, String, &str)>,
-) -> Result<()> {
+) -> Result<usize> {
     let tree = crate::tree::Tree::read(common_dir)?;
     // Whether the repository's history is whole (not a shallow clone).
     let whole = OnceCell::new();
+    let mut skipped = 0;
     let no_merged = format!("--no-merged={main}");
     let args = [
         "for-each-ref",
@@ -193,10 +205,13 @@ fn committed(
                 }
             }
             Err(_) if unrelated(common_dir, from, &to, &whole) => {}
-            Err(e) => eprintln!("skipping branch {branch}: {e:#}"),
+            Err(e) => {
+                eprintln!("skipping branch {branch}: {e:#}");
+                skipped += 1;
+            }
         }
     }
-    Ok(())
+    Ok(skipped)
 }
 
 /// Whether `a` and `b` have no history in common (`git merge-base` exits 1),

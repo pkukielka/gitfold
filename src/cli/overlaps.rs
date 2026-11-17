@@ -73,7 +73,7 @@ impl Target {
 
 /// `gitfold overlaps`: prints, for a workspace, `R` (read) and `W` (written)
 /// lines naming each target that changed the path since; returns the exit
-/// code, `FOUND` if there were any.
+/// code: `FOUND` if there were any, else 1 if a workspace was skipped.
 pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     let kinds = args.kinds();
     let OverlapsArgs {
@@ -137,6 +137,8 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
         anyhow::ensure!(rev != *branch, "{branch} can't be compared with itself");
         targets.push(rev_target(&common_dir, &store, &base, rev)?);
     }
+    // Workspaces it couldn't compare with: the answer is incomplete.
+    let mut skipped = 0;
     if against_workspaces {
         for w in crate::state::list(&common_dir)? {
             if w.branch == *branch || !git::branch_exists(&w.branch) {
@@ -147,7 +149,10 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
             }
             match rev_target(&common_dir, &store, &base, w.branch.clone()) {
                 Ok(t) => targets.push(t),
-                Err(e) => eprintln!("skipping workspace {}: {e:#}", w.branch),
+                Err(e) => {
+                    eprintln!("skipping workspace {}: {e:#}", w.branch);
+                    skipped += 1;
+                }
             }
         }
     }
@@ -184,7 +189,15 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
         write_path(&mut out, path, nul)?;
     }
     out.flush()?;
-    Ok(if lines.is_empty() { 0 } else { FOUND })
+    // Overlaps found are found, whatever was skipped (said above).
+    Ok(match (lines.is_empty(), skipped) {
+        (false, _) => FOUND,
+        (true, 0) => 0,
+        (true, _) => {
+            eprintln!("no overlaps found, but {skipped} workspace(s) skipped (see above)");
+            1
+        }
+    })
 }
 
 /// What to compare with by default: `git::default_compare_target`.

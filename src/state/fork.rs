@@ -23,6 +23,7 @@ use super::task::TaskDir;
 use crate::fsutil::{self, Unreadable};
 use crate::git;
 use crate::git::worktree;
+use crate::refusal::Refusal;
 use crate::settings;
 use crate::state::{self, StateDir};
 
@@ -41,7 +42,9 @@ const INDEX: &str = ".index";
 /// Forks workspace `from` into new branch `to`, with `copy` filling the new
 /// state directory from the source's (see `copy_state_dir`). `mount` is the
 /// mount point, if mounted, for the fork's registration. Returns what was done,
-/// for the user.
+/// for the user; made, but without the source's task folder or settings
+/// (copies that failed), `Refusal::Incomplete` saying what was done and what
+/// wasn't.
 pub fn fork(
     common_dir: &Path,
     from: &str,
@@ -96,10 +99,12 @@ pub fn fork(
     let to_task = TaskDir::with(&local, common_dir, to);
     let kept_task = to_task.dir.exists();
     let from_task = TaskDir::with(&local, common_dir, from);
+    // What wasn't copied, said once the branch is made.
+    let mut missed = Vec::new();
     let task_copied = match to_task.copy_from(&from_task, &local.inbox()) {
         Ok(copied) => copied,
         Err(e) => {
-            log::warn!("copying the task folder of {from} into {to}: {e:#}");
+            missed.push(format!("its task folder ({e:#})"));
             false
         }
     };
@@ -142,20 +147,27 @@ pub fn fork(
         }
         return Err(e);
     }
-    settings::copy_branch(&local, common_dir, from, to);
+    missed.extend(settings::copy_branch(&local, common_dir, from, to));
     let done = match copied {
         true => format!("created branch {to} at {from}, with its uncommitted changes"),
         false => {
             format!("created branch {to} at {from} (it had no workspace yet: no changes to copy)")
         }
     };
-    Ok(match kept_task {
+    let done = match kept_task {
         true => format!(
             "{done}; kept the task folder an earlier branch {to} left (not {from}'s): {}",
             to_task.dir.display()
         ),
         false => done,
-    })
+    };
+    match missed.is_empty() {
+        true => Ok(done),
+        false => Err(Refusal::Incomplete.error(format!(
+            "{done}; but not copied from {from}: {}",
+            missed.join(", ")
+        ))),
+    }
 }
 
 /// Copies the stored state `src` of a workspace into new directory `dst`: the
