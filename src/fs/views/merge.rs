@@ -68,7 +68,7 @@ pub struct Private {
     hash: gix::hash::Kind,
     /// Held by each merge, each live tree (`live`) and each garbage
     /// collection: one would prune what another just wrote.
-    pub(super) lock: Mutex<()>,
+    pub(super) lock: Mutex<super::live::Told>,
 }
 
 impl Private {
@@ -87,7 +87,7 @@ impl Private {
             top: git::work_tree().unwrap_or_else(|| git_dir.clone()),
             git_dir,
             hash,
-            lock: Mutex::new(()),
+            lock: Mutex::default(),
         };
         // In the repository's object format: git writes its objects there.
         private.run(&["init", "-q", "--bare", &format!("--object-format={hash}")])?;

@@ -47,26 +47,10 @@ pub fn output(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
 /// `input` on its stdin if given; what it printed. A failure's error holds
 /// `args` and what git said.
 pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
-    finish(command.args(args), args, input, &[])
+    finish(command.args(args), args, input)
 }
 
-/// `output_of`, for a git command that answers by its exit code too
-/// (`check-ignore`): exiting with one of `codes` isn't a failure.
-pub fn output_allowing(
-    command: &mut Command,
-    args: &[&str],
-    input: Option<Vec<u8>>,
-    codes: &[i32],
-) -> Result<Vec<u8>> {
-    finish(command.args(args), args, input, codes)
-}
-
-fn finish(
-    command: &mut Command,
-    args: &[&str],
-    input: Option<Vec<u8>>,
-    codes: &[i32],
-) -> Result<Vec<u8>> {
+fn finish(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
     let (out, written) = match input {
         None => (command.stdin(Stdio::null()).output()?, Ok(())),
         Some(input) => {
@@ -82,8 +66,7 @@ fn finish(
         }
     };
     // git's failure first: one that stopped reading leaves a broken pipe.
-    let allowed = out.status.code().is_some_and(|c| codes.contains(&c));
-    if !out.status.success() && !allowed {
+    if !out.status.success() {
         return Err(Failed {
             args: args.join(" "),
             status: out.status,

@@ -148,24 +148,26 @@ pub fn status(store: &Store, state: &StateDir) -> Result<Status> {
         &mut buf,
         Default::default(),
     )?;
-    walk(store, state, Some(ignore))
+    walk(store, state, ignore, Ignoring::Match)
 }
 
-/// The changes of the workspace stored in `state` as paths to give `git add`:
-/// ignored untracked files included (`ignored` is 0), for git itself to tell
-/// which it ignores, and a submodule changed in upper as its path (git
-/// records its checkout's commit), not as the files below it.
+/// The changes of the workspace stored in `state`, ignored untracked files
+/// included (`ignored` is 0): for git itself to tell which it ignores.
 // Its caller, the `@live` views' watch, comes next.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn unfiltered(store: &Store, state: &StateDir) -> Result<Status> {
-    walk(store, state, None)
+    walk(store, state, Default::default(), Ignoring::Never)
 }
 
-/// The changes of the workspace stored in `state`: with the ignore patterns
-/// `ignore` (global and `info/exclude`), ignored untracked files counted
-/// apart; without, as `unfiltered`.
-fn walk(store: &Store, state: &StateDir, ignore: Option<gix::ignore::Search>) -> Result<Status> {
-    let for_git = ignore.is_none();
+/// The changes of the workspace stored in `state`, with the ignore patterns
+/// `ignore` (global and `info/exclude`), counting ignored untracked files as
+/// `ignoring` says.
+fn walk(
+    store: &Store,
+    state: &StateDir,
+    ignore: gix::ignore::Search,
+    ignoring: Ignoring,
+) -> Result<Status> {
     let base = state.read_base()?;
     let tree = store.load_tree(base.tree)?;
     let (whiteouts, opaque) = Markers::read(&state.markers())?;
@@ -175,16 +177,11 @@ fn walk(store: &Store, state: &StateDir, ignore: Option<gix::ignore::Search>) ->
         upper: &upper,
         whiteouts: &whiteouts,
         opaque: &opaque,
-        ignore: ignore.unwrap_or_default(),
-        for_git,
+        ignore,
         changed: Vec::new(),
         deleted: BTreeSet::new(),
         ignored: 0,
         newest: None,
-    };
-    let ignoring = match for_git {
-        true => Ignoring::Never,
-        false => Ignoring::Match,
     };
     walk.changed_below(b"", Some(tree), ignoring)?;
     let Walk {
@@ -223,8 +220,6 @@ struct Walk<'a> {
     /// Ignore patterns: global and `info/exclude`, then the `.gitignore` of
     /// each directory from the root down to the one being walked.
     ignore: gix::ignore::Search,
-    /// Paths for `git add` (`unfiltered`).
-    for_git: bool,
     changed: Vec<Vec<u8>>,
     deleted: BTreeSet<Vec<u8>>,
     ignored: usize,
@@ -278,10 +273,6 @@ impl Walk<'_> {
                     Some(Lower::Tree(t)) => Some(t),
                     _ => None,
                 };
-                if self.for_git && matches!(lower, Some(Lower::Gitlink)) {
-                    self.changed.push(path);
-                    continue;
-                }
                 // Git never looks inside an untracked directory holding a
                 // repository: unless ignored, it is one untracked entry.
                 if !matches!(lower, Some(Lower::Tree(_) | Lower::Gitlink))
