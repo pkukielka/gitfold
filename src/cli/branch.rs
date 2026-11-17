@@ -157,6 +157,8 @@ fn merged(
             Source::resolve(repo, rev, i > 0, with_changes)
         })
         .collect::<Result<Vec<_>>>()?;
+    // The start point never reaches git merge, which would say them.
+    eprint!("{}", sources[0].warnings);
     // The workspaces whose changes are taken, checked before mounting too.
     let copied = match with_changes {
         true => Changes::workspaces(common_dir, &sources)?,
@@ -298,15 +300,15 @@ struct Source {
     id: String,
     full: Option<String>,
     name: Option<String>,
+    /// What git warned of it (a name it finds ambiguous).
+    warnings: String,
 }
 
 impl Source {
     /// `rev` in the worktree of git directory `repo`; refused as `git merge`
     /// refuses what isn't a commit; git's own error if it fails otherwise.
-    /// `merged`: given to `git merge`, which says git's warnings about it
-    /// (a name it finds ambiguous: `as_in` gives it as typed), with the
-    /// ref it names, short; else they are said here. `named` (`-w`): with
-    /// the ref it names in full.
+    /// With the ref it names: short if `merged` (given to `git merge`), in
+    /// full if `named` (`-w`).
     fn resolve(repo: &Path, rev: &str, merged: bool, named: bool) -> Result<Source> {
         let line = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
         let commit = format!("{rev}^{{commit}}");
@@ -334,21 +336,16 @@ impl Source {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        if !merged {
-            eprint!("{}", String::from_utf8_lossy(&out.stderr));
-        }
         let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`); a name
         // git finds ambiguous names none.
-        let rev_parse = |how: &str, rev: &str| {
-            (git::cmd::output(repo, &["rev-parse", "--verify", "-q", how, rev]).ok())
+        let ref_name = |how: &str| {
+            let args = ["rev-parse", "--verify", "-q", how, rev];
+            (!rev.starts_with('-'))
+                .then(|| git::cmd::output(repo, &args).ok())
+                .flatten()
                 .map(line)
                 .filter(|n| !n.is_empty() && n != "HEAD")
-        };
-        let ref_name = |how: &str| {
-            (!rev.starts_with('-'))
-                .then(|| rev_parse(how, rev))
-                .flatten()
         };
         let full = (named.then(|| ref_name("--symbolic-full-name")).flatten())
             .filter(|full| full.starts_with("refs/"));
@@ -358,6 +355,7 @@ impl Source {
             id,
             full,
             name,
+            warnings: String::from_utf8_lossy(&out.stderr).into_owned(),
         })
     }
 
@@ -369,7 +367,8 @@ impl Source {
     /// What to give `git merge` in the worktree of git directory `admin`:
     /// the revision as typed, else the ref it named, if git takes it for
     /// the same commit there (so git's message names it as the user did);
-    /// else the commit.
+    /// else the commit, git's warnings of it said here (git merge doesn't
+    /// see the name they are about).
     fn as_in(&self, admin: &Path) -> Result<String> {
         let typed = (!self.rev.starts_with('-')).then_some(&self.rev);
         for name in typed.into_iter().chain(&self.name) {
@@ -380,6 +379,7 @@ impl Source {
                 return Ok(name.clone());
             }
         }
+        eprint!("{}", self.warnings);
         Ok(self.id.clone())
     }
 }

@@ -184,7 +184,7 @@ eq "gitfold mount in the background: its flags recorded before it returns" "--pr
 # The daemon it starts: it would record them once mounted, before it answers
 # on its control socket (`gitfold version`).
 GITFOLD_RECORDED_BY_MOUNT=1 mount_fs --prewarm none
-"$BIN" version "$MNT" >/dev/null
+check "  the daemon answering on its control socket" "$BIN" version "$MNT"
 eq "  not by the daemon it starts, at a moment after" "--prewarm=content --prewarm-walks=2" "$(mount_options)"
 unmount_fs
 mount_fs
