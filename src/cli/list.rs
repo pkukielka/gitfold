@@ -15,6 +15,7 @@ use super::tree::{landed_said, paused};
 use super::write_path;
 use crate::follow;
 use crate::git;
+use crate::mount_table;
 use crate::settings;
 use crate::state::retire::{base_note, check_name};
 use crate::state::status;
@@ -49,7 +50,7 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     }
     let store = Store::default();
     let s = status::status(&store, &state)?;
-    let note = base_note(name, &s.base);
+    let note = base_note(name, &s.base, mount_table::mounted(&common_dir));
     if !note.is_empty() {
         eprintln!("note: {name}: {note}; changes are against the stored base");
     }
@@ -100,6 +101,7 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
         return Ok(1);
     }
     // Each workspace's uncommitted paths, and its note if any.
+    let mounted = mount_table::mounted(&common_dir);
     let store = Store::default();
     let mut workspaces = Vec::new();
     for w in state::list(&common_dir)? {
@@ -108,7 +110,7 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
         }
         match status::status(&store, &w.state) {
             Ok(s) => {
-                let note = base_note(&w.branch, &s.base);
+                let note = base_note(&w.branch, &s.base, mounted);
                 let paths: Vec<Vec<u8>> = s.changed.into_iter().chain(s.deleted).collect();
                 workspaces.push((w.branch, paths, note));
             }
@@ -370,6 +372,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     }
     let store = Store::default();
     let local = settings::Local::read(&common_dir);
+    let mounted = mount_table::mounted(&common_dir);
     let lines = match stat {
         true => format!(" {:>8} {:>8}", "+lines", "-lines"),
         false => String::new(),
@@ -424,7 +427,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             task = dir.status();
             counts = [s.changed.len(), s.deleted.len(), s.ignored].map(|n| n.to_string());
             base = s.base.to_hex_with_len(12).to_string();
-            let note = base_note(&w.branch, &s.base);
+            let note = base_note(&w.branch, &s.base, mounted);
             if !note.is_empty() {
                 notes.insert(0, note.to_string());
             }

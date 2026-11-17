@@ -31,6 +31,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         merge: _,
     } = args;
     let name = name.as_deref().context("name the branch")?;
+    let common_dir = git::init(repo)?;
     if let Some(parent) = &parent {
         // N5: created at P's tip, then built on P. With no upstream from P
         // (`--no-track`, whatever `branch.autoSetupMerge` says): the parent
@@ -56,13 +57,13 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             return Err(e);
         }
         println!(
-            "created branch {name} on {} ({}); open it as <mountpoint>/{name}",
+            "created branch {name} on {} ({}); open it as {}",
             crate::tree::short(&full),
-            super::tree::following(!no_follow)
+            super::tree::following(!no_follow),
+            open_as(&common_dir, name)
         );
         return Ok(());
     }
-    let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
     if from.len() > 1 {
         return merged(
@@ -99,13 +100,25 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             })
         })?;
         set_branch_settings(repo, name, prewarm, track_reads)?;
-        println!("{done}; open it as <mountpoint>/{name}");
+        println!("{done}; open it as {}", open_as(&common_dir, name));
         return Ok(());
     }
     create(repo, name, from.as_deref())?;
     set_branch_settings(repo, name, prewarm, track_reads)?;
-    println!("created branch {name}; open it as <mountpoint>/{name}");
+    println!(
+        "created branch {name}; open it as {}",
+        open_as(&common_dir, name)
+    );
     Ok(())
+}
+
+/// Where branch `name` of the repository of `common_dir` opens as a
+/// workspace: under its mount, or `<mountpoint>/<name>` while unmounted.
+fn open_as(common_dir: &Path, name: &str) -> String {
+    match crate::mount_table::mount_of(common_dir) {
+        Ok(Some(mount)) => mount.join(name).display().to_string(),
+        _ => format!("<mountpoint>/{name}"),
+    }
 }
 
 /// Refuses branch name `name` for a new workspace in the repository of

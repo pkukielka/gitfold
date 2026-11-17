@@ -165,13 +165,14 @@ body" "$(grep -v '^time: ' <<<"$out")"
 check "with a time header" grep -qE '^time: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' <<<"$out"
 eq "taken once: gone after" "" "$("$BIN" -C "$REPO" inbox ib 2>&1)"
 eq "an empty inbox: --peek prints nothing" "" "$("$BIN" -C "$REPO" inbox ib --peek 2>&1)"
+eq "an empty inbox: nothing to take, exit 0" "0 " "$(out=$("$BIN" -C "$REPO" inbox ib 2>&1); echo "$? $out")"
 start=$(date +%s%N)
-eq "--wait --timeout with nothing: nothing, after the wait" "" "$("$BIN" -C "$REPO" inbox ib --wait --timeout 1 2>&1)"
+eq "--wait --timeout with nothing: nothing, exit 124 (timed out), after the wait" "124 " "$(out=$("$BIN" -C "$REPO" inbox ib --wait --timeout 1 2>&1); echo "$? $out")"
 eq "  (about a second)" yes "$( (( ($(date +%s%N) - start) / 1000000 >= 900 )) && echo yes || echo no)"
 "$BIN" -C "$REPO" inbox ib --wait --timeout 10 >"$T/waited" 2>&1 & WP=$!
 sleep 0.3; start=$(date +%s%N)
-"$BIN" -C "$REPO" send ib wake up >/dev/null; wait $WP
-eq "--wait returns with the message as it arrives" "wake up" "$(tail -1 "$T/waited")"
+"$BIN" -C "$REPO" send ib wake up >/dev/null; wait $WP; rc=$?
+eq "--wait returns with the message as it arrives (exit 0)" "0 wake up" "$rc $(tail -1 "$T/waited")"
 eq "  (at once)" yes "$( (( ($(date +%s%N) - start) / 1000000 < 2000 )) && echo yes || echo no)"
 "$BIN" -C "$REPO" inbox ib --wait --timeout 10 >"$T/waited" 2>&1 & WP=$!
 sleep 0.3; rm -rf "$IB/inbox"; sleep 0.3
@@ -211,7 +212,7 @@ sleep 0.3; echo new >"$IB/notes/.tmp"; mv "$IB/notes/.tmp" "$IB/notes/handoff.md
 eq "watch: each name's last change (a file replaced: changed)" "D	b.md
 C	handoff.md" "$(cat "$T/watched")"
 check "watch refuses a file" fails "$BIN" -C "$REPO" watch ib:notes/handoff.md --timeout 1
-eq "watch --timeout: nothing" "" "$("$BIN" -C "$REPO" watch ib:notes --timeout 1 2>&1)"
+eq "watch --timeout: nothing, exit 124 (timed out)" "124 " "$(out=$("$BIN" -C "$REPO" watch ib:notes --timeout 1 2>&1); echo "$? $out")"
 check "watch refuses .." fails "$BIN" -C "$REPO" watch ib:../x --timeout 1
 eq "--claude-hook outside a workspace: silent, exit 0" "0" "$(cd / && "$BIN" inbox --claude-hook post-tool-use 2>&1; echo $?)"
 eq "--claude-hook, nothing new: silent" "" "$("$BIN" -C "$REPO" inbox ib --claude-hook user-prompt-submit 2>&1; "$BIN" -C "$REPO" inbox ib --claude-hook post-tool-use 2>&1)"
@@ -270,6 +271,10 @@ eq "not mounted: mounted again there (made again, as a tmpfs after a reboot), th
 mount_fs; kill -9 "$PID"; wait "$PID" 2>/dev/null
 out=$(create "$REPO" w6 2>"$T/err"); rc=$?
 eq "a mount whose daemon is gone: refused, saying so, no branch made" "1 yes no" "$rc $(grep -q "doesn't answer" "$T/err" && echo yes) $(R rev-parse -q --verify worktree-w6 >/dev/null && echo yes || echo no)"
+out=$("$BIN" mount --log "$T/stale.log" "$REPO" "$MNT" 2>&1); rc=$?
+eq "  mount over it: refused, saying the mount is stale" "1 Error: $MNT is a stale gitfold mount (its daemon is gone): \`gitfold unmount $MNT\`, then mount again" "$rc $out"
+out=$("$BIN" version "$MNT" 2>&1); rc=$?
+eq "  version: the daemon is gone" "1 yes" "$rc $(grep -q "is gone (killed?)" <<<"$out" && echo yes)"
 fusermount3 -u -z "$MNT"
 R config --unset gitfold.mountpoint
 out=$(create "$REPO" w5 2>"$T/err"); rc=$?

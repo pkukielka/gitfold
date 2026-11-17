@@ -292,7 +292,7 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
             println!("{name} is up to date with {short}");
             Ok(())
         }
-        moved => said(name, short, &plan, moved),
+        moved => said(name, short, &plan, moved, None),
     }
 }
 
@@ -509,7 +509,7 @@ fn try_follow(common_dir: &Path, name: &str, tree: &Tree) -> Result<Followed> {
         follow::Moved::Conflict(paths) => Some(format!("conflict on {}", paths.join(", "))),
         follow::Moved::Pushed(pushed) => Some(pushed_count(pushed)),
         follow::Moved::Work(paths) => Some(format!(
-            "uncommitted work in the way on {}",
+            "uncommitted work conflicts on {}",
             paths.join(", ")
         )),
         follow::Moved::Merge => Some("a merge among its own commits".to_string()),
@@ -521,7 +521,7 @@ fn try_follow(common_dir: &Path, name: &str, tree: &Tree) -> Result<Followed> {
         _ => None,
     };
     let mut out = landed.clone();
-    let said = said_to(&mut out, name, short, &plan, moved).map_err(|e| format!("{e:#}"));
+    let said = said_to(&mut out, name, short, &plan, moved, None).map_err(|e| format!("{e:#}"));
     Ok(match summary {
         // Moved, its work put back conflicting maybe.
         None => {
@@ -653,7 +653,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // before anything changes.
     let plan = follow::Plan::new(common_dir, name, old.as_deref(), &tree.root_refs(), &full)?;
     if !plan.up_to_date() && plan.merges(common_dir)? {
-        return said(name, short, &plan, follow::Moved::Merge);
+        return said(name, short, &plan, follow::Moved::Merge, None);
     }
     {
         // P checked again (it resolves the same, no cycle) and written
@@ -671,32 +671,25 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         settings::set_conflict(common_dir, name, None)?;
     }
     // Refused or failed from here, it is built on P all the same.
+    let built = format!("{name} is now built on {short}");
     let moved = plan
         .run(common_dir, false, |moves| {
-            let workspace = movable(common_dir, name, true, moves, &plan.by_hand(short))?;
-            if moves {
-                println!("moves {} of {name} onto {short}", commits(plan.own));
-            }
-            Ok(workspace)
+            movable(common_dir, name, true, moves, &plan.by_hand(short))
         })
-        .inspect_err(|_| println!("{name} is now built on {short}"))?;
+        .inspect_err(|_| println!("{built}"))?;
     let paused = match follow.unwrap_or(true) {
         true => "; following paused",
         false => "",
     };
     match &moved {
         follow::Moved::Pushed(pushed) => {
-            println!(
-                "{name} is now built on {short}{paused}: {}",
-                pushed_said(name, pushed)
-            );
+            println!("{built}{paused}: {}", pushed_said(name, pushed));
             Ok(())
         }
         // Built on P all the same, its conflict recorded: going back is
         // `--set` the old parent.
         follow::Moved::Conflict(_) => {
-            println!("{name} is now built on {short}{paused}");
-            said(name, short, &plan, moved)
+            said(name, short, &plan, moved, Some(&format!("{built}{paused}")))
         }
         // Refused before anything was written (above), the count kept.
         follow::Moved::Merge => unreachable!("a merge refused before the write"),
@@ -705,18 +698,22 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         follow::Moved::Work(_)
         | follow::Moved::Refused(_)
         | follow::Moved::UpToDate
-        | follow::Moved::Done { .. } => {
-            println!("{name} is now built on {short}");
-            said(name, short, &plan, moved)
-        }
+        | follow::Moved::Done { .. } => said(name, short, &plan, moved, Some(&built)),
     }
 }
 
 /// What a move of `name` onto `parent` (short) did, or why it didn't, said
-/// (on standard output) or refused.
-fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> Result<()> {
+/// (on standard output) or refused; after `built` (`--set`: that it is now
+/// built on it), which a move completes ("…: moved 1 commit").
+fn said(
+    name: &str,
+    parent: &str,
+    plan: &follow::Plan,
+    moved: follow::Moved,
+    built: Option<&str>,
+) -> Result<()> {
     let mut out = String::new();
-    let result = said_to(&mut out, name, parent, plan, moved);
+    let result = said_to(&mut out, name, parent, plan, moved, built);
     print!("{out}");
     result
 }
@@ -728,8 +725,19 @@ fn said_to(
     parent: &str,
     plan: &follow::Plan,
     moved: follow::Moved,
+    built: Option<&str>,
 ) -> Result<()> {
     use std::fmt::Write;
+    match (&moved, built) {
+        (follow::Moved::Done { kept, .. }, Some(built)) => {
+            writeln!(out, "{built}: moved {}", commits(*kept))?
+        }
+        (follow::Moved::Done { kept, .. }, None) => {
+            writeln!(out, "moved {} of {name} onto {parent}", commits(*kept))?
+        }
+        (_, Some(built)) => writeln!(out, "{built}")?,
+        (_, None) => {}
+    }
     match moved {
         follow::Moved::UpToDate => Ok(()),
         follow::Moved::Done {
@@ -737,7 +745,6 @@ fn said_to(
             push,
             unmerged,
         } => {
-            writeln!(out, "moved {} of {name} onto {parent}", commits(kept))?;
             if plan.own > kept {
                 let dropped = commits(plan.own - kept);
                 writeln!(out, "({dropped} already in {parent}: dropped)")?;
@@ -754,9 +761,13 @@ fn said_to(
                 ))),
             }
         }
+        // Committed, the work conflicts all the same: the advice resolves it.
         follow::Moved::Work(paths) => Err(Refusal::Changes.error(format!(
-            "nothing moved: {name}'s uncommitted work is in the way of {parent}'s commits on {}: \
-             commit or stash it, then: `gitfold parent {name} --update`",
+            "nothing moved: {name}'s uncommitted work on {} conflicts with {parent}'s new \
+             commits. Resolve it either way: commit it, then `gitfold parent {name} --update` \
+             reports the conflict, with the git rebase to run; or in its workspace `git stash`, \
+             `gitfold parent {name} --update`, then `git stash pop` and resolve the conflict \
+             there",
             paths.join(", ")
         ))),
         follow::Moved::Refused(said) => Err(Refusal::Changes.error(format!(

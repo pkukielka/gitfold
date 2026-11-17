@@ -108,13 +108,17 @@ enum Command {
     /// moved in, deleted or moved out (not below it; dot names don't count),
     /// prints `C` (changed) or `D` (deleted), a tab and the name for it and
     /// whatever else changed right after, and exits. Plain inotify on the
-    /// folder's directory: mounted or not, whoever writes.
+    /// folder's directory: mounted or not, whoever writes. Exit codes: 124 if
+    /// --timeout passes first (nothing printed), 3 no such branch, 1 other
+    /// errors.
     Watch(cli::inbox::WatchArgs),
     /// Take the messages in a workspace's inbox and print them.
     ///
     /// The inbox is `inbox/` in the task folder (`gitfold.inbox` names it). Each
     /// message is taken once, whoever else reads: printed as sent (headers, an
     /// empty line, the body), an empty line between messages, and deleted.
+    /// Exit codes: 0 (also with nothing to take), 124 if --wait --timeout
+    /// passes first (nothing printed), 3 no such branch, 1 other errors.
     Inbox(cli::inbox::InboxArgs),
     /// Leave a message in a workspace's inbox.
     ///
@@ -257,7 +261,7 @@ fn run() -> Result<i32> {
         }
         Command::Changes(args) => cli::list::changes(&cli::repo()?, args)?,
         Command::Overlaps(args) => return cli::overlaps::overlaps(&cli::repo()?, args),
-        Command::Watch(args) => cli::inbox::watch(&cli::repo()?, args)?,
+        Command::Watch(args) => return cli::inbox::watch(&cli::repo()?, args),
         // Finds the repository itself: as a hook, none is no error.
         Command::Inbox(args) => return cli::inbox::inbox(args),
         Command::Send(args) => cli::inbox::send(&cli::repo()?, args)?,

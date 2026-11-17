@@ -96,7 +96,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
     let (base, uncommitted, read) = match state.opened() {
         true => {
             let base = state.read_base()?.id;
-            let note = base_note(branch, &base);
+            let note = base_note(branch, &base, crate::mount_table::mounted(&common_dir));
             if !note.is_empty() {
                 eprintln!("note: {branch}: {note}; its changes are against the stored base");
             }

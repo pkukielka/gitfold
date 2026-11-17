@@ -26,11 +26,25 @@ use log::{info, warn};
 /// "Permission denied" for a directory that is already mounted).
 pub fn check(path: &Path) -> Result<PathBuf> {
     let shown = path.display();
+    // A gitfold mount `gitfold unmount` cleans up; another FUSE mount, fusermount.
+    let stale = || {
+        let gitfold = canonical(path)
+            .and_then(|path| crate::mount_table::gitfold_source(&path))
+            .is_ok_and(|source| source.is_some());
+        match gitfold {
+            true => anyhow::anyhow!(
+                "{shown} is a stale gitfold mount (its daemon is gone): `gitfold unmount \
+                 {shown}`, then mount again"
+            ),
+            false => anyhow::anyhow!(
+                "{shown} is a stale FUSE mount (its daemon is gone); run `fusermount3 -u \
+                 {shown}` first"
+            ),
+        }
+    };
     let meta = match fs::metadata(path) {
         Ok(meta) => meta,
-        Err(e) if e.raw_os_error() == Some(libc::ENOTCONN) => bail!(
-            "{shown} is a stale FUSE mount (its daemon is gone); run `fusermount3 -u {shown}` first"
-        ),
+        Err(e) if e.raw_os_error() == Some(libc::ENOTCONN) => return Err(stale()),
         Err(e) if e.kind() == ErrorKind::NotFound => {
             bail!("mount point {shown} does not exist; create it with `mkdir -p {shown}`")
         }
@@ -41,6 +55,9 @@ pub fn check(path: &Path) -> Result<PathBuf> {
     }
     let path = path.canonicalize()?;
     if is_mounted(&path) {
+        if is_stale(&path) {
+            return Err(stale());
+        }
         bail!("{shown} is already a mount point; unmount it first (`gitfold unmount {shown}`)");
     }
     Ok(path)
@@ -196,6 +213,32 @@ fn fusermount(args: &[&str], mountpoint: &Path) -> std::io::Result<std::process:
         Err(e) if e.kind() == ErrorKind::NotFound => run("fusermount"),
         out => out,
     }
+}
+
+/// Whether the FUSE mount at `path` lost its daemon (killed, crashed): it
+/// answers ENOTCONN. Asked with statfs, which always reaches the daemon (a
+/// stat of the mount root may be answered from the kernel's cache); a live
+/// daemon too busy to answer within a second isn't stale (the asking thread
+/// is left behind, for a process about to exit).
+pub fn is_stale(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    // No thread to ask from (out of resources): not known to be stale.
+    let asked = std::thread::Builder::new().spawn(move || {
+        let mut st = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        // SAFETY: a valid C string, and a buffer statfs fills.
+        let rc = unsafe { libc::statfs(path.as_ptr(), st.as_mut_ptr()) };
+        let _ = tx.send(
+            rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOTCONN),
+        );
+    });
+    asked.is_ok()
+        && rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap_or(false)
 }
 
 /// Whether something is mounted at `path` (it is on another device than its

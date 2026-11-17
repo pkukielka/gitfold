@@ -50,19 +50,22 @@ impl Tip {
         }
     }
 
-    /// What to tell the user about it: nothing at the tip.
-    fn note(self) -> &'static str {
-        match self {
-            Tip::At => "",
-            Tip::Behind => "base behind the branch tip (mount to update)",
-            Tip::Deleted => "branch deleted",
+    /// What to tell the user about it: nothing at the tip. Behind, the
+    /// mount of the repository (`mounted`) catches up by itself.
+    fn note(self, mounted: bool) -> &'static str {
+        match (self, mounted) {
+            (Tip::At, _) => "",
+            (Tip::Behind, false) => "base behind the branch tip (mount to update)",
+            (Tip::Behind, true) => "base behind the branch tip (the mount catches up)",
+            (Tip::Deleted, _) => "branch deleted",
         }
     }
 }
 
-/// Whether the workspace's base is the branch tip, as a note for the user.
-pub fn base_note(branch: &str, base: &gix::ObjectId) -> &'static str {
-    Tip::of(branch, base).note()
+/// Whether the workspace's base is the branch tip, as a note for the user;
+/// `mounted`: whether its repository is mounted.
+pub fn base_note(branch: &str, base: &gix::ObjectId, mounted: bool) -> &'static str {
+    Tip::of(branch, base).note(mounted)
 }
 
 /// What `remove --check` says of a workspace that can be removed.
@@ -121,12 +124,14 @@ pub fn remove_snapshot_registration(
 /// ignored files it holds. `catch_up` brings its stored base up to the branch
 /// tip, if it is behind: `fs::workspace::catch_up` for a closed workspace, or
 /// the open workspace's `sync` (`state` can't open one).
+/// `mounted`: the daemon's removal (else `gitfold remove` unmounted).
 pub fn check_workspace(
     store: &Store,
     common_dir: &Path,
     branch: &str,
     force: bool,
     catch_up: &dyn Fn() -> Result<()>,
+    mounted: bool,
 ) -> Result<usize> {
     // `..` would point it at the git directory itself.
     check_name(branch)?;
@@ -159,6 +164,11 @@ pub fn check_workspace(
         )));
     }
     let mut ignored = 0;
+    // Mounted (the daemon's removal), the workspace catches up by itself.
+    let advice = match mounted {
+        true => "retry shortly, or use --force",
+        false => "mount it, open it once, or use --force",
+    };
     if !force && state.opened() {
         let mut s = status::status(store, &state)?;
         // Changes are measured against the base; behind the tip (the branch moved
@@ -168,7 +178,7 @@ pub fn check_workspace(
             catch_up().map_err(|e| {
                 changes(format!(
                     "workspace {branch}: its base is behind the branch tip and catching up \
-                     failed ({e:#}); mount it, open it once, or use --force"
+                     failed ({e:#}); {advice}"
                 ))
             })?;
             s = status::status(store, &state)?;
@@ -177,9 +187,8 @@ pub fn check_workspace(
         let tip = Tip::of(branch, &s.base);
         if tip == Tip::Behind {
             return Err(changes(format!(
-                "workspace {branch}: {}, so its changes can't be told; mount it, open it \
-                 once, or use --force",
-                tip.note()
+                "workspace {branch}: {}, so its changes can't be told; {advice}",
+                tip.note(mounted)
             )));
         }
         if !s.changed.is_empty() || !s.deleted.is_empty() {

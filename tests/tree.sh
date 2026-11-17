@@ -324,7 +324,7 @@ check "moves don't make the repository look used with mounts" test ! -e "$REPO/.
 R branch side main; on side s.txt s
 R switch -q api; R merge -q --no-ff --no-edit side; R switch -q main
 R branch plain api; on plain p.txt p; on api a.txt after
-check "a merge in the parent's history: moved all the same" says 0 "moves 1 commit of plain onto api" parent plain --set api
+check "a merge in the parent's history: moved all the same" says 0 "plain is now built on api: moved 1 commit" parent plain --set api
 # Conflicting paths are said and recorded as git quotes them.
 "$BIN" -C "$REPO" branch q --parent api >/dev/null
 on q 'n"q.txt' mine; on api 'n"q.txt' theirs
@@ -443,7 +443,7 @@ R -c worktree.useRelativePaths=true worktree add -q --no-checkout "$REPO/.git/gi
 check "a dead move's worktree: cleaned up" says 0 "moved 1 commit of ui onto api" parent ui --update
 check "  gone" sh -c "! git -C '$REPO' worktree list | grep -q gitfold-move"
 # --set: its own commits onto another parent.
-check "--set: says what moves" says 0 "moves 1 commit of ui onto main" parent ui --set main
+check "--set: says what moved, once" test "$(gf parent ui --set main)" = "0 ui is now built on main: moved 1 commit"
 eq "  only its own commits" "1" "$(own main ui)"
 check "  api's commits gone from it" fails R merge-base --is-ancestor api ui
 check "--set --no-follow: following off" says 0 "ui is now built on api" parent ui --set api --no-follow
@@ -480,7 +480,7 @@ eq "  its base recorded" "$(R rev-parse api)" "$(R rev-parse refs/gitfold-base/u
 edit_line g.txt 5 mine-too
 R switch -q api; sed -i '5s/.*/theirs-too/' "$REPO/g.txt"; R commit -qam "api: g again"; R switch -q main
 before=$(R rev-parse ui)
-check "uncommitted work in conflict: nothing moves (exit 4)" says 4 "ui's uncommitted work is in the way of api's commits on g.txt" parent ui --update
+check "uncommitted work in conflict: nothing moves (exit 4)" says 4 "ui's uncommitted work on g.txt conflicts with api's new commits. Resolve it either way: commit it" parent ui --update
 eq "  the branch where it was" "$before" "$(R rev-parse ui)"
 eq "  the work as it was" "mine-too" "$(sed -n 5p "$MNT/ui/g.txt")"
 check "  no rebase left in it" sh -c "! git -C '$MNT/ui' status | grep -q rebase"
