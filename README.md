@@ -519,7 +519,8 @@ branch: `api+ui, web`), and the branches left out (`skipped`) or refs that
 couldn't be read (`unread`). git merges in the repository itself (its
 settings, attributes and merge drivers), but writes its objects into a
 private repository, `.git/gitfold/.views.git`, which borrows the
-repository's objects: nothing is written into the repository. The view
+repository's objects: no object or ref is written into the repository (merge
+drivers run in its top, as in any merge). The view
 follows new commits and changes to the tree within about a second. `@live`
 (with uncommitted work) is reserved and comes later; a branch named `committed` or
 `live` is reached as `@refs/heads/committed` (a remote so named as
