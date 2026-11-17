@@ -225,7 +225,8 @@ check "-w, a revision that is no branch: no changes from it" says 0 "created bra
 eq "  the others' changes" "api changed" "$(cat "$MNT/w4/api.txt")"
 R tag api api
 r=$(gf branch w9 -w --from api --from x)
-check "a first source git finds ambiguous: refused as git branch refuses it" says 1 "fatal: ambiguous object name: 'api'" branch w9 -w --from api --from x
+check "a first source git finds ambiguous: refused as git branch refuses it (exit 1)" test "${r%% *}" = 1
+check "  git's refusal" eq_ok "$r" "fatal: ambiguous object name: 'api'"
 eq "  git's warning said once" 1 "$(grep -o "warning: refname 'api' is ambiguous." <<<"$r" | wc -l)"
 check "  nothing left behind" nothing_of w9
 r=$(gf branch w11 -w --from x --from api)

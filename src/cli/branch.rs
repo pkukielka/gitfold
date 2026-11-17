@@ -175,14 +175,18 @@ fn merged(
     // typed: git takes it, or refuses it (a name it finds ambiguous),
     // saying so itself (its warnings too: `resolve` leaves them to it).
     let args = ["branch", "--no-track", "--", name, &first.rev];
-    if !git::cmd::command(repo).args(args).status()?.success() {
+    let created = git::cmd::command(repo)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .status()?;
+    if !created.success() {
         bail!("branch {name} not created (see above)");
     }
     // Where git made it (the start point may have moved since).
     let branch = format!("refs/heads/{name}");
     let at = git::cmd::output(repo, &["rev-parse", "--verify", &branch])
         .map(|out| String::from_utf8_lossy(&out).trim().to_string())
-        .with_context(|| format!("branch {name} created: `git branch -D {name}`"))?;
+        .unwrap_or_else(|_| first.id.clone());
     let made = Made {
         name,
         at: &at,
