@@ -298,8 +298,9 @@ struct Source {
     id: String,
     full: Option<String>,
     name: Option<String>,
-    /// What git warned of it (a name it finds ambiguous), said once: by
-    /// `resolve` or `as_in`, or by git merge given it as typed.
+    /// What git warned of it (a name it finds ambiguous), not yet said: by
+    /// `as_in`, or by git merge given it as typed (the start point's, by
+    /// `resolve`).
     warnings: String,
 }
 
@@ -335,10 +336,10 @@ impl Source {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        let warnings = String::from_utf8_lossy(&out.stderr).into_owned();
+        let mut warnings = String::from_utf8_lossy(&out.stderr).into_owned();
         // The start point never reaches git merge, which would say them.
         if !merged {
-            eprint!("{warnings}");
+            eprint!("{}", std::mem::take(&mut warnings));
         }
         let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`); a name
@@ -375,19 +376,20 @@ impl Source {
     /// typed (git merge doesn't see the name they are about).
     fn as_in(&self, admin: &Path) -> Result<String> {
         let typed = (!self.rev.starts_with('-')).then_some(&self.rev);
+        let mut given = &self.id;
         for name in typed.into_iter().chain(&self.name) {
             let commit = format!("{name}^{{commit}}");
             let args = ["rev-parse", "--verify", "-q", &commit];
             let there = git::cmd::command_in_other(admin)?.args(args).output()?;
             if there.status.success() && String::from_utf8_lossy(&there.stdout).trim() == self.id {
-                if *name != self.rev {
-                    eprint!("{}", self.warnings);
-                }
-                return Ok(name.clone());
+                given = name;
+                break;
             }
         }
-        eprint!("{}", self.warnings);
-        Ok(self.id.clone())
+        if *given != self.rev {
+            eprint!("{}", self.warnings);
+        }
+        Ok(given.clone())
     }
 }
 
