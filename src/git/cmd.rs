@@ -148,6 +148,15 @@ pub fn in_workspace(dir: &Path) -> Result<Command> {
     Ok(git)
 }
 
+/// The paths git printed NUL-terminated (`-z`), up to an empty field (or
+/// the end).
+pub fn nul_paths(out: &[u8]) -> Vec<Vec<u8>> {
+    (out.split(|b| *b == 0))
+        .take_while(|p| !p.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect()
+}
+
 /// The options of git on a copy of a worktree's index (a snapshot) that keep
 /// the repository safe: nothing of the copy (a split index's shared part, a
 /// sparse index's trees) written into it, and no hook hearing of it. Its

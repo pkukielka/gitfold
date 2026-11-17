@@ -92,13 +92,22 @@ fn write_gitdir(dir: &Path, gitfile: &Path) -> std::io::Result<()> {
 /// not otherwise referenced once its branch moves on). Goes through `git
 /// update-ref`, which handles every ref backend (files, packed, reftable).
 pub fn pin(common_dir: &Path, name: &str, commit: &ObjectId) -> Result<()> {
-    set_ref(common_dir, name, commit, "gitfold: workspace base")
+    set_ref(common_dir, name, commit, None, "gitfold: workspace base")
 }
 
-/// Points ref `name` at `commit`, with reflog message `why`.
-pub fn set_ref(common_dir: &Path, name: &str, commit: &ObjectId, why: &str) -> Result<()> {
-    let commit = commit.to_string();
-    super::cmd::output(common_dir, &["update-ref", "-m", why, name, &commit]).map(drop)
+/// Points ref `name` at `commit`, with reflog message `why`; with `old`,
+/// only if it is there (refused if it moved meanwhile).
+pub fn set_ref(
+    common_dir: &Path,
+    name: &str,
+    commit: &ObjectId,
+    old: Option<&ObjectId>,
+    why: &str,
+) -> Result<()> {
+    let (commit, old) = (commit.to_string(), old.map(ObjectId::to_string));
+    let mut args = vec!["update-ref", "-m", why, name, &commit];
+    args.extend(old.as_deref());
+    super::cmd::output(common_dir, &args).map(drop)
 }
 
 /// Deletes ref `name` (a workspace's base pin, say), if it exists.
