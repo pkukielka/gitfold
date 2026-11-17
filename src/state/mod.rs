@@ -176,6 +176,11 @@ pub fn parent(path: &[u8]) -> &[u8] {
     &path[..path.iter().rposition(|b| *b == b'/').unwrap_or(0)]
 }
 
+/// The last component of `path` (below a workspace's root).
+pub fn name(path: &[u8]) -> &[u8] {
+    &path[path.iter().rposition(|b| *b == b'/').map_or(0, |i| i + 1)..]
+}
+
 /// `dir/name`, for paths below a workspace's root (`dir` empty: the root).
 pub fn join(dir: &[u8], name: &[u8]) -> Vec<u8> {
     let mut path = dir.to_vec();

@@ -12,6 +12,9 @@
 //!   from the path (see `path_local`) so it is stable across remounts; 0 is the
 //!   workspace (or namespace) directory itself. Workspace entries can't
 //!   use the shared file inodes: a write must keep the inode the kernel holds.
+//! - view entries (`@committed/N/...`): `FILE_BIT | WS_BIT | view_slot << 44 |
+//!   local`, `local` derived from the path as for workspaces (0: the view's
+//!   root): a view's content changes, its paths keep their inodes.
 //!
 //! The git index stores the low 32 bits, which must match what `stat` reports.
 
@@ -41,6 +44,7 @@ pub enum Ino {
     GitFile { slot: u32 },
     File(u32),
     Ws { slot: u32, local: u64 },
+    View { slot: u32, local: u64 },
 }
 
 pub fn file(id: u32) -> u64 {
@@ -62,6 +66,11 @@ pub fn ws(slot: u32, local: u64) -> u64 {
     WS_BIT | (slot as u64) << WS_LOCAL_BITS | local
 }
 
+pub fn view(slot: u32, local: u64) -> u64 {
+    debug_assert!(local <= WS_LOCAL_MASK && slot < (1 << 18));
+    FILE_BIT | WS_BIT | (slot as u64) << WS_LOCAL_BITS | local
+}
+
 /// Preferred local inode part for a workspace path (relative, no leading `/`):
 /// FNV-1a of the path, never 0. Deterministic, so the inode low 32 bits written
 /// into the workspace's git index at creation match `stat` after any remount.
@@ -77,6 +86,13 @@ pub fn path_local(path: &[u8]) -> u64 {
 pub fn decode(ino: u64) -> Option<Ino> {
     if ino == ROOT {
         return Some(Ino::Root);
+    }
+    if ino & (FILE_BIT | WS_BIT) == FILE_BIT | WS_BIT {
+        let slot = u32::try_from((ino & !(FILE_BIT | WS_BIT)) >> WS_LOCAL_BITS).ok()?;
+        return Some(Ino::View {
+            slot,
+            local: ino & WS_LOCAL_MASK,
+        });
     }
     if ino & FILE_BIT != 0 {
         return u32::try_from(ino & !FILE_BIT).ok().map(Ino::File);

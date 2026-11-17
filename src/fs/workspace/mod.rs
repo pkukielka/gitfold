@@ -24,7 +24,7 @@
 //! What a workspace stores, and what commands read from it without a mount
 //! (its changes, the removal rules, forks, the task folder), is `state`.
 
-mod nodes;
+pub(in crate::fs) mod nodes;
 mod reads;
 mod rebase;
 mod times;
