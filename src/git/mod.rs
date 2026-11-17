@@ -41,10 +41,57 @@ const MIN_INDEX_SLOTS: usize = 16384;
 
 static REPO: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
 
+/// A repository of objects gitfold made itself (the views' merges), borrowing
+/// `REPO`'s objects (alternates): looked in when `REPO` hasn't an object.
+static PRIVATE: OnceLock<gix::ThreadSafeRepository> = OnceLock::new();
+
 thread_local! {
     static LOCAL: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
     /// The same, without rescanning packs on a miss (see `with_repo_no_refresh`).
     static LOCAL_NO_REFRESH: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
+    static LOCAL_PRIVATE: RefCell<Option<gix::Repository>> = const { RefCell::new(None) };
+}
+
+/// Opens the bare repository at `path`, which borrows the open repository's
+/// objects, as where objects `REPO` hasn't are looked for too. Once per
+/// process (again for the same path: nothing to do).
+pub fn open_private(path: &Path) -> Result<()> {
+    let repo = gix::open(path).with_context(|| format!("opening {}", path.display()))?;
+    if PRIVATE.set(repo.into_sync()).is_err() {
+        let open = PRIVATE
+            .get()
+            .map(|r| r.to_thread_local().git_dir().to_path_buf());
+        if open.as_deref() != Some(path) {
+            bail!("another private repository is open already");
+        }
+    }
+    Ok(())
+}
+
+/// `f` on the private repository's handle, if one is open (`open_private`).
+/// It doesn't look for new packs on a miss, as most lookups there are of
+/// objects the repository hasn't at all (`refresh_private` after making
+/// packs).
+fn with_private<R>(f: impl FnOnce(&gix::Repository) -> R) -> Option<R> {
+    with_local(&LOCAL_PRIVATE, &PRIVATE, true, f)
+}
+
+/// Makes packs made in the private repository (its garbage collection)
+/// visible to its handles.
+pub fn refresh_private() {
+    if let Some(private) = PRIVATE.get() {
+        let none = ObjectId::from_hex(b"0000000000000000000000000000000000000001").expect("hex");
+        private.to_thread_local().has_object(none);
+    }
+}
+
+/// Looks `f` up in the repository, then in the private one: `None` if in
+/// neither (the repository as of the last `refresh_packs`).
+fn here_or_private<T>(f: impl Fn(&gix::Repository) -> Result<Option<T>>) -> Result<Option<T>> {
+    match with_repo_no_refresh(&f)? {
+        None => with_private(&f).unwrap_or(Ok(None)),
+        found => Ok(found),
+    }
 }
 
 /// Opens the repository at `path` and returns its common git dir (`.git`).
@@ -81,7 +128,7 @@ pub fn work_tree() -> Option<PathBuf> {
 }
 
 pub fn with_repo<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
-    with_local(&LOCAL, false, f)
+    with_local(&LOCAL, &REPO, false, f).expect("git::init not called")
 }
 
 /// `with_repo`, with a handle that doesn't look for new packs when an object
@@ -89,18 +136,21 @@ pub fn with_repo<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
 /// lock) on every miss, and a tree walk in a partial clone misses once per
 /// absent blob. Call `refresh_packs` first to see packs added since.
 pub fn with_repo_no_refresh<R>(f: impl FnOnce(&gix::Repository) -> R) -> R {
-    with_local(&LOCAL_NO_REFRESH, true, f)
+    with_local(&LOCAL_NO_REFRESH, &REPO, true, f).expect("git::init not called")
 }
 
+/// `f` on this thread's handle `key` on `repo`, if `repo` is open.
 fn with_local<R>(
     key: &'static LocalKey<RefCell<Option<gix::Repository>>>,
+    repo: &OnceLock<gix::ThreadSafeRepository>,
     no_refresh: bool,
     f: impl FnOnce(&gix::Repository) -> R,
-) -> R {
-    key.with(|cell| {
+) -> Option<R> {
+    let repo = repo.get()?;
+    Some(key.with(|cell| {
         let mut slot = cell.borrow_mut();
         let repo = slot.get_or_insert_with(|| {
-            let mut repo = REPO.get().expect("git::init not called").to_thread_local();
+            let mut repo = repo.to_thread_local();
             repo.object_cache_size(0);
             if no_refresh {
                 repo.objects.refresh_never();
@@ -108,7 +158,7 @@ fn with_local<R>(
             repo
         });
         f(repo)
-    })
+    }))
 }
 
 /// Makes packs added since (a fetch, a repack) visible to all handles: a
@@ -171,9 +221,9 @@ pub struct Entry {
 }
 
 /// Lists one tree level; `None` if the tree isn't in the object database
-/// (as of the last `refresh_packs`).
+/// (as of the last `refresh_packs`), nor in the private one.
 pub fn tree_entries(tree: ObjectId) -> Result<Option<Tree>> {
-    with_repo_no_refresh(|repo| {
+    here_or_private(|repo| {
         let Some(object) = repo.try_find_object(tree)? else {
             return Ok(None);
         };
@@ -199,9 +249,10 @@ pub fn tree_entries(tree: ObjectId) -> Result<Option<Tree>> {
 }
 
 /// Uncompressed size of an object, without decompressing it; `None` if it
-/// isn't in the object database (as of the last `refresh_packs`).
+/// isn't in the object database (as of the last `refresh_packs`), nor in the
+/// private one.
 pub fn object_size(oid: ObjectId) -> Result<Option<u64>> {
-    with_repo_no_refresh(|repo| Ok(repo.try_find_header(oid)?.map(|h| h.size())))
+    here_or_private(|repo| Ok(repo.try_find_header(oid)?.map(|h| h.size())))
 }
 
 pub static BLOB_NS: AtomicU64 = AtomicU64::new(0);
@@ -209,7 +260,23 @@ pub static BLOB_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn read_blob(oid: ObjectId) -> Result<Vec<u8>> {
     let started = Instant::now();
-    let data = with_repo(|repo| Ok(repo.find_blob(oid)?.take_data()));
+    let read = |repo: &gix::Repository| -> Result<Option<Vec<u8>>> {
+        Ok(repo.try_find_object(oid)?.map(|o| o.detach().data))
+    };
+    // Then with a look for packs added since: a fetch, or the private
+    // repository's garbage collection (which removes the loose objects it
+    // packed).
+    let data = match here_or_private(read) {
+        Ok(None) => match with_repo(read) {
+            Ok(None) => {
+                refresh_private();
+                with_private(read).unwrap_or(Ok(None))
+            }
+            found => found,
+        },
+        found => found,
+    }
+    .and_then(|data| data.ok_or_else(|| anyhow!("object {oid} not found")));
     BLOB_NS.fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
     if let Ok(d) = &data {
         BLOB_BYTES.fetch_add(d.len() as u64, Ordering::Relaxed);

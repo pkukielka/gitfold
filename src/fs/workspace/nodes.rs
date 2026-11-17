@@ -57,7 +57,7 @@ fn name_of<'a>(names: &'a [u8], node: &Node) -> &'a [u8] {
 }
 
 #[derive(Default)]
-pub(super) struct Nodes {
+pub(in crate::fs) struct Nodes {
     nodes: HashTable<Node>,
     /// Local ids of the non-orphaned nodes, by (parent, name).
     by_name: HashTable<u64>,
@@ -75,7 +75,7 @@ impl Nodes {
         self.nodes.find_mut(local_hash(local), |n| n.local == local)
     }
 
-    pub(super) fn path(&self, local: u64) -> Option<Vec<u8>> {
+    pub(in crate::fs) fn path(&self, local: u64) -> Option<Vec<u8>> {
         let mut parts: Vec<&[u8]> = Vec::new();
         let mut cur = local;
         while cur != 0 {
@@ -90,7 +90,7 @@ impl Nodes {
         Some(parts.join(&b'/'))
     }
 
-    fn existing(&self, parent: u64, name: &[u8]) -> Option<u64> {
+    pub(in crate::fs) fn existing(&self, parent: u64, name: &[u8]) -> Option<u64> {
         let is = |&local: &u64| {
             self.get(local)
                 .is_some_and(|n| n.parent == parent && name_of(&self.names, n) == name)
@@ -100,7 +100,7 @@ impl Nodes {
 
     /// The node for `name` in `parent` (whose path is `dir`), allocating one on
     /// first sight, with one more kernel reference counted.
-    pub(super) fn claim(&mut self, parent: u64, name: &[u8], dir: &[u8]) -> u64 {
+    pub(in crate::fs) fn claim(&mut self, parent: u64, name: &[u8], dir: &[u8]) -> u64 {
         let local = match self.existing(parent, name) {
             Some(local) => local,
             None => {
@@ -116,7 +116,7 @@ impl Nodes {
 
     /// The local id `name` has or would get, without allocating (for plain
     /// readdir, whose entries the kernel doesn't count).
-    pub(super) fn peek(&self, parent: u64, name: &[u8], dir: &[u8]) -> u64 {
+    pub(in crate::fs) fn peek(&self, parent: u64, name: &[u8], dir: &[u8]) -> u64 {
         self.existing(parent, name)
             .unwrap_or_else(|| self.free_local(&join(dir, name)))
     }
@@ -199,7 +199,7 @@ impl Nodes {
         Some(entry.remove().0)
     }
 
-    pub(super) fn orphan(&mut self, parent: u64, name: &[u8]) {
+    pub(in crate::fs) fn orphan(&mut self, parent: u64, name: &[u8]) {
         if let Some(local) = self.take(parent, name)
             && let Some(node) = self.get_mut(local)
         {
@@ -223,7 +223,7 @@ impl Nodes {
     }
 
     /// The kernel dropped `n` references to `local`; frees it at zero.
-    pub(super) fn forget(&mut self, local: u64, n: u64) {
+    pub(in crate::fs) fn forget(&mut self, local: u64, n: u64) {
         let Some(node) = self.get_mut(local) else {
             return;
         };
