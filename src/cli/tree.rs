@@ -241,7 +241,7 @@ fn movable(
             }
             let dir = mount.join(name);
             // Neither committed nor stashed while paths are unmerged: resolved.
-            let unmerged = follow::unmerged(&dir)?;
+            let unmerged = follow::unmerged(&state.admin)?;
             if !unmerged.is_empty() {
                 return Err(Refusal::Changes.error(format!(
                     "{name} has a conflict left unresolved in its workspace on {}: resolve it, \
@@ -252,11 +252,7 @@ fn movable(
             Ok(Some(dir))
         }
         Some(follow::CheckedOut::Worktree(path)) => {
-            let rebase = rebase.map(|r| format!(" ({r})")).unwrap_or_default();
-            Err(Refusal::InUse.error(format!(
-                "{name} is checked out in {path}: gitfold doesn't move it there; take the new \
-                 commits with git rebase in it{rebase}"
-            )))
+            Err(follow::in_worktree(name, &path, false, rebase))
         }
     }
 }
@@ -637,8 +633,8 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     let old = tree.parent(name).map(String::from);
     // Checked out in another git worktree: refused before anything changes
     // (where its workspace is is found once it moves).
-    if let Some(follow::CheckedOut::Worktree(_)) = follow::checked_out(common_dir, name) {
-        movable(common_dir, name, true, None)?;
+    if let Some(follow::CheckedOut::Worktree(path)) = follow::checked_out(common_dir, name) {
+        return Err(follow::in_worktree(name, &path, false, None));
     }
     let _moving = follow::lock(common_dir, name)?;
     // The plan first (git walks history; the tree lock isn't held for

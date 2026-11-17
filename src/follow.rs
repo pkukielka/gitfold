@@ -290,6 +290,25 @@ pub fn checked_out(common_dir: &Path, branch: &str) -> Option<CheckedOut> {
         .map(CheckedOut::Worktree)
 }
 
+/// The refusal to move `branch`, checked out in git worktree `path`
+/// (`meanwhile`: since the move began): git rebase there, `rebase` if known.
+pub fn in_worktree(
+    branch: &str,
+    path: &str,
+    meanwhile: bool,
+    rebase: Option<&str>,
+) -> anyhow::Error {
+    let (is, meanwhile) = match meanwhile {
+        true => ("was", " meanwhile"),
+        false => ("is", ""),
+    };
+    let rebase = rebase.map(|r| format!(" ({r})")).unwrap_or_default();
+    Refusal::InUse.error(format!(
+        "{branch} {is} checked out in {path}{meanwhile}: gitfold doesn't move it there; take \
+         the new commits with git rebase in it{rebase}"
+    ))
+}
+
 /// How moving the branch to its rebased commits went.
 enum Applied {
     /// Moved to this tip; the paths where its uncommitted work, put back,
@@ -303,11 +322,12 @@ enum Applied {
     Refused(String),
 }
 
-/// The paths with a conflict git left unresolved in workspace `dir`, as
+/// The paths with a conflict git left unresolved in the index of the
+/// worktree with admin directory `admin` (no work tree needed), as
 /// `git ls-files -u` reads them from its index.
-pub fn unmerged(dir: &Path) -> Result<Vec<Vec<u8>>> {
+pub fn unmerged(admin: &Path) -> Result<Vec<Vec<u8>>> {
     let out = cmd::output_of(
-        &mut cmd::in_workspace(dir)?,
+        &mut cmd::command_in_other(admin)?,
         &["ls-files", "-u", "-z"],
         None,
     )?;
@@ -345,8 +365,9 @@ fn move_workspace(
     new: ObjectId,
 ) -> Result<Applied> {
     let git = |args: &[&str]| cmd::output_of(&mut cmd::in_workspace(dir)?, args, None);
-    let head = git(&["symbolic-ref", "-q", "HEAD"]).unwrap_or_default();
-    let on_branch = String::from_utf8_lossy(&head).trim() == format!("refs/heads/{branch}");
+    // HEAD read from its admin directory, as git keeps it.
+    let state = crate::state::StateDir::of(common_dir, branch);
+    let on_branch = !matches!(state.git_busy(), Some(GitBusy::HeadElsewhere { .. }));
     if !on_branch || git::branch_tip(branch)?.id != tip {
         let why = format!(
             "{branch} moved in its workspace meanwhile; again: `gitfold parent {branch} --update`"
@@ -397,7 +418,6 @@ fn move_workspace(
         // Git's state, not its message: no rebase under way (HEAD on the
         // branch, no rebase's directory: a lock another git holds says
         // nothing of this one), the branch where it was.
-        let state = crate::state::StateDir::of(common_dir, branch);
         let started = matches!(
             state.git_busy(),
             Some(
@@ -415,7 +435,10 @@ fn move_workspace(
     }
     // Moved (git exits 0 even if the work, put back, conflicted: then the
     // paths are unmerged, and the work stays in the stash).
-    Ok(Applied::Done(git::branch_tip(branch)?.id, unmerged(dir)?))
+    Ok(Applied::Done(
+        git::branch_tip(branch)?.id,
+        unmerged(&state.admin)?,
+    ))
 }
 
 /// What a move of a branch did, or why it didn't.
@@ -582,11 +605,8 @@ impl Plan {
                 )));
             }
             Some(CheckedOut::Worktree(path)) => {
-                return Err(Refusal::InUse.error(format!(
-                    "{branch} was checked out in {path} meanwhile: gitfold doesn't move it \
-                     there; take the new commits with git rebase in it ({})",
-                    self.by_hand(crate::tree::short(&self.onto_ref))
-                )));
+                let rebase = self.by_hand(crate::tree::short(&self.onto_ref));
+                return Err(in_worktree(branch, &path, true, Some(&rebase)));
             }
         }
         let name = format!("refs/heads/{branch}");
