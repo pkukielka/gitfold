@@ -434,6 +434,16 @@ impl Views {
         Ok(private.insert(Arc::new(made)).clone())
     }
 
+    /// The workspace of `branch` was removed: its live tree goes (`Lives::forget`).
+    pub fn workspace_removed(&self, branch: &str) {
+        let Some(private) = self.private.lock().clone() else {
+            return;
+        };
+        if let Err(e) = self.lives.forget(&private, branch) {
+            error!("views: the workspace of {branch} removed: {e:#}");
+        }
+    }
+
     /// How many views were opened; only grows.
     pub fn len(&self) -> usize {
         self.list.read().len()

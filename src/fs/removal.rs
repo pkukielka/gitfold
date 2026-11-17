@@ -14,6 +14,7 @@ use parking_lot::Mutex;
 
 use super::NameChanges;
 use super::snapshots::Snapshots;
+use super::views::Views;
 use super::workspace::Workspace;
 use super::workspaces::Workspaces;
 use crate::fs::workspace;
@@ -30,6 +31,8 @@ pub struct Removal {
     pub(super) snapshots: Arc<Snapshots>,
     pub(super) workspaces: Arc<Workspaces>,
     pub(super) names: Arc<NameChanges>,
+    /// The live trees the views keep of workspaces (`Views::workspace_removed`).
+    pub(super) views: Arc<Views>,
     /// Set once the file system is being unmounted; held during a removal, so
     /// the daemon doesn't exit in the middle of one.
     pub(super) closed: Arc<Mutex<bool>>,
@@ -118,10 +121,12 @@ impl Removal {
             self.refuse_if_used(&self.mount_point.join(branch), branch)?;
             // `open` dropped here: the wait for requests in flight counts references.
         }
-        self.workspaces.remove(branch, refuse_if_used, |ws| {
+        let removed = self.workspaces.remove(branch, refuse_if_used, |ws| {
             let ignored = self.check_workspace(branch, force, ws)?;
             retire::delete_workspace(common_dir, branch, ignored)
-        })
+        })?;
+        self.views.workspace_removed(branch);
+        Ok(removed)
     }
 
     /// What `remove` would refuse, without changing anything (`remove --check`).

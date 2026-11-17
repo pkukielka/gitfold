@@ -12,6 +12,7 @@ use gix::ObjectId;
 use parking_lot::Mutex;
 
 use super::members::Tip;
+use super::merge::Private;
 use super::watch::{Context, Stamp, stamp};
 use crate::state::StateDir;
 
@@ -55,7 +56,7 @@ impl Lives {
         let opened = (ctx.workspaces.open_quietly(&ctx.store, branch))
             .map_err(|e| anyhow!("opening the workspace of {branch}: {e:?}"))?;
         let Some((ws, opened_now)) = opened else {
-            self.trees.lock().remove(branch);
+            self.forget(&ctx.private, branch)?;
             return Ok(None);
         };
         if opened_now {
@@ -99,5 +100,14 @@ impl Lives {
             changing: None,
         });
         Ok(Some(tip))
+    }
+
+    /// Forgets the live tree of the workspace of `branch`, which is gone
+    /// (removed), if it had one: its ref too.
+    pub fn forget(&self, private: &Private, branch: &str) -> Result<()> {
+        if self.trees.lock().remove(branch).is_some() {
+            private.drop_live(branch)?;
+        }
+        Ok(())
     }
 }

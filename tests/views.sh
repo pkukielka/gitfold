@@ -188,6 +188,11 @@ echo mine >"$MNT/api/api.txt"
 check "the view's own workspace" until_ok has "$MNT/$L/api.txt" mine
 check "read-only" fails touch "$MNT/$L/other"
 eq "listed under @live once opened" "api" "$(ls "$MNT/@live")"
+P() { git -C "$COMMON/gitfold/.views.git" "$@"; }
+check "a workspace's live tree kept" P rev-parse -q --verify refs/gitfold/live/ui
+"$BIN" -C "$REPO" remove --force ui >/dev/null
+check "dropped when it is removed" fails P rev-parse -q --verify refs/gitfold/live/ui
+check "the view shows the tip again" until_ok has "$MNT/$L/ui.txt" ui
 }
 
 resting_views() {
