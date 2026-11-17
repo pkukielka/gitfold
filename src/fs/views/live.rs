@@ -58,37 +58,36 @@ impl Private {
         let base = ws.base.to_string();
         let args = ["diff-index", "--cached", "--name-only", "-z", &base];
         let out = git::cmd::output_of(&mut git()?, &args, None)?;
-        let staged = git::cmd::nul_paths(&out);
-        let staged: Vec<&[u8]> = staged.iter().map(Vec::as_slice).collect();
-        let changed: Vec<&[u8]> = ws.changed.iter().map(Vec::as_slice).collect();
+        let staged: Vec<&[u8]> = nul_fields(&out).collect();
+        let changed = || ws.changed.iter().map(Vec::as_slice);
         // Removals first (`deleted`, `staged`): a path git would refuse to
         // remove, a directory the index has nothing at (it adds what is
         // below), is left out.
-        let removals: Vec<&[u8]> = ws
-            .deleted
-            .iter()
-            .map(Vec::as_slice)
+        let removals: Vec<&[u8]> = (ws.deleted.iter().map(Vec::as_slice))
             .chain(staged.iter().copied())
             .collect();
-        let ignored = ignored(&git, changed.iter().chain(&staged).copied())?;
+        let asked: Vec<&[u8]> = changed().chain(staged.iter().copied()).collect();
+        let ignored = ignored(&git, &asked)?;
         let dirs = removals.iter().copied().filter(|p| {
             std::fs::symlink_metadata(upper_path(ws.upper, p)).is_ok_and(|m| m.is_dir())
         });
-        let asked: Vec<&[u8]> = ignored.iter().copied().chain(dirs).collect();
+        let asked: Vec<&[u8]> = ignored.into_iter().chain(dirs).collect();
         let untracked = untracked(&git, &asked)?;
         let mut seen = HashSet::new();
-        let update = (removals.into_iter().chain(changed))
+        let update = (removals.into_iter().chain(changed()))
             .filter(|p| !untracked.contains(p) && seen.insert(*p));
         let update = nul_list(b"", update);
-        let args = [
-            "update-index",
-            "-z",
-            "--add",
-            "--remove",
-            "--replace",
-            "--stdin",
-        ];
-        git::cmd::output_of(&mut git()?, &args, Some(update))?;
+        if !update.is_empty() {
+            let args = [
+                "update-index",
+                "-z",
+                "--add",
+                "--remove",
+                "--replace",
+                "--stdin",
+            ];
+            git::cmd::output_of(&mut git()?, &args, Some(update))?;
+        }
         let args = ["write-tree", "--missing-ok"];
         let tree = super::merge::oid(&git::cmd::output_of(&mut git()?, &args, None)?)?;
         let commit = self.commit(&tree, branch)?;
@@ -117,7 +116,7 @@ impl Private {
     /// like, unhashed (nothing reads it but these commands), and no fsmonitor
     /// or hook hearing of it. Paths aren't pathspecs here but for
     /// `check-ignore`, which takes no `--literal-pathspecs` (see
-    /// `untracked_ignored`).
+    /// `ignored`).
     fn in_workspace(&self, dir: &Path, index: &Path) -> Result<Command> {
         let mut git = git::cmd::in_workspace(dir)?;
         let plain = (git::cmd::PLAIN_INDEX.iter()).filter(|a| **a != "--literal-pathspecs");
@@ -130,11 +129,10 @@ impl Private {
 }
 
 /// Of `paths`, those git ignores (tracked or not).
-fn ignored<'a>(
-    git: &dyn Fn() -> Result<Command>,
-    paths: impl Iterator<Item = &'a [u8]>,
-) -> Result<Vec<&'a [u8]>> {
-    let paths: Vec<&[u8]> = paths.collect();
+fn ignored<'a>(git: &dyn Fn() -> Result<Command>, paths: &[&'a [u8]]) -> Result<Vec<&'a [u8]>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
     // `./`: a path is taken as a pathspec there, which `:` would start.
     // `--no-index`: the index is asked apart (`untracked`; git would match
     // each path against the whole index).
@@ -142,10 +140,19 @@ fn ignored<'a>(
     let args = ["check-ignore", "--no-index", "-z", "--stdin"];
     // 1: none ignored.
     let out = git::cmd::output_allowing(&mut git()?, &args, Some(input), &[1])?;
-    let ignored: HashSet<Vec<u8>> = (git::cmd::nul_paths(&out).into_iter())
-        .map(|p| p.strip_prefix(b"./").map(<[u8]>::to_vec).unwrap_or(p))
+    let ignored: HashSet<&[u8]> = nul_fields(&out)
+        .map(|p| p.strip_prefix(b"./").unwrap_or(p))
         .collect();
-    Ok(paths.into_iter().filter(|p| ignored.contains(*p)).collect())
+    Ok(paths
+        .iter()
+        .copied()
+        .filter(|p| ignored.contains(p))
+        .collect())
+}
+
+/// The fields of git's NUL-terminated output (`-z`), up to an empty one.
+fn nul_fields(out: &[u8]) -> impl Iterator<Item = &[u8]> {
+    out.split(|b| *b == 0).take_while(|p| !p.is_empty())
 }
 
 /// Of `paths`, those the index has no entry at (unmerged ones aside).
