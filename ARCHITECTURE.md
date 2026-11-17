@@ -1083,7 +1083,7 @@ missing, and a plain
 - **Disk space:** no fetch starts with under 1 GiB free in the objects
   directory. A fetch is bounded by the commit's missing objects, but on a large
   repository that is tens of thousands; the fork's notes record a fetch without
-  a want list pulling a 47 GB pack.
+  a want list pulling a pack of tens of GB.
 - **Finding what is missing doesn't rescan packs per miss.** gitoxide rescans
   the pack directory, under a store-wide lock, whenever an object isn't found,
   and a partial clone's walk misses once per absent blob: 60k missing blobs
@@ -1107,7 +1107,7 @@ missing, and a plain
   At unmount bases move to their tip only if it is here: a hanging remote must
   not hold up the unmount (the next mount, or `remove`, catches up). An empty
   list is never fetched: `git fetch` would fall back to the remote's refspecs,
-  everything (the fork's notes: 27M objects, 47 GB).
+  everything (the fork's notes: tens of millions of objects, tens of GB).
 - **Signals reach what the daemon starts.** The daemon used to block
   SIGINT/SIGTERM/SIGHUP for a `sigwait` thread; the mask survives exec (Rust's
   `Command` doesn't reset it), so git and everything under it never received
@@ -1336,7 +1336,7 @@ conflicts and its messages are git's.
 already applied skipped by patch id, empty ones dropped, authors kept,
 hooks run, strategies, octopus merges); each hand-built copy of git's
 behaviour left the next difference (see [views](#views-rebuilt-behind-the-kernels-back-then-told-what-changed)). The temporary worktree's cost
-doesn't grow with the tree: a monorepo's million files aren't written. A
+doesn't grow with the tree: a monorepo's million-plus files aren't written. A
 workspace's files change through the mount, so the kernel sees every
 change, and its index stays git's. The parent isn't git's upstream, which
 `git push -u` overwrites.
