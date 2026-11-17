@@ -31,7 +31,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::views::Views;
+use super::views::{Kind, Views};
 use super::workspace::Workspace;
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
@@ -201,6 +201,27 @@ impl Workspaces {
         slot
     }
 
+    /// The workspace of `branch`, opened if it isn't yet, but not walked
+    /// (`prewarm`): for an `@live` view, which reads only what changed. `None`
+    /// if it was never opened (nothing stored), or is being removed; whether
+    /// it was opened now.
+    pub fn open_quietly(
+        &self,
+        store: &Arc<Store>,
+        branch: &str,
+    ) -> Result<Option<(Arc<Workspace>, bool)>, Errno> {
+        if let Some(ws) = self.get_open(branch) {
+            return Ok(Some((ws, false)));
+        }
+        if !StateDir::of(&self.common_dir, branch).opened() {
+            return Ok(None);
+        }
+        self.refuse_open(branch)?;
+        self.preload(store, branch)?;
+        self.open_workspace(store, branch, false)?;
+        Ok(self.get_open(branch).map(|ws| (ws, true)))
+    }
+
     /// Walks the workspace of `branch` (see `prewarm`), in its own mode if set,
     /// if it is open. `--prewarm none` for the mount wins over a branch's mode.
     pub fn prewarm(&self, branch: &str) {
@@ -345,14 +366,19 @@ impl Workspaces {
         if path == "@committed" || path == "@live" {
             return Ok(self.namespace(path));
         }
-        if path.starts_with("@live/") {
-            return Err(Errno::ENOENT); // not served yet
-        }
-        if let Some(branch) = path.strip_prefix("@committed/") {
+        let view = (path
+            .strip_prefix("@committed/")
+            .map(|b| (b, Kind::Committed)))
+        .or_else(|| path.strip_prefix("@live/").map(|b| (b, Kind::Live)));
+        if let Some((branch, kind)) = view {
             if let Some(ino) = views.existing(path) {
                 return Ok(ino);
             }
-            return self.branch_or_namespace(path, branch, || views.open(path, branch));
+            return self.branch_or_namespace(path, branch, || {
+                // Its root is listed there (a resting view forgets it there).
+                let parent = self.namespace(&path[..path.rfind('/').expect("below @")]);
+                views.open(path, branch, kind, parent)
+            });
         }
         if let Some(spec) = path.strip_prefix('@') {
             if let Some(ino) = snapshots.existing(path.as_bytes()) {
@@ -371,7 +397,7 @@ impl Workspaces {
             // Cheap refusals first: before loading (and fetching) its trees.
             self.refuse_open(path)?;
             self.preload(store, path)?;
-            self.open_workspace(store, path)
+            self.open_workspace(store, path, true)
         })
     }
 
@@ -455,7 +481,8 @@ impl Workspaces {
         Ok(())
     }
 
-    fn open_workspace(&self, store: &Arc<Store>, branch: &str) -> Result<u64, Errno> {
+    /// Opens the workspace of `branch`, walking it (`prewarm`) if `walk`.
+    fn open_workspace(&self, store: &Arc<Store>, branch: &str, walk: bool) -> Result<u64, Errno> {
         // Never waits for readers while holding `creating`: a copy marks its
         // source a reader, and every open, removal and request needs `creating`.
         let started = Instant::now();
@@ -519,7 +546,9 @@ impl Workspaces {
         let ws = Arc::new(ws);
         let slot = self.add(branch, Registered::Workspace(ws.clone()));
         watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
-        self.prewarm(branch);
+        if walk {
+            self.prewarm(branch);
+        }
         Ok(inode::ws(slot, 0))
     }
 }

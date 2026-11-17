@@ -554,10 +554,22 @@ settings, attributes and merge drivers), but writes its objects into a
 private repository, `.git/gitfold/.views.git`, which borrows the
 repository's objects: no object or ref is written into the repository (merge
 drivers run in its top, as in any merge). The view
-follows new commits and changes to the tree within about a second. `@live`
-(with uncommitted work) is reserved and comes later; a branch named `committed` or
-`live` is reached as `@refs/heads/committed` (a remote so named as
-`@refs/remotes/committed/<branch>`).
+follows new commits and changes to the tree within about a second.
+
+`<mount>/@live/<branch>/` is the same view of the workspaces as they are,
+uncommitted work included: each branch with a workspace contributes what
+`git add -A` in it would stage (ignored files left out, as git leaves them),
+the others their tips. A workspace's files count once it has been quiet for
+2 s after a change, or every 10 s while it keeps changing; reading the tree
+(a `git add -A` on a copy of its index, through the mount) takes about as long
+as `git status` there. Opening `@live/<branch>` opens the workspaces in it
+(without `--prewarm`). A view not read for a minute rests (nothing is
+refreshed; `GITFOLD_VIEW_REST_SECS` changes how long), and the first access
+afterwards waits up to 5 s for it to be current. A branch with no history in
+common with its parent is left out of both views, noted in the summary.
+
+A branch named `committed` or `live` is reached as `@refs/heads/committed` (a
+remote so named as `@refs/remotes/committed/<branch>`).
 
 ### Partial clones
 

@@ -16,11 +16,13 @@ use anyhow::Result;
 use gix::ObjectId;
 use log::error;
 
+use super::lives::{self, Lives};
 use super::members::{self, Bases, BuiltOn, Refs};
 use super::merge::{Member, Private};
-use super::serve::ViewDir;
+use super::serve::{Kind, ViewDir, rests_after};
 use super::shown::{Changed, Shown, Times};
 use crate::fs::NameChanges;
+use crate::fs::workspaces::Workspaces;
 use crate::git;
 use crate::inode;
 use crate::state::{self, name, parent};
@@ -40,6 +42,32 @@ pub struct Context {
     pub names: Arc<NameChanges>,
     pub branch: String,
     pub private: Arc<Private>,
+    pub kind: Kind,
+    pub workspaces: Arc<Workspaces>,
+    pub lives: Arc<Lives>,
+}
+
+impl Context {
+    /// The view's name in the private repository (`merge::Private::merge`).
+    pub fn key(&self) -> String {
+        let kind = match self.kind {
+            Kind::Committed => "committed",
+            Kind::Live => "live",
+        };
+        format!("{kind}/{}", state::workspace_id(&self.branch))
+    }
+}
+
+/// Which trees an `@live` view merges.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Trees {
+    /// The tips: the view opens with them, not waiting for git to read the
+    /// workspaces (through the mount, from a request).
+    Tips,
+    /// The workspaces' live trees, made again once quiet (`lives`).
+    Quiet,
+    /// Made again at once if changed (the view woke).
+    Now,
 }
 
 /// What a view was last built from.
@@ -66,13 +94,14 @@ fn stamp(path: &Path) -> Stamp {
 }
 
 impl Watch {
-    /// The view again, if its refs (or the config) moved since it was last
-    /// built (or it wasn't yet), after `before`: what it shows, and the
-    /// paths that changed.
+    /// The view again, if its refs, its members' live trees (`@live`, as
+    /// `trees` says) or the config moved since it was last built (or it
+    /// wasn't yet), after `before`: what it shows, and the paths that changed.
     pub fn next(
         &mut self,
         ctx: &Context,
         before: Option<&Shown>,
+        trees: Trees,
     ) -> Result<Option<(Shown, Vec<Changed>, ObjectId)>> {
         let config = stamp(&ctx.common_dir.join("config"));
         if self.config != Some(config) || self.reads >= TREE_EVERY {
@@ -93,35 +122,48 @@ impl Watch {
         let origin = members::origin_root(&self.tree, branch);
         let opened = |b: &str| opened.contains(b);
         let members = members::members(&self.tree, branch, origin.as_deref(), opened);
-        let refs = members::refs(branch, origin.as_deref(), &members, &mut self.bases)?;
+        let mut refs = members::refs(branch, origin.as_deref(), &members, &mut self.bases)?;
+        self.bases.next_round();
+        if ctx.kind == Kind::Live && trees != Trees::Tips {
+            let now = trees == Trees::Now;
+            // Each workspace as it is: its live tree for its tip.
+            let mount = lives::Mount {
+                store: &ctx.store,
+                workspaces: &ctx.workspaces,
+                names: &ctx.names,
+                private: &ctx.private,
+            };
+            let own_tip = git::resolve(&format!("refs/heads/{branch}"))?.id;
+            if let Some(live) = ctx.lives.tip(&mount, branch, own_tip, now)? {
+                refs.own = live;
+            }
+            for (member, tip, _) in &mut refs.members {
+                if let Some(live) = ctx.lives.tip(&mount, member, tip.0, now)? {
+                    *tip = live;
+                }
+            }
+        }
         if let Some((m, r, c)) = &self.built
             && (m, r, *c) == (&members, &refs, config)
         {
             return Ok(None);
         }
-        let bases = &mut self.bases;
-        let inputs = (refs.members.iter())
-            .map(|(branch, (tip, _), parent)| {
-                let base = bases.get(*tip, *parent)?;
-                Ok(Member {
-                    branch,
-                    tip: *tip,
-                    base,
-                })
+        let inputs: Vec<Member> = (refs.members.iter())
+            .map(|(branch, (tip, _), base)| Member {
+                branch,
+                tip: *tip,
+                base: *base,
             })
-            .collect::<Result<Vec<_>>>()?;
-        self.bases.next_round();
+            .collect();
         // What git will read, loaded first: in a partial clone, fetched as
         // for a snapshot (git doesn't fetch for the views).
         ctx.store.load_tree(refs.own.1)?;
-        for ((_, (_, tree), _), m) in refs.members.iter().zip(&inputs) {
+        for ((_, (_, tree), base), _) in refs.members.iter().zip(&inputs) {
             ctx.store.load_tree(*tree)?;
-            if let Some(base) = m.base {
-                ctx.store.load_tree(git::resolve(&base.to_string())?.tree)?;
-            }
+            ctx.store.load_tree(git::resolve(&base.to_string())?.tree)?;
         }
         // No lock the requests need is held meanwhile.
-        let merged = ctx.private.merge(branch, refs.own, &inputs)?;
+        let merged = ctx.private.merge(&ctx.key(), branch, refs.own, &inputs)?;
         let tree = ctx.store.load_tree(merged.tree)?;
         let (conflicts, notes) = (&merged.conflicts, &refs.notes);
         let (shown, changed) = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);
@@ -130,15 +172,36 @@ impl Watch {
     }
 }
 
-/// Keeps `view` current while it exists.
+/// Keeps `view` current while it exists: every second, unless it rests (not
+/// accessed for `rests_after()`); an access wakes it (`ViewDir::reached`), and
+/// it is refreshed at once.
 pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
     let name = format!("view {}", ctx.branch);
     let spawned = thread::Builder::new().name(name).spawn(move || {
         loop {
-            thread::sleep(INTERVAL);
             let Some(view) = view.upgrade() else { return };
+            let woken = {
+                let mut rest = view.rest.lock();
+                // Woken early by an access to a resting view.
+                view.woken.wait_for(&mut rest, INTERVAL);
+                let idle = rest.accessed.elapsed() >= rests_after();
+                match (rest.resting, idle) {
+                    // Rests on.
+                    (true, true) => continue,
+                    // Accessed: refreshed at once.
+                    (true, false) => true,
+                    (false, true) => {
+                        rest.resting = true;
+                        drop(rest);
+                        resting(&ctx.names, &view);
+                        continue;
+                    }
+                    (false, false) => false,
+                }
+            };
             let before = view.shown();
-            match watch.next(&ctx, Some(&before)) {
+            let trees = if woken { Trees::Now } else { Trees::Quiet };
+            match watch.next(&ctx, Some(&before), trees) {
                 Ok(next) => {
                     watch.last_error.clear();
                     if let Some((shown, changed, commit)) = next {
@@ -146,7 +209,7 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                         // replies can't land after the kernel is told.
                         view.swap(shown, &changed);
                         tell(&ctx.names, &view, &changed);
-                        if let Err(e) = ctx.private.shown(&ctx.branch, commit) {
+                        if let Err(e) = ctx.private.shown(&ctx.key(), commit) {
                             error!("view {}: {e:#}", view.name);
                         }
                     }
@@ -160,11 +223,24 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                     }
                 }
             }
+            if woken {
+                let mut rest = view.rest.lock();
+                rest.resting = false;
+                rest.refreshed += 1;
+                view.woken.notify_all();
+            }
         }
     });
     if let Err(e) = spawned {
         error!("can't keep a view current: {e}");
     }
+}
+
+/// `view` rests: the kernel forgets its root's entry, so that the next path
+/// through it asks again, which wakes it (an `@committed` view's are cached
+/// long; an `@live` view's ask again soon anyway).
+fn resting(names: &NameChanges, view: &ViewDir) {
+    names.entry(view.parent, name(view.name.as_bytes()));
 }
 
 /// Tells the kernel that `changed` paths of `view` changed: their entries in
