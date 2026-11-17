@@ -46,8 +46,10 @@ fn report_reads(input: &str) -> Result<()> {
         let Some((mount, common_dir)) = mount_table::containing(&mounts, &path) else {
             continue;
         };
-        let rel = path.strip_prefix(mount)?;
-        let Some(rel) = rel.to_str().filter(|_| path.is_file()) else {
+        let Some(rel) = (path.strip_prefix(mount).ok())
+            .and_then(Path::to_str)
+            .filter(|_| path.is_file())
+        else {
             continue;
         };
         reads.entry(common_dir).or_default().push(rel.to_string());

@@ -44,8 +44,7 @@ pub fn repo_at(dir: &Path) -> Result<PathBuf> {
 /// below a gitfold mount where git finds no repository, from the top of the
 /// view the current directory is in (`@live/<branch>`, `@committed/<branch>`),
 /// elsewhere in the mount (its root, `@live`, a namespace directory) from the
-/// current directory, which stands for the top of the work tree. After
-/// `git::init` of the repository.
+/// current directory, which stands for the top of the work tree.
 pub fn here() -> Result<crate::git::cmd::Here> {
     use crate::git::cmd::Here;
     let dir = Path::new(".");
@@ -55,6 +54,8 @@ pub fn here() -> Result<crate::git::cmd::Here> {
     let Some((mount, common_dir, dir)) = mounted(dir) else {
         return Ok(Here(None));
     };
+    // `view_top` asks the repository which names are branches.
+    crate::git::init(&common_dir)?;
     Ok(Here(Some((common_dir, view_top(&mount, dir)?))))
 }
 
