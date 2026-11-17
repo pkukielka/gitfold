@@ -44,19 +44,23 @@ pub fn lock(common_dir: &Path) -> Result<Option<Lock>> {
         {
             let root = state_root(common_dir);
             fs::create_dir_all(&root).with_context(context)?;
-            let file = fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(root.join(".lock"))
-                .with_context(context)?;
-            if !flock(&file).with_context(context)? {
-                return Ok(None);
-            }
-            file
+            return try_file(&root.join(".lock")).with_context(context);
         }
         Err(e) => return Err(e).with_context(context),
     };
     Ok(Some(Lock { _file: locked }))
+}
+
+/// An exclusive `flock` on file `path` (created if missing), if no one else
+/// holds it: the repository lock's fallback, and moves of one branch at a
+/// time (`git::rebase`).
+pub fn try_file(path: &Path) -> Result<Option<Lock>> {
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(flock(&file)?.then_some(Lock { _file: file }))
 }
 
 /// An exclusive, non-blocking `flock`: whether it was taken.

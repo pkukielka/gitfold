@@ -1,6 +1,7 @@
 mod bench;
 mod cli;
 mod daemon;
+mod follow;
 mod fs;
 mod fsutil;
 mod git;

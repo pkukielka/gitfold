@@ -32,6 +32,13 @@ const TRACK_READS: &str = "gitfoldTrackReads";
 const PARENT: &str = "gitfoldParent";
 /// `branch.<branch>.gitfoldFollow`: a boolean; unset means on.
 const FOLLOW: &str = "gitfoldFollow";
+/// `branch.<branch>.gitfoldConflict`: the parent's tip its commits
+/// conflicted with, then the paths (quoted as git quotes them), one per
+/// line.
+const CONFLICT: &str = "gitfoldConflict";
+/// `branch.<branch>.gitfoldMoving`: the outcome of a move under way (see
+/// `follow`).
+const MOVING: &str = "gitfoldMoving";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -159,6 +166,20 @@ impl Local {
         self.branch_bool(branch, FOLLOW)
     }
 
+    /// The conflict recorded for `branch` (`gitfoldConflict`): the parent's
+    /// tip its commits conflicted with, and the paths.
+    pub fn conflict(&self, branch: &str) -> Option<(String, Vec<String>)> {
+        let value = self.branch(branch, CONFLICT)?;
+        let mut lines = value.lines().map(String::from);
+        Some((lines.next()?, lines.collect()))
+    }
+
+    /// The outcome of a move of `branch` under way, as recorded
+    /// (`gitfoldMoving`).
+    pub fn moving(&self, branch: &str) -> Option<String> {
+        self.branch(branch, MOVING)
+    }
+
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
     fn branch(&self, branch: &str, key: &str) -> Option<String> {
         let config = self.0.as_ref()?;
@@ -235,10 +256,40 @@ pub fn set_parent(git_dir: &Path, branch: &str, parent: &str) -> Result<()> {
     set_branch(git_dir, branch, PARENT, parent)
 }
 
-/// Forgets the parent of `branch`, and whether it follows it (F5).
+/// Forgets the parent of `branch`, whether it follows it (F5), and a
+/// conflict with it.
 pub fn forget_parent(git_dir: &Path, branch: &str) -> Result<()> {
     unset_branch(git_dir, branch, PARENT)?;
-    unset_branch(git_dir, branch, FOLLOW)
+    unset_branch(git_dir, branch, FOLLOW)?;
+    set_conflict(git_dir, branch, None)
+}
+
+/// Records the outcome of a move of `branch` under way, or with `None`
+/// forgets it.
+pub fn set_moving(git_dir: &Path, branch: &str, outcome: Option<&str>) -> Result<()> {
+    match outcome {
+        Some(outcome) => set_branch(git_dir, branch, MOVING, outcome),
+        None => unset_branch(git_dir, branch, MOVING),
+    }
+}
+
+/// Records that the commits of `branch` conflict with its parent's tip
+/// `at` on `paths`, or with `None` that they don't (any more).
+pub fn set_conflict(
+    git_dir: &Path,
+    branch: &str,
+    conflict: Option<(&str, &[String])>,
+) -> Result<()> {
+    match conflict {
+        Some((at, paths)) => {
+            let value = std::iter::once(at)
+                .chain(paths.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            set_branch(git_dir, branch, CONFLICT, &value)
+        }
+        None => unset_branch(git_dir, branch, CONFLICT),
+    }
 }
 
 /// Stores whether `branch` takes its parent's new commits by itself; on is
