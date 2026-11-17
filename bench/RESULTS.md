@@ -626,3 +626,128 @@ unchanged. An open costs about 4.5 µs; it is seconds per search only on large
 trees, but agents search often. So read tracking doesn't use opens
 (ARCHITECTURE, "Overlaps"). `claude-grep` hides most of it (ugrep is slow on its own); Claude
 Code's Grep tool runs `rg`.
+
+## 2026-11-17, re-measurement after the tree of branches
+
+After branches built on branches, following (a daemon thread walking the tree every second), views
+(`@committed`, `@live`, a request gate, new names under `@`) and the follow-ups. Same machine and
+command as 2026-11-12: `GF_WAIT_PREWARM=1 bench/bench.sh ~/work/bench/chromium
+PermissionRequestManager`, and `GF_TARGET=<branch>` for a fresh workspace. ms, first run / repeat
+on a fresh mount after prewarm (2026-11-12 in brackets):
+
+| cmd         | native      | snapshot                    | workspace                   |
+|-------------|-------------|-----------------------------|-----------------------------|
+| open        |             | 882 (856)                   | 906 (868)                   |
+| prewarm     |             | 703 (698)                   | 1153 (1159)                 |
+| find        | 474 / 474   | 350 / 348 (349 / 352)       | 351 / 353 (351 / 351)       |
+| Claude grep | 5214 / 4228 | 7142 / 4187 (5950 / 4188)   | 5685 / 4167 (5695 / 4119)   |
+| rg          | 375 / 362   | 2624 / 407 (2871 / 405)     | 2960 / 412 (3266 / 395)     |
+| git status  | 855 / 855   | 881 / 697 (884 / 706)       | 944 / 714 (942 / 721)       |
+
+No regression: everything is within run-to-run noise. The one outlier, the snapshot's first Claude
+grep (7142 ms), is a first cold read of 4 GB of blobs; the workspace's first run, on the same data,
+matches 2026-11-12 (5685 vs 5695), as do all repeats. Daemon anonymous memory after the warm runs:
+snapshot 63, 77, 256 and 64 MB (2026-11-12: 63, 73, 216, 64; the rg figure is the transient
+content cache), workspace 124, 135, 292 and 124 MB (124, 134, 298, 123).
+
+`git status` in the workspace now prints one line natively absent: `!! .task`, the task folder's
+symlink, listed only because Claude Code's invocation asks for ignored files (`--ignored=matching`).
+It came with task folders (2026-11-13), not with this work.
+
+Idle cost of the new daemon threads: a mounted Chromium clone with a workspace open, nothing
+changing, used 2 clock ticks (20 ms) of CPU in 60 s.
+
+## 2026-11-17, the tree of branches and views
+
+`bench/tree.sh ~/work/bench/chromium PermissionRequestManager`, same machine as above, release
+build. It mounts the clone (default flags) and builds a family at HEAD: `n` with one commit, and
+`a`, `b`, `c` built on it (`--parent n`), each three commits on files of its own, `a` and `b` both
+also appending to `AUTHORS` (one conflict, listed in `.gitfold-conflicts`). Commits are made
+without a checkout (a temporary index, `commit-tree`). `a`, `b` and `c` have workspaces, each with
+one uncommitted edit. Other families for the move and landing rows, below; everything is deleted
+at the end. "reads" cats 1,023 files (every 500th of `git ls-files`, 8 MB). ms; cold = fresh
+mount, warm = repeat; two full runs, which agreed within a few %, the second shown.
+
+Bulk reads. first: the first access on a fresh mount (`@HEAD`: `stat`, then its metadata
+prewarm is waited for, as bench.sh does; a view: `cat .gitfold-conflicts`, i.e. made and merged);
+complete: until `@live` shows all three members' uncommitted edits (polled). Views have no
+prewarm.
+
+| cmd         | `@HEAD` (prewarmed) | `@committed/n`  | `@live/n`                     |
+|-------------|---------------------|-----------------|-------------------------------|
+| first       | 863-895             | 771-803         | 5766-5795, complete 15.7-16.0 s |
+| find        | 350 / 350           | 2904 / 720      | 2755 / 764                    |
+| Claude grep | 5193 / 4144         | 8718 / 4655     | 8811 / 5320                   |
+| rg          | 2598 / 406          | 3687 / 428      | 3586 / 1402                   |
+| reads       | 56 / 26             | 100 / 31        | 86 / 28                       |
+| daemon RSS  | 85 MB               | 86 MB           | 260 MB                        |
+
+(`@live` cold/warm are measured once the view is complete.)
+
+Views, refresh and rest:
+
+| what | first | repeat |
+|---|---:|---:|
+| `@live`: an edit saved in `a`'s workspace, until seen in the view (3 rounds) | 4042 | 4043, 3924 |
+| `@committed`: `git commit` in `c`'s workspace, from its end until seen | 596 | 755 |
+| resting view (`GITFOLD_VIEW_REST_SECS=5`, rested 10 s), nothing changed: `@committed` | 3 | 3 |
+| same, `@live` | 189 | 3 |
+| `@live`, an edit saved in `a` while it rested, the first access (sees it) | 1081 | 988 |
+| `@committed`, a commit on `b` while it rested, the first access (sees it) | 17 | 17 |
+
+Branch operations (total wall time of the command):
+
+| what | first | repeat |
+|---|---:|---:|
+| `gitfold branch t --from a --from c` (no conflict; opens `t`, git merges there) | 3816 | 3748 |
+| `gitfold branch t -w --from a --from c` (each with an uncommitted edit, both carried) | 7978 | 7184 |
+| native: `git switch -c t a && git merge c` in a full worktree | 2063 | 1607 |
+| native: `git merge-tree --write-tree a c` (in memory) | 3 | 3 |
+| `gitfold parent u1 --update`, u1 without a workspace (2 commits onto a new parent commit) | 112 | 107 |
+| native: `git replay --onto` of the same (in memory, no refs) | 79 | 77 |
+| `gitfold parent u2 --update`, u2's workspace open, clean | 1946 | 1944 |
+| same, with an uncommitted edit (carried) | 4961 | 4838 |
+| native: `git rebase` in a full worktree, clean | 1969 | 1936 |
+| native: `git rebase --autostash` there, with an uncommitted edit | 5257 | 5116 |
+| `gitfold parent c7` (c7 on p7 on g7), p7 not landed | 72 | 73 |
+| same after p7 is squash-merged into g7 and g7 moved on (note computed) | 56 | 57 |
+| `gitfold changes -- AUTHORS`, 11 branches, 11 workspaces | 9059 | 9120 |
+| `gitfold changes -- docs` | 9149 | 9122 |
+
+The landing rows are the same with the recorded check dropped (`git config --unset
+branch.c7.gitfoldLanding`): 72 and 57 ms. Landing is checked against the parent's parent (`g7`)
+because the script doesn't touch main; the not-landed row checks `origin/main` and `main` too.
+
+Notes:
+
+- **`gitfold changes -- PATH` takes 9 s, and that is git, not gitfold:** 8.27 s of it is `git
+  for-each-ref --no-merged=origin/main refs/heads` (GIT_TRACE2_PERF), which, for a branch that is
+  not merged, walks all of `origin/main`'s 1.85M commits: this clone has no commit-graph. In a
+  `git clone --shared` of it with `git commit-graph write --reachable` (15 s, once), the same
+  query takes 2 ms. The rest, 11 workspaces' changes and 11 `git diff`s, is ~0.8 s. Clones that
+  have had `git gc`/`git maintenance` have a commit-graph; a fresh `git clone` doesn't.
+- **`@live`'s first access is slow on a fresh mount: 5.8 s, and the view is complete only after
+  ~16 s.** Opening `@live/n` resumes the three workspaces and makes their live trees one after
+  another (the log shows the workspaces resumed 5 s apart), each a `git add -A` on a copy of the
+  index through a workspace with nothing cached and no prewarm, like a cold `git status` without
+  prewarm (4.1 s on Chromium, 2026-10-25). The first access returns at the 5 s wake limit with
+  the members made so far. Once made, an edit shows in ~4 s (the 2 s quiet period, then ~2 s:
+  the member's `git add -A` with warm caches, the merge, up to 50 ms of polling), and a view that
+  rested catches up in ~1 s at its first access.
+- **Views are read like a snapshot without prewarm** (2026-10-25's prototype numbers: find
+  2.7 s, Claude grep 8.1 s, rg 3.2 s cold): first reads pay for metadata the prewarm would have
+  loaded. Warm, `@committed` matches `@HEAD` except find (720 vs 350 ms). Warm `@live` rg is
+  1.4 s vs 0.4 s, likely because its entries live only 1 s in the kernel (`LIVE_TTL`), so a warm
+  run asks the daemon again (not verified). Its daemon held 260 MB, with the three workspaces the view opened.
+- `@committed` itself is cheap: made and merged (three members, one conflict) in under 0.8 s,
+  less than opening a snapshot; a commit shows in it in 0.6-0.75 s; a resting one wakes in 3 ms,
+  17 ms when a commit came meanwhile.
+- Moves cost what git's rebase costs: in a workspace as natively in a full checkout (1.9 vs
+  1.9-2.0 s clean; 4.8-5.0 vs 5.1-5.3 s with `--autostash`, which on Chromium is ~3 s by itself);
+  without a workspace 0.11 s, near `git replay`'s 0.08 s.
+- A trial merge is ~2x native (3.8 vs 1.6-2.1 s): opening the new workspace (~1 s), then git's
+  merge in it, through the mount, while the new workspace's metadata prewarm (2.9 s) runs. `-w`
+  doubles it again (7.2-8.0 s), copying each source's uncommitted state; one earlier run's first
+  `-w` took 12.2 s, where the log shows the two sources being opened in this mount first
+  (resumed 4 s apart). Not broken down further.
+- The landing check is cheap (56-73 ms), recorded or not.
