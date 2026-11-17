@@ -256,7 +256,7 @@ pub enum Followed {
     Nothing,
     /// Its parent's new commits taken: what `--update` says.
     Moved(String),
-    /// Following paused: the full message, and its one-line summary.
+    /// Following paused: why in full, and in one line.
     Paused { full: String, short: String },
 }
 
@@ -265,17 +265,11 @@ pub enum Followed {
 /// against the parent's tip isn't tried again (paused until the parent
 /// moves on, or it is rebased by hand).
 pub fn follow_once(common_dir: &Path, name: &str) -> Followed {
-    match try_follow(common_dir, name) {
-        Ok(followed) => followed,
-        Err(e) => {
-            let full = format!("{e:#}");
-            let short = full.lines().next().unwrap_or_default().to_string();
-            Followed::Paused {
-                full: format!("following paused: {full}"),
-                short,
-            }
-        }
-    }
+    try_follow(common_dir, name).unwrap_or_else(|e| {
+        let full = format!("{e:#}");
+        let short = full.lines().next().unwrap_or_default().to_string();
+        Followed::Paused { full, short }
+    })
 }
 
 fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
@@ -298,41 +292,38 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
         Some(paths) => follow::Moved::Conflict(paths),
         None => plan.run(common_dir, false, || movable(common_dir, name))?,
     };
-    let paused = |full: String, short: String| {
-        let full = format!("following paused: {full}");
-        Ok(Followed::Paused { full, short })
+    let summary = match &moved {
+        follow::Moved::UpToDate => return Ok(Followed::Nothing),
+        follow::Moved::Done { .. } => None,
+        follow::Moved::Conflict(paths) => Some(format!("conflict on {}", paths.join(", "))),
+        follow::Moved::Pushed(pushed) => Some(pushed_count(pushed)),
+        follow::Moved::Work(paths) => Some(format!(
+            "uncommitted work in the way on {}",
+            paths.join(", ")
+        )),
+        follow::Moved::Merge => Some("a merge among its own commits".to_string()),
+        follow::Moved::Refused(_) => Some("git refused in its workspace".to_string()),
     };
-    match moved {
-        follow::Moved::UpToDate => Ok(Followed::Nothing),
-        follow::Moved::Conflict(paths) => paused(
-            conflict_said(name, short, &plan, &paths),
-            format!("conflict on {}", paths.join(", ")),
-        ),
-        follow::Moved::Pushed(pushed) => {
-            let are = if pushed.count == 1 { "is" } else { "are" };
-            let summary = format!("{} {are} pushed", commits(pushed.count));
-            paused(pushed_said(name, &pushed), summary)
-        }
-        moved @ follow::Moved::Done { .. } => {
-            let mut out = String::new();
-            if let Err(e) = said_to(&mut out, name, short, &plan, moved) {
+    // A conflict as `gitfold parent` says it.
+    let full = match &moved {
+        follow::Moved::Conflict(paths) => Some(conflict_said(name, short, &plan, paths)),
+        _ => None,
+    };
+    let mut out = String::new();
+    let said = said_to(&mut out, name, short, &plan, moved);
+    Ok(match (summary, said) {
+        // Moved, its work put back conflicting maybe.
+        (None, said) => {
+            if let Err(e) = said {
                 out += &format!("{e:#}\n");
             }
-            Ok(Followed::Moved(out))
+            Followed::Moved(out)
         }
-        moved => {
-            let summary = match &moved {
-                follow::Moved::Work(paths) => {
-                    format!("uncommitted work in the way on {}", paths.join(", "))
-                }
-                follow::Moved::Merge => "a merge among its own commits".to_string(),
-                _ => "git refused in its workspace".to_string(),
-            };
-            let mut out = String::new();
-            let e = said_to(&mut out, name, short, &plan, moved).expect_err("not moved");
-            paused(format!("{e:#}"), summary)
-        }
-    }
+        (Some(short), said) => Followed::Paused {
+            full: full.unwrap_or_else(|| format!("{:#}", said.expect_err("not moved"))),
+            short,
+        },
+    })
 }
 
 /// `gitfold parent NAME --set P` (P as `given`): P its parent, following it
@@ -493,13 +484,17 @@ fn said_to(
     }
 }
 
+/// How many of its commits are `pushed`: `2 commits are pushed`.
+fn pushed_count(pushed: &follow::Pushed) -> String {
+    let are = if pushed.count == 1 { "is" } else { "are" };
+    format!("{} {are} pushed", commits(pushed.count))
+}
+
 /// Why `name` doesn't move: `pushed`.
 fn pushed_said(name: &str, pushed: &follow::Pushed) -> String {
-    let are = if pushed.count == 1 { "is" } else { "are" };
     format!(
-        "{} {are} pushed. `gitfold parent {name} --update --yes` moves them; then force-push \
-         with: {}",
-        commits(pushed.count),
+        "{}. `gitfold parent {name} --update --yes` moves them; then force-push with: {}",
+        pushed_count(pushed),
         pushed.push
     )
 }

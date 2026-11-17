@@ -24,8 +24,10 @@ use std::time::{Duration, Instant};
 use gix::ObjectId;
 use log::{info, warn};
 
+use crate::follow;
 use crate::fs::Workspaces;
 use crate::git;
+use crate::settings::Local;
 use crate::state::StateDir;
 use crate::tree::Tree;
 
@@ -37,11 +39,11 @@ const IDLE: Duration = Duration::from_secs(3);
 const TIMEOUT: Duration = Duration::from_secs(600);
 
 /// What the walk knows of a branch.
-#[derive(Default)]
 struct Seen {
-    /// Its workspace's count of writes (`None`: not open), and since when it is.
+    /// Its workspace's count of writes (`None`: not open), and since when
+    /// it is that.
     writes: Option<u64>,
-    since: Option<Instant>,
+    since: Instant,
     /// The state last tried: its tip, its parent's, its workspace's
     /// writes.
     tried: Option<(ObjectId, ObjectId, Option<u64>)>,
@@ -78,15 +80,25 @@ fn walk(
     workspaces: &Workspaces,
     seen: &mut HashMap<String, Seen>,
 ) -> anyhow::Result<()> {
+    let local = Local::read_checked(common_dir)?;
+    // Nothing built on anything: no tree to read (it asks git for the root).
+    if local.parents().is_empty() {
+        seen.clear();
+        return Ok(());
+    }
     let tree = Tree::read(common_dir)?;
     let branches = tree.with_parents();
     seen.retain(|b, _| branches.contains(&b.as_str()));
     for branch in branches {
-        let seen = seen.entry(branch.to_string()).or_default();
         // Read now: a parent moved earlier in this walk is seen moved.
         let writes = workspaces.get_open(branch).map(|ws| ws.writes());
-        if seen.since.is_none() || seen.writes != writes {
-            (seen.writes, seen.since) = (writes, Some(Instant::now()));
+        let seen = seen.entry(branch.to_string()).or_insert_with(|| Seen {
+            writes,
+            since: Instant::now(),
+            tried: None,
+        });
+        if seen.writes != writes {
+            (seen.writes, seen.since) = (writes, Instant::now());
         }
         let Some(parent) = tree.parent(branch).filter(|_| tree.follows(branch)) else {
             continue;
@@ -99,89 +111,81 @@ fn walk(
         if seen.tried == Some(now) || state.agent_present() {
             continue;
         }
-        let idle = seen.since.is_some_and(|t| t.elapsed() >= IDLE);
+        let idle = seen.since.elapsed() >= IDLE;
         if writes.is_some() && (!idle || state.git_busy().is_some()) {
             continue;
         }
         seen.tried = Some(now);
-        if is_ancestor(common_dir, on.id, tip.id) {
-            continue; // up to date
+        // Up to date (a process saved), or a conflict recorded against the
+        // parent's tip: paused until it moves on (as `follow_once`).
+        let conflict = local.conflict(branch).map(|(at, _)| at);
+        if conflict == Some(on.id.to_string())
+            || follow::is_ancestor(common_dir, on.id, tip.id).unwrap_or(false)
+        {
+            continue;
         }
-        update(common_dir, &state);
+        update(common_dir, &state, tip.id);
     }
     Ok(())
 }
 
-/// Whether `a` is an ancestor of `b` (`git merge-base --is-ancestor`); not
-/// if git can't tell.
-fn is_ancestor(common_dir: &Path, a: ObjectId, b: ObjectId) -> bool {
-    (git::cmd::command(common_dir))
-        .args([
-            "merge-base",
-            "--is-ancestor",
-            &a.to_string(),
-            &b.to_string(),
-        ])
-        .status()
-        .is_ok_and(|s| s.success())
+/// A pipe of a child read to its end by a thread of its own (a full pipe
+/// would stop the child).
+fn drain<R: Read + Send + 'static>(mut from: R) -> thread::JoinHandle<String> {
+    thread::spawn(move || {
+        let mut text = String::new();
+        let _ = from.read_to_string(&mut text);
+        text
+    })
 }
 
-/// `gitfold parent BRANCH --update` for the branch of `state`, logged; a
-/// move in its workspace kept for its agent.
-fn update(common_dir: &Path, state: &StateDir) {
-    let branch = &state.branch;
-    let run = || -> anyhow::Result<(bool, String, String)> {
-        let mut child = Command::new(std::env::current_exe()?)
-            .arg("-C")
-            .arg(common_dir)
-            .args(["parent", branch, "--update"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        // Read meanwhile: a full pipe would stop it.
-        let read = |mut from: Box<dyn Read + Send>| {
-            thread::spawn(move || {
-                let mut text = String::new();
-                let _ = from.read_to_string(&mut text);
-                text
-            })
-        };
-        let out = read(Box::new(child.stdout.take().expect("piped")));
-        let err = read(Box::new(child.stderr.take().expect("piped")));
-        let started = Instant::now();
-        let status = loop {
-            if let Some(status) = child.try_wait()? {
-                break status;
-            }
-            if started.elapsed() > TIMEOUT {
-                let _ = child.kill();
-                let _ = child.wait();
-                anyhow::bail!(
-                    "gitfold parent {branch} --update took longer than {}s: killed, what git \
-                     did left as it is",
-                    TIMEOUT.as_secs()
-                );
-            }
-            thread::sleep(Duration::from_millis(50));
-        };
-        let (out, err) = (
-            out.join().unwrap_or_default(),
-            err.join().unwrap_or_default(),
-        );
-        Ok((status.success(), out, err))
+/// `gitfold parent BRANCH --update` for `branch`
+/// as a child process, killed after `TIMEOUT`: whether it succeeded, what
+/// it said.
+fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(bool, String)> {
+    let mut child = Command::new(std::env::current_exe()?)
+        .arg("-C")
+        .arg(common_dir)
+        .args(["parent", branch, "--update"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let out = drain(child.stdout.take().expect("piped"));
+    let err = drain(child.stderr.take().expect("piped"));
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() > TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!(
+                "gitfold parent {branch} --update took longer than {}s: killed, what git did \
+                 left as it is",
+                TIMEOUT.as_secs()
+            );
+        }
+        thread::sleep(Duration::from_millis(50));
     };
-    match run() {
-        Ok((true, said, _)) => {
+    let said = out.join().unwrap_or_default() + &err.join().unwrap_or_default();
+    Ok((status.success(), said))
+}
+
+/// Moves the branch of `state` (at `tip`), logged; a move kept for its
+/// agent (moved: the branch isn't at `tip` any more, even if its work, put
+/// back, conflicted).
+fn update(common_dir: &Path, state: &StateDir, tip: ObjectId) {
+    let branch = &state.branch;
+    match run_update(common_dir, branch) {
+        Ok((ok, said)) if ok || git::branch_tip(branch).is_ok_and(|now| now.id != tip) => {
             info!("following: {}", said.trim_end().replace('\n', "; "));
             if let Err(e) = state.add_followed(&said) {
                 warn!("following: {branch}: keeping the move for its agent: {e:#}");
             }
         }
-        Ok((false, said, err)) => {
-            let said = format!("{said}{err}");
-            warn!("following {branch} paused: {}", said.trim_end());
-        }
+        Ok((_, said)) => warn!("following {branch} paused: {}", said.trim_end()),
         Err(e) => warn!("following {branch}: {e:#}"),
     }
 }

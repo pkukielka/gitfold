@@ -115,7 +115,7 @@ fn turn_start(common_dir: &Path, state: &StateDir) -> Result<String> {
             true => format!("gitfold: following still paused: {short} (see `gitfold parent`)\n"),
             false => {
                 state.set_told(Some(&short))?;
-                format!("gitfold: {full}\n")
+                format!("gitfold: following paused: {full}\n")
             }
         },
     };

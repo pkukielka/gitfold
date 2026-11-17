@@ -15,7 +15,6 @@
 //!   there, said at its agent's next turn start.
 
 use std::fs;
-use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
@@ -25,6 +24,8 @@ use super::{StateDir, workspace_id};
 
 /// How long an agent counts as present after its last hook.
 pub const TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// How long a mark is fresh enough not to be refreshed.
+const REFRESH: Duration = Duration::from_secs(60);
 
 impl StateDir {
     fn agents(&self) -> PathBuf {
@@ -34,24 +35,25 @@ impl StateDir {
     /// Marks agent `id` present in the workspace (refreshed if it is),
     /// if the workspace exists.
     pub fn mark_agent(&self, id: &str) -> Result<()> {
+        let path = self.agents().join(workspace_id(id));
+        // Refreshed lately: a burst of tool calls costs a stat each.
+        let age = fs::metadata(&path).and_then(|m| m.modified());
+        if age.is_ok_and(|t| t.elapsed().is_ok_and(|age| age < REFRESH)) {
+            return Ok(());
+        }
         if !self.dir.is_dir() {
             return Ok(());
         }
-        let dir = self.agents();
-        fs::create_dir_all(&dir)?;
-        let file = fs::File::create(dir.join(workspace_id(id)))?;
-        std::io::Write::write_all(&mut &file, id.as_bytes())?;
+        fs::create_dir_all(self.agents())?;
+        fs::write(&path, id)?;
         // Rewriting the same bytes may leave the time as it was.
-        file.set_modified(SystemTime::now())?;
+        crate::fsutil::set_times(&path, None, Some(SystemTime::now()))?;
         Ok(())
     }
 
     /// Agent `id` left the workspace.
     pub fn unmark_agent(&self, id: &str) -> Result<()> {
-        match fs::remove_file(self.agents().join(workspace_id(id))) {
-            Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
-            _ => Ok(()),
-        }
+        remove(&self.agents().join(workspace_id(id)))
     }
 
     /// Whether an agent is present in the workspace now (see the module
@@ -81,10 +83,7 @@ impl StateDir {
         let path = self.told_file();
         match pause {
             Some(pause) => Ok(crate::fsutil::write_atomic(&path, pause.as_bytes())?),
-            None => match fs::remove_file(path) {
-                Err(e) if e.kind() != ErrorKind::NotFound => Err(e.into()),
-                _ => Ok(()),
-            },
+            None => remove(&path),
         }
     }
 
@@ -112,12 +111,20 @@ impl StateDir {
             .dir
             .join(format!("followed.taken-{}", std::process::id()));
         match fs::rename(self.followed_file(), &taken) {
-            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(e) if crate::fsutil::not_found(&e) => return Ok(None),
             renamed => renamed?,
         }
         let said = fs::read_to_string(&taken)?;
         fs::remove_file(&taken)?;
         Ok(Some(said))
+    }
+}
+
+/// Removes file `path`, if it exists.
+fn remove(path: &std::path::Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if !crate::fsutil::not_found(&e) => Err(e.into()),
+        _ => Ok(()),
     }
 }
 
