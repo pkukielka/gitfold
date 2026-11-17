@@ -124,22 +124,21 @@ impl Watch {
             // can't be read: its tip, noted). Opens the workspaces not open
             // yet (`Workspaces::open_quietly`).
             let mut notes = Vec::new();
+            // Errors logged once, while they last.
+            let before = std::mem::take(&mut self.live_failed);
             let failed = &mut self.live_failed;
+            let view = format!("@{}/{branch}", ctx.kind.name());
             let mut live =
                 |branch: &str, tip: &mut Tip| match ctx.lives.tip(ctx, branch, tip.0, now) {
-                    Ok(found) => {
-                        failed.remove(branch);
-                        if let Some(live) = found {
-                            *tip = live;
-                        }
-                    }
+                    Ok(Some(live)) => *tip = live,
+                    Ok(None) => {}
                     Err(e) => {
                         // Logged once; noted as such (the error's words may vary).
                         let e = format!("{e:#}");
-                        if failed.get(branch) != Some(&e) {
-                            error!("view {}: the workspace of {branch}: {e}", ctx.key);
-                            failed.insert(branch.to_string(), e);
+                        if before.get(branch) != Some(&e) {
+                            error!("view {view}: the workspace of {branch}: {e}");
                         }
+                        failed.insert(branch.to_string(), e);
                         notes.push(Note {
                             kind: "unread",
                             what: branch.to_string(),
@@ -147,21 +146,20 @@ impl Watch {
                         });
                     }
                 };
-            if refs.own.0 == refs.local {
+            for (member, tip, _) in &mut refs.members {
+                live(member, tip);
+            }
+            if refs.own == refs.local {
                 live(branch, &mut refs.own);
             } else {
                 // The view shows its origin root's files (its local branch only
-                // behind them): the workspace's work merged in, against the
-                // local tip.
-                let mut own = (refs.local, git::resolve(&refs.local.to_string())?.tree);
+                // behind them): the workspace's work merged in first, against
+                // the local tip, if it has any.
+                let mut own = refs.local;
                 live(branch, &mut own);
-                if own.0 != refs.local {
-                    refs.members.insert(0, (branch.clone(), own, refs.local));
-                }
-            }
-            for (member, tip, _) in &mut refs.members {
-                if member != branch {
-                    live(member, tip);
+                if own.1 != refs.local.1 {
+                    let name = format!("{branch}'s workspace");
+                    refs.members.insert(0, (name, own, refs.local.0));
                 }
             }
             refs.notes.extend(notes);
