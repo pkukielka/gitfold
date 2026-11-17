@@ -214,11 +214,10 @@ impl Local {
     /// `branch.<branch>.<key>` as a boolean, if set; a value that isn't one is
     /// warned about (`warn_once`) and counts as unset.
     fn branch_bool(&self, branch: &str, key: &str) -> Option<bool> {
-        self.branch_bool_checked(branch, key)
-            .unwrap_or_else(|e| {
-                warn_once(&e);
-                None
-            })
+        self.branch_bool_checked(branch, key).unwrap_or_else(|e| {
+            warn_once(&e);
+            None
+        })
     }
 
     /// `branch_bool`, a value that isn't a boolean an error saying so.
@@ -226,8 +225,12 @@ impl Local {
         let Some(config) = self.0.as_ref() else {
             return Ok(None);
         };
-        (config.boolean_by("branch", Some(branch.as_bytes().into()), key))
-            .map_err(|_| format!("{} is not a boolean (taken as unset)", branch_key(branch, key)))
+        (config.boolean_by("branch", Some(branch.as_bytes().into()), key)).map_err(|_| {
+            format!(
+                "{} is not a boolean (taken as unset)",
+                branch_key(branch, key)
+            )
+        })
     }
 }
 

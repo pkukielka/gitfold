@@ -128,13 +128,17 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
                 format!("gitfold: {said}\n")
             }
         },
-        Followed::Paused { full, short, .. } => match state.told(session).as_deref() == Some(&short) {
-            true => format!("gitfold: following still paused: {short} (see `gitfold parent`)\n"),
-            false => {
-                state.set_told(session, Some(&short))?;
-                format!("gitfold: following paused: {full}\n")
+        Followed::Paused { full, short, .. } => {
+            match state.told(session).as_deref() == Some(&short) {
+                true => {
+                    format!("gitfold: following still paused: {short} (see `gitfold parent`)\n")
+                }
+                false => {
+                    state.set_told(session, Some(&short))?;
+                    format!("gitfold: following paused: {full}\n")
+                }
             }
-        },
+        }
     };
     Ok(out)
 }
