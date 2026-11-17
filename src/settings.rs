@@ -16,6 +16,8 @@
 //! daemon's repository handle has the config as it was at mount time.
 
 use std::path::{Path, PathBuf};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::ValueEnum;
@@ -32,6 +34,13 @@ const TRACK_READS: &str = "gitfoldTrackReads";
 const PARENT: &str = "gitfoldParent";
 /// `branch.<branch>.gitfoldFollow`: a boolean; unset means on.
 const FOLLOW: &str = "gitfoldFollow";
+/// `branch.<branch>.gitfoldConflict`: the parent's tip its commits
+/// conflicted with, then the paths (quoted as git quotes them), one per
+/// line.
+const CONFLICT: &str = "gitfoldConflict";
+/// `branch.<branch>.gitfoldMoving`: the outcome of a move under way (see
+/// `follow`).
+const MOVING: &str = "gitfoldMoving";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -41,6 +50,9 @@ const TASKS_DIR: &str = "tasksDir";
 const INBOX: &str = "inbox";
 /// `gitfold.mountpoint`: where `gitfold mount` last mounted the repository.
 const MOUNTPOINT: &str = "mountpoint";
+/// `gitfold.mountOptions`: the flags `gitfold mount` last mounted it with,
+/// one per line (`--prewarm=meta`).
+const MOUNT_OPTIONS: &str = "mountOptions";
 /// The task folder's name unless `gitfold.taskDir` says otherwise.
 const DEFAULT_TASK_DIR: &str = ".task";
 /// The inbox's name unless `gitfold.inbox` says otherwise.
@@ -109,6 +121,13 @@ impl Local {
         self.repository(MOUNTPOINT).map(PathBuf::from)
     }
 
+    /// The flags `gitfold mount` last mounted the repository with
+    /// (`gitfold.mountOptions`), if recorded.
+    pub fn mount_options(&self) -> Vec<String> {
+        let options = self.repository(MOUNT_OPTIONS).unwrap_or_default();
+        options.lines().map(String::from).collect()
+    }
+
     /// The name of a task folder's inbox: `gitfold.inbox` if it is one plain
     /// name (not starting with a dot: files being written); else (warned about
     /// if set) `inbox`.
@@ -157,6 +176,20 @@ impl Local {
     /// (`gitfoldFollow`), if set (`Tree::follows` applies the rules).
     pub fn follow(&self, branch: &str) -> Option<bool> {
         self.branch_bool(branch, FOLLOW)
+    }
+
+    /// The conflict recorded for `branch` (`gitfoldConflict`): the parent's
+    /// tip its commits conflicted with, and the paths.
+    pub fn conflict(&self, branch: &str) -> Option<(String, Vec<String>)> {
+        let value = self.branch(branch, CONFLICT)?;
+        let mut lines = value.lines().map(String::from);
+        Some((lines.next()?, lines.collect()))
+    }
+
+    /// The outcome of a move of `branch` under way, as recorded
+    /// (`gitfoldMoving`).
+    pub fn moving(&self, branch: &str) -> Option<String> {
+        self.branch(branch, MOVING)
     }
 
     /// `branch.<branch>.<key>`, trimmed, if set and not empty.
@@ -235,10 +268,40 @@ pub fn set_parent(git_dir: &Path, branch: &str, parent: &str) -> Result<()> {
     set_branch(git_dir, branch, PARENT, parent)
 }
 
-/// Forgets the parent of `branch`, and whether it follows it (F5).
+/// Forgets the parent of `branch`, whether it follows it (F5), and a
+/// conflict with it.
 pub fn forget_parent(git_dir: &Path, branch: &str) -> Result<()> {
     unset_branch(git_dir, branch, PARENT)?;
-    unset_branch(git_dir, branch, FOLLOW)
+    unset_branch(git_dir, branch, FOLLOW)?;
+    set_conflict(git_dir, branch, None)
+}
+
+/// Records the outcome of a move of `branch` under way, or with `None`
+/// forgets it.
+pub fn set_moving(git_dir: &Path, branch: &str, outcome: Option<&str>) -> Result<()> {
+    match outcome {
+        Some(outcome) => set_branch(git_dir, branch, MOVING, outcome),
+        None => unset_branch(git_dir, branch, MOVING),
+    }
+}
+
+/// Records that the commits of `branch` conflict with its parent's tip
+/// `at` on `paths`, or with `None` that they don't (any more).
+pub fn set_conflict(
+    git_dir: &Path,
+    branch: &str,
+    conflict: Option<(&str, &[String])>,
+) -> Result<()> {
+    match conflict {
+        Some((at, paths)) => {
+            let value = std::iter::once(at)
+                .chain(paths.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join("\n");
+            set_branch(git_dir, branch, CONFLICT, &value)
+        }
+        None => unset_branch(git_dir, branch, CONFLICT),
+    }
 }
 
 /// Stores whether `branch` takes its parent's new commits by itself; on is
@@ -251,14 +314,46 @@ pub fn set_follow(git_dir: &Path, branch: &str, on: bool) -> Result<()> {
 }
 
 /// Records `mountpoint` as where the repository is mounted
-/// (`gitfold.mountpoint`), given its git directory or one of its worktrees'.
-pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path) -> Result<()> {
-    let key = format!("gitfold.{MOUNTPOINT}");
+/// (`gitfold.mountpoint`), with `flags`, the `gitfold mount` flags it was
+/// mounted with (`gitfold.mountOptions`, one per line), given its git
+/// directory or one of its worktrees'.
+pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result<()> {
     let value = mountpoint
         .to_str()
-        .context("a mount point that isn't UTF-8")?;
-    git::cmd::run(git_dir, &["config", "--local", &key, value])
+        .context("a mount point that isn't UTF-8");
+    // Each written even if the other can't be, each retried a while: another
+    // git command may hold the config's lock.
+    let write = |key: &str, value: &str| -> Result<()> {
+        let key = format!("gitfold.{key}");
+        let started = Instant::now();
+        loop {
+            let out = (git::cmd::command(git_dir))
+                .args(["config", "--local", &key, value])
+                .output()?;
+            match out.status.code() {
+                Some(0) => return Ok(()),
+                // The file not written (4, git config's exit code) or its
+                // lock held (255, what git exits with then): retried; any
+                // other failure waiting doesn't change.
+                Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
+                    sleep(Duration::from_millis(100));
+                    continue;
+                }
+                _ => {}
+            }
+            anyhow::bail!(
+                "git config {key} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+    };
+    let place = value.and_then(|value| write(MOUNTPOINT, value));
+    write(MOUNT_OPTIONS, &flags.join("\n")).and(place)
 }
+
+/// How long writing a setting is retried while it fails (the config locked).
+const CONFIG_WAIT: Duration = Duration::from_secs(2);
 
 /// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
 /// own config file (where it is read), given the repository's or one of its

@@ -16,7 +16,6 @@
 //!   prewarm and read-tracking settings).
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Weak};
@@ -406,33 +405,9 @@ impl Workspaces {
         inode::ws(self.add(path, Registered::Namespace), 0)
     }
 
-    /// The branch's checkout elsewhere, if any: git allows one checkout per branch.
-    /// A worktree in the middle of a rebase or bisect of the branch (detached
-    /// meanwhile) counts too, as for git.
+    /// The branch's checkout elsewhere, if any (see `worktree::checked_out`).
     fn checked_out_elsewhere(&self, branch: &str, own_admin: &Path) -> Option<String> {
-        let full = format!("refs/heads/{branch}");
-        let head = format!("ref: {full}");
-        let reads = |dir: &Path, file: &str, want: &str| {
-            fs::read_to_string(dir.join(file)).is_ok_and(|s| s.trim() == want)
-        };
-        let is_ours = |dir: &Path| {
-            reads(dir, "HEAD", &head)
-                || reads(dir, "rebase-merge/head-name", &full)
-                || reads(dir, "rebase-apply/head-name", &full)
-                || reads(dir, "BISECT_START", branch)
-        };
-        // A bare repository's HEAD names a branch but checks nothing out.
-        if !git::is_bare() && is_ours(&self.common_dir) {
-            return Some("the main worktree".into());
-        }
-        let worktrees = fs::read_dir(self.common_dir.join("worktrees")).ok()?;
-        worktrees.flatten().find_map(|w| {
-            let name = w.file_name().to_string_lossy().into_owned();
-            (w.path() != own_admin && is_ours(&w.path())).then(|| {
-                fs::read_to_string(w.path().join("gitdir"))
-                    .map_or(name, |g| g.trim().trim_end_matches("/.git").to_string())
-            })
-        })
+        worktree::checked_out(&self.common_dir, branch, Some(own_admin))
     }
 
     /// Loads the trees opening the workspace of `branch` needs (its tip and, if

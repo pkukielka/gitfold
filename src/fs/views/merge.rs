@@ -71,7 +71,7 @@ impl Private {
         std::fs::create_dir_all(&dir)?;
         let mut init = Command::new("git");
         git::cmd::in_other_worktree(&mut init)?;
-        git::cmd::checked(init.args(["init", "-q", "--bare"]).arg(&dir), &["init"])?;
+        git::cmd::output_of(init.arg("-C").arg(&dir), &["init", "-q", "--bare"], None)?;
         let real = |p: &str| common_dir.join(p);
         let objects = real("objects").canonicalize()?;
         std::fs::create_dir_all(dir.join("objects/info"))?;
@@ -127,7 +127,7 @@ impl Private {
     }
 
     fn run(&self, args: &[&str]) -> Result<Vec<u8>> {
-        git::cmd::checked(self.git()?.args(args), args)
+        git::cmd::output_of(&mut self.git()?, args, None)
     }
 
     /// A commit of `tree`, with no parent (nothing of any history to keep),

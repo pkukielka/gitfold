@@ -131,7 +131,8 @@ gitfold writes into the repository: worktree registrations under
   needed. Tested on 6.12; kernel 5.1 or newer is required for the no-opendir
   mode gitfold depends on.
 - git with linked worktree and index v4 support (any git from the last decade;
-  tested with 2.49).
+  tested with 2.49). Moving branches built on branches (`gitfold parent
+  --update`, `--set`) needs git 2.38 or newer.
 - A full clone, or a partial clone (`git clone --filter=blob:none`, or
   `tree:0`; git 2.29 or newer) whose promisor remote gitfold can fetch from
   without a prompt (an ssh agent, a credential helper); see [Partial
@@ -156,7 +157,8 @@ gitfold branch <BRANCH> --parent <P> [--no-follow]
                                               # a branch built on P
 gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
                                               # show or change what it is built
-                                              # on (--set, --update: not yet)
+                                              # on (a workspace's branch: not
+                                              # yet)
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold changes -- <PATH>...                  # who is changing them, on every branch
@@ -196,11 +198,15 @@ daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
 `inbox --claude-hook rewake` (2, to wake the session).
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
 several `--from`, it starts at the first, and `git merge` of the others runs in
-its workspace (mounting the repository again where it last was, if it isn't
+its workspace (mounting the repository again where and as it last was, if it isn't
 mounted): git merges, and says how, as it does. A conflict leaves the branch with
 git's merge in progress (exit 1): finish it with `git merge --continue` there, or
 `git merge --abort`. If git refuses, nothing is left. The branch keeps no
-relation to the others.
+relation to the others. With `-w`, each local branch's uncommitted changes in its
+workspace (tracked and untracked, not ignored files) are then applied as `git
+cherry-pick -n` applies them, unstaged; a conflict between them is left as git
+leaves it (exit 1, the paths named). With `-w`, a merge that doesn't complete
+is refused (nothing is left), as the changes go only on a merge made.
 
 Names below the mount point:
 
@@ -478,10 +484,22 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 A branch can be built on another branch, its parent: its own commits sit on
 the parent's, and it takes the parent's new commits. Branches built on
 branches form a tree. `gitfold branch NEW --parent P` creates a branch at
-P's tip built on P, following it unless `--no-follow`; `gitfold parent`
+P's tip built on P, following it unless `--no-follow`. It has no upstream
+until you `git push -u` it: its parent isn't its upstream. `gitfold parent`
 shows a branch's parent and whether it follows it, forgets it (`--none`:
-the history stays as it is) or turns following on and off. Nothing moves
-commits yet: following itself is still to come. The command-line contract
+the history stays as it is) or turns following on and off.
+
+`gitfold parent --update` takes the parent's new commits now, and `--set P`
+moves the branch onto another parent: its own commits move, as `git rebase
+--onto` moves them (git rebase does it, in a temporary worktree that checks
+out only the top-level files; commits the parent has already are dropped,
+as git does). A conflict moves nothing: the paths are named, and the
+conflict is recorded until the parent changes again. Commits already on the
+branch's own remote branch are moved only with `--update --yes`, and
+gitfold prints the force-push (it never pushes). A merge among its own
+commits, or a branch checked out in a git worktree, is left for you to
+rebase. For now only branches without a workspace move; following by
+itself is still to come. The command-line contract
 is in place; the commands marked "not yet" above parse their arguments,
 then say `not implemented yet` (exit 1). Commands people guess (`gitfold
 sync`, `pull`, `restack`, `rebase`, `branch --on`, `branch --merge`) exit 2
