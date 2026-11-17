@@ -79,6 +79,10 @@ eq "list empty again" "no workspaces" "$("$BIN" -C "$REPO" list 2>/dev/null)"
 
 prune() {
 check "snapshot registration exists" sh -c "ls '$COMMON/worktrees' | grep -q '^gitfold-[0-9a-f]\{12\}$'"
+chmod 000 "$COMMON/worktrees"
+out=$("$BIN" -C "$REPO" prune 2>&1); rc=$?
+chmod 755 "$COMMON/worktrees"
+eq "registrations that can't be read: an error, not \"removed 0\"" "1 no" "$rc $(grep -q 'removed 0' <<<"$out" && echo yes || echo no)"
 check "prune" "$BIN" -C "$REPO" prune
 check "snapshot registrations gone" sh -c "! ls '$COMMON/worktrees' 2>/dev/null | grep -q '^gitfold-'"
 check "git worktree list is clean" test "$(git -C "$REPO" worktree list | wc -l)" = 1
@@ -189,8 +193,15 @@ R config --unset core.splitIndex
 out=$("$BIN" -C "$REPO" changes -- ../x 2>&1); rc=$?
 eq "outside the work tree: refused with git's own words only" "1 1 fatal: no" "$rc $(wc -l <<<"$out") ${out%% *} $(grep -qE 'ls-files|core\.|Error' <<<"$out" && echo yes || echo no)"
 unmount_fs
+cp "$COMMON/gitfold/api/base" "$T/api.base"; echo bad >"$COMMON/gitfold/api/base"
+out=$("$BIN" -C "$REPO" changes -- d 2>"$T/err"); rc=$?
+eq "a workspace that can't be read: skipped, said, the rest printed (exit 1)" "1 yes mv	committed	d/c.txt" "$rc $(grep -q 'skipping workspace api' "$T/err" && echo yes) $(grep mv <<<"$out")"
+out=$("$BIN" -C "$REPO" overlaps ui --against-workspaces --writes 2>"$T/err"); rc=$?
+eq "overlaps --against-workspaces: skipped too, said; nothing else overlapping, exit 1" "1 yes" "$rc$out $(grep -q 'skipping workspace api' "$T/err" && echo yes)"
+cp "$T/api.base" "$COMMON/gitfold/api/base"
 git clone -q --depth 1 --no-single-branch "file://$REPO" "$T/shallow" 2>/dev/null; git -C "$T/shallow" branch -q api origin/api
-eq "a shallow clone: no history in common may be cut off, so said" yes "$("$BIN" -C "$T/shallow" changes -- d 2>&1 | grep -q 'skipping branch api' && echo yes)"
+out=$("$BIN" -C "$T/shallow" changes -- d 2>&1); rc=$?
+eq "a shallow clone: no history in common may be cut off, so said (exit 1)" "1 yes" "$rc $(grep -q 'skipping branch api' <<<"$out" && echo yes)"
 R config core.worktree "$REPO"
 eq "core.worktree set, from a subdirectory" "api	committed	d/b.txt" "$(cd "$REPO/d" && "$BIN" changes -- b.txt 2>&1)"
 R config --unset core.worktree

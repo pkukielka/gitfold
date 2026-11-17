@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 use crate::daemon::control;
 use crate::daemon::{self, serve};
 use crate::prewarm::Prewarm;
+use crate::refusal::Refusal;
 use crate::{mount_table, prewarm, procs, settings};
 
 /// How long `mount` waits for the daemon to mount.
@@ -175,7 +176,8 @@ fn mount_again(common_dir: &Path, mountpoint: &Path, flags: &[String]) -> Result
 /// `gitfold mount`: in the foreground, the daemon itself; else starts it in the
 /// background (see `start`), records where and with which flags it is mounted
 /// (`settings::set_mountpoint`; the daemon it starts doesn't: see
-/// `RECORDED_BY_PARENT`) before returning, and says where it logs.
+/// `RECORDED_BY_PARENT`) before returning, and says where it logs. Not
+/// recorded, it fails, mounted all the same.
 pub fn mount(args: MountArgs) -> Result<()> {
     let mountpoint = daemon::check(&args.mountpoint)?;
     if args.foreground {
@@ -210,16 +212,19 @@ pub fn mount(args: MountArgs) -> Result<()> {
         let common_dir = crate::git::init(&std::path::absolute(&args.repo)?)?;
         settings::set_mountpoint(&common_dir, &mountpoint, &args.flags())
     };
-    if let Err(e) = record() {
-        eprintln!("warning: recording the mount point in the git config: {e:#}");
-    }
+    let recorded = record();
     println!(
         "mounted at {} (log: {})",
         mountpoint.display(),
         log.display()
     );
     println!("unmount with: gitfold unmount {}", mountpoint.display());
-    Ok(())
+    // Mounted all the same, but not to be mounted again by itself.
+    recorded.context(
+        "the mount is up, but recording its mount point and flags in the git config failed: \
+         commands that mount it again by themselves (`branch` with several --from, Claude \
+         Code's worktree hook) won't, until `gitfold mount` records them",
+    )
 }
 
 /// Runs this command again with `--foreground`, detached and logging to `log`,
@@ -351,7 +356,8 @@ const WAIT: Duration = Duration::from_secs(3);
 /// `remove` and `prune` can follow right away. A busy mount is waited for too
 /// (say a `git maintenance run --auto` started by a commit), unless this
 /// process or one it runs under (its shell, `make`, ...) is inside it: that
-/// would wait forever.
+/// would wait forever, so it only detaches it and fails with `InUse`, the
+/// daemon still running.
 pub fn unmount(mountpoint: &Path) -> Result<()> {
     let (mountpoint, source, common_dir) = gitfold_mount(mountpoint)?;
     let shown = mountpoint.display();
@@ -378,12 +384,11 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
         daemon::detach(&mountpoint).map_err(resume)?;
         let ours = procs::self_and_ancestors();
         if users.iter().any(|u| ours.contains(&u.pid)) {
-            println!(
-                "{shown} is in use by this command or a process it runs under: detached it. \
-                 gitfold exits, and `gitfold remove` works, once the last process \
-                 using it leaves (`cd` out)"
-            );
-            return Ok(());
+            return Err(Refusal::InUse.error(format!(
+                "{shown} is in use by this command or a process it runs under: detached it, \
+                 but gitfold keeps running; it exits, and `gitfold remove` works, once the \
+                 last process using it leaves (`cd` out)"
+            )));
         }
         println!("{shown} is in use: detached it; waiting for gitfold to exit once these leave:");
         for u in &users {

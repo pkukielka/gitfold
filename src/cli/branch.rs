@@ -94,14 +94,34 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             from: source.clone(),
             to: name.to_string(),
         };
-        let done = super::local_or_daemon(&common_dir, &request, "branch --with-changes", || {
+        let forked = super::local_or_daemon(&common_dir, &request, "branch --with-changes", || {
             fork::fork(&common_dir, &source, name, None, |dst| {
                 fork::copy_stored(&common_dir, &source, dst)
             })
-        })?;
-        set_branch_settings(repo, name, prewarm, track_reads)?;
-        println!("{done}; open it as {}", open_as(&common_dir, name));
-        return Ok(());
+        });
+        // Made, but without some of the source's (said): given its own
+        // settings all the same, then the error.
+        if let Err(e) = &forked
+            && Refusal::of(e) != Some(Refusal::Incomplete)
+        {
+            return forked.map(drop);
+        }
+        let set = set_branch_settings(repo, name, prewarm, track_reads);
+        let open = open_as(&common_dir, name);
+        return match (forked, set) {
+            (Ok(done), Ok(())) => {
+                println!("{done}; open it as {open}");
+                Ok(())
+            }
+            (Ok(done), Err(e)) => Err(Refusal::Incomplete.error(format!(
+                "{done}, but not with its own settings: {e:#}; open it as {open}"
+            ))),
+            (Err(e), set) => {
+                let set = set.err().map(|s| format!("; nor its own settings: {s:#}"));
+                let set = set.unwrap_or_default();
+                Err(Refusal::Incomplete.error(format!("{e:#}{set}; open it as {open}")))
+            }
+        };
     }
     create(repo, name, from.as_deref())?;
     set_branch_settings(repo, name, prewarm, track_reads)?;

@@ -42,12 +42,17 @@ enum Command {
     ///
     /// Revisions appear as <MOUNTPOINT>/@<REV>/..., branches as
     /// <MOUNTPOINT>/<BRANCH>/... Runs in the background until `gitfold
-    /// unmount`.
+    /// unmount`. Exit codes: 1 errors, also once mounted if its mount point
+    /// and flags couldn't be recorded (the mount stays up; commands that
+    /// mount it again by themselves won't).
     Mount(cli::mount::MountArgs),
     /// Unmount, and wait for gitfold to exit.
     ///
     /// Works even while a shell is inside the mount: then it detaches the mount
-    /// and waits for the processes using it to leave.
+    /// and waits for the processes using it to leave; run from inside the
+    /// mount (or under a process there), it only detaches it, exit 5:
+    /// gitfold keeps running until the last process using it leaves. Exit
+    /// codes: 5 that, 1 other errors.
     Unmount { mountpoint: PathBuf },
     /// Print this gitfold's version, and its daemon's.
     ///
@@ -65,7 +70,9 @@ enum Command {
     /// on its own. Only the changes are copied, so it costs what they weigh, not
     /// the tree. Exit codes: 3 no such branch, 4 a git operation in progress in
     /// the source, 5 the source or the new branch busy (being removed, or the
-    /// new branch being made), 1 other errors, 2 usage errors.
+    /// new branch being made), 1 other errors (also a branch made with
+    /// --with-changes without the source's task folder or settings, said), 2
+    /// usage errors.
     Branch(cli::branch::BranchArgs),
     /// List the workspaces and their changes.
     ///
@@ -86,7 +93,8 @@ enum Command {
     /// paths. Read from the workspace's stored state, mounted or not. With --
     /// PATH...: instead, who is changing those paths, on every branch
     /// (committed: its own commits, since its parent if it has one that still
-    /// exists, else not yet in main) and in every workspace (uncommitted).
+    /// exists, else not yet in main) and in every workspace (uncommitted);
+    /// exit 1 if a workspace or branch couldn't be read (skipped, said).
     Changes(cli::list::ChangesArgs),
     /// List what a workspace read or changed that changed elsewhere since.
     ///
@@ -98,8 +106,10 @@ enum Command {
     /// workspace's base, plus, for a branch with a workspace, that workspace's
     /// uncommitted changes. Paths, not lines: a `W` path often merges cleanly
     /// (`git merge-tree` tells). Read from stored state, mounted or not. Exit
-    /// codes: 0 no overlaps, 6 some, 3 no such branch (or no
-    /// reads recorded, with --reads), 1 other errors, 2 usage errors.
+    /// codes: 0 no overlaps, 6 some, 3 no such branch (or, with
+    /// --reads, reads not tracked), 1 other errors (also, with
+    /// --against-workspaces and no overlaps, a workspace it couldn't compare
+    /// with), 2 usage errors.
     Overlaps(cli::overlaps::OverlapsArgs),
     /// Wait for a change in a directory of a task folder, and print it.
     ///
@@ -118,7 +128,8 @@ enum Command {
     /// message is taken once, whoever else reads: printed as sent (headers, an
     /// empty line, the body), an empty line between messages, and deleted.
     /// Exit codes: 0 (also with nothing to take), 124 if --wait --timeout
-    /// passes first (nothing printed), 3 no such branch, 1 other errors.
+    /// passes first (nothing printed), 3 no such branch, 1 other errors
+    /// (also a message printed but not deleted: it may be delivered again).
     Inbox(cli::inbox::InboxArgs),
     /// Leave a message in a workspace's inbox.
     ///
@@ -265,14 +276,20 @@ fn run() -> Result<i32> {
         // Finds the repository itself: as a hook, none is no error.
         Command::Inbox(args) => return cli::inbox::inbox(args),
         Command::Send(args) => cli::inbox::send(&cli::repo()?, args)?,
-        Command::Remove(args) if args.claude_hook.is_some() => cli::claude::worktree_remove()?,
+        // A hook: any error exits 1, whatever refused (shown by Claude Code).
+        Command::Remove(args) if args.claude_hook.is_some() => {
+            return Ok(match cli::claude::worktree_remove() {
+                Ok(()) => 0,
+                Err(e) => cli::hook::failed("gitfold remove --claude-hook", e),
+            });
+        }
         Command::Remove(args) => cli::remove::remove(&cli::repo()?, args)?,
         Command::Prune => cli::remove::prune(&cli::repo()?)?,
         // As a hook, it finds the repository from Claude Code's input.
         Command::Parent(cli::tree::ParentArgs {
             claude_hook: Some(event),
             ..
-        }) => cli::claude::parent_hook(event)?,
+        }) => return Ok(cli::claude::parent_hook(event)),
         Command::Parent(args) => cli::tree::parent(&cli::repo()?, args)?,
         Command::Sync(_) => return usage(cli::tree::guessed("sync")),
         Command::Pull(_) => return usage(cli::tree::guessed("pull")),

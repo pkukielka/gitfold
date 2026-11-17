@@ -35,8 +35,8 @@ wait
 check "branch bg4" "$BIN" -C "$REPO" branch bg4
 "$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" >/dev/null 2>&1
 cp "$REAL_BIN" "$MNT/bg4/gitfold-copy"
-out=$(timeout 20 "$MNT/bg4/gitfold-copy" unmount "$MNT" 2>&1)
-eq "unmount run from inside the mount doesn't wait for itself" yes "$(grep -q 'in use by this command' <<<"$out" && echo yes)"
+out=$(timeout 20 "$MNT/bg4/gitfold-copy" unmount "$MNT" 2>&1); rc=$?
+eq "unmount run from inside the mount doesn't wait for itself: only detached (exit 5)" "5 yes" "$rc $(grep -q 'in use by this command.*detached it, but gitfold keeps running' <<<"$out" && echo yes)"
 for _ in $(seq 100); do flock -n "$COMMON" true 2>/dev/null && break; sleep 0.1; done
 check "and gitfold exits after it" flock -n "$COMMON" true
 check "remove bg4" "$BIN" -C "$REPO" remove bg4 --force
@@ -47,6 +47,15 @@ eq "unmount with a shell inside detaches" yes "$(grep -q 'detached it' "$T/busy.
 for _ in $(seq 100); do flock -n "$COMMON" true 2>/dev/null && break; sleep 0.1; done
 check "the daemon exits once the shell leaves" flock -n "$COMMON" true
 check "a failed background mount reports the error" sh -c "! '$BIN' mount '$T/nonexistent' '$MNT' 2>&1 | grep -q mounted"
+rm -f "$COMMON/gitfold/.control"; mkdir "$COMMON/gitfold/.control"   # a stale socket is replaced, a directory not
+out=$("$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" 2>&1); rc=$?
+rmdir "$COMMON/gitfold/.control"
+eq "no control socket: not mounted, said (exit 1)" "1 no yes" "$rc $(mountpoint -q "$MNT" && echo yes || echo no) $(grep -q 'control socket' <<<"$out" && echo yes)"
+: >"$COMMON/config.lock"
+out=$("$BIN" mount --log "$T/bg.log" "$REPO" "$MNT" 2>&1); rc=$?
+rm "$COMMON/config.lock"
+eq "the mount point not recorded: mounted all the same, said (exit 1)" "1 yes yes" "$rc $(mountpoint -q "$MNT" && echo yes) $(grep -q 'the mount is up, but recording' <<<"$out" && echo yes)"
+"$BIN" unmount "$MNT" >/dev/null
 mount_fs; FG=$PID
 kill -HUP $FG; wait $FG
 check "SIGHUP unmounts a foreground daemon cleanly" sh -c "! mountpoint -q '$MNT'"

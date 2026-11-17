@@ -92,10 +92,9 @@ pub fn run(options: Options) -> Result<()> {
         names.clone(),
     );
     // Before mounting, so `remove` finds it once the mount is up. Without it
-    // only removals need an unmount.
-    let listener = control::bind(&common_dir)
-        .inspect_err(|e| log::warn!("{e:#}; `gitfold remove` will need an unmount"))
-        .ok();
+    // commands can't reach the daemon (`remove`, `branch -w`, `version`): not
+    // mounted.
+    let listener = control::bind(&common_dir)?;
     let removal = fs.removal();
     let workspaces = fs.workspaces();
     let following = fs.workspaces();
@@ -109,33 +108,31 @@ pub fn run(options: Options) -> Result<()> {
     }
     names.set_notifier(session.notifier());
     // After the notifier is set: a removal tells the kernel.
-    if let Some(listener) = listener {
-        control::serve(listener, move |request| match request {
-            Request::Remove { name, force, check } => match check {
-                true => removal.check(&name, force),
-                false => removal
-                    .remove(&name, force)
-                    .inspect(|done| log::info!("{done}")),
-            },
-            Request::Version => Ok(crate::VERSION.to_string()),
-            Request::ResumePrewarm => {
-                prewarm::resume();
-                log::info!("prewarm resumed: the unmount didn't go ahead");
-                Ok("prewarm resumed".into())
-            }
-            Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
-            Request::TrackReads { branch } => workspaces.track_reads_now(&branch),
-            Request::RecordReads { paths } => Ok(workspaces.record_reads(paths)),
-            Request::Fork { from, to } => workspaces
-                .fork(&from, &to)
+    control::serve(listener, move |request| match request {
+        Request::Remove { name, force, check } => match check {
+            true => removal.check(&name, force),
+            false => removal
+                .remove(&name, force)
                 .inspect(|done| log::info!("{done}")),
-            Request::StopPrewarm => {
-                prewarm::stop_for_unmount(mounted.clone());
-                log::info!("prewarm stopped for the unmount");
-                Ok("prewarm stopped for the unmount".into())
-            }
-        })?;
-    }
+        },
+        Request::Version => Ok(crate::VERSION.to_string()),
+        Request::ResumePrewarm => {
+            prewarm::resume();
+            log::info!("prewarm resumed: the unmount didn't go ahead");
+            Ok("prewarm resumed".into())
+        }
+        Request::Prewarm { branch } => Ok(workspaces.prewarm_now(&branch)),
+        Request::TrackReads { branch } => workspaces.track_reads_now(&branch),
+        Request::RecordReads { paths } => Ok(workspaces.record_reads(paths)),
+        Request::Fork { from, to } => workspaces
+            .fork(&from, &to)
+            .inspect(|done| log::info!("{done}")),
+        Request::StopPrewarm => {
+            prewarm::stop_for_unmount(mounted.clone());
+            log::info!("prewarm stopped for the unmount");
+            Ok("prewarm stopped for the unmount".into())
+        }
+    })?;
     // Once mounted: a move runs git through the mount.
     follow::spawn(common_dir.clone(), following);
     session.run()?;

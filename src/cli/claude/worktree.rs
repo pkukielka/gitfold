@@ -9,7 +9,7 @@
 //! refused: a full checkout of it is what gitfold is there to avoid.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
 
@@ -83,30 +83,70 @@ pub fn worktree_create() -> Result<()> {
 /// `WorktreeRemove`: removes the worktree at `worktree_path` (Claude Code asks
 /// once the user chose to, or the worktree is clean), discarding its changes
 /// as Claude Code does; its branch stays. A workspace in use (the session's
-/// shell still in it) is waited for briefly.
+/// shell still in it) is waited for briefly. Unmounted, a workspace is
+/// removed all the same, if the session's repository (`cwd`) was last
+/// mounted where it is (`unmounted_workspace`).
 pub fn worktree_remove() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     let path = PathBuf::from(
         field(&input, "worktree_path").context("no \"worktree_path\" in the hook's input")?,
     );
+    let session = cwd(&input);
     // The hook starts in the worktree; from in there, it is in use.
     std::env::set_current_dir("/")?;
     if !path.exists() {
-        return Ok(());
+        // Gone, unless its repository isn't mounted.
+        let Some((repo, branch)) = session.ok().and_then(|s| unmounted_workspace(&s, &path)) else {
+            return Ok(());
+        };
+        return crate::cli::remove::remove(&repo, removal(branch));
     }
     let repo = git::discover(&path)?;
     let common_dir = git::init(&repo)?;
     let mount = mount_table::mount_of(&common_dir)?;
     if mount.is_some_and(|m| path.starts_with(m)) {
-        let args = crate::cli::remove::RemoveArgs {
-            name: Some(crate::cli::branch_or_current(None, &repo)?),
-            force: true,
-            check: false,
-            wait: 10,
-            claude_hook: None,
-        };
-        return crate::cli::remove::remove(&repo, args);
+        let branch = crate::cli::branch_or_current(None, &repo)?;
+        return crate::cli::remove::remove(&repo, removal(branch));
     }
     let path = path.to_str().context("a worktree path that isn't UTF-8")?;
     git::cmd::output(&common_dir, &["worktree", "remove", "--force", path]).map(drop)
+}
+
+/// The workspace of `branch` removed, its changes discarded (as Claude Code
+/// does), waiting briefly while it is in use.
+fn removal(branch: String) -> crate::cli::remove::RemoveArgs {
+    crate::cli::remove::RemoveArgs {
+        name: Some(branch),
+        force: true,
+        check: false,
+        wait: 10,
+        claude_hook: None,
+    }
+}
+
+/// The repository of directory `session` and the branch whose workspace
+/// `path` is, if that repository isn't mounted, `path` is a workspace's
+/// path where it was last mounted (`gitfold.mountpoint`), and that workspace
+/// is stored.
+fn unmounted_workspace(session: &Path, path: &Path) -> Option<(PathBuf, String)> {
+    let repo = git::discover(session).ok()?;
+    let common_dir = git::init(&repo).ok()?;
+    if mount_table::mount_of(&common_dir).ok()?.is_some() {
+        return None;
+    }
+    let last = crate::settings::Local::read(&common_dir).mountpoint()?;
+    // A workspace's name below it, not the mount point itself or a way out.
+    let rel = path.strip_prefix(&last).ok()?;
+    let names = rel.components().map(|c| match c {
+        std::path::Component::Normal(name) => name.to_str(),
+        _ => None,
+    });
+    let branch = names.collect::<Option<Vec<_>>>()?.join("/");
+    if branch.starts_with('@') || crate::state::retire::check_name(&branch).is_err() {
+        return None;
+    }
+    let stored = crate::state::StateDir::of(&common_dir, &branch)
+        .dir
+        .exists();
+    stored.then_some((repo, branch))
 }

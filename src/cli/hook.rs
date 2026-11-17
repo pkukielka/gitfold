@@ -1,5 +1,5 @@
 //! Claude Code hooks' input: a JSON object on stdin, of which the hooks need
-//! only strings (`field`, `field_at`).
+//! only strings (`input`, `field`, `field_at`); and their errors (`failed`).
 
 /// The string `key` holds at the top level of JSON object `json`, if it is
 /// one.
@@ -18,6 +18,25 @@ pub fn field_at(json: &str, path: &[&str]) -> Option<String> {
         p.find(key)?;
     }
     p.string()
+}
+
+/// The hook's input on stdin: none from a terminal, or if it can't be read
+/// (the `parent` and `inbox` hooks then find the workspace from the current
+/// directory, as without a `cwd`).
+pub fn input() -> String {
+    let stdin = std::io::stdin();
+    if std::io::IsTerminal::is_terminal(&stdin) {
+        return String::new();
+    }
+    std::io::read_to_string(stdin).unwrap_or_default()
+}
+
+/// A hook's error inside a workspace, said on stderr as `what`'s: exit 1,
+/// for Claude Code an error shown to the user, the hook's output not used (2
+/// would block, or wake the session).
+pub fn failed(what: &str, e: anyhow::Error) -> i32 {
+    eprintln!("{what}: {e:#}");
+    1
 }
 
 /// A cursor over JSON text; `peek`, `next` and `expect` skip whitespace first.

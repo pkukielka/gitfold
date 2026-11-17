@@ -342,7 +342,7 @@ on ui u.txt one; on ui u.txt two
 R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui~1
 on api a.txt new
 before=$(R rev-parse ui)
-check "pushed commits: not moved" says 1 "1 commit is pushed. \`gitfold parent ui --update --yes\` moves them; then force-push with: git push --force-with-lease=ui:$(R rev-parse ui~1) origin ui" parent ui --update
+check "pushed commits: not moved (exit 4)" says 4 "1 commit is pushed. \`gitfold parent ui --update --yes\` moves them; then force-push with: git push --force-with-lease=ui:$(R rev-parse ui~1) origin ui" parent ui --update
 eq "  nothing moved" "$before" "$(R rev-parse ui)"
 check "  shown by parent" says 0 "following paused: 1 commit is pushed" parent ui
 check "--yes moves them, and says how to push" says 0 "force-push with: git push --force-with-lease=ui:$(R rev-parse ui~1) origin ui" parent ui --update --yes
@@ -354,7 +354,7 @@ on api a.txt newer
 check "never compared with its upstream" says 0 "moved 2 commits of ui onto api" parent ui --update
 # --set with pushed commits: built on the new parent, following paused.
 R update-ref refs/remotes/origin/ui ui
-check "--set with pushed commits: the parent set, the move paused" says 0 "ui is now built on main; following paused: 2 commits are pushed" parent ui --set main
+check "--set with pushed commits: the parent set, the move paused (exit 4)" says 4 "ui is now built on main; following paused Error: 2 commits are pushed. \`gitfold parent ui --update --yes\` moves them" parent ui --set main
 eq "  stored" "refs/heads/main" "$(R config branch.ui.gitfoldParent)"
 check "  then --update --yes moves only its own commits" says 0 "moved 2 commits of ui onto main" parent ui --update --yes
 eq "  api's commits gone from it" "2" "$(own main ui)"
@@ -594,6 +594,14 @@ hook session-end parent '"session_id":"other"' >/dev/null
 check "another session's end: stays" test -e "$AGENTS/s1"
 hook session-end parent '"session_id":"s1"' >/dev/null
 check "session end: gone" test ! -e "$AGENTS/s1"
+rm -rf "$AGENTS"; : >"$AGENTS"
+"$BIN" -C "$REPO" send ui hi >/dev/null
+r=$(hook session-start parent '"session_id":"s9"'; echo "rc=$?")
+check "an error in a workspace: said, exit 1 (never 2)" test "$([[ $r == "gitfold parent --claude-hook: "*"rc=1" ]] && echo yes)" = yes
+r=$(hook post-tool-use inbox '"session_id":"s9"'; echo "rc=$?")
+check "  the inbox hook too, nothing taken" test "$([[ $r == "gitfold inbox: marking the agent present"*"rc=1" ]] && echo yes)" = yes
+eq "  the message still there" "user	hi" "$("$BIN" -C "$REPO" inbox ui --peek 2>&1)"
+rm "$AGENTS"; "$BIN" -C "$REPO" inbox ui >/dev/null
 eq "outside a workspace: nothing, exit 0" "0 " "$(cd / && printf '{"cwd":"/"}' | "$BIN" parent --claude-hook user-prompt-submit 2>&1; echo "$? ")"
 check "--claude-hook: hidden" lacks 0 "claude-hook" parent --help
 check "--claude-hook with a branch: refused" says 2 "cannot be used with" parent ui --claude-hook session-start

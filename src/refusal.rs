@@ -1,9 +1,10 @@
 //! Why a command refused, as a typed error: each kind has its own exit code,
 //! and survives the control socket (see `daemon::control`).
 //!
-//! Exit codes, for every command: 0 success, 1 any other error, 2 a usage
-//! error, 3 not found (`NotFound`), 4 changes or git busy (`Changes`), 5 in
-//! use or busy (`InUse`). Three commands give codes of their own:
+//! Exit codes, for every command: 0 success, 1 any other error (or done but
+//! not all of it: `Incomplete`), 2 a usage error, 3 not found (`NotFound`),
+//! 4 changes or git busy (`Changes`), 5 in use or busy (`InUse`). Three
+//! commands give codes of their own:
 //! `version <MOUNTPOINT>` 3 another build, 4 a daemon too old to tell, 5 no
 //! answer; `overlaps` 6 something overlaps; `inbox --claude-hook rewake` 2
 //! to wake the session (what Claude Code asks for).
@@ -18,16 +19,26 @@ pub enum Refusal {
     Changes,
     /// A process uses it, or it is busy (being removed, unmounting).
     InUse,
+    /// Not a refusal: done, but not all of it; the message says what wasn't.
+    /// Exit 1, as other errors; typed so the caller can tell, across the
+    /// control socket too, that the rest was done.
+    Incomplete,
 }
 
 impl Refusal {
-    pub const ALL: [Refusal; 3] = [Refusal::NotFound, Refusal::Changes, Refusal::InUse];
+    pub const ALL: [Refusal; 4] = [
+        Refusal::NotFound,
+        Refusal::Changes,
+        Refusal::InUse,
+        Refusal::Incomplete,
+    ];
 
     pub fn exit_code(self) -> i32 {
         match self {
             Refusal::NotFound => 3,
             Refusal::Changes => 4,
             Refusal::InUse => 5,
+            Refusal::Incomplete => 1,
         }
     }
 
@@ -37,6 +48,7 @@ impl Refusal {
             Refusal::NotFound => "not-found",
             Refusal::Changes => "changes",
             Refusal::InUse => "in-use",
+            Refusal::Incomplete => "incomplete",
         }
     }
 

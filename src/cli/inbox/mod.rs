@@ -17,7 +17,7 @@ mod watch;
 pub use watch::{WatchArgs, watch};
 
 use std::fs;
-use std::io::{ErrorKind, IsTerminal};
+use std::io::ErrorKind;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
@@ -74,13 +74,16 @@ pub enum Hook {
 
 /// `gitfold inbox`: takes the messages in a workspace's inbox and prints them
 /// (see `take_all`). Returns the exit code. As a Claude Code hook, which runs
-/// in every session, it does nothing outside a workspace, and only logs its
-/// errors: they would show on every tool call.
+/// in every session, it does nothing outside a workspace; inside one, an
+/// error exits 1 (`hook::failed`), nothing handed over.
 pub fn inbox(args: InboxArgs) -> Result<i32> {
     let hook = args.claude_hook.is_some();
     if args.claude_hook == Some(Hook::PostToolUse) {
-        let input = hook_input().unwrap_or_default();
-        super::claude::tool_used(&input);
+        let input = super::hook::input();
+        // Failing, nothing is taken: the messages wait for the next call.
+        if let Err(e) = super::claude::tool_used(&input) {
+            return Ok(super::hook::failed("gitfold inbox", e));
+        }
         // A subagent's context isn't the session's.
         if super::hook::field(&input, "agent_id").is_some() {
             return Ok(0);
@@ -96,10 +99,7 @@ pub fn inbox(args: InboxArgs) -> Result<i32> {
         Err(e) => return Err(e),
     };
     match take_all(&repo, &branch, &args) {
-        Err(e) if hook => {
-            log::warn!("gitfold inbox: {e:#}");
-            Ok(0)
-        }
+        Err(e) if hook => Ok(super::hook::failed("gitfold inbox", e)),
         result => result,
     }
 }
@@ -216,20 +216,24 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
     };
     use std::io::Write;
     std::io::stdout().flush()?;
-    // Printed: now gone for good.
+    // Printed: now gone for good. One left would be taken again once this
+    // process is gone (`message::abandoned`): exit 1, but not for a hook,
+    // whose output Claude Code would then drop, the deleted ones with it.
+    let mut left = false;
     for (_, file) in taken {
-        let _ = fs::remove_file(file);
+        if let Err(e) = fs::remove_file(&file) {
+            eprintln!(
+                "warning: deleting {} once taken: {e} (it may be delivered again)",
+                file.display()
+            );
+            left = true;
+        }
     }
-    Ok(code)
-}
-
-/// The hook's input on stdin (none from a terminal).
-fn hook_input() -> Result<String> {
-    let stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Ok(String::new());
-    }
-    Ok(std::io::read_to_string(stdin)?)
+    Ok(if left && args.claude_hook.is_none() {
+        1
+    } else {
+        code
+    })
 }
 
 /// An exclusive lock on `dir`'s `.waiting` file, if no one else holds it.

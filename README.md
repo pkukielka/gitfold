@@ -215,6 +215,15 @@ daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
 `inbox --claude-hook rewake` (2, to wake the session), and `inbox --wait
 --timeout` and `watch --timeout` (124 if the time runs out first, as GNU
 `timeout`; nothing printed).
+A command that did only part of what was asked doesn't exit 0: it says what
+it did and what it didn't, and exits 1 (unless said): `mount` up but its mount
+point not recorded, `unmount` run from inside the mount that could only
+detach it (5: the daemon keeps running until you `cd` out), `parent --set` or
+`--update` held back by pushed commits (4), `changes -- PATH` or `overlaps
+--against-workspaces` with a workspace or branch skipped (`overlaps` still
+exits 6 if something overlaps), `branch -w` without the source's task folder
+or settings, `inbox` with a message printed but not deleted (it may come
+again). An empty answer is no error: nothing to take, nothing overlapping.
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
 several `--from`, it starts at the first, and `git merge` of the others runs in
 its workspace (mounting the repository again where and as it last was, if it isn't
@@ -371,7 +380,8 @@ A branch with a workspace adds that workspace's uncommitted changes, so
 `--against <BRANCH>` gives the paths two workspaces both changed, and
 `--against-workspaces` compares with every other workspace. A path counts if
 the target changed it, a directory above it, or (a directory replaced by a
-file) a path below it. It exits 6 if anything overlaps, 0 if not. `W` is about
+file) a path below it. It exits 6 if anything overlaps, 0 if not (1 if,
+with nothing overlapping, a workspace couldn't be compared with). `W` is about
 paths, not lines: two agents editing different parts of one file usually merge
 cleanly (`git merge-tree --write-tree` tells for sure).
 
@@ -674,7 +684,8 @@ So do a workspace's base following a branch that moved, and the checks of
   detached and `unmount` names the processes using it and waits for them to
   leave, however long that takes (an editor or another terminal inside it too).
   Only if `unmount` or a process it runs under (your shell) is itself inside
-  the mount does it return at once: the daemon exits when you `cd` out. Before
+  the mount does it return at once, only detaching it (exit 5): the daemon
+  exits when you `cd` out. Before
   exiting, the daemon brings every open workspace's base up to its branch tip.
   Ctrl-C (in the foreground), SIGTERM, SIGHUP and `fusermount3 -u <MOUNTPOINT>`
   stop it as well; a second SIGINT or SIGTERM exits immediately.
