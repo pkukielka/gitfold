@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use gix::ObjectId;
+use log::error;
 use parking_lot::Mutex;
 
 use super::members::Tip;
@@ -56,7 +57,7 @@ impl Lives {
         let opened = (ctx.workspaces.open_quietly(&ctx.store, branch))
             .map_err(|e| anyhow!("opening the workspace of {branch}: {e:?}"))?;
         let Some((ws, opened_now)) = opened else {
-            self.forget(&ctx.private, branch)?;
+            self.forget(&ctx.private, branch);
             return Ok(None);
         };
         if opened_now {
@@ -103,11 +104,15 @@ impl Lives {
     }
 
     /// Forgets the live tree of the workspace of `branch`, which is gone
-    /// (removed), if it had one: its ref too.
-    pub fn forget(&self, private: &Private, branch: &str) -> Result<()> {
-        if self.trees.lock().remove(branch).is_some() {
-            private.drop_live(branch)?;
+    /// (removed), if it had one: its ref too, once one being made is (a
+    /// failure only logged: it is dropped at the next mount anyway).
+    pub fn forget(&self, private: &Private, branch: &str) {
+        let Some(entry) = self.trees.lock().remove(branch) else {
+            return;
+        };
+        let _made = entry.lock();
+        if let Err(e) = private.drop_live(branch) {
+            error!("views: dropping the live tree of {branch}: {e:#}");
         }
-        Ok(())
     }
 }

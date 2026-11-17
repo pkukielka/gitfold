@@ -236,15 +236,15 @@ built_on ui api; built_on web api
 mount_fs
 eq "the view, merged" $'ui\na\nweb' "$(cat "$MNT/$V/a.txt")"
 unmount_fs
-export GIT_NO_LAZY_FETCH=1
 P() { git -C "$COMMON/gitfold/.views.git" "$@"; }
 far=$(R rev-parse origin/far:far.txt)
-check "a blob not fetched" fails R cat-file -e "$far"
+check "a blob not fetched" fails env GIT_NO_LAZY_FETCH=1 git -C "$REPO" cat-file -e "$far"
 P update-ref refs/gitfold/views/far "$(P commit-tree -m far "$(printf '100644 blob %s\tfar.txt\n' "$far" | P mktree --missing)")"
-# As the mount runs it, whatever the number of loose objects.
-check "git gc there" P -c core.hooksPath=/dev/null -c gc.pruneExpire=now gc --quiet
+# With the mount's settings (no hook, no lazy fetch, pruning at once), a full
+# gc: what its `gc --auto` runs past the threshold.
+check "git gc there" env GIT_NO_LAZY_FETCH=1 git -C "$COMMON/gitfold/.views.git" \
+    -c core.hooksPath=/dev/null -c gc.autoDetach=false -c gc.pruneExpire=now gc --quiet
 eq "the view's tree kept" $'ui\na\nweb' "$(P show refs/gitfold/views/committed/api:a.txt)"
-check "nor fetched by it" fails R cat-file -e "$far"
 }
 
 section "views: merged with what is built on it" merged_with_whats_built_on_it

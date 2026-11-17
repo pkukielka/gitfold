@@ -121,12 +121,13 @@ impl Removal {
             self.refuse_if_used(&self.mount_point.join(branch), branch)?;
             // `open` dropped here: the wait for requests in flight counts references.
         }
-        let removed = self.workspaces.remove(branch, refuse_if_used, |ws| {
+        self.workspaces.remove(branch, refuse_if_used, |ws| {
             let ignored = self.check_workspace(branch, force, ws)?;
-            retire::delete_workspace(common_dir, branch, ignored)
-        })?;
-        self.views.workspace_removed(branch);
-        Ok(removed)
+            let done = retire::delete_workspace(common_dir, branch, ignored)?;
+            // Still held: a workspace of that name made anew keeps its own.
+            self.views.workspace_removed(branch);
+            Ok(done)
+        })
     }
 
     /// What `remove` would refuse, without changing anything (`remove --check`).

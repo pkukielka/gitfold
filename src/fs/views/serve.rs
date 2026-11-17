@@ -439,9 +439,7 @@ impl Views {
         let Some(private) = self.private.lock().clone() else {
             return;
         };
-        if let Err(e) = self.lives.forget(&private, branch) {
-            error!("views: the workspace of {branch} removed: {e:#}");
-        }
+        self.lives.forget(&private, branch);
     }
 
     /// How many views were opened; only grows.
