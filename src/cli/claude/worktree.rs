@@ -9,11 +9,9 @@
 //! refused: a full checkout of it is what gitfold is there to avoid.
 
 use std::fs;
-use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use super::cwd;
 use crate::cli::hook::field;
@@ -44,7 +42,7 @@ pub fn worktree_create() -> Result<()> {
     let exists = git::branch_exists(&branch);
     let mount = match mount_table::mount_of(&common_dir)? {
         Some(mount) => Some(mount),
-        None if state_root(&common_dir).exists() => Some(mount_again(&common_dir)?),
+        None if state_root(&common_dir).exists() => Some(mount_again_or_refuse(&common_dir)?),
         None => None,
     };
     let path = match mount {
@@ -87,10 +85,9 @@ pub fn worktree_create() -> Result<()> {
     Ok(())
 }
 
-/// Mounts the repository of `common_dir` again where it last was
-/// (`gitfold.mountpoint`, recorded by `gitfold mount`), with the default
-/// options: `gitfold mount` in the background, its messages on stderr.
-fn mount_again(common_dir: &Path) -> Result<PathBuf> {
+/// Mounts the repository of `common_dir` again where it last was (see
+/// `mount::mount_again`), or refuses: it is used with gitfold.
+fn mount_again_or_refuse(common_dir: &Path) -> Result<PathBuf> {
     let mountpoint = settings::Local::read(common_dir)
         .mountpoint()
         .with_context(|| {
@@ -100,26 +97,7 @@ fn mount_again(common_dir: &Path) -> Result<PathBuf> {
                 common_dir.display()
             )
         })?;
-    // Gone with a reboot if it was on a tmpfs (/tmp, /run/user).
-    fs::create_dir_all(&mountpoint)
-        .with_context(|| format!("creating mount point {}", mountpoint.display()))?;
-    let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
-    let status = Command::new(std::env::current_exe()?)
-        .arg("mount")
-        .arg(common_dir)
-        .arg(&mountpoint)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stderr))
-        .status()?;
-    // Another hook may have mounted it meanwhile, its mount refused.
-    match mount_table::mount_of(common_dir)? {
-        Some(mount) => Ok(mount),
-        None => bail!(
-            "{} isn't mounted, and mounting it at {} failed ({status})",
-            common_dir.display(),
-            mountpoint.display()
-        ),
-    }
+    crate::cli::mount::mount_again(common_dir, &mountpoint)
 }
 
 /// `WorktreeRemove`: removes the worktree at `worktree_path` (Claude Code asks

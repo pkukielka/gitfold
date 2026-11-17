@@ -4,6 +4,7 @@
 //! is up, or with the daemon's error. `gitfold unmount` stops it.
 
 use std::fs::{self, OpenOptions};
+use std::os::fd::AsFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -70,6 +71,33 @@ pub struct MountArgs {
     /// track-reads`).
     #[arg(long)]
     pub track_reads: bool,
+}
+
+/// Mounts the repository of `common_dir` at `mountpoint` (where it last was:
+/// `gitfold.mountpoint`, recorded by `gitfold mount`), with the default
+/// options: `gitfold mount` in the background, its messages on stderr. The
+/// mount point, the repository's mount found afterwards: another command
+/// may have mounted it meanwhile, its mount refused.
+pub fn mount_again(common_dir: &Path, mountpoint: &Path) -> Result<PathBuf> {
+    // Gone with a reboot if it was on a tmpfs (/tmp, /run/user).
+    fs::create_dir_all(mountpoint)
+        .with_context(|| format!("creating mount point {}", mountpoint.display()))?;
+    let stderr = std::io::stderr().as_fd().try_clone_to_owned()?;
+    let status = Command::new(std::env::current_exe()?)
+        .arg("mount")
+        .arg(common_dir)
+        .arg(mountpoint)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stderr))
+        .status()?;
+    match mount_table::mount_of(common_dir)? {
+        Some(mount) => Ok(mount),
+        None => bail!(
+            "{} isn't mounted, and mounting it at {} failed ({status})",
+            common_dir.display(),
+            mountpoint.display()
+        ),
+    }
 }
 
 /// `gitfold mount`: in the foreground, the daemon itself; else starts it in the
