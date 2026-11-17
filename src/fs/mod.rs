@@ -60,7 +60,7 @@ pub use removal::Removal;
 use snapshots::Snapshots;
 use stats::{Counters, IoTimer, bump};
 use view::Content;
-use views::{ViewDir, Views};
+use views::{Kind, LIVE_TTL, ViewDir, Views};
 use workspace::{Obj, Workspace};
 pub use workspaces::Workspaces;
 
@@ -81,6 +81,8 @@ pub struct Options {
     /// Record the files read in workspaces, unless a branch says otherwise
     /// (`workspace::reads`).
     pub track_reads: bool,
+    /// How many threads serve requests.
+    pub request_threads: usize,
 }
 
 pub struct GitFold {
@@ -109,12 +111,26 @@ impl GitFold {
             gid: unsafe { libc::getgid() },
         };
         let store: Arc<Store> = Arc::default();
-        let views = Arc::new(Views::new(common_dir.clone(), store.clone(), names.clone()));
+        let workspaces = Arc::new(Workspaces::new(
+            common_dir.clone(),
+            mount_point.clone(),
+            stat,
+            opts.prewarm,
+            opts.prewarm_threads,
+            opts.track_reads,
+        ));
+        views::waiting_at_most(opts.request_threads / 2);
+        let views = Views::new(
+            common_dir.clone(),
+            store.clone(),
+            names.clone(),
+            workspaces.clone(),
+        );
         GitFold {
             no_open: opts.no_open,
             stat,
             store,
-            views,
+            views: Arc::new(views),
             snapshots: Arc::new(Snapshots::new(
                 common_dir.clone(),
                 mount_point.clone(),
@@ -122,14 +138,7 @@ impl GitFold {
                 opts.prewarm,
                 opts.prewarm_threads,
             )),
-            workspaces: Arc::new(Workspaces::new(
-                common_dir,
-                mount_point,
-                stat,
-                opts.prewarm,
-                opts.prewarm_threads,
-                opts.track_reads,
-            )),
+            workspaces,
             content: ContentCache::new(),
             names,
             removals_closed: Arc::default(),
@@ -199,10 +208,20 @@ fn ws_node_ino(ino: u64) -> Option<(u32, u64)> {
     }
 }
 
-/// Replies with `attr`, or the error.
-fn reply_attr(result: Result<FileAttr, Errno>, reply: ReplyAttr) {
+/// How long the kernel keeps entries and attributes in `view` (none: not
+/// in a view): `@live` views' briefly, so that an access reaches gitfold
+/// and wakes a resting one (`ViewDir::reached`).
+fn ttl(view: Option<&ViewDir>) -> &'static Duration {
+    match view.map(|v| v.kind) {
+        Some(Kind::Live) => &LIVE_TTL,
+        _ => &IMMUTABLE_TTL,
+    }
+}
+
+/// Replies with `attr` (kept `ttl`), or the error.
+fn reply_attr(result: Result<FileAttr, Errno>, ttl: &Duration, reply: ReplyAttr) {
     match result {
-        Ok(attr) => reply.attr(&IMMUTABLE_TTL, &attr),
+        Ok(attr) => reply.attr(ttl, &attr),
         Err(e) => reply.error(e),
     }
 }
@@ -282,7 +301,7 @@ impl Filesystem for GitFold {
         }
         match result {
             // Names go away only through `gitfold remove`, which tells the kernel.
-            Ok(attr) => reply.entry(&IMMUTABLE_TTL, &attr, Generation(0)),
+            Ok(attr) => reply.entry(ttl(view.as_deref()), &attr, Generation(0)),
             // A negative entry (inode 0): cached forever in snapshots and workspaces
             // (their names change only through this mount, which the kernel sees)
             // and for dot names everywhere (never refs, nor revs), not at all for
@@ -291,7 +310,12 @@ impl Filesystem for GitFold {
             // again on every run.
             Err(Errno::ENOENT) => {
                 let cached = !names_dir || name.as_bytes().starts_with(b".");
-                let ttl = if cached { &IMMUTABLE_TTL } else { &NO_CACHE };
+                // In an `@live` view, briefly (`ttl`).
+                let ttl = if cached {
+                    ttl(view.as_deref())
+                } else {
+                    &NO_CACHE
+                };
                 let negative = self.negative_attr();
                 reply.entry_with_ttls(&NO_CACHE, ttl, &negative, Generation(0))
             }
@@ -303,7 +327,7 @@ impl Filesystem for GitFold {
         bump(&self.counters.getattr);
         let view = self.view_of(ino.0);
         let _serving = view.as_deref().map(ViewDir::serving);
-        reply_attr(self.attr(ino.0), reply)
+        reply_attr(self.attr(ino.0), ttl(view.as_deref()), reply)
     }
 
     fn setattr(
@@ -339,7 +363,7 @@ impl Filesystem for GitFold {
             )?;
             self.attr(ino.0)
         });
-        reply_attr(result, reply)
+        reply_attr(result, &IMMUTABLE_TTL, reply)
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
@@ -518,7 +542,7 @@ impl Filesystem for GitFold {
     ) {
         bump(&self.counters.read);
         let view = self.view_of(ino.0);
-        let _serving = view.as_deref().map(ViewDir::serving);
+        let _serving = view.as_deref().map(ViewDir::reading);
         let _t = IoTimer::start(&self.counters);
         match self.content(ino, offset, size) {
             Ok(Content::Whole(data)) => {
@@ -644,7 +668,7 @@ impl Filesystem for GitFold {
                 INodeNo(child),
                 next,
                 OsStr::from_bytes(name),
-                &IMMUTABLE_TTL,
+                ttl(view.as_deref()),
                 &attr,
                 Generation(0),
             )

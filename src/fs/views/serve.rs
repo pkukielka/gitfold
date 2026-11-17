@@ -6,20 +6,186 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use fuser::Errno;
 use log::{error, info};
-use parking_lot::{Mutex, RwLock, RwLockReadGuard};
+use parking_lot::{Condvar, Mutex, RwLock, RwLockReadGuard};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
+use super::lives::Lives;
 use super::merge::Private;
 use super::shown::{Changed, Obj, Shown};
-use super::watch::{self, Watch};
+use super::watch::{self, Trees, Watch};
 use crate::fs::NameChanges;
 use crate::fs::workspace::nodes::Nodes;
+use crate::fs::workspaces::Workspaces;
 use crate::inode;
 use crate::state::{join, name, parent};
 use crate::store::Store;
+
+/// Which views: of committed tips, or of workspaces as they are.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Kind {
+    Committed,
+    Live,
+}
+
+impl Kind {
+    /// Its name below `@` (`@committed`, `@live`).
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Committed => "committed",
+            Kind::Live => "live",
+        }
+    }
+}
+
+/// How long the kernel keeps an `@live` view's entries and attributes: it
+/// asks again soon, so an access wakes a dormant view (`ViewDir::reached`).
+pub const LIVE_TTL: Duration = Duration::from_secs(1);
+/// How long a view goes unaccessed before it rests (no refreshes): a minute,
+/// or `GITFOLD_VIEW_REST_SECS`.
+pub fn rests_after() -> Duration {
+    static AFTER: OnceLock<Duration> = OnceLock::new();
+    *AFTER.get_or_init(|| {
+        let secs = std::env::var("GITFOLD_VIEW_REST_SECS").ok();
+        Duration::from_secs(secs.and_then(|s| s.parse().ok()).unwrap_or(60))
+    })
+}
+/// How long the first access to a resting view waits for it to be fresh.
+const WAKE_WAIT: Duration = Duration::from_secs(5);
+
+/// A view's rest: when it was last accessed, whether it rests, and the
+/// requests waiting for it to wake (`ViewDir::reached`, `watch`).
+pub struct Rest {
+    /// The last access, in milliseconds since `EPOCH`.
+    accessed: AtomicU64,
+    resting: AtomicBool,
+    lock: Mutex<()>,
+    woken: Condvar,
+}
+
+/// What the watch of a view does next (`Rest::tick`).
+pub enum Tick {
+    /// Refreshes it, its live trees made again once quiet.
+    Refresh,
+    /// Refreshes it at once: it was accessed resting.
+    Wake,
+    /// Not accessed for long: it is to rest (`Rest::rest`).
+    Idle,
+    /// Nothing: it rests on.
+    Rests,
+}
+
+/// A request waiting for a view to wake, counted: at most `waiting_at_most`
+/// at once, so that git (reading workspaces for the wake) has request threads
+/// left.
+struct Waiting;
+
+static WAITING: AtomicUsize = AtomicUsize::new(0);
+static MOST_WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// Lets `most` requests wait at once for views to wake: half the request
+/// threads (none with one).
+pub fn waiting_at_most(most: usize) {
+    MOST_WAITING.store(most, Ordering::Relaxed);
+}
+
+impl Waiting {
+    fn take() -> Option<Waiting> {
+        let most = MOST_WAITING.load(Ordering::Relaxed);
+        let taken = WAITING.try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < most).then_some(n + 1)
+        });
+        taken.is_ok().then_some(Waiting)
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        WAITING.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Milliseconds since the first call.
+fn now_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+impl Rest {
+    fn new(resting: bool) -> Rest {
+        Rest {
+            accessed: AtomicU64::new(now_ms()),
+            resting: AtomicBool::new(resting),
+            lock: Mutex::new(()),
+            woken: Condvar::new(),
+        }
+    }
+
+    /// Accessed: if it rests, its watch is woken, and this waits for it to
+    /// be refreshed (a while at most: then it shows what it last did).
+    fn reached(&self) {
+        self.accessed(true);
+    }
+
+    /// Accessed: if it rests, its watch is woken, and with `wait` this waits
+    /// (as `reached`).
+    fn accessed(&self, wait: bool) {
+        self.accessed.store(now_ms(), Ordering::Relaxed);
+        if !self.resting.load(Ordering::Acquire) {
+            return;
+        }
+        let mut lock = self.lock.lock();
+        self.woken.notify_all();
+        if !wait {
+            return;
+        }
+        // Not every request thread: git reads the workspaces through them.
+        let Some(_waiting) = Waiting::take() else {
+            return;
+        };
+        let until = Instant::now() + WAKE_WAIT;
+        while self.resting.load(Ordering::Acquire) {
+            if self.woken.wait_until(&mut lock, until).timed_out() {
+                break;
+            }
+        }
+    }
+
+    /// For the watch: waits `interval` (unless it was woken), then says what
+    /// to do.
+    pub fn tick(&self, interval: Duration) -> Tick {
+        let mut lock = self.lock.lock();
+        let idle = || {
+            let since = now_ms().saturating_sub(self.accessed.load(Ordering::Relaxed));
+            Duration::from_millis(since) >= rests_after()
+        };
+        if !(self.resting.load(Ordering::Acquire) && !idle()) {
+            self.woken.wait_for(&mut lock, interval);
+        }
+        match (self.resting.load(Ordering::Acquire), idle()) {
+            (true, true) => Tick::Rests,
+            (true, false) => Tick::Wake,
+            (false, true) => Tick::Idle,
+            (false, false) => Tick::Refresh,
+        }
+    }
+
+    /// For the watch: it rests from now on.
+    pub fn rest(&self) {
+        self.resting.store(true, Ordering::Release);
+    }
+
+    /// For the watch: refreshed after a wake; the requests waiting go on.
+    pub fn woke(&self) {
+        let _lock = self.lock.lock();
+        self.resting.store(false, Ordering::Release);
+        self.woken.notify_all();
+    }
+}
 
 /// What a view inode is, with its time.
 pub enum Item {
@@ -53,6 +219,12 @@ pub struct ViewDir {
     pub slot: u32,
     /// Below the mount root, e.g. `@committed/api`.
     pub name: String,
+    pub kind: Kind,
+    /// The directory its root is listed in (`@committed`, or a namespace
+    /// below it).
+    pub parent: u64,
+    /// Its rest (`watch`).
+    pub rest: Rest,
     shown: RwLock<Arc<Shown>>,
     nodes: Mutex<Nodes>,
     listings: Mutex<HashMap<u64, Arc<Listing>>>,
@@ -84,9 +256,25 @@ impl ViewDir {
         self.listings.lock().clear();
     }
 
-    /// Held while a request in it is served and replied to (`swap`).
+    /// Held while a request in it is served and replied to (`swap`), once
+    /// it is awake (`reached`).
     pub fn serving(&self) -> RwLockReadGuard<'_, ()> {
+        self.reached();
         self.gate.read()
+    }
+
+    /// Held while a read in it is served: as `serving`, but a read doesn't
+    /// wait for a resting view to wake. It holds a page of the file, which
+    /// the wake tells the kernel to drop (the lookups and attributes before
+    /// it waited).
+    pub fn reading(&self) -> RwLockReadGuard<'_, ()> {
+        self.rest.accessed(false);
+        self.gate.read()
+    }
+
+    /// The view was accessed (`Rest::reached`).
+    pub fn reached(&self) {
+        self.rest.reached();
     }
 
     /// The path of node `local` (`""`: the root).
@@ -188,6 +376,9 @@ pub struct Views {
     common_dir: PathBuf,
     store: Arc<Store>,
     names: Arc<NameChanges>,
+    workspaces: Arc<Workspaces>,
+    /// The live trees of workspaces, shared by the `@live` views.
+    lives: Arc<Lives>,
     list: RwLock<Vec<Arc<ViewDir>>>,
     creating: Mutex<()>,
     /// Bumped when a view opens: the namespace listings holding it changed.
@@ -197,11 +388,18 @@ pub struct Views {
 }
 
 impl Views {
-    pub fn new(common_dir: PathBuf, store: Arc<Store>, names: Arc<NameChanges>) -> Views {
+    pub fn new(
+        common_dir: PathBuf,
+        store: Arc<Store>,
+        names: Arc<NameChanges>,
+        workspaces: Arc<Workspaces>,
+    ) -> Views {
         Views {
             common_dir,
             store,
             names,
+            workspaces,
+            lives: Arc::default(),
             list: RwLock::default(),
             creating: Mutex::default(),
             mtime: Mutex::new(SystemTime::now()),
@@ -241,10 +439,15 @@ impl Views {
         self.list.read().len()
     }
 
-    /// The root inode of the open view `name`.
+    /// The open view `name`.
+    fn find(&self, name: &str) -> Option<Arc<ViewDir>> {
+        self.list.read().iter().find(|v| v.name == name).cloned()
+    }
+
+    /// The root inode of the open view `name`, reached (`ViewDir::reached`).
     pub fn existing(&self, name: &str) -> Option<u64> {
-        let list = self.list.read();
-        let view = list.iter().find(|v| v.name == name)?;
+        let view = self.find(name)?;
+        view.reached();
         Some(inode::view(view.slot, 0))
     }
 
@@ -258,12 +461,13 @@ impl Views {
             .collect()
     }
 
-    /// Opens view `name` (`@committed/<branch>`) of local branch `branch`:
-    /// built now, then kept current (`watch`). EIO if it can't be built.
-    pub fn open(&self, name: &str, branch: &str) -> Result<u64, Errno> {
+    /// Opens view `name` (`@committed/<branch>`, `@live/<branch>`: `kind`)
+    /// of local branch `branch`, listed in directory `parent`: built now,
+    /// then kept current (`watch`). EIO if it can't be built.
+    pub fn open(&self, name: &str, branch: &str, kind: Kind, parent: u64) -> Result<u64, Errno> {
         let _creating = self.creating.lock();
-        if let Some(ino) = self.existing(name) {
-            return Ok(ino);
+        if let Some(view) = self.find(name) {
+            return Ok(inode::view(view.slot, 0));
         }
         let ctx = watch::Context {
             common_dir: self.common_dir.clone(),
@@ -271,16 +475,21 @@ impl Views {
             names: self.names.clone(),
             branch: branch.to_string(),
             private: self.private()?,
+            key: format!("{}/{}", kind.name(), crate::state::workspace_id(branch)),
+            name: name.to_string(),
+            kind,
+            workspaces: self.workspaces.clone(),
+            lives: self.lives.clone(),
         };
         let mut watch = Watch::default();
-        let built = watch.next(&ctx, None).and_then(|built| {
+        let built = watch.next(&ctx, None, Trees::Tips).and_then(|built| {
             built.ok_or_else(|| anyhow::anyhow!("nothing built")) // the first always is
         });
         let (shown, _, commit) = built.map_err(|e| {
             error!("view {name}: {e:#}");
             Errno::EIO
         })?;
-        if let Err(e) = ctx.private.shown(branch, commit) {
+        if let Err(e) = ctx.private.shown(&ctx.key, commit) {
             error!("view {name}: {e:#}");
         }
         let mut list = self.list.write();
@@ -288,6 +497,11 @@ impl Views {
         let view = Arc::new(ViewDir {
             slot,
             name: name.to_string(),
+            kind,
+            parent,
+            // An `@live` view opens with the tips: its first requests wait for
+            // the workspaces (`ViewDir::reached`).
+            rest: Rest::new(kind == Kind::Live),
             shown: RwLock::new(Arc::new(shown)),
             nodes: Mutex::default(),
             listings: Mutex::default(),

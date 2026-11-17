@@ -74,7 +74,8 @@ pub fn run(options: Options) -> Result<()> {
         MountOption::FSName(mount_table::fs_name(&common_dir)),
         MountOption::Subtype("gitfold".into()),
     ];
-    config.n_threads = Some(threads.unwrap_or(cpus));
+    let request_threads = threads.unwrap_or(cpus);
+    config.n_threads = Some(request_threads);
     config.clone_fd = true;
     let names = Arc::new(NameChanges::default());
     let fs = GitFold::new(
@@ -85,6 +86,7 @@ pub fn run(options: Options) -> Result<()> {
             prewarm,
             prewarm_threads: prewarm_threads.unwrap_or(prewarm::THREADS.min(cpus / 2).max(1)),
             track_reads,
+            request_threads,
         },
         names.clone(),
     );
