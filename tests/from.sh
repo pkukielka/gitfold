@@ -224,11 +224,16 @@ check "  nothing left behind" nothing_of w7
 check "-w, a revision that is no branch: no changes from it" says 0 "created branch w4" branch w4 -w --from api --from "$(R rev-parse ui)"
 eq "  the others' changes" "api changed" "$(cat "$MNT/w4/api.txt")"
 R tag api api
-check "-w, a first source git finds ambiguous: git's warning, as git merge says it" says 0 "warning: refname 'api' is ambiguous." branch w9 -w --from api --from x
-check "  no changes from it" test ! -e "$MNT/w9/new.txt"
+check "a first source git finds ambiguous: refused as git branch refuses it" says 1 "fatal: ambiguous object name: 'api'" branch w9 -w --from api --from x
+check "  nothing left behind" nothing_of w9
+r=$(gf branch w11 -w --from x --from api)
+check "a later source git finds ambiguous: created" eq_ok "$r" "created branch w11"
+eq "  git's warning said once" 1 "$(grep -o "warning: refname 'api' is ambiguous." <<<"$r" | wc -l)"
+check "  no changes from it (it names no branch)" test ! -e "$MNT/w11/new.txt"
 R tag -d api >/dev/null
-for i in $(seq -w 12); do echo "p by api" >"$MNT/api/p$i.txt"; echo "p by ui" >"$MNT/ui/p$i.txt"; done
-check "-w, many paths conflicting: the first 10 named" says 1 "ui's on a.txt, p01.txt, p02.txt, p03.txt, p04.txt, p05.txt, p06.txt, p07.txt, p08.txt, p09.txt … and 3 more; in" branch w10 -w --from api --from ui
+for i in $(seq -w 12); do for b in api ui x; do echo "p by $b" >"$MNT/$b/p$i.txt"; done; done
+check "-w, many paths conflicting: the first 10 named, of all" says 1 "ui's on a.txt, p01.txt, p02.txt, p03.txt, p04.txt, p05.txt, p06.txt, p07.txt, p08.txt, p09.txt and x's … and 15 more; in" branch w10 -w --from api --from ui --from x
+for b in api ui x; do W "$b" clean -fq -- 'p??.txt'; done
 gf branch mp --from api --from clash >/dev/null
 check "-w, a source with a git operation in progress: refused (exit 4)" says 4 "in progress" branch w5 -w --from mp --from ui
 check "  nothing left behind" nothing_of w5

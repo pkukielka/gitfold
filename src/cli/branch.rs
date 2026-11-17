@@ -171,8 +171,9 @@ fn merged(
     };
     let changes = Changes::take(common_dir, &mount, &copied)?;
     let (first, others) = sources.split_first().expect("several --from");
-    // Without an upstream: no relation afterwards.
-    git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.id])?;
+    // Without an upstream: no relation afterwards. The start point as
+    // typed: git takes it, or refuses it (a name it finds ambiguous).
+    git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.rev])?;
     let made = Made {
         name,
         at: &first.id,
@@ -214,18 +215,26 @@ fn merged(
         }
         // As `git cherry-pick` exits after a conflict.
         Ok(Some(conflicts)) => {
+            // Up to `PATHS_SAID` paths in all.
+            let mut left = PATHS_SAID;
             let said: Vec<String> = (conflicts.iter())
                 .map(|(branch, paths)| {
-                    let more = paths.len().saturating_sub(PATHS_SAID);
-                    let shown = paths[..paths.len() - more].join(", ");
-                    match more {
-                        0 => format!("{branch}'s on {shown}"),
-                        more => format!("{branch}'s on {shown} … and {more} more"),
+                    let shown = paths.len().min(left);
+                    left -= shown;
+                    match shown {
+                        0 => format!("{branch}'s"),
+                        _ => format!("{branch}'s on {}", paths[..shown].join(", ")),
                     }
                 })
                 .collect();
+            let all: usize = conflicts.iter().map(|(_, paths)| paths.len()).sum();
+            let more = match all.saturating_sub(PATHS_SAID) {
+                0 => String::new(),
+                more => format!(" … and {more} more"),
+            };
             bail!(
-                "created branch {name}; the uncommitted changes conflict (see above): {}; in {}",
+                "created branch {name}; the uncommitted changes conflict (see above): {}{more}; \
+                 in {}",
                 and_list(&said),
                 workspace.display()
             )
@@ -298,10 +307,6 @@ struct Source {
     id: String,
     full: Option<String>,
     name: Option<String>,
-    /// What git warned of it (a name it finds ambiguous), not yet said: by
-    /// `as_in`, or by git merge given it as typed (the start point's, by
-    /// `resolve`).
-    warnings: String,
 }
 
 impl Source {
@@ -336,11 +341,8 @@ impl Source {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        let mut warnings = String::from_utf8_lossy(&out.stderr).into_owned();
-        // The start point never reaches git merge, which would say them.
-        if !merged {
-            eprint!("{}", std::mem::take(&mut warnings));
-        }
+        // git's warnings (a name it finds ambiguous), said once: here.
+        eprint!("{}", String::from_utf8_lossy(&out.stderr));
         let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`); a name
         // git finds ambiguous names none.
@@ -360,7 +362,6 @@ impl Source {
             id,
             full,
             name,
-            warnings,
         })
     }
 
@@ -372,24 +373,18 @@ impl Source {
     /// What to give `git merge` in the worktree of git directory `admin`:
     /// the revision as typed, else the ref it named, if git takes it for
     /// the same commit there (so git's message names it as the user did);
-    /// else the commit. git's warnings of it said here unless given as
-    /// typed (git merge doesn't see the name they are about).
+    /// else the commit.
     fn as_in(&self, admin: &Path) -> Result<String> {
         let typed = (!self.rev.starts_with('-')).then_some(&self.rev);
-        let mut given = &self.id;
         for name in typed.into_iter().chain(&self.name) {
             let commit = format!("{name}^{{commit}}");
             let args = ["rev-parse", "--verify", "-q", &commit];
             let there = git::cmd::command_in_other(admin)?.args(args).output()?;
             if there.status.success() && String::from_utf8_lossy(&there.stdout).trim() == self.id {
-                given = name;
-                break;
+                return Ok(name.clone());
             }
         }
-        if *given != self.rev {
-            eprint!("{}", self.warnings);
-        }
-        Ok(given.clone())
+        Ok(self.id.clone())
     }
 }
 
@@ -540,7 +535,13 @@ fn and_list(names: &[String]) -> String {
 /// made the merge.
 fn run_merge(workspace: &Path, revs: &[String]) -> Result<bool> {
     let status = (git::cmd::in_workspace(workspace)?)
-        .args(["merge", "--end-of-options"])
+        // git's warnings of the names said once, as they were resolved.
+        .args([
+            "-c",
+            "core.warnAmbiguousRefs=false",
+            "merge",
+            "--end-of-options",
+        ])
         .args(revs)
         .status()
         .context("running git merge")?;
