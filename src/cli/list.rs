@@ -404,7 +404,9 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             let s = match status::status(&store, &w.state) {
                 Ok(s) => s,
                 Err(e) => {
-                    println!("{name:<40} unreadable ({e:#}); id {}", w.state.id);
+                    // Its tree notes all the same.
+                    let notes = notes.iter().map(|n| format!("; {n}")).collect::<String>();
+                    println!("{name:<40} unreadable ({e:#}); id {}{notes}", w.state.id);
                     continue;
                 }
             };
