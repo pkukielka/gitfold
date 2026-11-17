@@ -372,18 +372,14 @@ const CONFIG_WAIT: Duration = Duration::from_secs(2);
 /// (where settings are read), given the repository's or one of its
 /// worktrees' git directory. Retried a while if git can't write the file:
 /// another git command (the user's, the mount's follow thread) may hold its
-/// lock. Exit 5, unsetting what isn't set, is no failure.
+/// lock.
 fn config(git_dir: &Path, args: &[&str]) -> Result<()> {
     let started = Instant::now();
     loop {
         let Err(e) = git_config(git_dir, args) else {
             return Ok(());
         };
-        match e
-            .downcast_ref::<git::cmd::Failed>()
-            .and_then(|f| f.status.code())
-        {
-            Some(5) => return Ok(()),
+        match exit_code(&e) {
             // The file not written (4, git config's exit code) or its lock
             // held (255, what git exits with then): retried; any other
             // failure waiting doesn't change.
@@ -411,15 +407,21 @@ fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()
 fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
     let key = branch_key(branch, key);
     // Exit 1: not set.
-    let set = git_config(git_dir, &["--get-all", &key]);
-    if let Err(e) = &set
-        && e.downcast_ref::<git::cmd::Failed>()
-            .and_then(|f| f.status.code())
-            == Some(1)
+    if let Err(e) = git_config(git_dir, &["--get-all", &key])
+        && exit_code(&e) == Some(1)
     {
         return Ok(());
     }
-    config(git_dir, &["--unset-all", &key])
+    match config(git_dir, &["--unset-all", &key]) {
+        // Exit 5: unset meanwhile.
+        Err(e) if exit_code(&e) == Some(5) => Ok(()),
+        done => done,
+    }
+}
+
+/// The exit code of git, if `e` is git failing (`cmd::Failed`).
+fn exit_code(e: &anyhow::Error) -> Option<i32> {
+    e.downcast_ref::<git::cmd::Failed>()?.status.code()
 }
 
 /// Gives branch `to` the settings set for branch `from` (a fork); one that

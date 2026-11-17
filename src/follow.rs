@@ -980,3 +980,9 @@ fn no_op_merge(
     }
     Ok(false)
 }
+
+/// What the agent of `branch` is told of a move of it (`said`, what
+/// `--update` says): by its turn start, or kept by the daemon.
+pub fn moved_said(branch: &str, said: &str) -> String {
+    format!("{branch} took its parent's new commits:\n{said}")
+}

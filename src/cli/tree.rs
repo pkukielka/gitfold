@@ -211,10 +211,16 @@ pub(crate) fn paused(
 /// worktree (`rebase` there), with a git operation under way or a conflict
 /// left unresolved in its workspace (read from its admin directory, before
 /// any mount), or if the repository isn't mounted (and never was, or not
-/// `again`).
+/// `again`); not looked for unless it `moves` (no pushed commits in the way).
 /// (With `--set`, its parent is written by then: each refusal names
 /// `--update` to finish.)
-fn movable(common_dir: &Path, name: &str, again: bool, rebase: &str) -> Result<Option<PathBuf>> {
+fn movable(
+    common_dir: &Path,
+    name: &str,
+    again: bool,
+    moves: bool,
+    rebase: &str,
+) -> Result<Option<PathBuf>> {
     match follow::checked_out(common_dir, name) {
         None => Ok(None),
         Some(follow::CheckedOut::Workspace) => {
@@ -237,6 +243,10 @@ fn movable(common_dir: &Path, name: &str, again: bool, rebase: &str) -> Result<O
                      then: `gitfold parent {name} --update`",
                     follow::quoted(&unmerged).join(", ")
                 )));
+            }
+            // Refused anyway (pushed commits): not mounted for it.
+            if !moves {
+                return Ok(None);
             }
             let mount = match again {
                 true => super::mount::mount_or_again(common_dir)?,
@@ -276,7 +286,7 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
         );
     }
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    let moving = |_| movable(common_dir, name, true, &plan.by_hand(short));
+    let moving = |moves| movable(common_dir, name, true, moves, &plan.by_hand(short));
     match plan.run(common_dir, yes, moving)? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
@@ -350,12 +360,6 @@ impl Took {
         let unresolved = self.unresolved.as_ref().map(|u| format!("{u}\n"));
         self.said.clone() + &unresolved.unwrap_or_default()
     }
-}
-
-/// What the agent of `branch` is told of a move of it (`said`, what
-/// `--update` says): by its turn start, or kept by the daemon.
-pub fn moved_said(branch: &str, said: &str) -> String {
-    format!("{branch} took its parent's new commits:\n{said}")
 }
 
 /// Takes its parent's new commits for `name`, if it follows its parent
@@ -489,8 +493,8 @@ fn try_follow(common_dir: &Path, name: &str, tree: &Tree) -> Result<Followed> {
     let moved = match plan.conflict(common_dir, &local)?.filter(|_| !gone) {
         Some(paths) => follow::Moved::Conflict(paths),
         None => plan
-            .run(common_dir, false, |_| {
-                movable(common_dir, name, false, &plan.by_hand(short))
+            .run(common_dir, false, |moves| {
+                movable(common_dir, name, false, moves, &plan.by_hand(short))
             })
             .map_err(|e| match gone {
                 // Built there all the same: said.
@@ -668,7 +672,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // Refused or failed from here, it is built on P all the same.
     let moved = plan
         .run(common_dir, false, |moves| {
-            let workspace = movable(common_dir, name, true, &plan.by_hand(short))?;
+            let workspace = movable(common_dir, name, true, moves, &plan.by_hand(short))?;
             if moves {
                 println!("moves {} of {name} onto {short}", commits(plan.own));
             }

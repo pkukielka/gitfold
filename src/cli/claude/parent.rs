@@ -11,7 +11,8 @@ use anyhow::Result;
 
 use super::cwd;
 use crate::cli::hook::field;
-use crate::cli::tree::{Followed, follow_once, moved_said};
+use crate::cli::tree::{Followed, follow_once};
+use crate::follow::moved_said;
 use crate::git;
 use crate::state::StateDir;
 use crate::tree::Tree;
@@ -97,7 +98,12 @@ fn unmark(state: &StateDir, id: Option<&str>) -> Result<()> {
 fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Result<String> {
     let branch = &state.branch;
     let session = session.unwrap_or_default();
-    let followed = follow_once(common_dir, branch, &Tree::read(common_dir)?);
+    // A tree that can't be read: said plainly, once (to each session), and
+    // what the daemon kept told all the same.
+    let followed = match Tree::read(common_dir) {
+        Ok(tree) => follow_once(common_dir, branch, &tree),
+        Err(e) => Followed::Noted(format!("can't read the tree of branches: {e:#}")),
+    };
     // Moves made while no agent was here (the daemon's): taken after
     // `follow_once`, which waits for one under way.
     let mut out = match state.take_followed()? {

@@ -209,7 +209,7 @@ fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, parent: &str, paus
         // What its agent is told.
         let told = match landed {
             true => said,
-            false => crate::cli::tree::moved_said(branch, &said),
+            false => crate::follow::moved_said(branch, &said),
         };
         if let Err(e) = state.add_followed(&told) {
             warn!("following: {branch}: keeping the move for its agent: {e:#}");
