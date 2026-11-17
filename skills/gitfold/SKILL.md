@@ -1,6 +1,6 @@
 ---
 name: gitfold
-description: How to work in a gitfold mount (a repository served as a FUSE filesystem, with read-only @<rev> snapshots and writable per-branch workspaces), and how to run several agents on it. Use when the working directory is under a gitfold mount, when the user mentions gitfold, or when setting up workspaces for parallel agents.
+description: How to work in a gitfold mount (a repository served as a FUSE filesystem, with read-only @<rev> snapshots and writable per-branch workspaces), and how to run several agents on it, including branches built on other agents' branches. Use when the working directory is under a gitfold mount, when the user mentions gitfold, or when setting up workspaces for parallel agents.
 ---
 
 # Working with gitfold
@@ -217,6 +217,50 @@ The new branch starts at the same commit with a copy of the uncommitted
 changes, staged ones included. Only the changes are copied, so this is cheap
 even on a huge tree. Each workspace then changes on its own.
 
+**To build and test several branches together,** start a branch at their
+merge: `gitfold branch try --from agent/a --from agent/b` runs `git merge` in
+the new workspace (a conflict leaves git's merge in progress there: `git
+merge --continue` or `--abort`). `-w` adds each one's uncommitted changes.
+The new branch is an ordinary one, unrelated to them afterwards.
+
+## Building on another branch
+
+When your work needs another task's commits before they land, build your
+branch on that branch, its **parent**:
+
+```
+gitfold branch agent/ui --parent agent/api   # starts at api's tip, built on it
+gitfold parent                               # what yours is built on, following or not
+gitfold parent --update                      # take the parent's new commits now
+```
+
+- **Following:** a branch built on another takes the parent's new commits by
+  itself (with the plugin, at your turn start, and you are told what moved),
+  replaying its own commits onto them, your uncommitted work carried along.
+  `--no-follow` (or `gitfold parent --no-follow`) leaves it to `--update`.
+- **When it can't:** a conflict moves nothing; you are told the paths once,
+  then reminded each turn until the parent changes again or you resolve it
+  (rebase by hand, or `gitfold parent --set` elsewhere). Commits you already
+  pushed move only with `gitfold parent --update --yes`, which prints the
+  force-push to run; gitfold never pushes.
+- **When the parent lands** in the main branch: once its branch is deleted,
+  yours moves onto the main branch with only its own commits; while it still
+  exists, `gitfold list` says so, and `gitfold parent --set main` does that
+  move. gitfold never fetches: `git fetch` to let it see a merge done on the
+  forge.
+- `gitfold parent --set <P>` moves your commits onto another parent;
+  `--none` forgets the parent and keeps the history as it is.
+- `gitfold list` shows the tree, and notes what needs doing (`conflict on
+  PATH`, `following paused: pushed`, `api landed in main`, `parent gone`).
+
+**Reading the others' work:** `<mount>/@committed/<branch>/` is that branch
+merged with every branch built on it, read-only (`git merge-tree`, so
+conflicts are in the files as git leaves them); `<mount>/@live/<branch>/` the
+same with each workspace's uncommitted work. `.gitfold-conflicts` at its root
+lists the conflicts and which branches they are between. To see who else is
+changing a file: `gitfold changes -- <PATH>...` (one line per branch,
+`committed` or `uncommitted`).
+
 ## Running many agents
 
 - **One branch and workspace per task.** Workspaces cost what their changes
@@ -227,7 +271,8 @@ even on a huge tree. Each workspace then changes on its own.
   opens.
 - **Watching them:** `gitfold list` shows each workspace's changed, deleted and
   ignored file counts, and how long ago it last changed (a file or a commit):
-  an agent idle for long stands out. `--stat` adds line totals.
+  an agent idle for long stands out, and the tree of branches built on
+  branches. `--stat` adds line totals.
   `gitfold changes <BRANCH>` shows one's changed paths. All read stored
   state, so polling many workspaces is cheap.
 - **Is the work stale, or colliding?** `gitfold overlaps` (inside a workspace, or
@@ -247,8 +292,10 @@ even on a huge tree. Each workspace then changes on its own.
   hook (the plugin's) reports: the Read tool's files, and the files `cat`,
   `head`, `tail`, `sed` ... show in Bash; with other agents, `overlaps` has
   `W` lines only.
-- **Merge previews:** to see what several branches look like merged, before
-  merging anything, make the merge commit with git and open it as a snapshot.
+- **Merge previews:** for branches built on one another, the views show them
+  merged (see [Building on another branch](#building-on-another-branch)).
+  For any branches, without making a branch or a workspace, make the merge
+  commit with git and open it as a snapshot.
   No working tree, index or ref is touched (git 2.38 or later). This is a
   bash function: it runs in a subshell, so the identity doesn't leak into your
   shell.
