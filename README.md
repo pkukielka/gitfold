@@ -158,7 +158,7 @@ gitfold branch <BRANCH> --parent <P> [--no-follow]
 gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
                                               # show or change what it is built
                                               # on
-gitfold list [--stat]                         # workspaces and their changes
+gitfold list [--stat]                         # workspaces, their changes, the tree
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold changes -- <PATH>...                  # who is changing them, on every branch
 gitfold send <BRANCH> [-s <SUBJECT>] [--from <NAME>] <TEXT>
@@ -426,7 +426,13 @@ files (build output) it holds, how long ago it last changed (`last`: a file
 written, created or deleted, or a commit; a stalled agent stands out), with a
 note if its branch was deleted or its base is behind the branch tip (mount once
 to update it); `--stat` adds the lines added and removed in total, reading
-every changed file. `gitfold changes
+every changed file. It shows the tree of branches too: each branch under its
+parent (`└─`; the main branch's children at the top), branches without a
+workspace only if they have a parent or children, whether each follows its
+parent (`follow`: on or off), and a note when something needs doing:
+following paused (`conflict on PATH`, `following paused: pushed`), the
+parent landed (`api looks merged into main`, as last checked by following,
+or `api landed in main`) or `parent gone`. `gitfold changes
 [<BRANCH>]` lists one workspace's uncommitted changes against its base,
 untracked files included and whatever is staged, as `git add -A` and `git diff
 --cached --name-status` would (`A`, `M`, `D` and the path, quoted as git quotes

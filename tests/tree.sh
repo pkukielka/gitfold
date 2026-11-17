@@ -753,6 +753,42 @@ on api c.txt more
 check "a workspace, unmounted: refused (exit 4)" says 4 "isn't mounted: mount it first" parent ui --update --auto
 check "  not mounted again" fails mountpoint -q "$MNT"
 }
+# gitfold list (spec section 8): each branch under its parent, whether it
+# follows it, and a note when something needs doing. Its rows with columns
+# split at two spaces or more (the indentation kept), and one row's.
+rows() { "$BIN" -C "$REPO" list 2>&1 | tail -n +2 | sed -E 's/([^ ]) {2,}/\1|/g'; }
+row() { rows | grep -E "^[ └─]*$1\|"; }
+listed() {
+identity; on main f.txt base
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+"$BIN" -C "$REPO" branch deep --parent ui >/dev/null; "$BIN" -C "$REPO" branch side --parent main >/dev/null
+R branch lone; "$BIN" -C "$REPO" parent deep --no-follow >/dev/null
+eq "under their parents, following on or off; the root's children at the top; no other branch" "api|-|-|-|-|-
+└─ ui|-|-|-|-|-|on
+   └─ deep|-|-|-|-|-|off
+side|-|-|-|-|-|on" "$(rows)"
+"$BIN" -C "$REPO" branch ws --parent api >/dev/null
+mount_fs; ls "$MNT/ws" "$MNT/lone" >/dev/null; echo new >"$MNT/ws/n.txt"
+eq "  a workspace: its columns as before, in the tree" "└─ ws 1 0 0 on" "$(row ws | awk -F'|' '{ print $1, $2, $3, $4, $7 }')"
+eq "  a workspace without a parent: no following" "lone 0 none" "$(row lone | awk -F'|' '{ print $1, $2, ($7 == "" ? "none" : $7) }')"
+rm "$MNT/ws/n.txt"; unmount_fs
+on api a.txt new; on ui a.txt mine
+"$BIN" -C "$REPO" parent ui --update --auto >/dev/null 2>&1
+eq "a conflict: noted" "(conflict on a.txt)" "$(row ui | awk -F'|' '{ print $NF }')"
+R branch -f ui ui~1; on ui u.txt mine; "$BIN" -C "$REPO" parent ui --update >/dev/null
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui; on api b.txt more
+eq "pushed commits: noted" "(following paused: pushed)" "$(row ui | awk -F'|' '{ print $NF }')"
+R update-ref -d refs/remotes/origin/ui; "$BIN" -C "$REPO" parent ui --update >/dev/null
+R merge -q --no-ff --no-edit api
+eq "its parent merged, not checked yet: nothing noted" "on" "$(row ui | awk -F'|' '{ print $NF }')"
+"$BIN" -C "$REPO" parent ui --update --auto >/dev/null
+eq "  checked (recorded): noted" "(api looks merged into main)" "$(row ui | awk -F'|' '{ print $NF }')"
+R update-ref -d refs/heads/api
+eq "its parent deleted: at the top, deep still under it; landed, as recorded" "ui|-|-|-|-|-|on|(api landed in main)
+└─ deep|-|-|-|-|-|off" "$(rows | grep -e ui -e deep)"
+R branch gone; "$BIN" -C "$REPO" branch ug --parent gone >/dev/null; on ug g.txt mine; R branch -D -q gone
+eq "gone, not landed: noted" "(parent gone)" "$(row ug | awk -F'|' '{ print $NF }')"
+}
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
 section "tree: rules R (the root)" the_root
@@ -769,4 +805,5 @@ section "tree: the parent lands, or is gone" landing
 section "tree: --update --auto" update_auto
 section "tree: following at turn start, agent presence" agents
 section "tree: following without an agent (the daemon)" daemon_follows
+section "tree: gitfold list" listed
 finish
