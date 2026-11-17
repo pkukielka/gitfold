@@ -91,8 +91,10 @@ pub struct Note {
 pub struct Refs {
     /// The view's own files: the branch's tip, or its origin root's.
     pub own: Tip,
-    /// Each member and its tip and parent's commit; skipped members aren't
-    /// here (`notes`).
+    /// The branch's tip.
+    pub local: Tip,
+    /// Each member, its tip, and its merge point with its parent (where it
+    /// left it); skipped members aren't here (`notes`).
     pub members: Vec<(String, Tip, ObjectId)>,
     pub notes: Vec<Note>,
 }
@@ -146,6 +148,7 @@ pub fn refs(
         Ok((c.id, c.tree))
     };
     let mut own = tip(&format!("refs/heads/{branch}"))?;
+    let local = own;
     let mut notes = Vec::new();
     // The origin root, if it exists but can't be read: noted, not failing.
     let mut unread: Option<&str> = None;
@@ -182,7 +185,11 @@ pub fn refs(
         };
         if why.is_none() {
             match tip(&full).and_then(|t| Ok((t, tip(&m.parent)?.0))) {
-                Ok((at, parent)) => out.push((m.branch.clone(), at, parent)),
+                // Unrelated histories: nothing to tell its work by.
+                Ok((at, parent)) => match bases.get(at.0, parent)? {
+                    Some(base) => out.push((m.branch.clone(), at, base)),
+                    None => why = Some(format!("no history in common with {}", m.parent)),
+                },
                 // Deleted meanwhile: as if it had been gone.
                 Err(_) if !exists(&full) => why = Some(format!("no branch {}", m.branch)),
                 Err(_) if !exists(&m.parent) => {
@@ -202,6 +209,7 @@ pub fn refs(
     }
     Ok(Refs {
         own,
+        local,
         members: out,
         notes,
     })

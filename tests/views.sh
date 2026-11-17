@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# End-to-end test of the read-only views `<mount>/@committed/N/`: branch N
+# End-to-end test of the read-only views `<mount>/@committed/N/` and
+# `<mount>/@live/N/` (the workspaces as they are): branch N
 # merged with the branches built on it, kept current as their commits and
 # the tree of branches change, with conflicts in the files and the
 # summary file; the reserved names under `@`.
@@ -130,7 +131,7 @@ R branch committed main
 R branch api main
 mount_fs
 check "@committed is there" test -d "$MNT/@committed"
-check "@live is reserved" test -d "$MNT/@live"
+check "@live is there" test -d "$MNT/@live"
 check "a branch with a slash" test -f "$MNT/@committed/feature/x/a.txt"
 eq "its namespace lists it" "x" "$(ls "$MNT/@committed/feature")"
 check "no such branch" fails test -e "$MNT/@committed/nosuch"
@@ -167,6 +168,53 @@ eq "every file listed" 20 "$(ls "$MNT/$V" | grep -c '^f[0-9]*\.txt$')"
 for i in 1 7 20; do eq "f$i.txt" "$i" "$(cat "$MNT/$V/f$i.txt")"; done
 }
 
+live_views() {
+commit_on api main a.txt=$'a\n' $'.gitignore=*.o\n'
+commit_on ui api $'ui.txt=ui\n'
+built_on ui api
+mount_fs
+L=@live/api
+eq "the tips while no workspace is open" "ui" "$(cat "$MNT/$L/ui.txt")"
+echo edited >"$MNT/ui/ui.txt"
+echo new >"$MNT/ui/new.txt"
+echo obj >"$MNT/ui/x.o"
+rm "$MNT/ui/a.txt"
+check "an uncommitted edit" until_ok has "$MNT/$L/ui.txt" edited
+check "a new file" has "$MNT/$L/new.txt" new
+check "an ignored file left out" fails test -e "$MNT/$L/x.o"
+check "a deletion" fails test -e "$MNT/$L/a.txt"
+eq "@committed has the tips" "ui" "$(cat "$MNT/@committed/api/ui.txt")"
+echo mine >"$MNT/api/api.txt"
+check "the view's own workspace" until_ok has "$MNT/$L/api.txt" mine
+check "read-only" fails touch "$MNT/$L/other"
+eq "listed under @live once opened" "api" "$(ls "$MNT/@live")"
+}
+
+resting_views() {
+commit_on api main a.txt=$'a\n'
+commit_on ui api $'ui.txt=ui\n'
+commit_on web api $'web.txt=web\n'
+built_on ui api; built_on web api
+GITFOLD_VIEW_REST_SECS=2 mount_fs
+echo e1 >"$MNT/ui/ui.txt"
+check "awake: current" until_ok has "$MNT/@live/api/ui.txt" e1
+eq "@committed opened" "web" "$(cat "$MNT/@committed/api/web.txt")"
+echo e2 >"$MNT/ui/ui.txt"
+commit_on web api $'web.txt=web2\n'
+sleep 5
+eq "a resting @live view wakes current" "e2" "$(cat "$MNT/@live/api/ui.txt")"
+eq "a resting @committed view wakes current" "web2" "$(cat "$MNT/@committed/api/web.txt")"
+}
+
+unrelated_history() {
+commit_on api main a.txt=$'a\n'
+R update-ref refs/heads/lone "$(R commit-tree "$(R mktree </dev/null)" -m lone)"
+built_on lone api
+mount_fs
+eq "left out, noted" "skipped	lone	no history in common with refs/heads/api" "$(grep lone "$MNT/@committed/api/.gitfold-conflicts")"
+}
+
+
 section "views: merged with what is built on it" merged_with_whats_built_on_it
 section "views: conflicts" conflicts
 section "views: git's merge" gits_merge
@@ -174,4 +222,7 @@ section "views: kept current" kept_current
 section "views: names under @" names
 section "views: the root shows opened branches" root_shows_opened_branches
 section "views: refreshes under readers" refresh_under_readers
+section "views: @live, the workspaces as they are" live_views
+section "views: resting, and woken current" resting_views
+section "views: a branch with unrelated history left out" unrelated_history
 finish

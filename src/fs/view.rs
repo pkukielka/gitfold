@@ -151,12 +151,9 @@ impl GitFold {
         }
     }
 
-    /// The root and every namespace directory, the root first (it is what gets
-    /// listed right after opening something).
+    /// The root and every namespace directory (`Workspaces::names_dirs`).
     pub(super) fn names_dirs(&self) -> Vec<u64> {
-        let mut dirs = vec![inode::ROOT];
-        dirs.extend(self.workspaces.namespace_inodes());
-        dirs
+        self.workspaces.names_dirs()
     }
 
     /// How many names the root and namespace directories hold together; only

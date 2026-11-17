@@ -66,7 +66,8 @@ fn git(dir: &Path, args: &[&str], index: Option<&Path>, stdin: Option<&[u8]>) ->
 }
 
 /// A commit on `parent` (none: a root commit) with `files` set (`link:T`: a
-/// symlink to T; `exec:D`: an executable file) or deleted (`None`).
+/// symlink to T; `exec:D`: an executable file; `gitlink:C`: a submodule at
+/// commit C) or deleted (`None`).
 pub fn commit(parent: Option<&str>, files: &[(&str, Option<&str>)]) -> String {
     let dir = repo();
     let n = INDEXES.fetch_add(1, Ordering::Relaxed);
@@ -78,14 +79,17 @@ pub fn commit(parent: Option<&str>, files: &[(&str, Option<&str>)]) -> String {
     for (path, content) in files {
         match content {
             Some(content) => {
-                let (mode, data) = if let Some(target) = content.strip_prefix("link:") {
-                    ("120000", target)
+                let hash =
+                    |data: &str| run(&["hash-object", "-w", "--stdin"], Some(data.as_bytes()));
+                let (mode, oid) = if let Some(target) = content.strip_prefix("link:") {
+                    ("120000", hash(target))
                 } else if let Some(data) = content.strip_prefix("exec:") {
-                    ("100755", data)
+                    ("100755", hash(data))
+                } else if let Some(commit) = content.strip_prefix("gitlink:") {
+                    ("160000", commit.to_string())
                 } else {
-                    ("100644", *content)
+                    ("100644", hash(content))
                 };
-                let oid = run(&["hash-object", "-w", "--stdin"], Some(data.as_bytes()));
                 run(
                     &[
                         "update-index",
@@ -160,4 +164,24 @@ pub fn run(args: &[&str]) -> String {
 /// The commit `commit` (and its tree).
 pub fn tip(commit: &str) -> crate::git::Commit {
     crate::git::resolve(commit).unwrap()
+}
+
+/// Runs git in `dir` (a worktree of the test repository, with input
+/// `stdin`); its output.
+pub fn run_in(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> String {
+    git(dir, args, None, stdin)
+}
+
+/// A new worktree of the test repository at `commit` (detached), named
+/// `name`; its directory.
+pub fn worktree(name: &str, commit: &str) -> PathBuf {
+    let dir = repo().join("worktrees").join(name);
+    let path = dir.to_str().unwrap();
+    git(
+        repo(),
+        &["worktree", "add", "-q", "--detach", path, commit],
+        None,
+        None,
+    );
+    dir
 }
