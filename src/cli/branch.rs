@@ -157,8 +157,6 @@ fn merged(
             Source::resolve(repo, rev, i > 0, with_changes)
         })
         .collect::<Result<Vec<_>>>()?;
-    // The start point never reaches git merge, which would say them.
-    eprint!("{}", sources[0].warnings);
     // The workspaces whose changes are taken, checked before mounting too.
     let copied = match with_changes {
         true => Changes::workspaces(common_dir, &sources)?,
@@ -300,7 +298,8 @@ struct Source {
     id: String,
     full: Option<String>,
     name: Option<String>,
-    /// What git warned of it (a name it finds ambiguous).
+    /// What git warned of it (a name it finds ambiguous), said once: by
+    /// `resolve` or `as_in`, or by git merge given it as typed.
     warnings: String,
 }
 
@@ -336,6 +335,11 @@ impl Source {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
+        let warnings = String::from_utf8_lossy(&out.stderr).into_owned();
+        // The start point never reaches git merge, which would say them.
+        if !merged {
+            eprint!("{warnings}");
+        }
         let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`); a name
         // git finds ambiguous names none.
@@ -355,7 +359,7 @@ impl Source {
             id,
             full,
             name,
-            warnings: String::from_utf8_lossy(&out.stderr).into_owned(),
+            warnings,
         })
     }
 
@@ -367,8 +371,8 @@ impl Source {
     /// What to give `git merge` in the worktree of git directory `admin`:
     /// the revision as typed, else the ref it named, if git takes it for
     /// the same commit there (so git's message names it as the user did);
-    /// else the commit, git's warnings of it said here (git merge doesn't
-    /// see the name they are about).
+    /// else the commit. git's warnings of it said here unless given as
+    /// typed (git merge doesn't see the name they are about).
     fn as_in(&self, admin: &Path) -> Result<String> {
         let typed = (!self.rev.starts_with('-')).then_some(&self.rev);
         for name in typed.into_iter().chain(&self.name) {
@@ -376,6 +380,9 @@ impl Source {
             let args = ["rev-parse", "--verify", "-q", &commit];
             let there = git::cmd::command_in_other(admin)?.args(args).output()?;
             if there.status.success() && String::from_utf8_lossy(&there.stdout).trim() == self.id {
+                if *name != self.rev {
+                    eprint!("{}", self.warnings);
+                }
                 return Ok(name.clone());
             }
         }
