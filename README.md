@@ -132,7 +132,7 @@ gitfold writes into the repository: worktree registrations under
   mode gitfold depends on.
 - git with linked worktree and index v4 support (any git from the last decade;
   tested with 2.49). Moving branches built on branches (`gitfold parent
-  --update`, `--set`) needs git 2.38 or newer.
+  --update`, `--set`) needs git 2.40 or newer.
 - A full clone, or a partial clone (`git clone --filter=blob:none`, or
   `tree:0`; git 2.29 or newer) whose promisor remote gitfold can fetch from
   without a prompt (an ssh agent, a credential helper); see [Partial
@@ -157,8 +157,7 @@ gitfold branch <BRANCH> --parent <P> [--no-follow]
                                               # a branch built on P
 gitfold parent [<BRANCH>] [--set <P> | --none] [--follow | --no-follow] [--update [--yes]]
                                               # show or change what it is built
-                                              # on (a workspace's branch: not
-                                              # yet)
+                                              # on
 gitfold list [--stat]                         # workspaces and their changes
 gitfold changes [<BRANCH>] [-z] [--stat]      # a workspace's changed paths
 gitfold changes -- <PATH>...                  # who is changing them, on every branch
@@ -498,10 +497,11 @@ conflict is recorded until the parent changes again. Commits already on the
 branch's own remote branch are moved only with `--update --yes`, and
 gitfold prints the force-push (it never pushes). A merge among its own
 commits, or a branch checked out in a git worktree, is left for you to
-rebase. For now only branches without a workspace move; following by
-itself is still to come. The command-line contract
-is in place; the commands marked "not yet" above parse their arguments,
-then say `not implemented yet` (exit 1). Commands people guess (`gitfold
+rebase. A workspace's branch moves in its workspace, through the mount
+(mounted again where it last was if it isn't now), by git there: its
+uncommitted work is carried along as `git rebase --autostash` carries it,
+and work that would conflict with the move stops it, nothing moved.
+Following by itself is still to come. Commands people guess (`gitfold
 sync`, `pull`, `restack`, `rebase`, `branch --on`, `branch --merge`) exit 2
 naming the right one.
 
