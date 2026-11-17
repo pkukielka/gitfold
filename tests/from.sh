@@ -221,6 +221,8 @@ R tag api api
 check "-w, a first source git finds ambiguous: git's warning, as git merge says it" says 0 "warning: refname 'api' is ambiguous." branch w9 -w --from api --from x
 check "  no changes from it" test ! -e "$MNT/w9/new.txt"
 R tag -d api >/dev/null
+for i in $(seq -w 12); do echo "p by api" >"$MNT/api/p$i.txt"; echo "p by ui" >"$MNT/ui/p$i.txt"; done
+check "-w, many paths conflicting: the first 10 named" says 1 "ui's on a.txt, p01.txt, p02.txt, p03.txt, p04.txt, p05.txt, p06.txt, p07.txt, p08.txt, p09.txt … and 3 more; in" branch w10 -w --from api --from ui
 gf branch mp --from api --from clash >/dev/null
 check "-w, a source with a git operation in progress: refused (exit 4)" says 4 "in progress" branch w5 -w --from mp --from ui
 check "  nothing left behind" nothing_of w5

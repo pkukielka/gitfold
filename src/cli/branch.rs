@@ -215,7 +215,14 @@ fn merged(
         // As `git cherry-pick` exits after a conflict.
         Ok(Some(conflicts)) => {
             let said: Vec<String> = (conflicts.iter())
-                .map(|(branch, paths)| format!("{branch}'s on {}", paths.join(", ")))
+                .map(|(branch, paths)| {
+                    let more = paths.len().saturating_sub(PATHS_SAID);
+                    let shown = paths[..paths.len() - more].join(", ");
+                    match more {
+                        0 => format!("{branch}'s on {shown}"),
+                        more => format!("{branch}'s on {shown} … and {more} more"),
+                    }
+                })
                 .collect();
             let said: Vec<&str> = said.iter().map(String::as_str).collect();
             bail!(
@@ -242,7 +249,10 @@ fn merged(
     }
 }
 
-/// What `merged` made: branch `name` at `at`, and which settings it stored.
+/// How many of the paths whose changes conflict (`branch -w`) are named.
+const PATHS_SAID: usize = 10;
+
+/// What `merged` made:branch `name` at `at`, and which settings it stored.
 struct Made<'a> {
     name: &'a str,
     at: &'a str,
