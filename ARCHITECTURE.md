@@ -852,19 +852,20 @@ merge-tree --write-tree` folds each member into the view so far, against its
 merge base with its parent. git runs in the repository itself (its config,
 `includeIf`, attributes, merge drivers; in its work tree's top), with only
 its objects redirected (`GIT_OBJECT_DIRECTORY`) into a private bare
-repository (`.git/gitfold/.views.git`, made anew at each mount) that borrows the repository's objects through
-`objects/info/alternates`; `.gitattributes` are read from the view so far
-(`attr.tree`). git is given every side by commit id, so markers show ids:
-the branches' tips, and for the view so far a commit of each fold's tree in
-the private repository (git 2.44 takes no tree as a side). Names given to
-git would be resolved by git meanwhile, racing with the refs and its own
-shortening; `.gitfold-conflicts`, which gitfold writes, names the branches.
-gitfold reads the merged trees through a second object-database handle on it (`git::open_private`: `tree_entries`, `object_size` and
-`read_blob` look there when the repository hasn't an object). Its only refs
-are each view's, and `git gc --auto` (with
-`gc.pruneExpire=now`) collects the rest as git decides. The view is rebuilt
-when its refs move: a thread
-per open view reads its members' refs every
+repository (`.git/gitfold/.views.git`, made anew at each mount) that borrows
+the repository's objects through `objects/info/alternates`;
+`.gitattributes` are read from the view so far (`attr.tree`). git is given
+every side by commit id, so markers show ids: the branches' tips, and for
+the view so far a commit of each fold's tree in the private repository (git
+2.44 takes no tree as a side). Names given to git would be resolved by git
+meanwhile, racing with the refs and its own shortening;
+`.gitfold-conflicts`, which gitfold writes, names the branches. gitfold
+reads the merged trees through a second object-database handle on it
+(`git::open_private`: `tree_entries`, `object_size` and `read_blob` look
+there when the repository hasn't an object). Its only refs are each view's,
+and `git gc --auto` (with `gc.pruneExpire=now`) collects the rest as git
+decides. The view is rebuilt when its refs move: a thread per open view
+reads its members' refs every
 second (the tree of branches again when the config changed, or every 30 s;
 for the main branch's view, which workspaces are opened), and if they moved,
 builds the view again, swaps it in, waits for the requests served from the

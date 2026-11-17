@@ -89,7 +89,12 @@ impl Private {
         std::fs::create_dir_all(private.dir.join("objects/info"))?;
         std::fs::write(
             private.dir.join("objects/info/alternates"),
-            [objects.as_os_str().as_bytes(), b"\n"].concat(),
+            // Quoted as git quotes paths (one per line).
+            [
+                crate::cli::quote(objects.as_os_str().as_bytes()),
+                b"\n".to_vec(),
+            ]
+            .concat(),
         )?;
         // Its commits' author, and no reflogs: they would keep what no view
         // shows.
@@ -167,7 +172,7 @@ impl Private {
     ) -> Result<Merged> {
         let _lock = self.lock.lock();
         // The view so far: its commit (a commit of each fold's tree: git
-        // 2.40 takes no tree there), and how the summary names it.
+        // 2.44 takes no tree there), and how the summary names it.
         let (mut ours, mut side) = (own.0, branch.to_string());
         let mut tree = own.1;
         let mut conflicts = Vec::new();
