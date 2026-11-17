@@ -217,6 +217,10 @@ check "-w, the branches conflicting, no changes at all: refused too" says 1 "the
 check "  nothing left behind" nothing_of w7
 check "-w, a revision that is no branch: no changes from it" says 0 "created branch w4" branch w4 -w --from api --from "$(R rev-parse ui)"
 eq "  the others' changes" "api changed" "$(cat "$MNT/w4/api.txt")"
+R tag api api
+check "-w, a first source git finds ambiguous: git's warning, as git merge says it" says 0 "warning: refname 'api' is ambiguous." branch w9 -w --from api --from x
+check "  no changes from it" test ! -e "$MNT/w9/new.txt"
+R tag -d api >/dev/null
 gf branch mp --from api --from clash >/dev/null
 check "-w, a source with a git operation in progress: refused (exit 4)" says 4 "in progress" branch w5 -w --from mp --from ui
 check "  nothing left behind" nothing_of w5

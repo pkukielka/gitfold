@@ -154,7 +154,7 @@ fn merged(
     let sources = (from.iter().enumerate())
         .map(|(i, rev)| {
             let rev = if rev == "-" && i > 0 { "@{-1}" } else { rev };
-            Source::resolve(repo, rev)
+            Source::resolve(repo, rev, i > 0, with_changes)
         })
         .collect::<Result<Vec<_>>>()?;
     // The workspaces whose changes are taken, checked before mounting too.
@@ -283,7 +283,7 @@ const UNDO_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A `--from` as git takes it where the user stands: as typed, its commit,
 /// and the ref it names (`refs/heads/ui` for `HEAD` on ui), in full and
-/// shortened as git shortens it, if it names one.
+/// shortened as git shortens it, if it names one (and they are used: `resolve`).
 struct Source {
     rev: String,
     id: String,
@@ -292,42 +292,55 @@ struct Source {
 }
 
 impl Source {
-    /// `rev` in the worktree of git directory `repo`, and the ref it names;
-    /// refused as `git merge` refuses what isn't a commit; git's own error
-    /// if it fails otherwise.
-    fn resolve(repo: &Path, rev: &str) -> Result<Source> {
+    /// `rev` in the worktree of git directory `repo`; refused as `git merge`
+    /// refuses what isn't a commit; git's own error if it fails otherwise.
+    /// `merged`: given to `git merge`, which says git's warnings about it
+    /// (a name it finds ambiguous): with the ref it names, short too; else
+    /// they are said here, and the ref it names only if `named` (`-w`).
+    fn resolve(repo: &Path, rev: &str, merged: bool, named: bool) -> Result<Source> {
         let line = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
         let commit = format!("{rev}^{{commit}}");
-        let args = ["rev-parse", "--verify", "-q", "--end-of-options", &commit];
-        let out = git::cmd::command(repo).args(args).output()?;
-        // `--verify -q`: exit 1 for what names no commit (anything else
-        // that fails dies, 128).
-        if out.status.code() == Some(1) {
-            // What git said first (an ambiguous short id's candidates), as
-            // `git merge` shows it.
-            eprint!("{}", String::from_utf8_lossy(&out.stderr));
-            bail!("{rev} - not something we can merge");
+        // Without `-q`: git's warnings too.
+        let verify = |quiet: &[&str]| {
+            (git::cmd::command(repo).args(["rev-parse", "--verify"]))
+                .args(quiet)
+                .args(["--end-of-options", &commit])
+                .output()
+        };
+        let out = verify(&[])?;
+        if !out.status.success() {
+            let out = verify(&["-q"])?;
+            // `--verify -q`: exit 1 for what names no commit (anything
+            // else that fails dies, 128).
+            if out.status.code() == Some(1) {
+                // What git said first (an ambiguous short id's candidates),
+                // as `git merge` shows it.
+                eprint!("{}", String::from_utf8_lossy(&out.stderr));
+                bail!("{rev} - not something we can merge");
+            }
+            bail!(
+                "git rev-parse {commit} failed ({}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
-        ensure!(
-            out.status.success(),
-            "git rev-parse {commit} failed ({}): {}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        if !merged {
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        }
         let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`); a name
-        // git finds ambiguous names none (git warns).
+        // git finds ambiguous names none.
         let rev_parse = |how: &str, rev: &str| {
             (git::cmd::output(repo, &["rev-parse", "--verify", "-q", how, rev]).ok())
                 .map(line)
                 .filter(|n| !n.is_empty() && n != "HEAD")
         };
-        let full = (!rev.starts_with('-'))
+        let full = ((merged || named) && !rev.starts_with('-'))
             .then(|| rev_parse("--symbolic-full-name", rev))
             .flatten()
             .filter(|full| full.starts_with("refs/"));
-        let name = full
-            .as_ref()
+        let name = (full.as_ref())
+            .filter(|_| merged)
             .and_then(|full| rev_parse("--abbrev-ref", full));
         Ok(Source {
             rev: rev.to_string(),
