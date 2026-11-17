@@ -226,12 +226,17 @@ pub fn spawn(view: Weak<ViewDir>, ctx: Context, mut watch: Watch) {
                         // Waits for requests served from the old view: their
                         // replies can't land after the kernel is told.
                         view.swap(shown, &changed);
-                        // Woken: the requests waiting go on first; they hold
-                        // their directories, which telling the kernel takes.
+                        let entries = tell(&ctx.names, &view, &changed);
+                        // Woken: the requests waiting go on before the kernel
+                        // forgets entries; they hold their directories, which
+                        // that takes. (Pages and attributes were told: they
+                        // read the new ones.)
                         if std::mem::take(&mut waiting) {
                             view.rest.woke();
                         }
-                        tell(&ctx.names, &view, &changed);
+                        for (dir, name) in entries {
+                            ctx.names.entry(dir, &name);
+                        }
                         if let Err(e) = ctx.private.shown(&ctx.key, commit) {
                             error!("view {}: {e:#}", view.name);
                         }
@@ -263,17 +268,18 @@ fn resting(names: &NameChanges, view: &ViewDir) {
     names.entry(view.parent, name(view.name.as_bytes()));
 }
 
-/// Tells the kernel that `changed` paths of `view` changed: their entries in
-/// their directories, the directories' listings, their attributes and pages.
-/// Only for what it holds.
-fn tell(names: &NameChanges, view: &ViewDir, changed: &[Changed]) {
+/// Tells the kernel that `changed` paths of `view` changed: the directories'
+/// listings, their attributes and pages; their entries in their directories
+/// are returned, for the caller to tell. Only for what it holds.
+fn tell(names: &NameChanges, view: &ViewDir, changed: &[Changed]) -> Vec<(u64, Vec<u8>)> {
     let ino = |local: u64| inode::view(view.slot, local);
     // The root holds the summary, which changes with what is merged.
     let mut inodes = vec![ino(0)];
     let mut dirs = HashSet::from([0]);
+    let mut entries = Vec::new();
     for path in changed.iter().map(|c| &c.path) {
         if let Some(dir) = view.held(parent(path)) {
-            names.entry(ino(dir), name(path));
+            entries.push((ino(dir), name(path).to_vec()));
             if dirs.insert(dir) {
                 inodes.push(ino(dir));
             }
@@ -283,4 +289,5 @@ fn tell(names: &NameChanges, view: &ViewDir, changed: &[Changed]) {
         }
     }
     names.changed(&inodes);
+    entries
 }
