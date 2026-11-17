@@ -242,11 +242,12 @@ impl Private {
     /// pruning at once): what no view shows goes. A failure of that is only
     /// logged.
     pub fn shown(&self, branch: &str, commit: ObjectId) -> Result<()> {
+        // Refs too: another garbage collection packs them.
+        let _collecting = self.lock.write();
         let id = crate::state::workspace_id(branch);
         self.refs(format!(
             "update refs/gitfold/views/{id} {commit}\ndelete refs/gitfold/next/{id}\n"
         ))?;
-        let _collecting = self.lock.write();
         let packs = self.dir.join("objects/pack");
         let before = std::fs::metadata(&packs).and_then(|m| m.modified()).ok();
         let gc = self.run(&[

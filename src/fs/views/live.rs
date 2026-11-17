@@ -44,8 +44,12 @@ impl Private {
             let args = ["write-tree", "--missing-ok"];
             oid(&git::cmd::output_of(&mut git()?, &args, None)?)
         });
-        // Left if it fails: the private repository is made anew at each mount.
+        // Left if it fails (and a lock a killed git left): the private
+        // repository is made anew at each mount.
+        let mut lock = copy.clone().into_os_string();
+        lock.push(".lock");
         let _ = std::fs::remove_file(&copy);
+        let _ = std::fs::remove_file(lock);
         let tree = tree?;
         let commit = self.commit(&tree, branch)?;
         // By id: branch names nest (`a`, `a/b`), refs can't.
