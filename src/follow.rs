@@ -829,12 +829,12 @@ fn landed(
 }
 
 /// Whether the changes of `base` since it and the target (at `tip`)
-/// diverged are in a commit of the target since then (a squash merge; the
-/// last commit of a rebase merge; also with the target changing those lines
-/// later): merging `base` into it, from where they diverged, changes
-/// nothing (`git merge-tree`, one for each commit touching their paths,
-/// after `since`). It is a guess: the target making the same change on its
-/// own looks the same.
+/// diverged are in the target as other commits (a squash merge; a rebase
+/// merge): merging `base` into the target changes nothing (`git
+/// merge-tree`, from where they diverged). First into its tip; else (the
+/// target changed those lines since) into each of its commits touching
+/// their paths, after `since`, the newest `MAX_TRIED`. It is a guess: the
+/// target making the same change on its own looks the same.
 fn squashed(
     common_dir: &Path,
     base: ObjectId,
@@ -857,6 +857,11 @@ fn squashed(
     let paths = cmd::nul_paths(&cmd::output(common_dir, &args)?);
     if paths.is_empty() {
         return Ok(false);
+    }
+    let tree = cmd::output(common_dir, &["rev-parse", &format!("{tip}^{{tree}}")])?;
+    let tree = String::from_utf8_lossy(&tree).trim().to_string();
+    if no_op_merge(common_dir, fork, base, &[(tip_hex.as_str(), tree.as_str())])? {
+        return Ok(true);
     }
     // The paths on standard input: a large change's would overflow the
     // command line.
@@ -890,6 +895,17 @@ fn squashed(
         );
         commits.truncate(MAX_TRIED);
     }
+    no_op_merge(common_dir, fork, base, &commits)
+}
+
+/// Whether merging `base` into one of `commits` (each with its tree), from
+/// `fork`, gives that commit's tree: one `git merge-tree --stdin` for all.
+fn no_op_merge(
+    common_dir: &Path,
+    fork: ObjectId,
+    base: ObjectId,
+    commits: &[(&str, &str)],
+) -> Result<bool> {
     if commits.is_empty() {
         return Ok(false);
     }
