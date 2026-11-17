@@ -3,7 +3,7 @@
 //! those paths).
 
 use std::cell::OnceCell;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,9 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 
+use super::tree::{landed_said, paused};
 use super::write_path;
+use crate::follow;
 use crate::git;
 use crate::settings;
 use crate::state::retire::{base_note, check_name};
@@ -19,6 +21,7 @@ use crate::state::status;
 use crate::state::task::TaskDir;
 use crate::state::{self, StateDir};
 use crate::store::Store;
+use crate::tree::Tree;
 
 /// `gitfold changes`: the uncommitted changes of a workspace relative to
 /// its base (normally its branch's tip), untracked files included and ignored
@@ -349,12 +352,19 @@ fn last_change(state: &StateDir, s: &status::Status, task: &TaskDir) -> Option<S
     .max()
 }
 
-/// `gitfold list`: the repository's workspaces and their uncommitted changes.
+/// `gitfold list`: the repository's workspaces and their uncommitted changes,
+/// with the tree of branches (spec section 8): each branch under its parent,
+/// whether it follows it, and a note when something needs doing.
 pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     let ListArgs { stat } = args;
     let common_dir = git::init(repo)?;
-    let list = state::list(&common_dir)?;
-    if list.is_empty() {
+    // The tree is extra: a config it can't read doesn't hide the workspaces.
+    let tree = Tree::read(&common_dir).unwrap_or_else(|e| {
+        log::warn!("the tree of branches: {e:#}");
+        Tree::default()
+    });
+    let rows = rows(&tree, state::list(&common_dir)?);
+    if rows.is_empty() {
         println!("no workspaces");
         return Ok(());
     }
@@ -365,50 +375,170 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         false => String::new(),
     };
     println!(
-        "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  status",
-        "branch", "changed", "deleted", "ignored", "base", "last"
+        "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {:<6}  status",
+        "branch", "changed", "deleted", "ignored", "base", "last", "follow"
     );
-    for w in list {
-        let s = match status::status(&store, &w.state) {
-            Ok(s) => s,
-            Err(e) => {
-                println!("{:<40} unreadable ({e:#}); id {}", w.branch, w.state.id);
-                continue;
-            }
+    for (depth, branch, workspace) in rows {
+        let name = match depth {
+            0 => branch.clone(),
+            _ => format!("{}└─ {branch}", "   ".repeat(depth - 1)),
         };
-        let lines = match stat {
-            true => {
+        let follow = match tree.parent(&branch) {
+            Some(_) if tree.follows(&branch) => "on",
+            Some(_) => "off",
+            None => "",
+        };
+        let mut notes = tree_notes(&common_dir, &tree, &local, &branch);
+        // A branch without a workspace: its tree columns only.
+        let (mut counts, mut base, mut last, mut task) = (
+            ["-".to_string(), "-".into(), "-".into()],
+            "-".to_string(),
+            "-".to_string(),
+            None,
+        );
+        let mut lines = match stat {
+            true => format!(" {:>8} {:>8}", "-", "-"),
+            false => String::new(),
+        };
+        if let Some(w) = workspace {
+            let s = match status::status(&store, &w.state) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Its tree notes all the same.
+                    let notes = notes.iter().map(|n| format!("; {n}")).collect::<String>();
+                    println!("{name:<40} unreadable ({e:#}); id {}{notes}", w.state.id);
+                    continue;
+                }
+            };
+            if stat {
                 let (mut added, mut removed) = (0, 0);
                 for (change, path) in s.changes(&store) {
                     if let Some((a, r)) = s.line_counts(&store, &w.state, change, path)? {
                         (added, removed) = (added + a, removed + r);
                     }
                 }
-                format!(" {:>8} {:>8}", format!("+{added}"), format!("-{removed}"))
+                lines = format!(" {:>8} {:>8}", format!("+{added}"), format!("-{removed}"));
             }
-            false => String::new(),
-        };
-        let task = TaskDir::with(&local, &common_dir, &w.branch);
-        let last = last_change(&w.state, &s, &task).map_or("-".into(), age);
+            let dir = TaskDir::with(&local, &common_dir, &w.branch);
+            last = last_change(&w.state, &s, &dir).map_or("-".into(), age);
+            task = dir.status();
+            counts = [s.changed.len(), s.deleted.len(), s.ignored].map(|n| n.to_string());
+            base = s.base.to_hex_with_len(12).to_string();
+            let note = base_note(&w.branch, &s.base);
+            if !note.is_empty() {
+                notes.insert(0, note.to_string());
+            }
+        }
         // What the agent says it is doing, then what gitfold notes.
-        let status = match (task.status(), base_note(&w.branch, &s.base)) {
+        let notes = notes.join("; ");
+        let status = match (task, notes.as_str()) {
             (Some(status), "") => status,
-            (Some(status), note) => format!("{status} ({note})"),
+            (Some(status), notes) => format!("{status} ({notes})"),
             (None, "") => String::new(),
-            (None, note) => format!("({note})"),
+            (None, notes) => format!("({notes})"),
         };
-        println!(
-            "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {}",
-            w.branch,
-            s.changed.len(),
-            s.deleted.len(),
-            s.ignored,
-            s.base.to_hex_with_len(12).to_string(),
-            last,
-            status
+        let [changed, deleted, ignored] = counts;
+        let line = format!(
+            "{name:<40} {changed:>8} {deleted:>8} {ignored:>8}{lines}  {base:<12} {last:>6}  \
+             {follow:<6}  {status}"
         );
+        println!("{}", line.trim_end());
     }
     Ok(())
+}
+
+/// The branches `gitfold list` shows, in order, each with how deep it sits
+/// in the tree and its workspace: the workspaces, and the branches with a
+/// parent or children (never every branch). Each sits under its parent;
+/// the root's children, and branches whose parent isn't shown or is gone,
+/// at the top.
+fn rows(
+    tree: &Tree,
+    workspaces: Vec<state::Stored>,
+) -> Vec<(usize, String, Option<state::Stored>)> {
+    let mut shown: BTreeMap<String, Option<state::Stored>> = (workspaces.into_iter())
+        .map(|w| (w.branch.clone(), Some(w)))
+        .collect();
+    for branch in tree.with_parents() {
+        shown.entry(branch.to_string()).or_default();
+        if let Some(parent) = up(tree, branch) {
+            shown.entry(parent.to_string()).or_default();
+        }
+    }
+    // The branches under each shown branch, by name; under `None`, the top.
+    let mut under: BTreeMap<Option<String>, Vec<String>> = BTreeMap::new();
+    for branch in shown.keys() {
+        let parent = up(tree, branch).filter(|p| shown.contains_key(*p));
+        (under.entry(parent.map(String::from)).or_default()).push(branch.clone());
+    }
+    let level = |depth, branches: Vec<String>| branches.into_iter().rev().map(move |b| (depth, b));
+    let mut stack: Vec<(usize, String)> =
+        level(0, under.remove(&None).unwrap_or_default()).collect();
+    let mut rows = Vec::new();
+    loop {
+        let Some((depth, branch)) = stack.pop() else {
+            // Left over: a cycle a hand-edited config may hold (T4), at the top.
+            match under.pop_first() {
+                Some((_, branches)) => stack.extend(level(0, branches)),
+                None => break,
+            }
+            continue;
+        };
+        if let Some(children) = under.remove(&Some(branch.clone())) {
+            stack.extend(level(depth + 1, children));
+        }
+        let workspace = shown.get_mut(&branch).and_then(Option::take);
+        rows.push((depth, branch, workspace));
+    }
+    rows
+}
+
+/// The parent of `branch` it is shown under: a local branch, not the root,
+/// that exists.
+fn up<'a>(tree: &'a Tree, branch: &str) -> Option<&'a str> {
+    let parent = tree.parent(branch)?.strip_prefix("refs/heads/")?;
+    (Some(parent) != tree.root() && !tree.parent_gone(branch)).then_some(parent)
+}
+
+/// What needs doing about `branch` in the tree, in a few words: its parent
+/// landed (as last checked and recorded: `follow::landed_recorded`), is
+/// gone, or following it is paused (a conflict recorded, or commits pushed:
+/// as `gitfold parent` says, asked of git only when the parent has commits
+/// it lacks).
+fn tree_notes(
+    common_dir: &Path,
+    tree: &Tree,
+    local: &settings::Local,
+    branch: &str,
+) -> Vec<String> {
+    let Some(parent) = tree.parent(branch) else {
+        return Vec::new();
+    };
+    let gone = tree.parent_gone(branch);
+    let mut notes = Vec::new();
+    let landed = (follow::landed_recorded(local, branch, !gone))
+        .filter(|to| to != parent && !tree.root_refs().iter().any(|r| r == parent));
+    match (landed, gone) {
+        (Some(to), _) => notes.push(landed_said(parent, &to, gone)),
+        (None, true) => notes.push("parent gone".to_string()),
+        (None, false) => {}
+    }
+    if !gone && tree.follows(branch) {
+        let behind = || -> Result<bool> {
+            let (from, tip) = (git::resolve(parent)?.id, git::branch_tip(branch)?.id);
+            Ok(!follow::is_ancestor(common_dir, from, tip)?)
+        };
+        let paused = behind().and_then(|behind| match behind {
+            true => paused(common_dir, tree, branch),
+            false => Ok(None),
+        });
+        match paused {
+            Ok(Some((few, _))) => notes.push(few),
+            Ok(None) => {}
+            Err(e) => log::warn!("{branch}: whether it can take its parent's commits: {e:#}"),
+        }
+    }
+    notes
 }
 
 /// The arguments of `gitfold list`.

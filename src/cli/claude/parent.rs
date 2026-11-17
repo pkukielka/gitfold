@@ -92,7 +92,7 @@ fn unmark(state: &StateDir, id: Option<&str>) -> Result<()> {
 /// What the agent of the workspace of `state` is told at its turn start,
 /// its branch having followed its parent (`follow_once`): a move in full, a
 /// pause in full once (to each session), then a one-line reminder each turn
-/// while it lasts.
+/// while it lasts; a parent that looks merged noted once.
 fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Result<String> {
     let branch = &state.branch;
     let session = session.unwrap_or_default();
@@ -114,6 +114,18 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
             state.set_told(session, None)?;
             format!("gitfold: {branch} took its parent's new commits:\n{said}")
         }
+        Followed::Landed(said) => {
+            state.set_told(session, None)?;
+            format!("gitfold: {said}")
+        }
+        // Told once (to each session).
+        Followed::Noted(said) => match state.told(session).as_deref() == Some(&said) {
+            true => String::new(),
+            false => {
+                state.set_told(session, Some(&said))?;
+                format!("gitfold: {said}\n")
+            }
+        },
         Followed::Paused { full, short } => match state.told(session).as_deref() == Some(&short) {
             true => format!("gitfold: following still paused: {short} (see `gitfold parent`)\n"),
             false => {
