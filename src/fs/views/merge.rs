@@ -64,14 +64,11 @@ pub struct Private {
     /// directory there; its git dir if it has none).
     git_dir: PathBuf,
     top: PathBuf,
-    /// The repository's common directory (its `info/exclude`).
-    pub(super) common_dir: PathBuf,
     /// The repository's object format, and so the private one's.
     hash: gix::hash::Kind,
     /// Held by each merge, each live tree (`live`) and each garbage
-    /// collection: one would prune what another just wrote. It holds what
-    /// git was told of each workspace, which only live trees read.
-    pub(super) lock: Mutex<super::live::Told>,
+    /// collection: one would prune what another just wrote.
+    pub(super) lock: Mutex<()>,
 }
 
 impl Private {
@@ -88,10 +85,9 @@ impl Private {
         let private = Private {
             dir,
             top: git::work_tree().unwrap_or_else(|| git_dir.clone()),
-            common_dir: common_dir.to_path_buf(),
             git_dir,
             hash,
-            lock: Mutex::default(),
+            lock: Mutex::new(()),
         };
         // In the repository's object format: git writes its objects there.
         private.run(&["init", "-q", "--bare", &format!("--object-format={hash}")])?;
@@ -120,7 +116,6 @@ impl Private {
         for remote in git::promisor::remotes() {
             private.run(&["config", &format!("remote.{remote}.promisor"), "true"])?;
         }
-        super::live::install(&private.dir)?;
         git::open_private(&private.dir)?;
         Ok(private)
     }
