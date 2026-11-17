@@ -15,6 +15,7 @@
 //! writes them (not included files), at the moment they are needed: the
 //! daemon's repository handle has the config as it was at mount time.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -176,9 +177,11 @@ impl Local {
     }
 
     /// Whether `branch` takes its parent's new commits by itself
-    /// (`gitfoldFollow`), if set (`Tree::follows` applies the rules).
-    pub fn follow(&self, branch: &str) -> Option<bool> {
-        self.branch_bool(branch, FOLLOW)
+    /// (`gitfoldFollow`), if set (`Tree::follows` applies the rules); a value
+    /// that isn't a boolean an error saying so (warned about by `Tree` only
+    /// where that branch's following is asked).
+    pub fn follow(&self, branch: &str) -> Result<Option<bool>, String> {
+        self.branch_bool_checked(branch, FOLLOW)
     }
 
     /// The conflict recorded for `branch` (`gitfoldConflict`): the parent's
@@ -209,16 +212,34 @@ impl Local {
     }
 
     /// `branch.<branch>.<key>` as a boolean, if set; a value that isn't one is
-    /// warned about and counts as unset.
+    /// warned about (`warn_once`) and counts as unset.
     fn branch_bool(&self, branch: &str, key: &str) -> Option<bool> {
-        let config = self.0.as_ref()?;
-        match config.boolean_by("branch", Some(branch.as_bytes().into()), key) {
-            Ok(value) => value,
-            Err(_) => {
-                warn!("{} is not a boolean", branch_key(branch, key));
-                None
-            }
-        }
+        self.branch_bool_checked(branch, key).unwrap_or_else(|e| {
+            warn_once(&e);
+            None
+        })
+    }
+
+    /// `branch_bool`, a value that isn't a boolean an error saying so.
+    fn branch_bool_checked(&self, branch: &str, key: &str) -> Result<Option<bool>, String> {
+        let Some(config) = self.0.as_ref() else {
+            return Ok(None);
+        };
+        (config.boolean_by("branch", Some(branch.as_bytes().into()), key)).map_err(|_| {
+            format!(
+                "{} is not a boolean (taken as unset)",
+                branch_key(branch, key)
+            )
+        })
+    }
+}
+
+/// Warns `message` once in this process: the config is read again and again.
+pub fn warn_once(message: &str) {
+    static WARNED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+    let mut warned = WARNED.lock().unwrap_or_else(|e| e.into_inner());
+    if warned.insert(message.to_string()) {
+        warn!("{message}");
     }
 }
 
@@ -338,33 +359,8 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
     let value = mountpoint
         .to_str()
         .context("a mount point that isn't UTF-8");
-    // Each written even if the other can't be, each retried a while: another
-    // git command may hold the config's lock.
-    let write = |key: &str, value: &str| -> Result<()> {
-        let key = format!("gitfold.{key}");
-        let started = Instant::now();
-        loop {
-            let out = (git::cmd::command(git_dir))
-                .args(["config", "--local", &key, value])
-                .output()?;
-            match out.status.code() {
-                Some(0) => return Ok(()),
-                // The file not written (4, git config's exit code) or its
-                // lock held (255, what git exits with then): retried; any
-                // other failure waiting doesn't change.
-                Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
-                    sleep(Duration::from_millis(100));
-                    continue;
-                }
-                _ => {}
-            }
-            anyhow::bail!(
-                "git config {key} failed ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-    };
+    // Each written even if the other can't be.
+    let write = |key: &str, value: &str| config(git_dir, &[&format!("gitfold.{key}"), value]);
     let place = value.and_then(|value| write(MOUNTPOINT, value));
     write(MOUNT_OPTIONS, &flags.join("\n")).and(place)
 }
@@ -372,30 +368,60 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
 /// How long writing a setting is retried while it fails (the config locked).
 const CONFIG_WAIT: Duration = Duration::from_secs(2);
 
-/// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
-/// own config file (where it is read), given the repository's or one of its
-/// worktrees' git directory.
-fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()> {
-    git::cmd::run(
-        git_dir,
-        &["config", "--local", &branch_key(branch, key), value],
-    )
+/// Runs `git config --local <args>`: writes the repository's own config file
+/// (where settings are read), given the repository's or one of its
+/// worktrees' git directory. Retried a while if git can't write the file:
+/// another git command (the user's, the mount's follow thread) may hold its
+/// lock.
+fn config(git_dir: &Path, args: &[&str]) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let Err(e) = git_config(git_dir, args) else {
+            return Ok(());
+        };
+        match exit_code(&e) {
+            // The file not written (4, git config's exit code) or its lock
+            // held (255, what git exits with then): retried; any other
+            // failure waiting doesn't change.
+            Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
+                sleep(Duration::from_millis(100));
+            }
+            _ => return Err(e),
+        }
+    }
 }
 
-/// Removes `branch.<branch>.<key>` (every value it has), if set.
+/// `git config --local <args>` (see `config`), what it printed.
+fn git_config(git_dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let args = [&["config", "--local"], args].concat();
+    git::cmd::output_of(&mut git::cmd::command(git_dir), &args, None)
+}
+
+/// Sets `branch.<branch>.<key>` to `value` (see `config`).
+fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()> {
+    config(git_dir, &[&branch_key(branch, key), value])
+}
+
+/// Removes `branch.<branch>.<key>` (every value it has), if set; if not,
+/// the config isn't written (git takes its lock even then).
 fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
     let key = branch_key(branch, key);
-    let out = git::cmd::command(git_dir)
-        .args(["config", "--local", "--unset-all", &key])
-        .output()?;
-    // Exit 5: it wasn't set.
-    match out.status.code() {
-        Some(0 | 5) => Ok(()),
-        _ => anyhow::bail!(
-            "git config --unset-all {key}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
+    // Exit 1: not set.
+    if let Err(e) = git_config(git_dir, &["--get-all", &key])
+        && exit_code(&e) == Some(1)
+    {
+        return Ok(());
     }
+    match config(git_dir, &["--unset-all", &key]) {
+        // Exit 5: unset meanwhile.
+        Err(e) if exit_code(&e) == Some(5) => Ok(()),
+        done => done,
+    }
+}
+
+/// The exit code of git, if `e` is git failing (`cmd::Failed`).
+fn exit_code(e: &anyhow::Error) -> Option<i32> {
+    e.downcast_ref::<git::cmd::Failed>()?.status.code()
 }
 
 /// Gives branch `to` the settings set for branch `from` (a fork); one that

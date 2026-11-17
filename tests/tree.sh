@@ -265,6 +265,8 @@ on() { R switch -q "$1"; echo "$3" >>"$REPO/$2"; R add "$2"; R commit -qm "$1: $
 own() { R rev-list --count "$1..$2"; }
 # refs/gitfold-base/ui put back as it was ($1, or none), after a --set.
 put_base() { if [ -n "$1" ]; then R update-ref refs/gitfold-base/ui "$1"; else R update-ref -d refs/gitfold-base/ui; fi; }
+# branch.ui.gitfoldFollow put back as it was ($1, or unset), after a --set.
+put_follow() { if [ -n "$1" ]; then R config branch.ui.gitfoldFollow "$1"; else R config --unset branch.ui.gitfoldFollow || true; fi; }
 # git rebase commits: it needs a committer, as anywhere.
 identity() { R config user.name t; R config user.email t@t; }
 
@@ -379,12 +381,13 @@ check "a merge among its own commits: not moved" says 1 "ui's own commits includ
 R branch elsewhere main; on elsewhere e.txt e
 check "--set with such a merge: refused" says 1 "ui's own commits include a merge" parent ui --set elsewhere
 eq "  its parent unchanged" "refs/heads/api" "$(R config branch.ui.gitfoldParent)"
+follow=$(R config branch.ui.gitfoldFollow)
 check "--set where it sits already, merge and all: up to date" says 0 "ui is now built on main" parent ui --set main
-R config branch.ui.gitfoldParent refs/heads/api
+R config branch.ui.gitfoldParent refs/heads/api; put_follow "$follow"
 R switch -q ui; R reset -q --hard HEAD~1; R switch -q main
 # Checked out in a git worktree: never moved by gitfold.
 R worktree add -q "$T/wt" ui
-check "checked out in a git worktree: refused (exit 5)" says 5 "ui is checked out in $T/wt" parent ui --update
+check "checked out in a git worktree: refused (exit 5), with the git rebase" says 5 "ui is checked out in $T/wt: gitfold doesn't move it there; take the new commits with git rebase in it (git rebase api ui)" parent ui --update
 R worktree remove "$T/wt"
 # Checked out in a git worktree meanwhile (by a hook, while it moves): git
 # rebase there, not --update (which refuses it).
@@ -400,10 +403,10 @@ rm "$REPO/.git/hooks/post-rewrite"; R worktree remove "$T/wt"
 # A workspace's branch in a repository never mounted: mount it first.
 mkdir -p "$REPO/.git/gitfold/ui"
 check "a workspace's branch, never mounted: mount it first" says 1 "mount it first (\`gitfold mount\`)" parent ui --update
-base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set elsewhere)
+follow=$(R config branch.ui.gitfoldFollow); base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set elsewhere)
 check "--set, never mounted: written, then --update finishes" test "${r%% *} $([[ $r == *"ui is now built on elsewhere "*"isn't mounted: mount it first (\`gitfold mount\`), then: \`gitfold parent ui --update\`"* ]] && echo yes)" = "1 yes"
 eq "  its parent written" "refs/heads/elsewhere" "$(R config branch.ui.gitfoldParent)"
-R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"
+R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"; put_follow "$follow"
 rmdir "$REPO/.git/gitfold/ui"
 # A move a crash interrupted after git moved the branch: its base recorded.
 R update-ref refs/gitfold-base/ui main~1
@@ -497,9 +500,12 @@ on api a.txt unresolved
 before=$(R rev-parse ui)
 check "a conflict left unresolved: resolve it (exit 4)" says 4 "ui has a conflict left unresolved in its workspace on g.txt: resolve it, then: \`gitfold parent ui --update\`" parent ui --update
 eq "  the branch where it was" "$before" "$(R rev-parse ui)"
-base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set main)
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui
+check "  said before its commits being pushed" says 4 "ui has a conflict left unresolved" parent ui --update
+R update-ref -d refs/remotes/origin/ui; R remote remove origin
+follow=$(R config branch.ui.gitfoldFollow); base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set main)
 eq "--set with it: refused before it says what moves" "4 yes no" "${r%% *} $([[ $r == *"resolve it"* ]] && echo yes || echo no) $([[ $r == *"moves "* ]] && echo yes || echo no)"
-R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"
+R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"; put_follow "$follow"
 W ui reset -q -- g.txt
 check "  moved once resolved" says 0 "moved 1 commit of ui onto api" parent ui --update
 # An untracked file where the parent adds one: git refuses, nothing moves.
@@ -564,8 +570,12 @@ eq "rebased by hand: nothing said" "" "$(turn)"
 check "  the conflict forgotten" fails R config branch.ui.gitfoldConflict
 # Its parent merged: said once; deleted, ui moves onto main.
 R merge -q --no-ff --no-edit api
-eq "the parent merged: said once" "gitfold: api looks merged into main: \`gitfold parent ui --set main\` moves ui there with only its own commits (or delete api, \`git branch -d api\`, and ui moves there by itself) " "$(turn)"
+eq "the parent merged: said once" "gitfold: api looks merged into main: \`gitfold parent ui --set main\` moves ui there with only its own commits (or delete api, \`git branch -D api\`, and ui moves there by itself) " "$(turn)"
 eq "  then nothing" "" "$(turn)"
+R config branch.ui.gitfoldFollow maybe
+eq "following set to no boolean: warned once, as unset" "1" "$(turn | grep -c 'branch.ui.gitfoldFollow is not a boolean (taken as unset)')"
+check "  not for another branch" lacks 0 "not a boolean" parent api
+R config --unset branch.ui.gitfoldFollow
 R branch -D -q api
 r=$(turn)
 check "  deleted: ui moved onto main, said" test "$([[ $r == "gitfold: api landed in main; ui is now built on main moved "*" of ui onto main"* ]] && echo yes)" = yes
@@ -638,6 +648,13 @@ R branch dp; on dp dp.txt one; "$BIN" -C "$REPO" branch dc --parent dp >/dev/nul
 R merge -q --no-ff --no-edit dp; R branch -D -q dp
 check "a parent landed and deleted: built on main" until_ok sh -c "[ \"\$(git -C '$REPO' config branch.dc.gitfoldParent)\" = refs/heads/main ]"
 check "  logged" until_ok grep -q "following: dp landed in main; dc is now built on main" "$LOG"
+# A workspace's parent landed: its agent told of the landing (what was
+# kept for it taken first).
+turn >/dev/null; hook session-end parent '"session_id":"s1"' >/dev/null
+R merge -q --no-ff --no-edit api; R branch -D -q api
+check "a workspace's parent landed: built on main" until_ok test -e "$REPO/.git/gitfold/ui/followed"
+r=$(turn)
+check "  its agent told of the landing" test "$([[ $r == "gitfold: since your last turn, api landed in main; ui is now built on main"* ]] && echo yes)" = yes
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
 }
 
@@ -748,9 +765,12 @@ check "pushed commits: paused (exit 4)" says 4 "following paused: 1 commit is pu
 check "  nothing moved" fails R merge-base --is-ancestor api ui
 check "  --update --yes moves them" says 0 "moved 1 commit of ui onto api" parent ui --update --yes
 R update-ref -d refs/remotes/origin/ui
+on api w.txt more; R worktree add -q "$T/wt" ui
+check "checked out in a git worktree: refused (exit 5, as --update)" says 5 "ui is checked out in $T/wt" parent ui --update --auto
+R worktree remove "$T/wt"
 mount_fs; ls "$MNT/ui" >/dev/null; unmount_fs
 on api c.txt more
-check "a workspace, unmounted: refused (exit 4)" says 4 "isn't mounted: mount it first" parent ui --update --auto
+check "a workspace, unmounted: refused (exit 1, as --update)" says 1 "isn't mounted: mount it first" parent ui --update --auto
 check "  not mounted again" fails mountpoint -q "$MNT"
 }
 # gitfold list (spec section 8): each branch under its parent, whether it
