@@ -642,6 +642,13 @@ R branch dp; on dp dp.txt one; "$BIN" -C "$REPO" branch dc --parent dp >/dev/nul
 R merge -q --no-ff --no-edit dp; R branch -D -q dp
 check "a parent landed and deleted: built on main" until_ok sh -c "[ \"\$(git -C '$REPO' config branch.dc.gitfoldParent)\" = refs/heads/main ]"
 check "  logged" until_ok grep -q "following: dp landed in main; dc is now built on main" "$LOG"
+# A workspace's parent landed: its agent told of the landing (what was
+# kept for it taken first).
+turn >/dev/null; hook session-end parent '"session_id":"s1"' >/dev/null
+R merge -q --no-ff --no-edit api; R branch -D -q api
+check "a workspace's parent landed: built on main" until_ok test -e "$REPO/.git/gitfold/ui/followed"
+r=$(turn)
+check "  its agent told of the landing" test "$([[ $r == "gitfold: since your last turn, api landed in main; ui is now built on main"* ]] && echo yes)" = yes
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
 }
 

@@ -101,9 +101,7 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
     // Moves made while no agent was here (the daemon's): taken after
     // `follow_once`, which waits for one under way.
     let mut out = match state.take_followed()? {
-        Some(said) => format!(
-            "gitfold: since your last turn, {branch} took its parent's new commits:\n{said}"
-        ),
+        Some(said) => format!("gitfold: since your last turn, {said}"),
         None => String::new(),
     };
     out += &match followed {

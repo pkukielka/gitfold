@@ -196,10 +196,17 @@ fn update(common_dir: &Path, state: &StateDir, tip: ObjectId, parent: &str, paus
     let branch = &state.branch;
     let (said, ok) = run_update(common_dir, branch).unwrap_or_else(|e| (format!("{e:#}\n"), false));
     let moved = git::branch_tip(branch).is_ok_and(|now| now.id != tip);
-    if moved || Tree::read(common_dir).is_ok_and(|t| t.parent(branch) != Some(parent)) {
+    // Built on another parent: its parent landed (said so first).
+    let landed = Tree::read(common_dir).is_ok_and(|t| t.parent(branch) != Some(parent));
+    if moved || landed {
         paused.clear();
         info!("following: {}", said.trim_end().replace('\n', "; "));
-        if let Err(e) = state.add_followed(&said) {
+        // What its agent is told.
+        let told = match landed {
+            true => said,
+            false => format!("{branch} took its parent's new commits:\n{said}"),
+        };
+        if let Err(e) = state.add_followed(&told) {
             warn!("following: {branch}: keeping the move for its agent: {e:#}");
         }
     } else if said.trim().is_empty() {
