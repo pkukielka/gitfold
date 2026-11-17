@@ -139,7 +139,7 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
             false => Ok(None),
         };
         match paused {
-            Ok(Some(paused)) => println!("{paused}"),
+            Ok(Some((_, full))) => println!("{full}"),
             Ok(None) => {}
             Err(e) => log::warn!("{name}: whether it can take its parent's commits: {e:#}"),
         }
@@ -177,8 +177,13 @@ fn show(tree: &Tree, name: &str, parent: Option<&str>) -> String {
 }
 
 /// Why `name` doesn't take its parent's new commits, if it has some it
-/// can't take: a conflict recorded, or commits already pushed.
-fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> {
+/// can't take: a conflict recorded, or commits already pushed. In a few
+/// words (`gitfold list`), and in full.
+pub(crate) fn paused(
+    common_dir: &Path,
+    tree: &Tree,
+    name: &str,
+) -> Result<Option<(String, String)>> {
     let Some(parent) = tree.parent(name).filter(|_| !tree.parent_gone(name)) else {
         return Ok(None);
     };
@@ -189,13 +194,15 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
     let local = settings::Local::read_checked(common_dir)?;
     let short = crate::tree::short(parent);
     if let Some(paths) = plan.conflict(common_dir, &local)? {
-        return Ok(Some(format!(
-            "following paused: {}",
-            conflict_said(name, short, &plan, &paths)
-        )));
+        let full = conflict_said(name, short, &plan, &paths);
+        let few = format!("conflict on {}", paths.join(", "));
+        return Ok(Some((few, format!("following paused: {full}"))));
     }
     let pushed = plan.pushed(common_dir)?;
-    Ok(pushed.map(|p| format!("following paused: {}", pushed_said(name, &p))))
+    Ok(pushed.map(|p| {
+        let few = "following paused: pushed".to_string();
+        (few, format!("following paused: {}", pushed_said(name, &p)))
+    }))
 }
 
 /// Where `name` moves: its workspace, through the mount (mounted again
@@ -518,7 +525,7 @@ fn landed_in(
 
 /// What is said of `parent` landing in `to` (full refs): it landed
 /// (`gone`), or looks merged while its branch exists.
-fn landed_said(parent: &str, to: &str, gone: bool) -> String {
+pub(crate) fn landed_said(parent: &str, to: &str, gone: bool) -> String {
     let (parent, to) = (crate::tree::short(parent), crate::tree::short(to));
     match gone {
         true => format!("{parent} landed in {to}"),

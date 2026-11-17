@@ -272,9 +272,11 @@ pub fn forget_workspace(
 }
 
 /// Makes `parent` (a full ref) the parent of `branch` (see `set_branch`);
-/// following is `set_follow`'s.
+/// following is `set_follow`'s. What was checked of the landing of the
+/// parent before is forgotten: it was of another parent maybe.
 pub fn set_parent(git_dir: &Path, branch: &str, parent: &str) -> Result<()> {
-    set_branch(git_dir, branch, PARENT, parent)
+    set_branch(git_dir, branch, PARENT, parent)?;
+    unset_branch(git_dir, branch, LANDING)
 }
 
 /// Forgets the parent of `branch`, whether it follows it (F5), and a

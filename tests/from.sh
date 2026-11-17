@@ -41,7 +41,7 @@ git_refuses() {
     return $refused
 }
 # Whether branch $1 left nothing: no branch, no workspace.
-nothing_of() { ! R rev-parse --verify -q "refs/heads/$1" >/dev/null && [ ! -e "$MNT/$1" ] && ! "$BIN" -C "$REPO" list | grep -q "^$1 "; }
+nothing_of() { ! R rev-parse --verify -q "refs/heads/$1" >/dev/null && [ ! -e "$MNT/$1" ] && ! "$BIN" -C "$REPO" list | grep -Eq "^[ └─]*$1 "; }
 # git in workspace $1 of the mount.
 W() { git -C "$MNT/$1" -c user.name=t -c user.email=t@t "${@:2}"; }
 

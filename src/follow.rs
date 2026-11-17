@@ -54,7 +54,7 @@ fn rev(name: &str) -> Option<ObjectId> {
 }
 
 /// Whether `a` is an ancestor of `b` (or `b`).
-fn is_ancestor(common_dir: &Path, a: ObjectId, b: ObjectId) -> Result<bool> {
+pub fn is_ancestor(common_dir: &Path, a: ObjectId, b: ObjectId) -> Result<bool> {
     let (a, b) = (a.to_string(), b.to_string());
     let status = cmd::command(common_dir)
         .args(["merge-base", "--is-ancestor", &a, &b])
@@ -735,6 +735,19 @@ impl Checked {
             targets,
         })
     }
+}
+
+/// Where the parent of `branch` landed, as `landing` last recorded it, if
+/// it found a landing: of its own commits as they start now (`recorded_base`)
+/// and of its parent as it is now (`fresh`: its branch still there; one
+/// found while it was holds once it is gone, the check then being looser).
+pub fn landed_recorded(local: &Local, branch: &str, fresh: bool) -> Option<String> {
+    let checked = Checked::decode(&local.landing(branch)?)?;
+    if (fresh && !checked.fresh) || Some(checked.base) != recorded_base(branch) {
+        return None;
+    }
+    let mut targets = checked.targets.into_iter();
+    targets.find(|&(_, _, yes)| yes).map(|(target, ..)| target)
 }
 
 /// The first of `targets` (full refs) that the commits of the parent of
