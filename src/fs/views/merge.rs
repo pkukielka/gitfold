@@ -64,6 +64,8 @@ pub struct Private {
     /// directory there; its git dir if it has none).
     git_dir: PathBuf,
     top: PathBuf,
+    /// The repository's object format, and so the private one's.
+    hash: gix::hash::Kind,
     /// Held by each merge and its garbage collection: one would prune what
     /// the other just wrote.
     lock: Mutex<()>,
@@ -78,14 +80,17 @@ impl Private {
         crate::state::retire::remove_dir(&dir)?;
         std::fs::create_dir_all(&dir)?;
         let objects = common_dir.join("objects").canonicalize()?;
-        let git_dir = git::with_repo(|repo| repo.git_dir().to_path_buf());
+        let (git_dir, hash) =
+            git::with_repo(|repo| (repo.git_dir().to_path_buf(), repo.object_hash()));
         let private = Private {
             dir,
             top: git::work_tree().unwrap_or_else(|| git_dir.clone()),
             git_dir,
+            hash,
             lock: Mutex::new(()),
         };
-        private.run(&["init", "-q", "--bare"])?;
+        // In the repository's object format: git writes its objects there.
+        private.run(&["init", "-q", "--bare", &format!("--object-format={hash}")])?;
         std::fs::create_dir_all(private.dir.join("objects/info"))?;
         std::fs::write(
             private.dir.join("objects/info/alternates"),
@@ -177,7 +182,7 @@ impl Private {
         let mut tree = own.1;
         let mut conflicts = Vec::new();
         for (i, m) in members.iter().enumerate() {
-            let base = (m.base).unwrap_or_else(|| ObjectId::empty_tree(gix::hash::Kind::Sha1));
+            let base = (m.base).unwrap_or_else(|| ObjectId::empty_tree(self.hash));
             let base = format!("--merge-base={base}");
             let (ours_hex, theirs) = (ours.to_string(), m.tip.to_string());
             // Attributes (`merge=union`) from the view so far, as a merge in a
