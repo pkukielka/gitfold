@@ -174,9 +174,14 @@ fn merged(
     // Without an upstream: no relation afterwards. The start point as
     // typed: git takes it, or refuses it (a name it finds ambiguous).
     git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.rev])?;
+    // Where git made it (the start point may have moved since).
+    let branch = format!("refs/heads/{name}");
+    let at = git::cmd::output(repo, &["rev-parse", "--verify", &branch])
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string())
+        .unwrap_or_else(|_| first.id.clone());
     let made = Made {
         name,
-        at: &first.id,
+        at: &at,
         prewarm: prewarm.is_some(),
         track_reads: track_reads.is_some(),
     };
@@ -216,18 +221,16 @@ fn merged(
         // As `git cherry-pick` exits after a conflict.
         Ok(Some(conflicts)) => {
             // Up to `PATHS_SAID` paths in all.
-            let mut left = PATHS_SAID;
-            let said: Vec<String> = (conflicts.iter())
-                .map(|(branch, paths)| {
-                    let shown = paths.len().min(left);
-                    left -= shown;
-                    match shown {
-                        0 => format!("{branch}'s"),
-                        _ => format!("{branch}'s on {}", paths[..shown].join(", ")),
-                    }
-                })
-                .collect();
-            let all: usize = conflicts.iter().map(|(_, paths)| paths.len()).sum();
+            let (mut said, mut left, mut all) = (Vec::new(), PATHS_SAID, 0);
+            for (branch, paths) in &conflicts {
+                let shown = paths.len().min(left);
+                left -= shown;
+                all += paths.len();
+                said.push(match shown {
+                    0 => format!("{branch}'s"),
+                    _ => format!("{branch}'s on {}", paths[..shown].join(", ")),
+                });
+            }
             let more = match all.saturating_sub(PATHS_SAID) {
                 0 => String::new(),
                 more => format!(" … and {more} more"),
@@ -535,7 +538,8 @@ fn and_list(names: &[String]) -> String {
 /// made the merge.
 fn run_merge(workspace: &Path, revs: &[String]) -> Result<bool> {
     let status = (git::cmd::in_workspace(workspace)?)
-        // git's warnings of the names said once, as they were resolved.
+        // git's warnings of the names said once, as they were resolved (for
+        // the git its hooks run too).
         .args([
             "-c",
             "core.warnAmbiguousRefs=false",
