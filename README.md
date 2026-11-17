@@ -266,7 +266,7 @@ Options:
 
 | option | default | |
 |---|---|---|
-| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot or workspace, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.16 s for a workspace). |
+| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot, workspace or view, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.16 s for a workspace). |
 | `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--track-reads` | off | Record the files Claude Code reads in workspaces, as its hook reports them, for `gitfold overlaps`. A workspace's own setting wins (`gitfold track-reads`). |
@@ -618,10 +618,12 @@ the others their tips. A workspace's files count once it has been quiet for
 2 s after a change, or every 10 s while it keeps changing; reading the tree
 (a `git add -A` on a copy of its index, through the mount) takes about as long
 as `git status` there. Opening `@live/<branch>` opens the workspaces in it
-(without `--prewarm`). A view not read for a minute rests (nothing is
-refreshed; `GITFOLD_VIEW_REST_SECS` changes how long), and the first access
-afterwards waits up to 5 s for it to be current. A branch with no history in
-common with its parent is left out of both views, noted in the summary.
+(without `--prewarm`), and makes their live trees side by side. A view is
+walked once when it opens, as a snapshot is (`--prewarm`). A view not read
+for a minute rests (nothing is refreshed; `GITFOLD_VIEW_REST_SECS` changes
+how long), and the first access afterwards waits up to 5 s for it to be
+current. A branch with no history in common with its parent is left out of
+both views, noted in the summary.
 
 A branch named `committed` or `live` is reached as `@refs/heads/committed` (a
 remote so named as `@refs/remotes/committed/<branch>`).
@@ -916,18 +918,25 @@ three children, each with commits and a workspace with an uncommitted edit; firs
 | `@committed/<branch>`, first access (built and merged by git) | 0.78 s | |
 | a commit visible in `@committed` | 0.6-0.75 s | |
 | an edit visible in `@live` (2 s quiet period included) | 4.0 s | |
-| `@live/<branch>` on a fresh mount: first access / complete | 5.8 / 16 s | |
+| `@live/<branch>` on a fresh mount: first access / complete | 5.8 / 6.2 s | |
+| a view's cold `find` / warm `rg` (after its metadata prewarm, 1.9 s; `@live` 7.3 s) | 0.35 / 0.36 s | 0.47 / 0.37 s |
 | `parent --update`, branch without a workspace | 0.11 s | 0.08 s (`git replay`) |
 | `parent --update`, a clean workspace | 1.95 s | 1.94 s (`git rebase`) |
 | `parent --update`, a workspace with uncommitted work | 4.9 s | 5.1 s (`git rebase --autostash`) |
 | `branch t --from a --from c` (with `-w`) | 3.8 s (7.2-8.0 s) | 1.6-2.1 s (switch + merge) |
 | landing check (`gitfold parent`) | 0.06-0.07 s | |
-| `changes -- PATH`, 11 branches and workspaces | 9.1 s | |
+| `changes -- PATH`, 11 branches and workspaces | 0.83 s (9.0 s without a commit-graph) | |
 
-Moves cost what git's own rebase costs. `changes -- PATH` spends 8.3 of its 9.1 s in git's
-`for-each-ref --no-merged`, which walks every commit when the repository has no commit-graph: in a
-large repository, run `git commit-graph write --reachable` once (or keep it current with
-`git maintenance start`), and the same query takes milliseconds.
+Moves cost what git's own rebase costs. gitfold keeps a commit-graph current: while mounted, the
+daemon runs git's own task for it, `git maintenance run --task=commit-graph --auto` (at mount and
+every ten minutes, at the lowest CPU and I/O priority, in the background), which writes it
+incrementally (`git commit-graph write --reachable --split`) once 100 commits are missing from
+it (`maintenance.commit-graph.auto`). The first on Chromium took 15 s, later ones a fraction of
+a second. Without one, git walks
+every commit for `changes -- PATH`'s `for-each-ref --no-merged` (9 s on Chromium). To turn it
+off, use git's settings: `maintenance.commit-graph.auto=0` (gitfold leaves the commit-graph to
+you), `maintenance.auto=false` (git's automatic maintenance off, gitfold's too), or
+`core.commitGraph=false` (git doesn't use one at all).
 
 ## Development
 

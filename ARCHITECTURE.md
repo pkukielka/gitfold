@@ -161,6 +161,7 @@ Then, per request (`fs/workspace/`):
 | `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm` and `track-reads` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/serve.rs` | the daemon in the foreground: mounting with FUSE, the control requests it answers, until unmounted |
 | `src/daemon/follow.rs` | following without an agent: the tree walked every second, `parent B --update --auto` run as a child process |
+| `src/daemon/commit_graph.rs` | the repository's commit-graph kept current by `git commit-graph write`, in the background |
 | `src/tree.rs` | the tree of branches: each branch's parent (branch config), the root, resolving parent names, the rules a new parent must pass (no cycle) |
 | `src/follow.rs` | moving a branch onto its parent's commits (`parent --update`, `--set`, following): its own commits, the move by git (its ref, or in its workspace through the mount), crash records, pushed commits, conflicts, landings |
 | `src/git/rebase.rs` | a branch's commits rebased by `git rebase` in a temporary worktree that checks out only the top-level files |
@@ -914,16 +915,27 @@ private repository only (`live`), so every rule of what gets staged is git's.
 There is one live tree per workspace, shared by the views it is in (`lives`),
 kept by `refs/gitfold/live/<id>` (dropped when the workspace is removed), and
 made again once the workspace has been quiet for 2 s after a change, or 10 s
-into a burst. A view opens with the tips; its first requests wait for the
+into a burst. A view's thread makes its members' live trees side by side,
+four at once at most, with threads of its own (each is mostly git waiting on
+the mount; on Chromium one takes ~5 s on a fresh mount, as a cold `git
+status`). A view opens with the tips; its first requests wait for the
 workspaces.
 
+A view is walked once when it opens, as a snapshot is (the mount's
+`--prewarm` mode, threads and walk limit; an `@live` view once it shows its
+live trees: its walk would take the wake slots from the first requests), so
+a first `find` or `rg` doesn't pay for the metadata; not when it wakes
+(what changed meanwhile, the kernel was told to forget).
+
 A view not accessed for a minute rests: its thread reads nothing until an
-access wakes it. An `@live` view's entries and attributes are cached for 1 s
-only, so accesses keep reaching gitfold; an `@committed` view, cached long,
-has the kernel forget its root's entry when it rests, so the next path
-through it asks again. The first access to a resting view waits up to 5 s
-for it to be refreshed, at most half the request threads at once (git reads
-the workspaces through the others; with one thread nothing waits).
+access wakes it. Its entries and attributes are cached long, `@live`'s too;
+when it rests, the kernel forgets its root's entry, so the next path through
+it asks again, and a listing in it always asks gitfold. The first access to a
+resting view waits up to 5 s for it to be refreshed, at most half the request
+threads at once (git reads the workspaces through the others; with one thread
+nothing waits). `@live` once cached its entries for 1 s, so that every access
+reached gitfold: a warm `rg` on Chromium then cost 280k lookups (1.4 s vs
+0.35 s).
 
 **Why git's merge:** each hand-built copy of git's merge behaviour (renames,
 attributes, conflict cases) left the next difference; `merge-tree` is git's
@@ -1382,6 +1394,25 @@ session end and a subagent's stop remove it.
 - **Told once:** a pause is said in full once per session (`told/<session>`),
   then as a one-line reminder each turn; moves the daemon made are said at
   the next turn start (`followed`).
+
+### The commit-graph: git's own cache, kept current
+
+**What:** while mounted, the daemon keeps the repository's commit-graph
+current (`src/daemon/commit_graph.rs`): at mount and every ten minutes it runs
+git's own task, `git maintenance run --task=commit-graph --auto`, at the
+lowest CPU and I/O priority, in a process of its own. git decides: it writes
+(`git commit-graph write --reachable --split`, only the commits new since)
+once enough reachable commits are missing from it
+(`maintenance.commit-graph.auto`, 100; 0 turns it off); not with
+`core.commitGraph=false` nor, as for git's own automatic maintenance, with
+`maintenance.auto=false`; under git's maintenance lock.
+
+**Why:** gitfold's tree of branches asks git commit walks
+(`for-each-ref --no-merged`, merge bases), which walk every commit without a
+commit-graph: on Chromium `gitfold changes -- PATH` took 9 s, 8.3 s of it
+one such query. A fresh `git clone` has none until `git gc` or `git
+maintenance` writes it. git's own task rather than gitfold's check: when to
+write, the settings and the lock are git's, as for `git maintenance`.
 
 ## Rejected ideas (index)
 

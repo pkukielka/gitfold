@@ -231,6 +231,16 @@ impl Workspaces {
         Ok(self.get_open(branch).map(|ws| (ws, true)))
     }
 
+    /// Walks `name` below the mount (a view, see `prewarm`) in the mount's
+    /// mode.
+    pub fn walk(&self, name: &str) {
+        prewarm::spawn(
+            self.mount_point.join(name),
+            self.prewarm,
+            self.prewarm_threads,
+        );
+    }
+
     /// Walks the workspace of `branch` (see `prewarm`), in its own mode if set,
     /// if it is open. `--prewarm none` for the mount wins over a branch's mode.
     pub fn prewarm(&self, branch: &str) {
