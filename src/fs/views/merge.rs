@@ -10,8 +10,8 @@
 //! repository's objects (`objects/info/alternates`) and which gitfold reads
 //! too (`git::open_private`). Nothing is written into the repository. The
 //! first fold's conflict markers name the branches (`<<<<<<< api`,
-//! `>>>>>>> ui`); later ones name the view so far by its tree. The private
-//! repository's only refs are the view's: the tree it shows
+//! `>>>>>>> ui`); later ones name the view so far by the id of a commit of
+//! it. The private repository's only refs are the view's: the tree it shows
 //! (`refs/gitfold/views/<view>`) and, until it shows it, the new one
 //! (`refs/gitfold/next/<view>`). It is made anew at each mount, and
 //! garbage-collected as git's `gc --auto` decides (more loose objects than
@@ -25,7 +25,7 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 use log::warn;
 use parking_lot::Mutex;
@@ -61,8 +61,10 @@ pub struct Merged {
 /// The private repository, and where git runs for the merges.
 pub struct Private {
     dir: PathBuf,
-    /// The repository's git dir, and its objects.
-    repository: PathBuf,
+    /// The repository's git dir, its work tree's top (git's current
+    /// directory there; its git dir if it has none), and its objects.
+    git_dir: PathBuf,
+    top: PathBuf,
     objects: PathBuf,
     /// Held by each merge and its garbage collection: one would prune what
     /// the other just wrote.
@@ -70,26 +72,28 @@ pub struct Private {
 }
 
 impl Private {
-    /// The private repository of the repository at `common_dir`, made anew
-    /// (an earlier mount's objects dropped) and opened for reads.
+    /// The private repository of the repository at `common_dir` (the one
+    /// `git::init` opened), made anew (an earlier mount's objects dropped)
+    /// and opened for reads.
     pub fn create(common_dir: &Path) -> Result<Private> {
         let dir = crate::state::state_root(common_dir).join(".views.git");
         crate::state::retire::remove_dir(&dir)?;
         std::fs::create_dir_all(&dir)?;
-        let init = ["init", "-q", "--bare"];
-        git::cmd::output_of(&mut git::cmd::command_in_other(&dir)?, &init, None)?;
         let objects = common_dir.join("objects").canonicalize()?;
-        std::fs::create_dir_all(dir.join("objects/info"))?;
-        std::fs::write(
-            dir.join("objects/info/alternates"),
-            format!("{}\n", objects.display()),
-        )?;
+        let git_dir = git::with_repo(|repo| repo.git_dir().to_path_buf());
         let private = Private {
             dir,
-            repository: common_dir.to_path_buf(),
+            top: git::work_tree().unwrap_or_else(|| git_dir.clone()),
+            git_dir,
             objects,
             lock: Mutex::new(()),
         };
+        private.run(&["init", "-q", "--bare"])?;
+        std::fs::create_dir_all(private.dir.join("objects/info"))?;
+        std::fs::write(
+            private.dir.join("objects/info/alternates"),
+            format!("{}\n", private.objects.display()),
+        )?;
         // Its commits' author, and no reflogs: they would keep what no view
         // shows.
         for (key, value) in [
@@ -103,26 +107,27 @@ impl Private {
         Ok(private)
     }
 
-    /// git in the private repository.
-    fn run(&self, args: &[&str]) -> Result<Vec<u8>> {
-        git::cmd::output_of(&mut git::cmd::command_in_other(&self.dir)?, args, None)
+    /// git in the private repository: no hook (a global `core.hooksPath`'s
+    /// `pre-auto-gc`, `reference-transaction`) hears of it.
+    fn private_git(&self) -> Result<Command> {
+        let mut git = git::cmd::command_in_other(&self.dir)?;
+        git.args(["-c", "core.hooksPath=/dev/null"]);
+        Ok(git)
     }
 
-    /// git in the repository, as in a shell at its work tree's top (its
-    /// settings, attributes, merge drivers), but for its objects: read from
-    /// the repository and the private one, written to the private one only.
+    fn run(&self, args: &[&str]) -> Result<Vec<u8>> {
+        git::cmd::output_of(&mut self.private_git()?, args, None)
+    }
+
+    /// git in the repository, as there (its settings, attributes, merge
+    /// drivers; in its work tree's top), but for its objects: read from the
+    /// repository and the private one, written to the private one only.
     /// Missing objects aren't fetched (gitfold fetches what a view needs
     /// first).
     fn in_repository(&self) -> Result<Command> {
-        let mut git = match git::work_tree() {
-            Some(top) => git::cmd::in_workspace(&top)?,
-            None => {
-                let mut git = git::cmd::command_in_other(&self.repository)?;
-                git.current_dir(&self.repository);
-                git
-            }
-        };
-        git.env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
+        let mut git = git::cmd::command_in_other(&self.git_dir)?;
+        git.current_dir(&self.top)
+            .env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
             .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", alternate(&self.objects))
             .env("GIT_NO_LAZY_FETCH", "1");
         Ok(git)
@@ -141,8 +146,8 @@ impl Private {
     /// Runs `git update-ref --stdin` with `commands`.
     fn refs(&self, commands: String) -> Result<()> {
         let args = ["update-ref", "--stdin"];
-        let mut git = git::cmd::command_in_other(&self.dir)?;
-        git::cmd::output_of(&mut git, &args, Some(commands.into_bytes())).map(drop)
+        let input = Some(commands.into_bytes());
+        git::cmd::output_of(&mut self.private_git()?, &args, input).map(drop)
     }
 
     /// The view of `branch`: its commit and tree `own` (the tip of `branch`
@@ -159,12 +164,18 @@ impl Private {
         let _lock = self.lock.lock();
         let local = format!("refs/heads/{branch}");
         let own_refs: Vec<&str> = [local.as_str()].into_iter().chain(origin).collect();
-        // git's arguments for the view so far and the member, which name
-        // the sides in conflict markers: refs, then the view's tree.
-        let mut ours = named(&own_refs, own.0);
-        // How the summary names the view so far.
-        let mut side = branch.to_string();
+        // git's argument for the view so far, which names it in conflict
+        // markers: a ref, then a commit of the view so far (git 2.44
+        // takes no tree there; the last one is the view's).
+        let (mut ours, mut ours_at) = (named(&own_refs, own.0), own.0);
+        // How the summary names it: as the first markers do, by branch if
+        // they name it by id.
+        let mut side = match ObjectId::from_hex(ours.as_bytes()).is_ok() {
+            true => branch.to_string(),
+            false => ours.clone(),
+        };
         let mut tree = own.1;
+        let mut commit = None;
         let mut conflicts = Vec::new();
         for (i, m) in members.iter().enumerate() {
             let base = (m.base).unwrap_or_else(|| ObjectId::empty_tree(gix::hash::Kind::Sha1));
@@ -177,6 +188,14 @@ impl Private {
             let out = (self.in_repository()?.args(["-c", &attributes]).args(args))
                 .stdin(Stdio::null())
                 .output()?;
+            // A branch git took by name moved meanwhile: merged against
+            // another merge point. Made again at the next refresh.
+            for (name, at) in [(&ours, ours_at), (&theirs, m.tip)] {
+                let by_id = ObjectId::from_hex(name.as_bytes()).is_ok_and(|id| id == at);
+                if !by_id && !git::resolve(name).is_ok_and(|c| c.id == at) {
+                    bail!("{name} moved during the merge");
+                }
+            }
             // 1: conflicts, which the output says.
             if !matches!(out.status.code(), Some(0 | 1)) {
                 return Err(git::cmd::Failed {
@@ -192,11 +211,16 @@ impl Private {
                 let sides = [side.clone(), m.branch.to_string()];
                 conflicts.push(Conflict { kind, sides, path });
             }
-            side = label(branch, &side, m.branch, i + 1);
-            ours = tree.to_string();
+            side = label(branch, &side, m.branch, i + 1, members);
+            ours_at = self.commit(&tree, &side)?;
+            ours = ours_at.to_string();
+            commit = Some(ours_at);
         }
         // Kept as a tree of its own, without the branches' history.
-        let commit = self.commit(&tree, branch)?;
+        let commit = match commit {
+            Some(commit) => commit,
+            None => self.commit(&tree, branch)?,
+        };
         self.refs(format!("update refs/gitfold/next/{branch} {commit}\n"))?;
         Ok(Merged {
             tree,
@@ -277,13 +301,17 @@ fn alternate(dir: &Path) -> OsString {
 
 /// How the summary names the view so far after `member`, the `merged`th
 /// member, was merged into `ours` (a view of `branch`): a long name counts
-/// the branches.
-fn label(branch: &str, ours: &str, member: &str, merged: usize) -> String {
-    let label = format!("{ours}+{member}");
-    match label.len() > 100 {
-        true => format!("{branch}+{merged}-branches"),
-        false => label,
+/// the branches; one that is a member's name too gets `-view`, so that the
+/// two sides read apart.
+fn label(branch: &str, ours: &str, member: &str, merged: usize, members: &[Member]) -> String {
+    let mut label = format!("{ours}+{member}");
+    if label.len() > 100 {
+        label = format!("{branch}+{merged}-branches");
     }
+    while label == branch || members.iter().any(|m| m.branch == label) {
+        label.push_str("-view");
+    }
+    label
 }
 
 /// What git says conflicts in a merge: its kind, the path.
@@ -390,11 +418,11 @@ mod tests {
         );
         let m = view("g1-api", &[("g1-ui", "g1-api"), ("g1-web", "g1-api")]);
         assert_eq!(show(&m, "a").unwrap(), "UI\n2\n3\n4\nWEB\n");
-        // The view so far named by its tree, the member by name.
+        // The view so far named by an id, the member by name.
         let c = show(&m, "c").unwrap();
         let (ours, rest) = c.split_once('\n').unwrap();
-        let tree = ours.strip_prefix("<<<<<<< ").unwrap();
-        assert!(ObjectId::from_hex(tree.as_bytes()).is_ok(), "{c}");
+        let id = ours.strip_prefix("<<<<<<< ").unwrap();
+        assert!(ObjectId::from_hex(id.as_bytes()).is_ok(), "{c}");
         assert_eq!(rest, "ui\n=======\nweb\n>>>>>>> g1-web\n");
         let sides = ["g1-api+g1-ui".to_string(), "g1-web".to_string()];
         assert_eq!(
@@ -507,8 +535,18 @@ mod tests {
 
     #[test]
     fn labels() {
-        assert_eq!(label("api", "api", "web", 1), "api+web");
-        let long = label("api", "api+ui", &"x".repeat(120), 3);
+        let tip = ObjectId::empty_tree(gix::hash::Kind::Sha1);
+        let member = |branch| Member {
+            branch,
+            tip,
+            base: None,
+        };
+        let x = "x".repeat(120);
+        let members = [member("ui"), member("api+ui"), member(&x)];
+        assert_eq!(label("api", "api", "web", 1, &members), "api+web");
+        let clash = label("api", "api", "ui", 1, &members);
+        assert_eq!(clash, "api+ui-view", "a member's name");
+        let long = label("api", "api+ui", &x, 3, &members);
         assert_eq!(long, "api+3-branches");
     }
 

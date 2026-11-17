@@ -856,7 +856,8 @@ an alternate) into a private bare repository (`.git/gitfold/.views.git`,
 made anew at each mount) that borrows the repository's objects through
 `objects/info/alternates`; `.gitattributes` are read from the view so far
 (`attr.tree`). The first fold's markers name the branches, later ones the
-view so far by its tree id (no ref names it); `.gitfold-conflicts` names the
+view so far by the id of a commit of it in the private repository (no ref
+names it; git 2.44 takes no tree as a side); `.gitfold-conflicts` names the
 branches. gitfold reads the merged trees through a second object-database
 handle on it (`git::open_private`: `tree_entries`, `object_size` and
 `read_blob` look there when the repository hasn't an object). Its only refs
