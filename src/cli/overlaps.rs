@@ -189,7 +189,10 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
 
 /// What to compare with by default: `git::default_compare_target`.
 fn default_target(common_dir: &Path) -> Result<String> {
-    git::default_compare_target(common_dir)
+    match git::default_compare_target(common_dir)? {
+        Some(target) => Ok(target),
+        None => bail!("no origin/HEAD and no branch main: name a target with --against"),
+    }
 }
 
 /// Target `rev`: what it changed since it diverged from `base`, and, for a
