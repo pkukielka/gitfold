@@ -162,9 +162,10 @@ pub fn tip(commit: &str) -> crate::git::Commit {
     crate::git::resolve(commit).unwrap()
 }
 
-/// Runs git in `dir` (a worktree of the test repository); its output.
-pub fn run_in(dir: &Path, args: &[&str]) -> String {
-    git(dir, args, None, None)
+/// Runs git in `dir` (a worktree of the test repository, with input
+/// `stdin`); its output.
+pub fn run_in(dir: &Path, args: &[&str], stdin: Option<&[u8]>) -> String {
+    git(dir, args, None, stdin)
 }
 
 /// A new worktree of the test repository at `commit` (detached), named

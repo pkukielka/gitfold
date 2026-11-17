@@ -46,10 +46,10 @@ impl Private {
         let _lock = self.lock.lock();
         let copy = self.live_index(branch)?;
         std::fs::copy(index, &copy).with_context(|| format!("copying {}", index.display()))?;
-        let git = || in_workspace(dir, &copy, &self.dir.join("objects"));
+        let git = || self.in_workspace(dir, &copy);
         let untracked = untracked_ignored(&git, changed)?;
-        let kept = changed.iter().filter(|p| !untracked.contains(*p));
-        let update = nul_list(deleted.iter().chain(kept).cloned());
+        let kept = changed.iter().filter(|p| !untracked.contains(p.as_slice()));
+        let update = nul_list(b"", deleted.iter().chain(kept).map(Vec::as_slice));
         let args = [
             "update-index",
             "-z",
@@ -80,24 +80,22 @@ impl Private {
         }
         Ok(index)
     }
-}
 
-/// git in the workspace at `dir`, on index `index`, its objects going to
-/// `objects`: a plain index, whatever the repository's are like, unhashed
-/// (nothing reads it but these commands), and no fsmonitor or hook hearing
-/// of it. Paths aren't pathspecs here but for `check-ignore`, which takes no
-/// `--literal-pathspecs` (see `untracked_ignored`).
-fn in_workspace(dir: &Path, index: &Path, objects: &Path) -> Result<Command> {
-    let mut git = git::cmd::in_workspace(dir)?;
-    let plain = git::cmd::PLAIN_INDEX
-        .iter()
-        .filter(|a| **a != "--literal-pathspecs");
-    git.args(plain)
-        .args(["-c", "index.skipHash=true"])
-        .env("GIT_INDEX_FILE", index)
-        .env("GIT_OBJECT_DIRECTORY", objects)
-        .env("GIT_NO_LAZY_FETCH", "1");
-    Ok(git)
+    /// git in the workspace at `dir`, on index `index`, its objects going to
+    /// the private repository: a plain index, whatever the repository's are
+    /// like, unhashed (nothing reads it but these commands), and no fsmonitor
+    /// or hook hearing of it. Paths aren't pathspecs here but for
+    /// `check-ignore`, which takes no `--literal-pathspecs` (see
+    /// `untracked_ignored`).
+    fn in_workspace(&self, dir: &Path, index: &Path) -> Result<Command> {
+        let mut git = git::cmd::in_workspace(dir)?;
+        let plain = (git::cmd::PLAIN_INDEX.iter()).filter(|a| **a != "--literal-pathspecs");
+        git.args(plain)
+            .args(["-c", "index.skipHash=true"])
+            .env("GIT_INDEX_FILE", index);
+        self.to_private(&mut git);
+        Ok(git)
+    }
 }
 
 /// Of `paths`, those git ignores and the index doesn't track.
@@ -108,30 +106,31 @@ fn untracked_ignored(
     // `./`: a path is taken as a pathspec there, which `:` would start.
     // `--no-index`: the index is asked below (git would match each path
     // against the whole index).
-    let input = nul_list(paths.iter().map(|p| [b"./", p.as_slice()].concat()));
+    let input = nul_list(b"./", paths.iter().map(Vec::as_slice));
     let args = ["check-ignore", "--no-index", "-z", "--stdin"];
     // 1: none ignored.
     let out = git::cmd::output_allowing(&mut git()?, &args, Some(input), &[1])?;
-    let ignored: Vec<Vec<u8>> = (git::cmd::nul_paths(&out).into_iter())
-        .map(|p| p.strip_prefix(b"./").map(<[u8]>::to_vec).unwrap_or(p))
+    let ignored: Vec<&[u8]> = (out.split(|b| *b == 0))
+        .take_while(|p| !p.is_empty())
+        .map(|p| p.strip_prefix(b"./").unwrap_or(p))
         .collect();
     if ignored.is_empty() {
         return Ok(HashSet::new());
     }
     // `:0:<path>`: the index's entry at the path, if it has one.
-    let input = nul_list(ignored.iter().map(|p| [b":0:", p.as_slice()].concat()));
+    let input = nul_list(b":0:", ignored.iter().copied());
     let args = ["cat-file", "-Z", "--batch-check=%(objectname)"];
-    let out = git::cmd::output_of(&mut git()?, &args, Some(input))?;
-    let answers: Vec<&[u8]> = out.split(|b| *b == 0).collect();
-    Ok((ignored.into_iter().zip(answers))
+    let answers = git::cmd::output_of(&mut git()?, &args, Some(input))?;
+    Ok((ignored.into_iter().zip(answers.split(|b| *b == 0)))
         .filter(|(_, a)| a.ends_with(b" missing"))
-        .map(|(p, _)| p)
+        .map(|(p, _)| p.to_vec())
         .collect())
 }
 
 /// The tree of the index. Paths the index has unmerged (a merge in
 /// progress) that gitfold doesn't know changed are taken as the worktree has
-/// them first, as `git add` of them would. Objects aren't checked: they are
+/// them first, as `git add` of them would: while the merge lasts, each tree
+/// costs a failed `write-tree` and these. Objects aren't checked: they are
 /// the repository's (a partial clone's may be missing) or hashed just now.
 fn write_tree(git: &dyn Fn() -> Result<Command>) -> Result<ObjectId> {
     let write = || git::cmd::output_of(&mut git()?, &["write-tree", "--missing-ok"], None);
@@ -148,25 +147,24 @@ fn write_tree(git: &dyn Fn() -> Result<Command>) -> Result<ObjectId> {
             if paths.is_empty() {
                 return Err(e);
             }
-            let input = nul_list(paths.into_iter().map(<[u8]>::to_vec));
+            let input = nul_list(b"", paths.into_iter());
             let args = ["update-index", "-z", "--add", "--remove", "--stdin"];
             git::cmd::output_of(&mut git()?, &args, Some(input))?;
             write()?
         }
     };
-    Ok(ObjectId::from_hex(
-        String::from_utf8_lossy(&out).trim().as_bytes(),
-    )?)
+    super::merge::oid(&out)
 }
 
-/// `paths`, each ended by a NUL.
-fn nul_list(paths: impl Iterator<Item = Vec<u8>>) -> Vec<u8> {
-    paths
-        .flat_map(|mut p| {
-            p.push(0);
-            p
-        })
-        .collect()
+/// `paths`, each with `prefix` and ended by a NUL.
+fn nul_list<'a>(prefix: &[u8], paths: impl Iterator<Item = &'a [u8]>) -> Vec<u8> {
+    let mut list = Vec::new();
+    for path in paths {
+        list.extend_from_slice(prefix);
+        list.extend_from_slice(path);
+        list.push(0);
+    }
+    list
 }
 
 #[cfg(test)]
@@ -184,20 +182,19 @@ mod tests {
     /// The worktree's index.
     fn index_of(dir: &Path) -> PathBuf {
         let args = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
-        PathBuf::from(run_in(dir, &args))
+        PathBuf::from(run_in(dir, &args, None))
     }
 
     /// `tree` as `git ls-tree -r` lists it (read from the private
     /// repository).
     fn listing(tree: &ObjectId) -> String {
-        let out = Command::new("git")
-            .arg("--git-dir")
-            .arg(&private().dir)
-            .args(["ls-tree", "-r", &tree.to_string()])
-            .output()
-            .unwrap();
-        assert!(out.status.success());
-        String::from_utf8(out.stdout).unwrap()
+        in_private(&["ls-tree", "-r", &tree.to_string()])
+    }
+
+    /// git's output in the private repository.
+    fn in_private(args: &[&str]) -> String {
+        let out = git::cmd::output(&private().dir, args).unwrap();
+        String::from_utf8(out).unwrap()
     }
 
     /// The blob id of `data`, as git would hash it.
@@ -239,7 +236,7 @@ mod tests {
         w("exe", "x\n");
         fs::set_permissions(wt.join("exe"), fs::Permissions::from_mode(0o755)).unwrap();
         w("st", "staged\n");
-        run_in(&wt, &["add", "st"]);
+        run_in(&wt, &["add", "st"], None);
         let index = index_of(&wt);
         let before = fs::read(&index).unwrap();
         let changed = paths(&[
@@ -277,17 +274,8 @@ mod tests {
             before,
             "the workspace's index untouched"
         );
-        let kept = Command::new("git")
-            .arg("--git-dir")
-            .arg(&private().dir)
-            .args([
-                "rev-parse",
-                "refs/gitfold/live/l1",
-                &format!("{}^{{tree}}", live.commit),
-            ])
-            .output()
-            .unwrap();
-        let kept = String::from_utf8(kept.stdout).unwrap();
+        let tree = format!("{}^{{tree}}", live.commit);
+        let kept = in_private(&["rev-parse", "refs/gitfold/live/l1", &tree]);
         assert_eq!(kept, format!("{}\n{}\n", live.commit, live.tree));
     }
 
@@ -326,13 +314,11 @@ mod tests {
             zero = "0".repeat(40)
         );
         let index = index_of(&wt);
-        let mut git = Command::new("git");
-        git.current_dir(&wt)
-            .args(["update-index", "--index-info"])
-            .stdin(std::process::Stdio::piped());
-        let mut child = git.spawn().unwrap();
-        std::io::Write::write_all(&mut child.stdin.take().unwrap(), info.as_bytes()).unwrap();
-        assert!(child.wait().unwrap().success());
+        run_in(
+            &wt,
+            &["update-index", "--index-info"],
+            Some(info.as_bytes()),
+        );
         let live = private().live("l3", &wt, &index, &[], &[]).unwrap();
         let expected = format!(
             "100644 blob {}\tm\n100644 blob {}\tn\n",

@@ -141,20 +141,23 @@ impl Private {
     /// first).
     fn in_repository(&self) -> Result<Command> {
         let mut git = git::cmd::command_in_other(&self.git_dir)?;
-        git.current_dir(&self.top)
-            .env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
-            .env("GIT_NO_LAZY_FETCH", "1");
+        git.current_dir(&self.top);
+        self.to_private(&mut git);
         Ok(git)
+    }
+
+    /// `git`, its objects read from the repository and the private one and
+    /// written to the private one only, missing ones not fetched.
+    pub(super) fn to_private<'a>(&self, git: &'a mut Command) -> &'a mut Command {
+        git.env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
+            .env("GIT_NO_LAZY_FETCH", "1")
     }
 
     /// A commit of `tree`, with no parent (nothing of any history to keep),
     /// unsigned whatever the settings.
     pub(super) fn commit(&self, tree: &ObjectId, message: &str) -> Result<ObjectId> {
         let hex = tree.to_string();
-        let out = self.run(&["commit-tree", "--no-gpg-sign", &hex, "-m", message])?;
-        Ok(ObjectId::from_hex(
-            String::from_utf8_lossy(&out).trim().as_bytes(),
-        )?)
+        oid(&self.run(&["commit-tree", "--no-gpg-sign", &hex, "-m", message])?)
     }
 
     /// Runs `git update-ref --stdin` with `commands`.
@@ -262,6 +265,13 @@ impl Private {
         }
         Ok(())
     }
+}
+
+/// The object id git printed (and a newline).
+pub(super) fn oid(out: &[u8]) -> Result<ObjectId> {
+    Ok(ObjectId::from_hex(
+        String::from_utf8_lossy(out).trim().as_bytes(),
+    )?)
 }
 
 /// How the summary names the view so far after `member`, the `merged`th
