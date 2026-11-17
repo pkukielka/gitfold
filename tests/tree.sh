@@ -685,17 +685,19 @@ check "a fast-forward, ff still there: not reported" lacks 0 "merged" parent uf
 R branch -D -q ff
 check "  deleted: lands" says 0 "ff landed in main; uf is now built on main" parent uf --update --auto
 landed_in uf main
-# Into the parent's own parent, its settings left (deleted by update-ref).
+# Into the parent's own parent: known from the check while it existed (git
+# branch -D drops its settings).
 R branch core; "$BIN" -C "$REPO" branch mid --parent core >/dev/null; on mid mid.txt one
 "$BIN" -C "$REPO" branch leaf --parent mid >/dev/null; on leaf leaf.txt mine
 R switch -q core; R merge -q --no-ff --no-edit mid; R switch -q main
-R update-ref -d refs/heads/mid
+check "into its parent's parent: reported" says 0 "mid looks merged into core" parent leaf --update --auto
+R branch -D -q mid
 check "into its parent's parent: lands there" says 0 "mid landed in core; leaf is now built on core" parent leaf --update --auto
 landed_in leaf core
-# Gone without landing: its commits kept, following paused.
+# Gone without landing: its commits kept, noted.
 built gone ug; before=$(R rev-parse ug)
 R branch -D -q gone
-check "gone, not landed: paused (exit 4)" says 4 "following paused: ug's parent gone is gone, and didn't land: ug keeps its commits" parent ug --update --auto
+check "gone, not landed: noted" says 0 "ug's parent gone is gone, with no landing of it found: ug keeps its commits" parent ug --update --auto
 eq "  nothing moved" "$before refs/heads/gone" "$(R rev-parse ug) $(R config branch.ug.gitfoldParent)"
 check "  shown" says 0 "ug is built on gone (parent gone)" parent ug
 # Landed on origin's main only (merged by the forge, fetched).

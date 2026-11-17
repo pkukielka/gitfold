@@ -367,12 +367,11 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
             }
             None => {
                 let parent = crate::tree::short(parent);
-                let full = format!(
-                    "{name}'s parent {parent} is gone, and didn't land: {name} keeps its commits \
-                     as they are (`gitfold parent {name} --none` counts {parent}'s as its own)"
-                );
-                let short = format!("parent {parent} gone");
-                return Ok(Followed::Paused { full, short });
+                return Ok(Followed::Noted(format!(
+                    "{name}'s parent {parent} is gone, with no landing of it found: {name} keeps \
+                     its commits as they are (`gitfold parent {name} --none` counts {parent}'s as \
+                     its own)"
+                )));
             }
         },
     };
@@ -380,8 +379,9 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), &onto)?;
     if gone {
         let _tree = follow::tree_lock(common_dir)?;
-        if Tree::read(common_dir)?.parent(name) != Some(parent) {
-            let why = format!("{name}'s parent changed meanwhile; retry");
+        let now = Tree::read(common_dir)?;
+        if now.parent(name) != Some(parent) || now.check(name, &onto).is_err() {
+            let why = format!("{name}'s parent or {onto} changed meanwhile; retry");
             return Err(Refusal::InUse.error(why));
         }
         follow::set_base(common_dir, name, plan.base)?;
@@ -393,10 +393,15 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
         if gone {
             return Ok(Followed::Moved(landed.clone()));
         }
+        // Only a note: its failure doesn't pause following.
         Ok(
-            match landed_in(common_dir, &tree, &local, name, Some(plan.base))? {
-                Some(to) => Followed::Noted(landed_said(name, parent, &to, false, true)),
-                None => Followed::Nothing,
+            match landed_in(common_dir, &tree, &local, name, Some(plan.base)) {
+                Ok(Some(to)) => Followed::Noted(landed_said(name, parent, &to, false, true)),
+                Ok(None) => Followed::Nothing,
+                Err(e) => {
+                    log::warn!("{name}: whether its parent landed: {e:#}");
+                    Followed::Nothing
+                }
             },
         )
     };
@@ -476,7 +481,8 @@ fn landed_in(
         return Ok(None);
     }
     // Its stored parent, as the config holds it (a deleted branch's
-    // settings may outlive it, T2).
+    // settings may outlive it, T2), or as checked before (deleted with
+    // them).
     let own = (parent.strip_prefix("refs/heads/"))
         .and_then(|p| local.parents().remove(p))
         .map(|p| match p.starts_with("refs/") {
@@ -484,7 +490,8 @@ fn landed_in(
             false => format!("refs/heads/{p}"),
         });
     let mut targets: Vec<String> = Vec::new();
-    for target in own.into_iter().chain(roots) {
+    let checked = follow::checked_targets(local, name);
+    for target in own.into_iter().chain(checked).chain(roots) {
         if target != parent && !targets.contains(&target) && tree.check(name, &target).is_ok() {
             targets.push(target);
         }

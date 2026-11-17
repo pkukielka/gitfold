@@ -46,7 +46,7 @@ struct Seen {
     /// it is that.
     writes: Option<u64>,
     since: Instant,
-    /// The state last tried: its tip, its parent's (gone: the root's), its
+    /// The state last tried: its tip, its parent's (gone: its targets'), its
     /// workspace's writes.
     tried: Option<(ObjectId, Vec<ObjectId>, Option<u64>)>,
     /// The pause it last logged: the same one isn't logged again.
@@ -111,11 +111,12 @@ fn walk(
         let Ok(tip) = git::branch_tip(branch) else {
             continue; // the branch gone meanwhile
         };
-        // Its parent's tip; gone (T3), the root's, where the parent may
-        // have landed (spec section 4).
+        // Its parent's tip; gone (T3), those of where the parent may have
+        // landed (spec section 4): the root, the targets checked before.
         let on: Vec<ObjectId> = match git::resolve(parent) {
             Ok(on) => vec![on.id],
-            Err(_) => (tree.root_refs().iter())
+            Err(_) => (crate::follow::checked_targets(&local, branch).iter())
+                .chain(&tree.root_refs())
                 .filter_map(|r| git::resolve(r).ok().map(|c| c.id))
                 .collect(),
         };

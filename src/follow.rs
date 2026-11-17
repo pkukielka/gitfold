@@ -737,6 +737,17 @@ impl Checked {
     }
 }
 
+/// The targets a landing of the parent of `branch` was checked against, as
+/// recorded (`Checked`): its parent's own parent among them, which a deleted
+/// parent's settings don't keep (`git branch -D` drops them).
+pub fn checked_targets(local: &Local, branch: &str) -> Vec<String> {
+    let checked = local.landing(branch).as_deref().and_then(Checked::decode);
+    (checked.into_iter())
+        .flat_map(|c| c.targets)
+        .map(|(target, ..)| target)
+        .collect()
+}
+
 /// The first of `targets` (full refs) that the commits of the parent of
 /// `branch` it sits on, up to `base`, landed in (spec section 4): see
 /// `landed`; `fresh` while the parent's branch exists. Incremental: the
