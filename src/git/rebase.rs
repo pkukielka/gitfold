@@ -1,19 +1,19 @@
-//! Moving a branch that no worktree has checked out onto another commit with
-//! `git rebase` itself, in a temporary worktree that checks out almost
-//! nothing: a sparse checkout of the top-level files only, with a sparse
-//! index, so its cost doesn't grow with the tree (a monorepo's million files
-//! aren't written). Git does everything a rebase does: it skips commits
-//! whose change is there already (by patch id, for `git rebase <onto>`),
-//! drops commits that become empty, keeps authors and runs the hooks; on a
-//! conflict it stops, says which paths conflict (`git diff
-//! --diff-filter=U`), and is aborted, so the branch stays where it was.
+//! A branch's commits rebased onto another commit with `git rebase` itself,
+//! on a detached HEAD at the branch's tip in a temporary worktree that
+//! checks out almost nothing: a sparse checkout of the top-level files only,
+//! with a sparse index, so its cost doesn't grow with the tree (a monorepo's
+//! million files aren't written). The branch and where it is checked out
+//! don't change: the caller moves them to the result (`follow`). Git does
+//! everything a rebase does: it skips commits whose change is there already
+//! (by patch id, for `git rebase <onto>`), drops commits that become empty,
+//! keeps authors and runs the hooks; on a conflict it stops, says which
+//! paths conflict (`git diff --diff-filter=U`), and is aborted.
 //!
 //! The worktree is `<common>/gitfold-moves/gitfold-move-<id>` (not under
 //! `<common>/gitfold/`, whose presence means the repository is used with
 //! gitfold mounts), made under a lock on `<id>.lock` beside it (`lock`) and
-//! removed after. One left by a process that died is cleaned up by the next
-//! move of that branch (its rebase aborted: git moves the branch only when
-//! the rebase finishes). The sparse settings are given on the command line
+//! removed after. One left by a process that died is removed by the next
+//! move of that branch. The sparse settings are given on the command line
 //! (`-c`) and the patterns written to the worktree's own
 //! `info/sparse-checkout`, so the repository's config isn't changed (`git
 //! sparse-checkout` would turn on `extensions.worktreeConfig` for good).
@@ -87,8 +87,8 @@ const TREE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// What `rebase` did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Rebased {
-    /// The branch moved to this commit.
-    Moved(ObjectId),
+    /// Its commits, rebased: the new tip.
+    Done(ObjectId),
     /// A commit conflicted on these paths (as stored); the branch didn't
     /// move.
     Conflict(Vec<Vec<u8>>),
@@ -100,11 +100,11 @@ struct Scratch {
     common_dir: PathBuf,
 }
 
-/// Rebases local branch `branch`, at `tip`, onto `onto`: `git rebase
-/// <onto>`, or with `upstream`, `git rebase --onto <onto> <upstream>` (its
-/// commits after `upstream`). The caller holds `lock`. Fails if it isn't at
-/// `tip` any more, or if it is checked out somewhere (`git worktree add`
-/// refuses it).
+/// What `git rebase <onto>` (or with `upstream`, `git rebase --onto <onto>
+/// <upstream>`: the commits after `upstream`) makes of the commits of
+/// branch `branch` at `tip`: rebased on a detached HEAD at `tip`, so
+/// neither the branch nor where it is checked out changes. The caller
+/// holds `lock`.
 pub fn rebase(
     common_dir: &Path,
     branch: &str,
@@ -114,18 +114,16 @@ pub fn rebase(
 ) -> Result<Rebased> {
     let scratch = Scratch::of(common_dir, branch);
     let rebased = scratch
-        .make(branch)
-        .and_then(|()| scratch.rebase(branch, tip, onto, upstream));
+        .make(tip)
+        .and_then(|()| scratch.rebase(onto, upstream));
     let removed = scratch.remove();
     let rebased = rebased?;
     removed?;
     Ok(rebased)
 }
 
-/// Removes the worktree a move of `branch` that died left, its rebase
-/// aborted first, as git would. (A rebase moves the branch only when it
-/// finishes, so dropping the worktree alone also leaves the branch where it
-/// was.) The caller holds `lock`.
+/// Removes the worktree a move of `branch` that died left. (It is on a
+/// detached HEAD: nothing of the branch is in it.) The caller holds `lock`.
 pub fn clean_up(common_dir: &Path, branch: &str) -> Result<()> {
     Scratch::of(common_dir, branch).clean_up(branch)
 }
@@ -143,33 +141,18 @@ impl Scratch {
             return Ok(());
         }
         log::warn!("{branch}: cleaning up the worktree of an interrupted move");
-        // Only in a worktree that is one (with its `.git` file): git would
-        // otherwise find the repository's own worktree above it.
-        if self.path.join(".git").is_file()
-            && self.admin().is_ok_and(|a| a.join("rebase-merge").exists())
-            && let Err(e) = self.git(&["rebase", "--abort"])
-        {
-            log::warn!("{branch}: aborting the interrupted move: {e:#}");
-        }
         self.remove()
     }
 
-    /// Adds the worktree on the branch, nothing checked out but the
-    /// top-level files. A registration of it whose directory is gone (a
-    /// removal that failed half-way) is taken over (`-f`, only then: it also
-    /// lifts git's refusal of a branch checked out elsewhere).
-    fn make(&self, branch: &str) -> Result<()> {
+    /// Adds the worktree, detached at `tip`, nothing checked out but the
+    /// top-level files. `-f`: a registration of it whose directory is gone
+    /// (a removal that failed half-way) is taken over (detached, it lifts
+    /// nothing else).
+    fn make(&self, tip: ObjectId) -> Result<()> {
         let path = self.path.to_str().context("a path that isn't UTF-8")?;
-        let args = ["worktree", "add", "-q", "--no-checkout", path, branch];
-        if let Err(e) = self.git_here(&args) {
-            let ours = super::worktree::checked_out(&self.common_dir, branch, None)
-                .is_some_and(|at| Path::new(&at) == self.path);
-            if !ours {
-                return Err(e);
-            }
-            let forced = ["worktree", "add", "-q", "-f", "--no-checkout", path, branch];
-            self.git_here(&forced)?;
-        }
+        let tip = tip.to_string();
+        let args = ["worktree", "add", "-q", "-f", "--no-checkout", "--detach"];
+        self.git_here(&[&args[..], &[path, &tip]].concat())?;
         let info = self.admin()?.join("info");
         fs::create_dir_all(&info)?;
         fs::write(info.join("sparse-checkout"), PATTERNS)?;
@@ -215,25 +198,15 @@ impl Scratch {
         Ok(command)
     }
 
-    fn rebase(
-        &self,
-        branch: &str,
-        tip: ObjectId,
-        onto: ObjectId,
-        upstream: Option<ObjectId>,
-    ) -> Result<Rebased> {
-        // The worktree is on the branch: its tip is what it has.
-        if crate::git::branch_tip(branch)?.id != tip {
-            bail!("{branch} moved meanwhile");
-        }
+    fn rebase(&self, onto: ObjectId, upstream: Option<ObjectId>) -> Result<Rebased> {
         let onto = onto.to_string();
         let upstream = upstream.map(|u| u.to_string());
         let range: Vec<&str> = match &upstream {
             Some(upstream) => vec!["--onto", &onto, upstream],
             None => vec![&onto],
         };
-        // Only this branch moves, and only its own commits (whatever the
-        // user's rebase.* settings say); an editor is never needed.
+        // Only the detached HEAD moves, and only its own commits (whatever
+        // the user's rebase.* settings say); an editor is never needed.
         let out = self
             .command()?
             .env("GIT_EDITOR", ":")
@@ -247,10 +220,11 @@ impl Scratch {
             .args(&range)
             .output()?;
         if out.status.success() {
-            let tip = crate::git::branch_tip(branch)?;
-            return Ok(Rebased::Moved(tip.id));
+            let head = self.git(&["rev-parse", "HEAD"])?;
+            let head = String::from_utf8_lossy(&head);
+            return Ok(Rebased::Done(ObjectId::from_hex(head.trim().as_bytes())?));
         }
-        // Stopped at a conflict: the paths, then the branch back.
+        // Stopped at a conflict: the paths, then the rebase gone.
         let paths = self.git(&["diff", "--name-only", "--diff-filter=U", "-z"]);
         let stopped = self.admin()?.join("rebase-merge").exists();
         if stopped {
@@ -264,7 +238,7 @@ impl Scratch {
                     .collect(),
             )),
             _ => bail!(
-                "git rebase {} on {branch} failed ({}): {}",
+                "git rebase {} failed ({}): {}",
                 range.join(" "),
                 out.status,
                 String::from_utf8_lossy(&out.stderr).trim()
