@@ -228,10 +228,11 @@ again). An empty answer is no error: nothing to take, nothing overlapping.
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
 several `--from`, it starts at the first, and `git merge` of the others runs in
 its workspace (mounting the repository again where and as it last was, if it isn't
-mounted): git merges, and says how, as it does. A conflict leaves the branch with
-git's merge in progress (exit 1): finish it with `git merge --continue` there, or
-`git merge --abort`. If git refuses, nothing is left. The branch keeps no
-relation to the others. With `-w`, each local branch's uncommitted changes in its
+mounted): git merges, and says how, as it does. In a terminal it opens your
+editor for the merge message, as `git merge` does (`GIT_MERGE_AUTOEDIT=no`
+skips it). A conflict leaves the branch with git's merge in progress (exit
+1): finish it with `git merge --continue` there, or `git merge --abort`. If
+git refuses, nothing is left. The branch keeps no relation to the others. With `-w`, each local branch's uncommitted changes in its
 workspace (tracked and untracked, not ignored files) are then applied as `git
 cherry-pick -n` applies them, unstaged; a conflict between them is left as git
 leaves it (exit 1, the paths named). With `-w`, a merge that doesn't complete
