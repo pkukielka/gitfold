@@ -58,10 +58,14 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, agents/, told/, followed, upper/, tmp/
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
+           .git/gitfold/.views.git/          the views' private repository (objects, view and live-tree refs)
+           .git/gitfold-moves/               temporary worktrees of branch moves (git rebase)
            refs/gitfold/<id>                 keeps the workspace base from git gc
+           refs/gitfold-base/<branch>        where a branch's own commits start (on its parent)
+           branch.<branch>.gitfold*          per-branch settings: parent, following, prewarm, read tracking, records (conflict, move, landing)
 ```
 
 Names below the root are resolved by `Workspaces::resolve`, one component at a
@@ -157,10 +161,14 @@ Then, per request (`fs/workspace/`):
 | `src/daemon/control.rs` | the daemon's control socket (`remove`, `branch --with-changes`, `prewarm` and `track-reads` while mounted; stopping and resuming prewarm for `unmount`; its version) |
 | `src/daemon/serve.rs` | the daemon in the foreground: mounting with FUSE, the control requests it answers, until unmounted |
 | `src/daemon/follow.rs` | following without an agent: the tree walked every second, `parent B --update --auto` run as a child process |
+| `src/tree.rs` | the tree of branches: each branch's parent (branch config), the root, resolving parent names, the rules a new parent must pass (no cycle) |
+| `src/follow.rs` | moving a branch onto its parent's commits (`parent --update`, `--set`, following): its own commits, the move by git (its ref, or in its workspace through the mount), crash records, pushed commits, conflicts, landings |
+| `src/git/rebase.rs` | a branch's commits rebased by `git rebase` in a temporary worktree that checks out only the top-level files |
 | `src/prewarm.rs` | background walk of new snapshots and workspaces, in a walker process; the prewarm modes |
 | `src/cli/mod.rs` | what commands share: the repository (`repo`), the workspace the current directory is in (`branch_or_current`), printing paths as git quotes them (`quote`, `write_path`), the repository lock or a daemon request (`local_or_daemon`) |
-| `src/cli/branch.rs` | `branch` (and its forks), `prewarm`, `track-reads` |
-| `src/cli/list.rs` | `list` and `changes` (with `-- PATH`: who is changing it, on every branch) |
+| `src/cli/branch.rs` | `branch` (and its forks; with several `--from`, `git merge` in the new workspace), `prewarm`, `track-reads` |
+| `src/cli/tree.rs` | `parent` and `branch --parent`, following once (`follow_once`, for `--update --auto` and the turn start), what is said of moves, pauses and landings, the hints for guessed commands |
+| `src/cli/list.rs` | `list` (with the tree of branches) and `changes` (with `-- PATH`: who is changing it, on every branch) |
 | `src/cli/remove.rs` | `remove` and `prune` |
 | `src/cli/hook.rs` | Claude Code hooks' input: the top-level strings of its JSON |
 | `src/cli/claude/mod.rs` | Claude Code's hooks, which run in every repository: what they share |
@@ -184,7 +192,10 @@ Then, per request (`fs/workspace/`):
 | `tests/status.sh` | end-to-end test of what a workspace's status sees: deletions, half-way git operations, ignore rules, modes, nested repositories, the index's cache tree |
 | `tests/mount.sh` | end-to-end test of mount and unmount, version, names that appear later, many packs, prewarm |
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
-| `tests/fixture.sh` | the repository each isolated section of the four suites above starts from |
+| `tests/tree.sh` | end-to-end test of branches built on branches: `parent` and `branch --parent` (the root and name rules), moves, pushed commits, crashes, landing, following at turn start and by the daemon, the tree in `list` |
+| `tests/from.sh` | end-to-end test of `branch` with several `--from` (compared with git's own merge), with `-w`, mounting again |
+| `tests/views.sh` | end-to-end test of `@committed` and `@live`: members, conflicts, refreshing, resting, the reserved names |
+| `tests/fixture.sh` | the repository each isolated section of manage, status, mount, agents, tree, from and views starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
 | `tests/race-modes.pl` | helper of `tests/workspace.sh`: lifted modes must stay invisible |
@@ -250,6 +261,17 @@ Then, per request (`fs/workspace/`):
   reads the same inode.
 - **Prewarm**: gitfold walking a new snapshot or workspace through its own
   mount to fill the kernel caches.
+- **Parent**: the branch a branch is built on (`branch.<b>.gitfoldParent`, a
+  full ref); parents form the **tree of branches**, rooted at the main
+  branch (the **root**, from `origin/HEAD`, else `main`, `master`,
+  `origin/main` or `origin/master`).
+- **Own commits**: a branch's commits since the parent's commit they sit on,
+  kept by `refs/gitfold-base/<branch>` (not a workspace's **base**).
+- **Move** (of a branch): its own commits replayed onto its parent's tip by
+  `git rebase`; **following** is moving by itself at safe moments.
+- **View**: `@committed/<branch>` or `@live/<branch>`, a branch merged with
+  the branches built on it; a workspace's **live tree** is what `git add -A`
+  would stage in it.
 
 ## Invariants
 
@@ -311,7 +333,9 @@ decision that creates them.
   the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times` and
   `reads` record formats, `upper/`), task folders in `.git/gitfold/.tasks/<id>/`
   and the message format of their inboxes (README, "Messages"), the
-  base-pinning ref `refs/gitfold/<id>`, the
+  base-pinning ref `refs/gitfold/<id>`, the own-commits ref
+  `refs/gitfold-base/<branch>` and the per-branch settings in git config
+  (`branch.<b>.gitfold*`), the
   registration names `gitfold-<sha12>` and `gitfold-ws-<id>`, and the path
   hash. Changing any of them needs a migration, or every existing workspace's
   index stops matching (Chromium: 4.4 GB re-hashed). The daemon lock (an
@@ -1060,7 +1084,7 @@ missing, and a plain
 - **Disk space:** no fetch starts with under 1 GiB free in the objects
   directory. A fetch is bounded by the commit's missing objects, but on a large
   repository that is tens of thousands; the fork's notes record a fetch without
-  a want list pulling a 47 GB pack.
+  a want list pulling a pack of tens of GB.
 - **Finding what is missing doesn't rescan packs per miss.** gitoxide rescans
   the pack directory, under a store-wide lock, whenever an object isn't found,
   and a partial clone's walk misses once per absent blob: 60k missing blobs
@@ -1084,7 +1108,7 @@ missing, and a plain
   At unmount bases move to their tip only if it is here: a hanging remote must
   not hold up the unmount (the next mount, or `remove`, catches up). An empty
   list is never fetched: `git fetch` would fall back to the remote's refspecs,
-  everything (the fork's notes: 27M objects, 47 GB).
+  everything (the fork's notes: tens of millions of objects, tens of GB).
 - **Signals reach what the daemon starts.** The daemon used to block
   SIGINT/SIGTERM/SIGHUP for a `sigwait` thread; the mask survives exec (Rust's
   `Command` doesn't reset it), so git and everything under it never received
@@ -1281,6 +1305,50 @@ nudge` drives tmux): tied to tmux and to how each harness reads input;
 `asyncRewake` does it inside the harness. Messages through the daemon's socket
 (would need it mounted, and a protocol instead of files).
 
+### Branches built on branches: git does the moves
+
+**What:** a branch's parent is a setting in its git config
+(`branch.<b>.gitfoldParent`, a full ref; `gitfoldFollow`), read and checked
+by `src/tree.rs`: names resolve as git takes them, the root has no parent,
+and a new parent that would make a cycle is refused, checked and written
+under one lock. Its own commits start at `refs/gitfold-base/<branch>`;
+without that ref (a parent set by hand, a renamed branch), at git's fork
+point of the parent, else their merge base. A move (`src/follow.rs`) rebases
+them with `git rebase` itself, on a detached HEAD in a temporary worktree
+(`gitfold-moves/`) that checks out only the top-level files, with a sparse
+index. The branch then goes to the result: by `update-ref` without a
+workspace; in its workspace, through the mount, by `git rebase --autostash
+--onto <new> <tip>`, which replays nothing and carries the uncommitted work
+along (work that would conflict, `git merge-tree` of `git stash create` onto
+the new tip, stops it first). A record written before the rebase
+(`gitfoldMoving`) lets the next move finish or drop one cut short; a
+conflict is recorded against the parent's tip (`gitfoldConflict`). A landing
+is git's answer: the parent's commits in the target's history (`git
+merge-base --is-ancestor`), else merging them into the target changes nothing
+(`git merge-tree`: a squash or rebase merge; a guess, since the target could
+make the same change itself).
+
+`branch --from A --from B` starts the branch at A and runs `git merge B` in
+its workspace, through the mount (mounted again with the options of its last
+mount, `gitfold.mountpoint` and `gitfold.mountOptions`), so the merge, its
+conflicts and its messages are git's.
+
+**Why:** git's rebase and merge already do what users expect (commits
+already applied skipped by patch id, empty ones dropped, authors kept,
+hooks run, strategies, octopus merges); each hand-built copy of git's
+behaviour left the next difference (see [views](#views-rebuilt-behind-the-kernels-back-then-told-what-changed)). The temporary worktree's cost
+doesn't grow with the tree: a monorepo's million-plus files aren't written. A
+workspace's files change through the mount, so the kernel sees every
+change, and its index stays git's. The parent isn't git's upstream, which
+`git push -u` overwrites.
+
+**Rejected:** `git replay` (no worktree needed, but experimental, and in
+git 2.49 it keeps commits that become empty and skips none by patch id);
+sharing uncommitted work between branches (earlier designs with layers,
+patches and filters): nothing writes into another branch's unfinished work,
+so committed work is shared through parents, and the rest is only read
+(workspaces, views).
+
 ### Following: one policy, at safe moments
 
 **What:** a branch that follows its parent takes the parent's new commits by
@@ -1345,6 +1413,9 @@ session end and a subagent's stop remove it.
 | LRU content cache | no measured benefit | [memory](#memory-hygiene) |
 | Holding `creating` across a fork | every open waited for a copy | [forks](#forks-commands-on-a-workspaces-stored-state) |
 | Read tracking on by default | `R` lines are for several agents on one repository | [overlaps](#overlaps-reads-from-claude-codes-hook-writes-from-stored-state) |
+| Hand-built merges for views | each left the next difference from git's | [views](#views-rebuilt-behind-the-kernels-back-then-told-what-changed) |
+| `git replay` for moves | experimental; keeps empty commits, no patch-id skipping | [tree](#branches-built-on-branches-git-does-the-moves) |
+| Sharing uncommitted work between branches | committed work through parents; the rest only read | [tree](#branches-built-on-branches-git-does-the-moves) |
 
 ## Known limitations
 
