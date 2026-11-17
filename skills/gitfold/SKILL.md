@@ -18,7 +18,8 @@ Both are real git worktrees: `git status`, `log`, `diff`, `blame`, `commit`
 work as usual. Find out where you are with `git rev-parse --show-toplevel`
 and `gitfold list`. gitfold commands other than `mount` work on the
 repository the current directory is in: the original clone, or any workspace
-or snapshot (not the mount root itself), like git; `-C <PATH>` as with git.
+or snapshot, like git, or the mounted one from the mount root or a view;
+`-C <PATH>` as with git.
 
 ## In a workspace
 

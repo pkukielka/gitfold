@@ -89,7 +89,14 @@ pub fn inbox(args: InboxArgs) -> Result<i32> {
             return Ok(0);
         }
     }
-    let found = super::repo().and_then(|repo| {
+    // A hook only ever takes a workspace's messages: git finds its repository
+    // (no looking through the mount table on every tool use).
+    let repo = if hook {
+        crate::git::discover(Path::new("."))
+    } else {
+        super::repo()
+    };
+    let found = repo.and_then(|repo| {
         let branch = super::branch_or_current(args.branch.clone(), &repo)?;
         Ok((repo, branch))
     });

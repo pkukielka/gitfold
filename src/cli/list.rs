@@ -90,10 +90,11 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
 /// workspace or branch was skipped (an incomplete answer).
 pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
     let common_dir = git::init(repo)?;
+    let here = super::here()?;
     // git checks the paths first, once: listing an empty index (one that
     // doesn't exist). If it fails, what git says is all that is said.
     let dir = TempDir::new()?;
-    if let Err(e) = ls_files(&dir.0.join("none"), &args.paths) {
+    if let Err(e) = ls_files(&here, &dir.0.join("none"), &args.paths) {
         let failed = e.downcast::<git::cmd::Failed>()?;
         match failed.stderr.trim() {
             "" => eprintln!("{failed}"),
@@ -124,10 +125,10 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
         }
     }
     let all = workspaces.iter().flat_map(|(_, paths, _)| paths);
-    let matching = matching(all, &args.paths, &dir)?;
+    let matching = matching(&here, all, &args.paths, &dir)?;
     let mut lines = BTreeSet::new();
     match git::default_compare_target(&common_dir)? {
-        Some(main) => skipped += committed(&common_dir, &main, &args.paths, &mut lines)?,
+        Some(main) => skipped += committed(&here, &common_dir, &main, &args.paths, &mut lines)?,
         None => eprintln!("note: no main branch to compare with: uncommitted changes only"),
     }
     for (branch, paths, note) in workspaces {
@@ -159,6 +160,7 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
 /// shared with that (as `gh-pages` often has) changes nothing there. How
 /// many branches it skipped (git couldn't diff them).
 fn committed(
+    here: &git::cmd::Here,
     common_dir: &Path,
     main: &str,
     typed: &[String],
@@ -198,7 +200,7 @@ fn committed(
             .chain(typed.iter().map(String::as_str))
             .collect();
         // One branch git can't diff doesn't hide the others.
-        match git::cmd::output_of(&mut git::cmd::here(), &args, None) {
+        match git::cmd::output_of(&mut here.command(), &args, None) {
             Ok(out) => {
                 for path in out.split(|b| *b == 0).filter(|p| !p.is_empty()) {
                     lines.insert((path.to_vec(), branch.to_string(), "committed"));
@@ -237,6 +239,7 @@ fn unrelated(common_dir: &Path, a: &str, b: &str, whole: &OnceCell<bool>) -> boo
 /// go into throwaway indexes in `dir` (no objects written), which `git
 /// ls-files` lists.
 fn matching<'a>(
+    here: &git::cmd::Here,
     paths: impl Iterator<Item = &'a Vec<u8>>,
     typed: &[String],
     dir: &TempDir,
@@ -255,10 +258,10 @@ fn matching<'a>(
             info.extend(*path);
             info.push(0);
         }
-        let mut command = git::cmd::here();
+        let mut command = here.command();
         command.env("GIT_INDEX_FILE", &file);
         git::cmd::output_of(&mut command, &update, Some(info))?;
-        let out = ls_files(&file, typed)?;
+        let out = ls_files(here, &file, typed)?;
         matching.extend(
             out.split(|b| *b == 0)
                 .filter(|p| !p.is_empty())
@@ -270,12 +273,12 @@ fn matching<'a>(
 
 /// `git ls-files` of the index at `index` (none there: an empty one), from
 /// the current directory: its paths matching `typed`, NUL-terminated.
-fn ls_files(index: &Path, typed: &[String]) -> Result<Vec<u8>> {
+fn ls_files(here: &git::cmd::Here, index: &Path, typed: &[String]) -> Result<Vec<u8>> {
     let args: Vec<&str> = (git::cmd::PLAIN_INDEX.into_iter())
         .chain(["ls-files", "-z", "--full-name", "--"])
         .chain(typed.iter().map(String::as_str))
         .collect();
-    let mut command = git::cmd::here();
+    let mut command = here.command();
     command.env("GIT_INDEX_FILE", index);
     git::cmd::output_of(&mut command, &args, None)
 }

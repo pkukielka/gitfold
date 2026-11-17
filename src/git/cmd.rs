@@ -6,10 +6,10 @@
 //! worktree's admin directory for what is per worktree (its HEAD, index and
 //! config). Except where git must take paths as typed in the current
 //! directory (pathspecs): then git finds the repository there itself
-//! (`here`).
+//! (`Here`), or, where it can't (a gitfold mount's root and views), is told.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 
@@ -22,10 +22,22 @@ pub fn command(git_dir: &Path) -> Command {
     command
 }
 
-/// `git`, run in the current directory: it finds the repository there, and
-/// takes pathspecs relative to it, as when typed.
-pub fn here() -> Command {
-    Command::new("git")
+/// git run in the current directory, taking pathspecs relative to it, as when
+/// typed: it finds the repository there itself, or, where it would find none
+/// (in a gitfold mount, outside workspaces and snapshots), is told the git
+/// directory and the top of the work tree the current directory stands in.
+pub struct Here(pub Option<(PathBuf, PathBuf)>);
+
+impl Here {
+    /// `git`, to add arguments to.
+    pub fn command(&self) -> Command {
+        let mut command = Command::new("git");
+        if let Some((git_dir, work_tree)) = &self.0 {
+            command.arg("--git-dir").arg(git_dir);
+            command.arg("--work-tree").arg(work_tree);
+        }
+        command
+    }
 }
 
 /// Runs git with `args`; its messages go to the terminal. Fails if git does.

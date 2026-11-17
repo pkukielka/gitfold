@@ -262,6 +262,10 @@ eq "  again: the same one" "$out" "$(create "$REPO" w2 2>/dev/null)"
 eq "named like a branch: still its own (worktree-main)" "$MNT/worktree-main" "$(create "$REPO" main 2>/dev/null)"
 echo s >"$MNT/st/s.txt"; G "$MNT/st" add s.txt; G "$MNT/st" commit -qm s
 eq "from a session in a workspace: from its HEAD" "$(R rev-parse st)" "$(G "$(create "$MNT/st/d" w3 2>/dev/null)" rev-parse HEAD)"
+for at in "w7 $MNT" "w8 $MNT/@live/st"; do
+    name=${at%% *} dir=${at#* }
+    eq "from a session at ${dir#"$MNT"}/ of the mount: a workspace, from the repository's HEAD" "0 $MNT/worktree-$name $(R rev-parse HEAD)" "$(out=$(create "$dir" "$name" 2>&1); echo "$? $out $(G "$out" rev-parse HEAD 2>&1)")"
+done
 echo x >"$MNT/worktree-w2/x.txt"
 (cd "$MNT/worktree-w2/d" && remove "$MNT/worktree-w2" >/dev/null 2>"$T/err"); rc=$?
 eq "removed from inside it, changes discarded, its branch kept" "0 no yes" "$rc $(R worktree list | grep -q worktree-w2 && echo yes || echo no) $(R rev-parse -q --verify worktree-w2 >/dev/null && echo yes)"

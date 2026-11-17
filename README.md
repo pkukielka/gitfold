@@ -197,9 +197,10 @@ gitfold parent --claude-hook <EVENT>
 ```
 
 Commands other than `mount` work on the repository the current directory is
-in, as git does (a workspace under the mount included). `-C <PATH>` runs any
-command as if started in `<PATH>`, as `git -C` does. For `mount`, `<REPO>` is
-the repository's top-level work tree or its git directory (not a
+in, as git does (a workspace or snapshot under the mount included), or, from
+elsewhere in a mount (its root, a view), on the mounted one. `-C <PATH>` runs
+any command as if started in `<PATH>`, as `git -C` does. For `mount`,
+`<REPO>` is the repository's top-level work tree or its git directory (not a
 subdirectory). `<MOUNTPOINT>` must be an existing directory you own; use an
 empty one, since its contents are hidden while mounted. A repository can be
 mounted only once at a time (a second `gitfold mount` of it fails): two mounts
@@ -227,10 +228,12 @@ again). An empty answer is no error: nothing to take, nothing overlapping.
 `gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
 several `--from`, it starts at the first, and `git merge` of the others runs in
 its workspace (mounting the repository again where and as it last was, if it isn't
-mounted): git merges, and says how, as it does. A conflict leaves the branch with
-git's merge in progress (exit 1): finish it with `git merge --continue` there, or
-`git merge --abort`. If git refuses, nothing is left. The branch keeps no
-relation to the others. With `-w`, each local branch's uncommitted changes in its
+mounted): git merges, and says how, as it does. In a terminal it opens your
+editor for the merge message, as `git merge` does (`GIT_MERGE_AUTOEDIT=no`
+skips it). A conflict leaves the branch with git's merge in progress (exit
+1): finish it with `git merge --continue` there, or `git merge --abort`. If
+git refuses, nothing is left. The branch keeps no relation to the others.
+With `-w`, each local branch's uncommitted changes in its
 workspace (tracked and untracked, not ignored files) are then applied as `git
 cherry-pick -n` applies them, unstaged; a conflict between them is left as git
 leaves it (exit 1, the paths named). With `-w`, a merge that doesn't complete
@@ -585,7 +588,9 @@ Commands people guess (`gitfold sync`, `pull`, `restack`, `rebase`, `branch
 branch and path, sorted by path, with `committed` (its own commits, since it
 left its parent, else not yet in the main branch) or `uncommitted` (in its
 workspace). Directories match everything below them; `-z` works as for
-`changes`, `--stat` is refused.
+`changes`, `--stat` is refused. Paths are taken as git takes them, from the
+current directory: in a view, from its top as from a work tree's; from the
+mount root, from the top of the repository.
 
 ```
 api	committed	src/lexer.rs

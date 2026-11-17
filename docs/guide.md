@@ -311,6 +311,9 @@ $ git merge --continue
 (With `-w`, a merge that conflicts is refused instead, and nothing is
 created: the uncommitted changes need a finished merge to go on.)
 
+In a terminal, git opens your editor for the merge message, as `git merge`
+does; `GIT_MERGE_AUTOEDIT=no` skips it.
+
 To fork a single workspace, half-done state and all, run this inside it:
 
 ```
