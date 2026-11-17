@@ -373,9 +373,9 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
             paths.join(", ")
         ))),
         follow::Moved::Refused(said) => Err(Refusal::Changes.error(format!(
-            "nothing moved: git refused in {name}'s workspace; then: `gitfold parent {name} \
-             --update`{}{said}",
-            if said.is_empty() { "" } else { "\n" }
+            "nothing moved: git refused in {name}'s workspace{}{said}\nonce what git says is \
+             out of the way: `gitfold parent {name} --update`",
+            if said.is_empty() { "" } else { ":\n" }
         ))),
         follow::Moved::Pushed(pushed) => bail!("{}", pushed_said(name, &pushed)),
         follow::Moved::Merge => bail!(

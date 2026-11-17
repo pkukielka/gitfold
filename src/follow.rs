@@ -32,11 +32,13 @@
 //!   the branch sits on that tip (rebased by hand).
 //! - **Merges** among its own commits aren't moved: rebased by hand.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use gix::ObjectId;
 
+use crate::git::worktree::GitBusy;
 use crate::git::{self, cmd, rebase};
 use crate::refusal::Refusal;
 use crate::settings::{self, Local};
@@ -331,9 +333,16 @@ fn move_workspace(
         return Err(Refusal::InUse.error(why));
     }
     let (tip_hex, new_hex) = (tip.to_string(), new.to_string());
-    let work = String::from_utf8_lossy(&git(&["stash", "create"])?)
-        .trim()
-        .to_string();
+    // Git refuses here too (paths unmerged meanwhile, say): nothing moved.
+    let stash = cmd::in_workspace(dir)?
+        .args(["stash", "create"])
+        .stdin(std::process::Stdio::null())
+        .output()?;
+    if !stash.status.success() {
+        let said = String::from_utf8_lossy(&stash.stderr).trim().to_string();
+        return Ok(Applied::Refused(said));
+    }
+    let work = String::from_utf8_lossy(&stash.stdout).trim().to_string();
     if !work.is_empty() {
         let mut check = cmd::command(common_dir);
         let args = ["merge-tree", "--write-tree", "-z", "--name-only"];
@@ -364,10 +373,13 @@ fn move_workspace(
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
         // Git's state, not its message: no rebase under way (HEAD on the
-        // branch, no operation's file: a ref locked by another git says
+        // branch, no rebase's directory: a lock another git holds says
         // nothing of this one), the branch where it was.
-        let busy = crate::state::StateDir::of(common_dir, branch).git_busy();
-        let started = !matches!(busy, None | Some(git::worktree::GitBusy::RefLocked));
+        let state = crate::state::StateDir::of(common_dir, branch);
+        let started = matches!(state.git_busy(), Some(GitBusy::HeadElsewhere { .. }))
+            || ["rebase-merge", "rebase-apply"]
+                .iter()
+                .any(|d| fs::symlink_metadata(state.admin.join(d)).is_ok());
         if !started && git::branch_tip(branch)?.id == tip {
             return Ok(Applied::Refused(said));
         }
