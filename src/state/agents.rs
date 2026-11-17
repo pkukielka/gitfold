@@ -8,7 +8,8 @@
 //!   each turn start and tool call) and remove it (session end, subagent
 //!   stop): one per id, so a subagent stopping leaves its session's. An
 //!   agent counts as present while a file is younger than `TIMEOUT`: a
-//!   session that dies without ending stops counting then.
+//!   session that dies without ending stops counting then, and its file
+//!   goes at the next refresh.
 //! - **Told:** `told/<session>`, the pause of following last reported to
 //!   the session in full (its one-line summary): then it
 //!   gets only a reminder each turn.
@@ -49,6 +50,12 @@ impl StateDir {
         fs::write(&path, id)?;
         // Rewriting the same bytes may leave the time as it was.
         crate::fsutil::set_times(&path, None, Some(SystemTime::now()))?;
+        // Those of agents gone without a word (expired) go.
+        for entry in fs::read_dir(self.agents())?.flatten() {
+            if !fresh(&entry) {
+                remove(&entry.path())?;
+            }
+        }
         Ok(())
     }
 
@@ -63,11 +70,7 @@ impl StateDir {
         let Ok(entries) = fs::read_dir(self.agents()) else {
             return false;
         };
-        entries.flatten().any(|e| {
-            e.metadata()
-                .and_then(|m| m.modified())
-                .is_ok_and(|t| t.elapsed().unwrap_or_default() < TIMEOUT)
-        })
+        entries.flatten().any(|e| fresh(&e))
     }
 
     fn told_file(&self, session: &str) -> PathBuf {
@@ -123,6 +126,12 @@ impl StateDir {
         fs::remove_file(&taken)?;
         Ok(Some(said))
     }
+}
+
+/// Whether presence file `entry` is younger than `TIMEOUT`.
+fn fresh(entry: &fs::DirEntry) -> bool {
+    (entry.metadata().and_then(|m| m.modified()))
+        .is_ok_and(|t| t.elapsed().unwrap_or_default() < TIMEOUT)
 }
 
 /// Removes file `path`, if it exists.

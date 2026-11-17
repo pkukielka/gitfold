@@ -91,13 +91,23 @@ can send one: an orchestrator, a script, a person (`gitfold send <BRANCH>
 
 **Delivery without polling, in Claude Code:** the gitfold plugin's hooks
 deliver them (see [Claude Code](#claude-code) below). Without the plugin, add
+these (the `parent` ones also mark your presence and follow your branch's
+parent at turn start)
 to `~/.claude/settings.json` (the commands do nothing outside a gitfold
 workspace):
 
 ```json
 {
   "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command",
+      "command": "gitfold parent --claude-hook session-start" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command",
+      "command": "gitfold parent --claude-hook session-end" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command",
+      "command": "gitfold parent --claude-hook subagent-stop" }] }],
     "UserPromptSubmit": [{ "hooks": [{ "type": "command",
+      "command": "gitfold parent --claude-hook user-prompt-submit",
+      "timeout": 600 }, { "type": "command",
       "command": "gitfold inbox --claude-hook user-prompt-submit" }] }],
     "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command",
       "command": "gitfold inbox --claude-hook post-tool-use" }] }],
@@ -171,9 +181,17 @@ It runs the `gitfold` on `PATH`, or else the release matching the plugin
   except that in a repository used with gitfold creating a worktree fails,
   saying why.
 - **Inbox messages arrive in the session** (see [Messages](#messages-between-agents)).
+- **Your branch takes its parent's new commits at your turn start**, if it
+  is built on a branch and follows it (`gitfold parent`): what moved is said
+  then, or why following is paused (in full once, then a one-line reminder
+  each turn: resolve it as it says, or ask the user). While your session is
+  active in a workspace the daemon doesn't move its branch; once the session
+  ends (or no hook ran for 30 minutes) it does, when the workspace is idle.
 
 The hooks are `gitfold branch --claude-hook worktree-create`, `gitfold remove
---claude-hook worktree-remove` and the `inbox --claude-hook` ones above. A
+--claude-hook worktree-remove`, the `inbox --claude-hook` ones above, and
+`gitfold parent --claude-hook session-start`, `session-end`, `subagent-stop`
+and `user-prompt-submit` (your presence, and following at turn start). A
 plugin's `WorktreeCreate` hook doesn't run for `claude --worktree --tmux`; for
 that, put the two worktree hooks in `settings.json` instead.
 

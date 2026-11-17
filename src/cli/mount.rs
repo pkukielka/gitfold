@@ -113,10 +113,6 @@ impl MountArgs {
     }
 }
 
-/// Set (by the daemon, for the moves it runs): a repository not mounted
-/// isn't mounted again, it is refused (the daemon's mount went away).
-pub const NO_MOUNT_AGAIN: &str = "GITFOLD_NO_MOUNT_AGAIN";
-
 /// Where the repository of `common_dir` is mounted: its mount, else mounted
 /// again where it was last mounted (see `mount_again`); `None` if no mount
 /// point is recorded (never mounted). Refused if the mount doesn't answer.
@@ -126,9 +122,6 @@ pub fn mount_or_again(common_dir: &Path) -> Result<Option<PathBuf>> {
         None => {
             let local = settings::Local::read(common_dir);
             match local.mountpoint() {
-                Some(_) if std::env::var_os(NO_MOUNT_AGAIN).is_some() => {
-                    bail!("{} was unmounted meanwhile", common_dir.display())
-                }
                 Some(last) => mount_again(common_dir, &last, &local.mount_options())?,
                 None => return Ok(None),
             }

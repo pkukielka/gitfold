@@ -177,6 +177,7 @@ gitfold prewarm <BRANCH> <MODE>               # a workspace's prewarm mode
 gitfold track-reads <BRANCH> on|off           # record a workspace's reads
 gitfold branch --claude-hook worktree-create  # Claude Code's worktree hooks
 gitfold remove --claude-hook worktree-remove  # (the plugin's; see the skill)
+gitfold parent --claude-hook <EVENT>          # its presence and turn-start hooks
 ```
 
 Commands other than `mount` work on the repository the current directory is
@@ -501,9 +502,24 @@ rebase. A workspace's branch moves in its workspace, through the mount
 (mounted again where it last was if it isn't now), by git there: its
 uncommitted work is carried along as `git rebase --autostash` carries it,
 and work that would conflict with the move stops it, nothing moved.
-Following by itself is still to come. Commands people guess (`gitfold
-sync`, `pull`, `restack`, `rebase`, `branch --on`, `branch --merge`) exit 2
-naming the right one.
+
+A branch that follows its parent takes its new commits by itself, at safe
+moments: in a workspace with an agent, at the agent's turn start (Claude
+Code's `UserPromptSubmit` hook, `gitfold parent --claude-hook
+user-prompt-submit`), which tells the agent what moved, or why following is
+paused (in full once, then a one-line reminder each turn); in a workspace
+without one, once nothing was written in it for a few seconds; a branch
+without a workspace, when its parent moves (both by the mount's daemon,
+which logs each move and pause, and cascade down the tree). An agent is
+present while its session's hooks say so (session start and end, a
+subagent's stop, each turn and tool call), or until 30 minutes pass without
+one. Automatic moves never move pushed commits, never retry a conflict
+recorded against the parent's tip, and never mount the repository again:
+the daemon and the turn start both run that policy, which is also `gitfold
+parent B --update --auto` (hidden; the daemon runs it as a child process).
+
+Commands people guess (`gitfold sync`, `pull`, `restack`, `rebase`, `branch
+--on`, `branch --merge`) exit 2 naming the right one.
 
 `<mount>/@committed/<branch>/` is a read-only view of a branch merged with
 every branch built on it, their committed tips (for the main branch, only

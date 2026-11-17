@@ -6,7 +6,9 @@
 //! turn start does it, see `cli::claude::parent`). The tree is walked every
 //! `POLL`, each branch before its children, so a move cascades down.
 //!
-//! A move is `gitfold parent B --update` run as a child process: the
+//! A move is `gitfold parent B --update --auto` (the policy of
+//! `cli::tree::follow_once`, an agent's turn start's too) run as a child
+//! process (`/proc/self/exe`, which an upgrade in place leaves): the
 //! daemon holds nothing (locks, the workspace) while it runs git in the
 //! workspace through this very mount, and a git that hangs is killed after
 //! `TIMEOUT`, its state left as git leaves it. Each is tried once per state
@@ -25,7 +27,6 @@ use std::time::{Duration, Instant};
 use gix::ObjectId;
 use log::{info, warn};
 
-use crate::follow;
 use crate::fs::Workspaces;
 use crate::git;
 use crate::settings::Local;
@@ -117,14 +118,6 @@ fn walk(
             continue;
         }
         seen.tried = Some(now);
-        // A conflict recorded against the parent's tip, which it doesn't
-        // sit on: paused until the parent moves on (as `follow_once`).
-        let conflict = local.conflict(branch).map(|(at, _)| at);
-        if conflict == Some(on.id.to_string())
-            && !follow::is_ancestor(common_dir, on.id, tip.id).unwrap_or(true)
-        {
-            continue;
-        }
         update(common_dir, &state, tip.id);
     }
     Ok(())
@@ -140,60 +133,51 @@ fn drain<R: Read + Send + 'static>(mut from: R) -> thread::JoinHandle<String> {
     })
 }
 
-/// `gitfold parent BRANCH --update` for `branch`, in a process group of its
-/// own (the git it runs killed with it after `TIMEOUT`): whether it
-/// succeeded, what it said.
-fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<(bool, String)> {
-    let mut child = Command::new(std::env::current_exe()?)
+/// `gitfold parent BRANCH --update --auto` for `branch`, in a process
+/// group of its own (the git it runs killed with it after `TIMEOUT`): what
+/// it said.
+fn run_update(common_dir: &Path, branch: &str) -> anyhow::Result<String> {
+    let mut child = Command::new("/proc/self/exe")
         .arg("-C")
         .arg(common_dir)
-        .args(["parent", branch, "--update"])
-        // The mount is the daemon's: gone, it isn't mounted again.
-        .env(crate::cli::mount::NO_MOUNT_AGAIN, "1")
-        // Its own process group: killed with the git it runs.
-        .process_group(0)
+        .args(["parent", branch, "--update", "--auto"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Its own process group: killed with the git it runs.
+        .process_group(0)
         .spawn()?;
     let out = drain(child.stdout.take().expect("piped"));
     let err = drain(child.stderr.take().expect("piped"));
     let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
-        }
+    while child.try_wait()?.is_none() {
         if started.elapsed() > TIMEOUT {
             // SAFETY: a plain syscall, on the group of our own child.
             unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
             let _ = child.wait();
             anyhow::bail!(
-                "gitfold parent {branch} --update took longer than {}s: killed, what git did \
-                 left as it is",
+                "gitfold parent {branch} --update --auto took longer than {}s: killed, what \
+                 git did left as it is",
                 TIMEOUT.as_secs()
             );
         }
         thread::sleep(Duration::from_millis(50));
-    };
-    let said = out.join().unwrap_or_default() + &err.join().unwrap_or_default();
-    Ok((status.success(), said))
+    }
+    Ok(out.join().unwrap_or_default() + &err.join().unwrap_or_default())
 }
 
-/// Moves the branch of `state` (at `tip`), logged; a move kept for its
-/// agent. Moved: the branch isn't at `tip` any more (even if its work, put
-/// back, conflicted).
+/// Moves the branch of `state` (at `tip`): a move (the branch isn't at
+/// `tip` any more) logged and kept for its agent, anything else said
+/// logged as a pause.
 fn update(common_dir: &Path, state: &StateDir, tip: ObjectId) {
     let branch = &state.branch;
-    let (ok, said) = run_update(common_dir, branch)
-        .unwrap_or_else(|e| (false, format!("following {branch}: {e:#}\n")));
+    let said = run_update(common_dir, branch).unwrap_or_else(|e| format!("{e:#}\n"));
     if git::branch_tip(branch).is_ok_and(|now| now.id != tip) {
         info!("following: {}", said.trim_end().replace('\n', "; "));
         if let Err(e) = state.add_followed(&said) {
             warn!("following: {branch}: keeping the move for its agent: {e:#}");
         }
-    } else if ok {
-        log::debug!("following: {}", said.trim_end());
-    } else {
-        warn!("following {branch} paused: {}", said.trim_end());
+    } else if !said.trim().is_empty() {
+        warn!("following {branch}: {}", said.trim_end());
     }
 }

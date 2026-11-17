@@ -568,9 +568,10 @@ eq "a subagent's tool call: it is present" "a1" "$(cat "$AGENTS/a1")"
 hook subagent-stop parent '"session_id":"s1","agent_id":"a1"' >/dev/null
 check "its stop: gone" test ! -e "$AGENTS/a1"
 check "  its session stays" test -e "$AGENTS/s1"
-touch -d '2 hours ago' "$AGENTS/s1"
+touch -d '2 hours ago' "$AGENTS/s1"; : >"$AGENTS/old"; touch -d '2 hours ago' "$AGENTS/old"
 hook post-tool-use inbox '"session_id":"s1"' >/dev/null
 check "a tool call refreshes it" test -n "$(find "$AGENTS/s1" -mmin -1)"
+check "  expired ones go" test ! -e "$AGENTS/old"
 hook session-end parent '"session_id":"other"' >/dev/null
 check "another session's end: stays" test -e "$AGENTS/s1"
 hook session-end parent '"session_id":"s1"' >/dev/null
@@ -616,15 +617,46 @@ check "  idle: moved" until_ok R merge-base --is-ancestor api ui
 eq "  the work carried along" "16" "$(cat "$MNT/ui/w.txt")"
 # A conflict: paused, logged once, nothing moved.
 on api u.txt theirs
-check "a conflict: logged" until_ok grep -q "following ui paused: .*conflict" "$LOG"
+check "a conflict: logged" until_ok grep -q "following ui: .*following paused: ui.s commits conflict with api.s on u.txt" "$LOG"
 check "  nothing moved" fails R merge-base --is-ancestor api ui
 sleep 3
-eq "  logged once" "1" "$(grep -c "following ui paused" "$LOG")"
+eq "  logged once" "1" "$(grep -c "following ui: " "$LOG")"
 "$BIN" -C "$REPO" parent leaf --no-follow >/dev/null
 W ui rebase -q api -X theirs >/dev/null 2>&1
 sleep 5
 check "not following: not moved" fails R merge-base --is-ancestor ui leaf
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
+}
+
+# --update --auto (hidden): the automation's policy, as the daemon and an
+# agent's turn start take the parent's new commits.
+update_auto() {
+identity; on main f.txt base
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+on ui u.txt mine
+check "--auto needs --update" says 2 "--update" parent ui --auto
+check "--auto with --yes: refused" says 2 "cannot be used with" parent ui --update --auto --yes
+check "--auto: hidden" lacks 0 "--auto" parent --help
+eq "up to date: nothing said" "0 " "$(gf parent ui --update --auto)"
+on api a.txt new
+check "moved: said" says 0 "moved 1 commit of ui onto api" parent ui --update --auto
+on api u.txt theirs
+check "a conflict: paused (exit 4)" says 4 "following paused: ui's commits conflict with api's on u.txt" parent ui --update --auto
+# Its commit replaced by one that doesn't conflict, the parent as it was.
+R branch -f ui ui~1; on ui v.txt other
+check "a recorded conflict: not tried again" says 4 "following paused: ui's commits conflict with api's on u.txt" parent ui --update --auto
+check "  --update tries it" says 0 "moved 1 commit of ui onto api" parent ui --update
+check "  then it is forgotten" fails R config branch.ui.gitfoldConflict
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui
+on api b.txt more
+check "pushed commits: paused (exit 4)" says 4 "following paused: 1 commit is pushed" parent ui --update --auto
+check "  nothing moved" fails R merge-base --is-ancestor api ui
+check "  --update --yes moves them" says 0 "moved 1 commit of ui onto api" parent ui --update --yes
+R update-ref -d refs/remotes/origin/ui
+mount_fs; ls "$MNT/ui" >/dev/null; unmount_fs
+on api c.txt more
+check "a workspace, unmounted: refused (exit 4)" says 4 "isn't mounted: mount it first" parent ui --update --auto
+check "  not mounted again" fails mountpoint -q "$MNT"
 }
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
@@ -638,6 +670,7 @@ section "tree: moves (--update, --set)" moves
 section "tree: pushed commits" pushed
 section "tree: what isn't moved, and crashes" not_moved
 section "tree: workspaces moved through the mount" workspaces
+section "tree: --update --auto" update_auto
 section "tree: following at turn start, agent presence" agents
 section "tree: following without an agent (the daemon)" daemon_follows
 finish

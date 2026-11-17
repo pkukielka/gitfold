@@ -66,6 +66,9 @@ pub struct ParentArgs {
     /// With --update: move commits that are pushed already.
     #[arg(long, requires = "update")]
     pub yes: bool,
+    // As the daemon and agents' turn starts take them (`follow_once`).
+    #[arg(long, hide = true, requires = "update", conflicts_with = "yes")]
+    pub auto: bool,
     // As Claude Code's hooks (`session-start`, `session-end`,
     // `subagent-stop`, `user-prompt-submit`): an agent's presence in its
     // workspace, and following at its turn start (`cli::claude::parent`).
@@ -95,7 +98,10 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         return set(&common_dir, &name, parent, follow);
     }
     if args.update {
-        update(&common_dir, &name, args.yes)?;
+        match args.auto {
+            true => update_auto(&common_dir, &name)?,
+            false => update(&common_dir, &name, args.yes)?,
+        }
         // Changed only once the update went through.
         if args.follow || args.no_follow {
             settings::set_follow(&common_dir, &name, args.follow)?;
@@ -180,17 +186,22 @@ fn paused(common_dir: &Path, tree: &Tree, name: &str) -> Result<Option<String>> 
 }
 
 /// Where `name` moves: its workspace, through the mount (mounted again
-/// where it last was if it isn't now: `mount::mount_or_again`), or `None`
-/// (no worktree has it). Refused checked out in another git worktree (git
-/// rebase there), with a git operation under way or a conflict left
-/// unresolved in its workspace, or if the repository was never mounted.
+/// where it last was if it isn't now and `again`: `mount::mount_or_again`),
+/// or `None` (no worktree has it). Refused checked out in another git
+/// worktree (git rebase there), with a git operation under way or a
+/// conflict left unresolved in its workspace, or if the repository isn't
+/// mounted (and never was, or not `again`).
 /// (With `--set`, its parent is written by then: each refusal names
 /// `--update` to finish.)
-fn movable(common_dir: &Path, name: &str) -> Result<Option<PathBuf>> {
+fn movable(common_dir: &Path, name: &str, again: bool) -> Result<Option<PathBuf>> {
     match follow::checked_out(common_dir, name) {
         None => Ok(None),
         Some(follow::CheckedOut::Workspace) => {
-            let Some(mount) = super::mount::mount_or_again(common_dir)? else {
+            let mount = match again {
+                true => super::mount::mount_or_again(common_dir)?,
+                false => crate::mount_table::mount_of(common_dir)?,
+            };
+            let Some(mount) = mount else {
                 bail!(
                     "{} isn't mounted: mount it first (`gitfold mount`), then: `gitfold parent \
                      {name} --update` ({name} moves in its workspace)",
@@ -241,12 +252,32 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
         );
     }
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    match plan.run(common_dir, yes, || movable(common_dir, name))? {
+    match plan.run(common_dir, yes, || movable(common_dir, name, true))? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
             Ok(())
         }
         moved => said(name, short, &plan, moved),
+    }
+}
+
+/// `gitfold parent NAME --update --auto`: its parent's new commits taken as
+/// the automation takes them (`follow_once`), if it follows its parent: a
+/// move said, a pause refused (exit 4).
+fn update_auto(common_dir: &Path, name: &str) -> Result<()> {
+    // F6, S4: only a branch with a parent.
+    let tree = Tree::read(common_dir)?;
+    let refuse = |r| refused("gitfold parent", name, "", r);
+    tree.check_follow(name).map_err(refuse)?;
+    match follow_once(common_dir, name) {
+        Followed::Nothing => Ok(()),
+        Followed::Moved(said) => {
+            print!("{said}");
+            Ok(())
+        }
+        Followed::Paused { full, .. } => {
+            Err(Refusal::Changes.error(format!("following paused: {full}")))
+        }
     }
 }
 
@@ -261,9 +292,12 @@ pub enum Followed {
 }
 
 /// Takes its parent's new commits for `name`, if it follows its parent
-/// (spec section 3): as `--update` without `--yes`, but a conflict recorded
-/// against the parent's tip isn't tried again (paused until the parent
-/// moves on, or it is rebased by hand).
+/// (spec section 3): the automation's policy (`--update --auto`, the
+/// daemon, an agent's turn start). As `--update` without `--yes`, but a
+/// conflict recorded against the parent's tip isn't tried again (paused
+/// until the parent moves on, or it is rebased by hand; forgotten once it
+/// is up to date), a move under way is waited for (up to a minute), and an
+/// unmounted repository isn't mounted again.
 pub fn follow_once(common_dir: &Path, name: &str) -> Followed {
     try_follow(common_dir, name).unwrap_or_else(|e| {
         let full = format!("{e:#}");
@@ -282,10 +316,12 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     let started = std::time::Instant::now();
     let _moving = loop {
         match follow::lock(common_dir, name) {
-            Err(e)
-                if Refusal::of(&e) == Some(Refusal::InUse)
-                    && started.elapsed() < std::time::Duration::from_secs(60) =>
-            {
+            Err(e) if Refusal::of(&e) == Some(Refusal::InUse) => {
+                if started.elapsed() >= std::time::Duration::from_secs(60) {
+                    let short = "a move is under way".to_string();
+                    let full = format!("a move of {name} is under way; `gitfold parent` once done");
+                    return Ok(Followed::Paused { full, short });
+                }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
             lock => break lock?,
@@ -307,7 +343,7 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     }
     let moved = match plan.conflict(common_dir, &local)? {
         Some(paths) => follow::Moved::Conflict(paths),
-        None => plan.run(common_dir, false, || movable(common_dir, name))?,
+        None => plan.run(common_dir, false, || movable(common_dir, name, false))?,
     };
     let summary = match &moved {
         follow::Moved::UpToDate => return Ok(Followed::Nothing),
@@ -366,7 +402,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // Checked out in another git worktree: refused before anything changes
     // (where its workspace is is found once it moves).
     if let Some(follow::CheckedOut::Worktree(_)) = follow::checked_out(common_dir, name) {
-        movable(common_dir, name)?;
+        movable(common_dir, name, true)?;
     }
     let _moving = follow::lock(common_dir, name)?;
     // The plan first (git walks history; the tree lock isn't held for
@@ -394,7 +430,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     // Refused or failed from here, it is built on P all the same.
     let moved = plan
         .run(common_dir, false, || {
-            let workspace = movable(common_dir, name)?;
+            let workspace = movable(common_dir, name, true)?;
             println!("moves {} of {name} onto {short}", commits(plan.own));
             Ok(workspace)
         })

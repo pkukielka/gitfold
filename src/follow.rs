@@ -54,7 +54,7 @@ fn rev(name: &str) -> Option<ObjectId> {
 }
 
 /// Whether `a` is an ancestor of `b` (or `b`).
-pub fn is_ancestor(common_dir: &Path, a: ObjectId, b: ObjectId) -> Result<bool> {
+fn is_ancestor(common_dir: &Path, a: ObjectId, b: ObjectId) -> Result<bool> {
     let (a, b) = (a.to_string(), b.to_string());
     let status = cmd::command(common_dir)
         .args(["merge-base", "--is-ancestor", &a, &b])
