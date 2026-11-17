@@ -467,7 +467,8 @@ last tip, see above), as real files; `markers` records deleted files so they
 stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
 `refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
-`agents/` the agents present in it (see [Branches built on
+`agents/` the agents present in it, `told/` and `followed` what following told
+them (see [Branches built on
 branches](#branches-built-on-branches)).
 Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.

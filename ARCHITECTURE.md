@@ -58,7 +58,7 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, agents/, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, agents/, told/, followed, upper/, tmp/
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
            .git/gitfold/.views.git/          the views' private repository (objects, view and live-tree refs)
