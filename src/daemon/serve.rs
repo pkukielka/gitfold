@@ -24,6 +24,10 @@ pub struct Options {
     pub prewarm_threads: Option<usize>,
     pub prewarm_walks: u64,
     pub track_reads: bool,
+    /// The flags it was given, to record once mounted for mounting it again
+    /// the same way (`cli::mount::mount_again`); none if `gitfold mount`
+    /// started it, which records them itself.
+    pub flags: Option<Vec<String>>,
 }
 
 /// Mounts `repo` at `mountpoint` and serves it until unmounted.
@@ -37,6 +41,7 @@ pub fn run(options: Options) -> Result<()> {
         prewarm_threads,
         prewarm_walks,
         track_reads,
+        flags,
     } = options;
     // Children (git, prewarm walkers) are waited for: an ignored SIGCHLD
     // inherited from whatever started the daemon would have the kernel reap
@@ -91,8 +96,10 @@ pub fn run(options: Options) -> Result<()> {
     let workspaces = fs.workspaces();
     let mounted = mountpoint.clone();
     let session = fuser::Session::new(fs, &mountpoint, &config)?;
-    // Mounted: where Claude Code's worktree hook mounts it again (`cli::claude`).
-    if let Err(e) = crate::settings::set_mountpoint(&common_dir, &mountpoint) {
+    // Mounted: where and how commands mount it again (`cli::mount::mount_again`).
+    if let Some(flags) = &flags
+        && let Err(e) = crate::settings::set_mountpoint(&common_dir, &mountpoint, flags)
+    {
         log::warn!("recording the mount point in the git config: {e:#}");
     }
     names.set_notifier(session.notifier());

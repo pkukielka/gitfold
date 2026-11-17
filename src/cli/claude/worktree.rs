@@ -9,7 +9,7 @@
 //! refused: a full checkout of it is what gitfold is there to avoid.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, ensure};
 
@@ -17,7 +17,6 @@ use super::cwd;
 use crate::cli::hook::field;
 use crate::git;
 use crate::mount_table;
-use crate::settings;
 use crate::state::state_root;
 
 /// Claude Code's branch name for its worktree `name` (as bin/gitfold's
@@ -40,20 +39,16 @@ pub fn worktree_create() -> Result<()> {
     let common_dir = git::init(&repo)?;
     let branch = branch_of(&name);
     let exists = git::branch_exists(&branch);
-    let mount = match mount_table::mount_of(&common_dir)? {
-        Some(mount) => Some(mount),
-        None if state_root(&common_dir).exists() => Some(mount_again_or_refuse(&common_dir)?),
-        None => None,
-    };
+    let mount = crate::cli::mount::mount_or_again(&common_dir)?;
+    // Used with gitfold, but no mount point recorded (an older gitfold's).
+    ensure!(
+        mount.is_some() || !state_root(&common_dir).exists(),
+        "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a workspace, \
+         rather than a full checkout",
+        common_dir.display()
+    );
     let path = match mount {
         Some(mount) => {
-            fs::metadata(&mount).with_context(|| {
-                format!(
-                    "the gitfold mount at {} doesn't answer (its daemon gone?); `gitfold \
-                     unmount` it",
-                    mount.display()
-                )
-            })?;
             let path = mount.join(&branch);
             if !exists {
                 crate::cli::branch::check_new(&common_dir, &branch)?;
@@ -83,21 +78,6 @@ pub fn worktree_create() -> Result<()> {
     };
     println!("{}", path.display());
     Ok(())
-}
-
-/// Mounts the repository of `common_dir` again where it last was (see
-/// `mount::mount_again`), or refuses: it is used with gitfold.
-fn mount_again_or_refuse(common_dir: &Path) -> Result<PathBuf> {
-    let mountpoint = settings::Local::read(common_dir)
-        .mountpoint()
-        .with_context(|| {
-            format!(
-                "{} is used with gitfold but not mounted: mount it (`gitfold mount`) for a \
-             workspace, rather than a full checkout",
-                common_dir.display()
-            )
-        })?;
-    crate::cli::mount::mount_again(common_dir, &mountpoint)
 }
 
 /// `WorktreeRemove`: removes the worktree at `worktree_path` (Claude Code asks

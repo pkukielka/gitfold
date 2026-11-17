@@ -161,7 +161,8 @@ It runs the `gitfold` on `PATH`, or else the release matching the plugin
   `gitfold remove` them.
 - **The mount comes back by itself.** A repository used with gitfold but not
   mounted (after a reboot, say) is mounted again where `gitfold mount` last
-  mounted it (`gitfold.mountpoint` in its git config), with default options;
+  mounted it (`gitfold.mountpoint` in its git config), with the flags it had
+  then (`gitfold.mountOptions`);
   if none is recorded, creating a worktree fails, saying so: mount it.
 - **Other repositories are left alone:** a git worktree in
   `.claude/worktrees/<name>`, as without the plugin.

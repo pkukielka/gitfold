@@ -50,12 +50,6 @@ pub fn output_of(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -
     finish(command.args(args), args, input)
 }
 
-/// Runs `git`, a command its `args` are already added to, returning what it
-/// printed; a failure's error holds `args` and what git said.
-pub fn checked(git: &mut Command, args: &[&str]) -> Result<Vec<u8>> {
-    finish(git, args, None)
-}
-
 fn finish(command: &mut Command, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>> {
     let (out, written) = match input {
         None => (command.stdin(Stdio::null()).output()?, Ok(())),
@@ -117,10 +111,8 @@ pub fn in_other_worktree(git: &mut Command) -> Result<&mut Command> {
     let local = match LOCAL.get() {
         Some(local) => local,
         None => {
-            let out = checked(
-                Command::new("git").args(["rev-parse", "--local-env-vars"]),
-                &["rev-parse", "--local-env-vars"],
-            )?;
+            let args = ["rev-parse", "--local-env-vars"];
+            let out = output_of(&mut Command::new("git"), &args, None)?;
             let vars = String::from_utf8_lossy(&out)
                 .lines()
                 .map(String::from)
@@ -146,3 +138,43 @@ pub fn command_in_other(git_dir: &Path) -> Result<Command> {
     in_other_worktree(&mut git)?;
     Ok(git)
 }
+
+/// git run in worktree `dir` (a workspace), as in a shell there (see
+/// `in_other_worktree`).
+pub fn in_workspace(dir: &Path) -> Result<Command> {
+    let mut git = Command::new("git");
+    in_other_worktree(&mut git)?;
+    git.current_dir(dir);
+    Ok(git)
+}
+
+/// The options of git on a copy of a worktree's index (a snapshot) that keep
+/// the repository safe: nothing of the copy (a split index's shared part, a
+/// sparse index's trees) written into it, and no hook hearing of it. Its
+/// untracked cache and fsmonitor are used as the repository has them.
+pub const REPOSITORY_SAFE: [&str; 6] = [
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "index.sparse=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+
+/// The options of git on a throwaway index: a plain index, whatever the
+/// repository's are like, so that nothing of it (a split index's shared
+/// part, a sparse index's trees) is written into the repository and no hook
+/// hears of it; paths taken literally.
+pub const PLAIN_INDEX: [&str; 11] = [
+    "-c",
+    "core.splitIndex=false",
+    "-c",
+    "index.sparse=false",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.untrackedCache=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "--literal-pathspecs",
+];
