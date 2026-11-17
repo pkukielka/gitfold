@@ -223,7 +223,7 @@ fn matching<'a>(
 ) -> Result<HashSet<Vec<u8>>> {
     let empty = git::with_repo(|repo| gix::ObjectId::empty_blob(repo.object_hash()));
     let entry = format!("100644 {empty} 0\t");
-    let update: Vec<&str> = (PLAIN.into_iter())
+    let update: Vec<&str> = (git::cmd::PLAIN_INDEX.into_iter())
         .chain(["update-index", "-z", "--index-info"])
         .collect();
     let mut matching = HashSet::new();
@@ -248,28 +248,10 @@ fn matching<'a>(
     Ok(matching)
 }
 
-/// The options of git on a throwaway index: a plain index, whatever the
-/// repository's are like, so that nothing of it (a split index's shared
-/// part, a sparse index's trees) is written into the repository and no hook
-/// hears of it; paths taken literally.
-const PLAIN: [&str; 11] = [
-    "-c",
-    "core.splitIndex=false",
-    "-c",
-    "index.sparse=false",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.untrackedCache=false",
-    "-c",
-    "core.hooksPath=/dev/null",
-    "--literal-pathspecs",
-];
-
 /// `git ls-files` of the index at `index` (none there: an empty one), from
 /// the current directory: its paths matching `typed`, NUL-terminated.
 fn ls_files(index: &Path, typed: &[String]) -> Result<Vec<u8>> {
-    let args: Vec<&str> = (PLAIN.into_iter())
+    let args: Vec<&str> = (git::cmd::PLAIN_INDEX.into_iter())
         .chain(["ls-files", "-z", "--full-name", "--"])
         .chain(typed.iter().map(String::as_str))
         .collect();
