@@ -58,14 +58,14 @@ Non-goals for now: macOS and Windows; applying checkout filters
 
  on disk:  .git/worktrees/gitfold-<sha12>/   snapshot registrations
            .git/worktrees/gitfold-ws-<id>/   workspace registrations
-           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, upper/, tmp/
+           .git/gitfold/<id>/                workspace state: base, branch, markers, times, reads, agents/, upper/, tmp/
            .git/gitfold/.tasks/<id>/         task folders (kept after the workspace)
            .git/gitfold/.control             the daemon's control socket
            .git/gitfold/.views.git/          the views' private repository (objects, view and live-tree refs)
            .git/gitfold-moves/               temporary worktrees of branch moves (git rebase)
            refs/gitfold/<id>                 keeps the workspace base from git gc
            refs/gitfold-base/<branch>        where a branch's own commits start (on its parent)
-           branch.<branch>.gitfold*          per-branch settings: parent, following, prewarm, read tracking
+           branch.<branch>.gitfold*          per-branch settings: parent, following, prewarm, read tracking, records (conflict, move, landing)
 ```
 
 Names below the root are resolved by `Workspaces::resolve`, one component at a
@@ -195,7 +195,7 @@ Then, per request (`fs/workspace/`):
 | `tests/tree.sh` | end-to-end test of branches built on branches: `parent` and `branch --parent` (the root and name rules), moves, pushed commits, crashes, landing, following at turn start and by the daemon, the tree in `list` |
 | `tests/from.sh` | end-to-end test of `branch` with several `--from` (compared with git's own merge), with `-w`, mounting again |
 | `tests/views.sh` | end-to-end test of `@committed` and `@live`: members, conflicts, refreshing, resting, the reserved names |
-| `tests/fixture.sh` | the repository each isolated section of the suites above starts from |
+| `tests/fixture.sh` | the repository each isolated section of manage, status, mount, agents, tree, from and views starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
 | `tests/race-modes.pl` | helper of `tests/workspace.sh`: lifted modes must stay invisible |
@@ -263,7 +263,8 @@ Then, per request (`fs/workspace/`):
   mount to fill the kernel caches.
 - **Parent**: the branch a branch is built on (`branch.<b>.gitfoldParent`, a
   full ref); parents form the **tree of branches**, rooted at the main
-  branch (the **root**, from `origin/HEAD`, else `main` or `master`).
+  branch (the **root**, from `origin/HEAD`, else `main`, `master`,
+  `origin/main` or `origin/master`).
 - **Own commits**: a branch's commits since the parent's commit they sit on,
   kept by `refs/gitfold-base/<branch>` (not a workspace's **base**).
 - **Move** (of a branch): its own commits replayed onto its parent's tip by

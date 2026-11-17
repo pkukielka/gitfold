@@ -141,7 +141,8 @@ branches](#branches-built-on-branches)), and settings in its git config
 - git with linked worktree and index v4 support (any git from the last decade;
   tested with 2.49). Moving branches built on branches (`gitfold parent
   --update`, `--set`, following) and the views (`@committed`, `@live`) need
-  git 2.40 or newer; the views in a partial clone, 2.44.
+  git 2.40 or newer (before 2.43, a view's merges read `.gitattributes` from the
+  checkout, not from the view); the views in a partial clone, 2.44.
 - A full clone, or a partial clone (`git clone --filter=blob:none`, or
   `tree:0`; git 2.29 or newer) whose promisor remote gitfold can fetch from
   without a prompt (an ssh agent, a credential helper); see [Partial
@@ -202,7 +203,7 @@ would share, and corrupt, the stored workspace changes. The mount is read-write
 Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
 error, 3 not found (no such branch, workspace or snapshot, or not a valid
 name), 4 uncommitted changes or a git operation in progress (for `parent`,
-also a move stopped: a conflict, pushed commits), 5 in use or busy.
+also a move a conflict stopped), 5 in use or busy.
 Three commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
 `inbox --claude-hook rewake` (2, to wake the session).
@@ -512,7 +513,8 @@ the history stays as it is) or turns following on and off.
 
 A parent is a local branch or a remote-tracking one (`origin/main`, which
 moves when you fetch), named as git takes the name. The tree's root, the
-main branch (`origin/HEAD`'s, else `main` or `master`), has no parent. Both
+main branch (`origin/HEAD`'s, else `main`, `master`, `origin/main` or
+`origin/master`), has no parent. Both
 settings are kept in the branch's git config (`branch.<name>.gitfoldParent`,
 `gitfoldFollow`).
 

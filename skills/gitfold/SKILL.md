@@ -220,7 +220,8 @@ even on a huge tree. Each workspace then changes on its own.
 **To build and test several branches together,** start a branch at their
 merge: `gitfold branch try --from agent/a --from agent/b` runs `git merge` in
 the new workspace (a conflict leaves git's merge in progress there: `git
-merge --continue` or `--abort`). `-w` adds each one's uncommitted changes.
+merge --continue` or `--abort`). `-w` adds each one's uncommitted changes,
+and then a merge that doesn't complete leaves nothing.
 The new branch is an ordinary one, unrelated to them afterwards.
 
 ## Building on another branch
@@ -242,15 +243,17 @@ gitfold parent --update                      # take the parent's new commits now
   how to resolve it once, then reminded each turn. Commits you already
   pushed move only with `gitfold parent --update --yes`, which prints the
   force-push to run; gitfold never pushes.
-- **When the parent lands** in the main branch: once its branch is deleted,
-  yours moves onto the main branch with only its own commits; while it still
-  exists, `gitfold list` says so, and `gitfold parent --set main` does that
+- **When the parent lands** in the main branch (or in its own parent): once
+  its branch is deleted, yours, if it follows, moves there with only its own
+  commits; while it still exists, following notes `api looks merged into
+  main` (in `gitfold list` too), and `gitfold parent --set main` does that
   move. gitfold never fetches: `git fetch` to let it see a merge done on the
   forge.
 - `gitfold parent --set <P>` moves your commits onto another parent;
   `--none` forgets the parent and keeps the history as it is.
 - `gitfold list` shows the tree, and notes what needs doing (`conflict on
-  PATH`, `following paused: pushed`, `api landed in main`, `parent gone`).
+  PATH`, `following paused: pushed`, `api looks merged into main`, `parent
+  gone`).
 
 **Reading the others' work:** `<mount>/@committed/<branch>/` is that branch
 merged with every branch built on it, read-only (`git merge-tree`, so
