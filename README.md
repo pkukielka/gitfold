@@ -511,11 +511,14 @@ branches opened as workspaces, and those they are built on). Each branch's
 change is its files against where it left its parent, merged in turn by git
 (`git merge-tree`): renames, `.gitattributes` merge settings and
 `merge.conflictStyle` apply as in a merge, and conflicts stay in the files as
-git leaves them, markers named by branch (`api+ui`, `web`).
+git leaves them (the first merge's markers name the branches, later ones the
+view so far by its tree id).
 `.gitfold-conflicts` at the view's root lists every conflict git reports, one
-per line (`CONFLICT (<kind>)\t<the two sides>\t<path>`), and the branches left
-out (`skipped`) or refs that couldn't be read (`unread`). Git's objects go
-into a private repository, `.git/gitfold/.views.git`, which borrows the
+per line (`CONFLICT (<kind>)\t<the two sides>\t<path>`, the sides named by
+branch: `api+ui, web`), and the branches left out (`skipped`) or refs that
+couldn't be read (`unread`). git merges in the repository itself (its
+settings, attributes and merge drivers), but writes its objects into a
+private repository, `.git/gitfold/.views.git`, which borrows the
 repository's objects: nothing is written into the repository. The view
 follows new commits and changes to the tree within about a second. `@live`
 (with uncommitted work) is reserved and comes later; a branch named `committed` or

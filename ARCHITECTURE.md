@@ -849,15 +849,18 @@ of decoding trees on demand. The remaining cold cost is per-entry kernel work
 
 **What:** a view (`@committed/<branch>`) is a tree git merges: `git
 merge-tree --write-tree` folds each member into the view so far, against its
-merge base with its parent, in a private bare repository
-(`.git/gitfold/.views.git`, made anew at each mount) that borrows the
-repository's objects through `objects/info/alternates`, its config
-(`include.path`) and its `info/attributes`; `.gitattributes` are read from
-the view so far (`attr.tree`). gitfold reads the merged trees through a
-second object-database handle on it (`git::open_private`: `tree_entries`,
-`object_size` and `read_blob` look there when the repository hasn't an
-object). During a merge its refs name the sides, for the conflict markers;
-after it only each view's ref stays, and `git gc --auto` (with
+merge base with its parent. git runs in the repository itself (its config,
+`includeIf`, attributes, merge drivers; in its work tree's top), with only
+its objects redirected (`GIT_OBJECT_DIRECTORY`, the repository's objects as
+an alternate) into a private bare repository (`.git/gitfold/.views.git`,
+made anew at each mount) that borrows the repository's objects through
+`objects/info/alternates`; `.gitattributes` are read from the view so far
+(`attr.tree`). The first fold's markers name the branches, later ones the
+view so far by its tree id (no ref names it); `.gitfold-conflicts` names the
+branches. gitfold reads the merged trees through a second object-database
+handle on it (`git::open_private`: `tree_entries`, `object_size` and
+`read_blob` look there when the repository hasn't an object). Its only refs
+are each view's, and `git gc --auto` (with
 `gc.pruneExpire=now`) collects the rest as git decides. The view is rebuilt
 when its refs move: a thread
 per open view reads its members' refs every
@@ -877,8 +880,11 @@ an entry in it appeared or went; the root keeps its first.
 **Why git's merge:** each hand-built copy of git's merge behaviour (renames,
 attributes, conflict cases) left the next difference; `merge-tree` is git's
 own, and takes ~5 ms per merge on 100k files (it reads only differing
-subtrees). The private repository keeps the user's repository free of the
-objects and refs it needs.
+subtrees). It runs in the user's repository because a second repository
+imitating it (borrowed config, attributes, label refs) kept differing
+(`includeIf`, relative merge-driver paths, branch names clashing with its
+refs); only the objects go elsewhere, keeping the user's repository free of
+them.
 
 **Why:** the views change without the kernel seeing it, unlike workspaces;
 short TTLs would cost a request per access everywhere in a view, for content

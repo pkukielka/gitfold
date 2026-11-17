@@ -66,22 +66,31 @@ commit_on ui api $'a.txt=ui\n' 'gone.txt=-'
 commit_on web api $'a.txt=web\n' $'gone.txt=web\n'
 built_on ui api; built_on web api
 mount_fs
-eq "markers named by branch" $'<<<<<<< api+ui\nui\n=======\nweb\n>>>>>>> web' "$(cat "$MNT/$V/a.txt")"
+check "the view so far named by its tree" grep -qE '^<<<<<<< [0-9a-f]{40}$' "$MNT/$V/a.txt"
+eq "the member by name" $'ui\n=======\nweb\n>>>>>>> web' "$(sed 1d "$MNT/$V/a.txt")"
 eq "modify/delete: the changed version, as git leaves it" "web" "$(cat "$MNT/$V/gone.txt")"
 eq "the summary, as git says it" $'CONFLICT (contents)\tapi+ui, web\ta.txt\nCONFLICT (modify/delete)\tapi+ui, web\tgone.txt' \
     "$(cat "$MNT/$V/.gitfold-conflicts")"
 }
 
 gits_merge() {
-commit_on api main $'CHANGES=c\n' $'.gitattributes=CHANGES merge=union\n'
-commit_on ui api a.txt=- $'renamed.txt=a\n' $'CHANGES=c\nui\n'
-commit_on web api $'a.txt=a\nweb\n' $'CHANGES=c\nweb\n'
+commit_on api main $'CHANGES=c\n' $'DRIVEN=d\n' $'.gitattributes=CHANGES merge=union\nDRIVEN merge=mine\n'
+commit_on ui api a.txt=- $'renamed.txt=a\n' $'CHANGES=c\nui\n' $'DRIVEN=ui\n'
+commit_on web api $'a.txt=a\nweb\n' $'CHANGES=c\nweb\n' $'DRIVEN=web\n'
+# The repository's merge driver, by a path relative to its top, in settings
+# it includes for itself only.
+mkdir -p "$REPO/tools"
+printf '#!/bin/sh\necho driven >"$1"\n' >"$REPO/tools/drive.sh"
+chmod +x "$REPO/tools/drive.sh"
+printf '[merge "mine"]\n\tdriver = tools/drive.sh %%A\n' >"$T/drivers"
+R config "includeIf.gitdir:$REPO/.path" "$T/drivers"
 built_on ui api; built_on web api
 refs_before=$(R for-each-ref | wc -l)
 objects_before=$(R count-objects -v | sed -n 's/^count: //p')
 mount_fs
 eq "an edit follows a rename" $'a\nweb' "$(cat "$MNT/$V/renamed.txt")"
 eq "merge=union" $'c\nui\nweb' "$(cat "$MNT/$V/CHANGES")"
+eq "the repository's merge driver" "driven" "$(cat "$MNT/$V/DRIVEN")"
 eq "no ref in the repository" "$refs_before" "$(R for-each-ref | wc -l)"
 eq "no object in the repository" "$objects_before" "$(R count-objects -v | sed -n 's/^count: //p')"
 check "the private repository's" test -d "$COMMON/gitfold/.views.git"

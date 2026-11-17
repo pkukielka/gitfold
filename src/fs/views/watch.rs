@@ -112,7 +112,7 @@ impl Watch {
             .collect::<Result<Vec<_>>>()?;
         self.bases.next_round();
         // What git will read, loaded first: in a partial clone, fetched as
-        // for a snapshot (git doesn't fetch in the private repository).
+        // for a snapshot (git doesn't fetch for the views).
         ctx.store.load_tree(refs.own.1)?;
         for ((_, (_, tree), _), m) in refs.members.iter().zip(&inputs) {
             ctx.store.load_tree(*tree)?;
@@ -121,7 +121,9 @@ impl Watch {
             }
         }
         // No lock the requests need is held meanwhile.
-        let merged = ctx.private.merge(branch, refs.own, &inputs)?;
+        let merged = ctx
+            .private
+            .merge(branch, origin.as_deref(), refs.own, &inputs)?;
         let tree = ctx.store.load_tree(merged.tree)?;
         let (conflicts, notes) = (&merged.conflicts, &refs.notes);
         let (shown, changed) = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);
