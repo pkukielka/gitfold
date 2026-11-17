@@ -125,7 +125,7 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/views/` | `@committed/<branch>`: which branches a view merges (`members`), the merge by `git merge-tree` in a private repository (`merge`), the merged tree as files and its summary (`shown`), serving it (`serve`), and keeping it current (`watch`) |
+| `src/fs/views/` | `@committed/<branch>` and `@live/<branch>`: which branches a view merges (`members`), the merge by `git merge-tree` in a private repository (`merge`), workspaces as trees for `@live` (`live`, `lives`), the merged tree as files and its summary (`shown`), serving it (`serve`), and keeping it current or resting (`watch`) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
@@ -865,7 +865,8 @@ meanwhile, racing with the refs and its own shortening;
 `.gitfold-conflicts`, which gitfold writes, names the branches. gitfold
 reads the merged trees through a second object-database handle on it
 (`git::open_private`: `tree_entries`, `object_size` and `read_blob` look
-there when the repository hasn't an object). Its only refs are each view's,
+there when the repository hasn't an object). Its only refs are each view's
+(and each workspace's live tree, below),
 and `git gc --auto` (with `gc.pruneExpire=now`) collects the rest as git
 decides. The view is rebuilt when its refs move: a thread per open view
 reads its members' refs every
@@ -881,6 +882,24 @@ nothing is re-walked; a path whose kind changed (a file now a directory) gets
 a new one. What changed is the difference between the old and the new
 merged tree. Times: a file's is when its blob last changed, a directory's when
 an entry in it appeared or went; the root keeps its first.
+
+`@live/<branch>` merges the same way, each workspace as it is instead of its
+tip: its live tree is `git add -A` and `git write-tree` run in the workspace
+(through the mount) on a fresh copy of its index, objects going to the
+private repository only (`live`), so every rule of what gets staged is git's.
+There is one live tree per workspace, shared by the views it is in (`lives`),
+kept by `refs/gitfold/live/<id>` (dropped when the workspace is removed), and
+made again once the workspace has been quiet for 2 s after a change, or 10 s
+into a burst. A view opens with the tips; its first requests wait for the
+workspaces.
+
+A view not accessed for a minute rests: its thread reads nothing until an
+access wakes it. An `@live` view's entries and attributes are cached for 1 s
+only, so accesses keep reaching gitfold; an `@committed` view, cached long,
+has the kernel forget its root's entry when it rests, so the next path
+through it asks again. The first access to a resting view waits up to 5 s
+for it to be refreshed, at most half the request threads at once (git reads
+the workspaces through the others; with one thread nothing waits).
 
 **Why git's merge:** each hand-built copy of git's merge behaviour (renames,
 attributes, conflict cases) left the next difference; `merge-tree` is git's

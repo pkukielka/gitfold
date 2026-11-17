@@ -239,7 +239,7 @@ Options:
 | `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--track-reads` | off | Record the files Claude Code reads in workspaces, as its hook reports them, for `gitfold overlaps`. A workspace's own setting wins (`gitfold track-reads`). |
-| `--threads N` | number of CPUs | FUSE worker threads. |
+| `--threads N` | number of CPUs (also for 0) | FUSE worker threads. Half of them at most wait for a resting view to wake (git reads the workspaces through the others): with 1, a first access doesn't wait. |
 
 A workspace can have its own prewarm mode, kept across remounts in the branch's
 git config: `gitfold branch <BRANCH> --prewarm none`, or `git config
