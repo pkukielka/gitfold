@@ -67,7 +67,7 @@ commit_on web api $'a.txt=web\n' $'gone.txt=web\n'
 built_on ui api; built_on web api
 mount_fs
 check "the view so far named by an id" grep -qE '^<<<<<<< [0-9a-f]{40}$' "$MNT/$V/a.txt"
-eq "the member by name" $'ui\n=======\nweb\n>>>>>>> web' "$(sed 1d "$MNT/$V/a.txt")"
+eq "the member by its commit" $'ui\n=======\nweb\n>>>>>>> '"$(R rev-parse web)" "$(sed 1d "$MNT/$V/a.txt")"
 eq "modify/delete: the changed version, as git leaves it" "web" "$(cat "$MNT/$V/gone.txt")"
 eq "the summary, as git says it" $'CONFLICT (contents)\tapi+ui, web\ta.txt\nCONFLICT (modify/delete)\tapi+ui, web\tgone.txt' \
     "$(cat "$MNT/$V/.gitfold-conflicts")"

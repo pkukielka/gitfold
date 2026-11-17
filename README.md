@@ -511,8 +511,8 @@ branches opened as workspaces, and those they are built on). Each branch's
 change is its files against where it left its parent, merged in turn by git
 (`git merge-tree`): renames, `.gitattributes` merge settings and
 `merge.conflictStyle` apply as in a merge, and conflicts stay in the files as
-git leaves them (the first merge's markers name the branches, later ones the
-view so far by the id of a commit of it, in gitfold's private repository).
+git leaves them (markers name the sides by commit id: the branches' tips, and
+commits of the view so far in gitfold's private repository).
 `.gitfold-conflicts` at the view's root lists every conflict git reports, one
 per line (`CONFLICT (<kind>)\t<the two sides>\t<path>`, the sides named by
 branch: `api+ui, web`), and the branches left out (`skipped`) or refs that

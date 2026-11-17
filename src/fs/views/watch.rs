@@ -121,9 +121,7 @@ impl Watch {
             }
         }
         // No lock the requests need is held meanwhile.
-        let merged = ctx
-            .private
-            .merge(branch, origin.as_deref(), refs.own, &inputs)?;
+        let merged = ctx.private.merge(branch, refs.own, &inputs)?;
         let tree = ctx.store.load_tree(merged.tree)?;
         let (conflicts, notes) = (&merged.conflicts, &refs.notes);
         let (shown, changed) = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);

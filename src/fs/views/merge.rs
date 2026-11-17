@@ -9,20 +9,18 @@
 //! private bare repository, `<git dir>/gitfold/.views.git`, which borrows the
 //! repository's objects (`objects/info/alternates`) and which gitfold reads
 //! too (`git::open_private`). No object or ref is written into the repository
-//! (merge drivers run in its top, as in any merge). The
-//! first fold's conflict markers name the branches (`<<<<<<< api`,
-//! `>>>>>>> ui`); later ones name the view so far by the id of a commit of
-//! it. The private repository's only refs are the view's: the tree it shows
-//! (`refs/gitfold/views/<view>`) and, until it shows it, the new one
+//! (merge drivers run in its top, as in any merge). git is given commits by
+//! id, so conflict markers name the sides by id; the summary names the
+//! branches. The private repository's only refs are the view's: the tree it
+//! shows (`refs/gitfold/views/<view>`) and, until it shows it, the new one
 //! (`refs/gitfold/next/<view>`). It is made anew at each mount, and
 //! garbage-collected as git's `gc --auto` decides (more loose objects than
 //! `gc.auto`'s default): what no view shows goes. Missing objects aren't
 //! fetched: in a partial clone, gitfold fetches what a merge needs first, as
 //! for a snapshot.
 
-use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
-use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::collections::HashSet;
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -63,10 +61,9 @@ pub struct Merged {
 pub struct Private {
     dir: PathBuf,
     /// The repository's git dir, its work tree's top (git's current
-    /// directory there; its git dir if it has none), and its objects.
+    /// directory there; its git dir if it has none).
     git_dir: PathBuf,
     top: PathBuf,
-    objects: PathBuf,
     /// Held by each merge and its garbage collection: one would prune what
     /// the other just wrote.
     lock: Mutex<()>,
@@ -86,14 +83,13 @@ impl Private {
             dir,
             top: git::work_tree().unwrap_or_else(|| git_dir.clone()),
             git_dir,
-            objects,
             lock: Mutex::new(()),
         };
         private.run(&["init", "-q", "--bare"])?;
         std::fs::create_dir_all(private.dir.join("objects/info"))?;
         std::fs::write(
             private.dir.join("objects/info/alternates"),
-            [alternate(&private.objects), b"\n".to_vec()].concat(),
+            [objects.as_os_str().as_bytes(), b"\n"].concat(),
         )?;
         // Its commits' author, and no reflogs: they would keep what no view
         // shows.
@@ -137,10 +133,6 @@ impl Private {
         let mut git = git::cmd::command_in_other(&self.git_dir)?;
         git.current_dir(&self.top)
             .env("GIT_OBJECT_DIRECTORY", self.dir.join("objects"))
-            .env(
-                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-                OsString::from_vec(alternate(&self.objects)),
-            )
             .env("GIT_NO_LAZY_FETCH", "1");
         Ok(git)
     }
@@ -163,100 +155,37 @@ impl Private {
     }
 
     /// The view of `branch`: its commit and tree `own` (the tip of `branch`
-    /// or of `origin`, its origin root) with `members` merged in turn. Its
-    /// commit is kept (`refs/gitfold/next/<branch>`) until `shown` says it
-    /// is the one shown.
+    /// or of its origin root) with `members` merged in turn. git is given
+    /// commits by id, so conflict markers name the sides by id; the summary
+    /// names them by branch. Its commit is kept (`refs/gitfold/next/<branch>`)
+    /// until `shown` says it is the one shown.
     pub fn merge(
         &self,
         branch: &str,
-        origin: Option<&str>,
         own: (ObjectId, ObjectId),
         members: &[Member],
     ) -> Result<Merged> {
         let _lock = self.lock.lock();
-        let local = format!("refs/heads/{branch}");
-        let fulls: Vec<String> = [local.clone()]
-            .into_iter()
-            .chain(origin.map(String::from))
-            .chain(members.iter().map(|m| format!("refs/heads/{}", m.branch)))
-            .collect();
-        let before = self.refs_now(&fulls)?;
-        let merged = self.fold(branch, origin, own, members, |full, id| {
-            (before.get(full))
-                .filter(|(at, _)| *at == id)
-                .map(|(_, short)| short.clone())
-        });
-        // A ref git took by name moved meanwhile: git merged another commit,
-        // or failed. Made again by the ids.
-        let merged = match self.refs_now(&fulls)? == before {
-            true => merged?,
-            false => self.fold(branch, origin, own, members, |_, _| None)?,
-        };
-        let commit = merged.commit;
-        self.refs(format!("update refs/gitfold/next/{branch} {commit}\n"))?;
-        Ok(merged)
-    }
-
-    /// Each of `fulls` (full refs) that exists: the commit it is at and its
-    /// name as git shortens it (`%(refname:short)`), by git.
-    fn refs_now(&self, fulls: &[String]) -> Result<HashMap<String, (ObjectId, String)>> {
-        let mut args = vec![
-            "for-each-ref",
-            "--format=%(objectname) %(refname) %(refname:short)",
-        ];
-        args.extend(fulls.iter().map(String::as_str));
-        let mut git = git::cmd::command_in_other(&self.git_dir)?;
-        let out = git::cmd::output_of(&mut git, &args, None)?;
-        let mut now = HashMap::new();
-        // Ref names have no spaces.
-        for line in String::from_utf8_lossy(&out).lines() {
-            let mut fields = line.splitn(3, ' ');
-            if let (Some(id), Some(full), Some(short)) =
-                (fields.next(), fields.next(), fields.next())
-                && fulls.iter().any(|f| f == full)
-            {
-                now.insert(
-                    full.to_string(),
-                    (ObjectId::from_hex(id.as_bytes())?, short.to_string()),
-                );
-            }
-        }
-        Ok(now)
-    }
-
-    /// The fold of `merge`, git given each side by the name `name` says for
-    /// a full ref at a commit (for the conflict markers), or by its id.
-    fn fold(
-        &self,
-        branch: &str,
-        origin: Option<&str>,
-        own: (ObjectId, ObjectId),
-        members: &[Member],
-        name: impl Fn(&str, ObjectId) -> Option<String>,
-    ) -> Result<Merged> {
-        let named = |full: &str, id: ObjectId| name(full, id).unwrap_or_else(|| id.to_string());
-        // git's argument for the view so far, which names it in conflict
-        // markers: the branch (or its origin root), then a commit of the view
-        // so far (git 2.44 takes no tree there; the last one is the view's).
-        let local = format!("refs/heads/{branch}");
-        let mut ours = [Some(local.as_str()), origin]
-            .into_iter()
-            .flatten()
-            .find_map(|full| name(full, own.0))
-            .unwrap_or_else(|| own.0.to_string());
-        // How the summary names it: by branch.
-        let mut side = branch.to_string();
+        // The view so far: its commit (a commit of each fold's tree: git
+        // 2.40 takes no tree there), and how the summary names it.
+        let (mut ours, mut side) = (own.0, branch.to_string());
         let mut tree = own.1;
-        let mut commit = None;
         let mut conflicts = Vec::new();
         for (i, m) in members.iter().enumerate() {
             let base = (m.base).unwrap_or_else(|| ObjectId::empty_tree(gix::hash::Kind::Sha1));
             let base = format!("--merge-base={base}");
-            let theirs = named(&format!("refs/heads/{}", m.branch), m.tip);
+            let (ours_hex, theirs) = (ours.to_string(), m.tip.to_string());
             // Attributes (`merge=union`) from the view so far, as a merge in a
             // checkout of it reads them.
             let attributes = format!("attr.tree={tree}");
-            let args = ["merge-tree", "--write-tree", "-z", &base, &ours, &theirs];
+            let args = [
+                "merge-tree",
+                "--write-tree",
+                "-z",
+                &base,
+                &ours_hex,
+                &theirs,
+            ];
             let out = (self.in_repository()?.args(["-c", &attributes]).args(args))
                 .stdin(Stdio::null())
                 .output()?;
@@ -276,15 +205,14 @@ impl Private {
                 conflicts.push(Conflict { kind, sides, path });
             }
             side = label(branch, &side, m.branch, i + 1, members);
-            let at = self.commit(&tree, &side)?;
-            ours = at.to_string();
-            commit = Some(at);
+            ours = self.commit(&tree, &side)?;
         }
         // Kept as a tree of its own, without the branches' history.
-        let commit = match commit {
-            Some(commit) => commit,
-            None => self.commit(&tree, branch)?,
+        let commit = match members.is_empty() {
+            true => self.commit(&tree, branch)?,
+            false => ours,
         };
+        self.refs(format!("update refs/gitfold/next/{branch} {commit}\n"))?;
         Ok(Merged {
             tree,
             commit,
@@ -323,18 +251,6 @@ impl Private {
             git::refresh_private();
         }
         Ok(())
-    }
-}
-
-/// `dir` as an entry of an alternates list (`objects/info/alternates`, one per
-/// line; `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `:`-separated): C-quoted as git
-/// quotes paths, and also if it has a `:`.
-fn alternate(dir: &Path) -> Vec<u8> {
-    let path = dir.as_os_str().as_bytes();
-    let quoted = crate::cli::quote(path);
-    match quoted == path && path.contains(&b':') {
-        true => [&b"\""[..], path, b"\""].concat(),
-        false => quoted,
     }
 }
 
@@ -414,7 +330,6 @@ mod tests {
         private()
             .merge(
                 n,
-                None,
                 (
                     id(&run(&["rev-parse", n])),
                     id(&run(&["rev-parse", &format!("{n}^{{tree}}")])),
@@ -457,12 +372,12 @@ mod tests {
         );
         let m = view("g1-api", &[("g1-ui", "g1-api"), ("g1-web", "g1-api")]);
         assert_eq!(show(&m, "a").unwrap(), "UI\n2\n3\n4\nWEB\n");
-        // The view so far named by an id, the member by name.
+        let web = run(&["rev-parse", "refs/heads/g1-web"]);
         let c = show(&m, "c").unwrap();
         let (ours, rest) = c.split_once('\n').unwrap();
         let id = ours.strip_prefix("<<<<<<< ").unwrap();
         assert!(ObjectId::from_hex(id.as_bytes()).is_ok(), "{c}");
-        assert_eq!(rest, "ui\n=======\nweb\n>>>>>>> g1-web\n");
+        assert_eq!(rest, format!("ui\n=======\nweb\n>>>>>>> {web}\n"));
         let sides = ["g1-api+g1-ui".to_string(), "g1-web".to_string()];
         assert_eq!(
             m.conflicts,
@@ -552,24 +467,21 @@ mod tests {
             !there.success(),
             "the merged tree is in the private repository only"
         );
-        assert!(show(&m, "a").unwrap().contains(">>>>>>> g4-web"));
+        assert!(show(&m, "a").unwrap().contains("=======\nweb\n>>>>>>> "));
         let refs = run(&["for-each-ref", "--format=%(refname)"]);
         assert!(!refs.contains("gitfold"), "{refs}");
     }
 
     #[test]
-    fn first_fold_names_branches_as_git_takes_them() {
+    fn markers_by_id_summary_by_branch() {
         let api0 = commit(None, &[("a", Some("1\n"))]);
-        branch("g5-ui", &commit(Some(&api0), &[("a", Some("ui\n"))]));
-        branch("g5-api", &commit(Some(&api0), &[("a", Some("api\n"))]));
+        let ui = branch("g5-ui", &commit(Some(&api0), &[("a", Some("ui\n"))]));
+        let api = branch("g5-api", &commit(Some(&api0), &[("a", Some("api\n"))]));
         let m = view("g5-api", &[("g5-ui", "g5-api")]);
-        let markers = "<<<<<<< g5-api\napi\n=======\nui\n>>>>>>> g5-ui\n";
+        let markers = format!("<<<<<<< {api}\napi\n=======\nui\n>>>>>>> {ui}\n");
         assert_eq!(show(&m, "a").unwrap(), markers);
-        // A tag of that name: as git shortens the branch then (`heads/`).
-        run(&["tag", "g5-ui", &api0]);
-        let m = view("g5-api", &[("g5-ui", "g5-api")]);
-        let markers = "<<<<<<< g5-api\napi\n=======\nui\n>>>>>>> heads/g5-ui\n";
-        assert_eq!(show(&m, "a").unwrap(), markers);
+        let sides = ["g5-api".to_string(), "g5-ui".to_string()];
+        assert_eq!(m.conflicts[0].sides, sides);
     }
 
     #[test]
@@ -587,13 +499,6 @@ mod tests {
         assert_eq!(clash, "api+ui-view", "a member's name");
         let long = label("api", "api+ui", &x, 3, &members);
         assert_eq!(long, "api+3-branches");
-    }
-
-    #[test]
-    fn alternates_quoted() {
-        assert_eq!(alternate(Path::new("/a/b")), b"/a/b");
-        assert_eq!(alternate(Path::new("/a:b")), b"\"/a:b\"");
-        assert_eq!(alternate(Path::new("/a\nb\"")), b"\"/a\\nb\\\"\"");
     }
 
     #[test]

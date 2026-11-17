@@ -851,17 +851,15 @@ of decoding trees on demand. The remaining cold cost is per-entry kernel work
 merge-tree --write-tree` folds each member into the view so far, against its
 merge base with its parent. git runs in the repository itself (its config,
 `includeIf`, attributes, merge drivers; in its work tree's top), with only
-its objects redirected (`GIT_OBJECT_DIRECTORY`, the repository's objects as
-an alternate) into a private bare repository (`.git/gitfold/.views.git`,
-made anew at each mount) that borrows the repository's objects through
+its objects redirected (`GIT_OBJECT_DIRECTORY`) into a private bare
+repository (`.git/gitfold/.views.git`, made anew at each mount) that borrows the repository's objects through
 `objects/info/alternates`; `.gitattributes` are read from the view so far
-(`attr.tree`). The first fold's markers name the branches (as `git
-for-each-ref` shortens them; by id if one moved during the merge, which is
-then made again by ids), later ones the
-view so far by the id of a commit of it in the private repository (no ref
-names it; git 2.44 takes no tree as a side); `.gitfold-conflicts` names the
-branches. gitfold reads the merged trees through a second object-database
-handle on it (`git::open_private`: `tree_entries`, `object_size` and
+(`attr.tree`). git is given every side by commit id, so markers show ids:
+the branches' tips, and for the view so far a commit of each fold's tree in
+the private repository (git 2.44 takes no tree as a side). Names given to
+git would be resolved by git meanwhile, racing with the refs and its own
+shortening; `.gitfold-conflicts`, which gitfold writes, names the branches.
+gitfold reads the merged trees through a second object-database handle on it (`git::open_private`: `tree_entries`, `object_size` and
 `read_blob` look there when the repository hasn't an object). Its only refs
 are each view's, and `git gc --auto` (with
 `gc.pruneExpire=now`) collects the rest as git decides. The view is rebuilt
