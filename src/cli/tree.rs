@@ -583,7 +583,8 @@ pub(crate) fn landed_said(parent: &str, to: &str, gone: bool) -> String {
 
 /// `landed_said`, with how `name` gets there: `--set`, or (`itself`: it
 /// follows its parent, which landed in the root and still exists) the
-/// parent's branch deleted (its own parent is forgotten with it).
+/// parent's branch deleted (its own parent is forgotten with it; `-D`:
+/// git refuses `-d` after a squash or rebase merge, and it landed).
 fn landed_hint(name: &str, parent: &str, to: &str, gone: bool, itself: bool) -> String {
     let landed = landed_said(parent, to, gone);
     let (short, to) = (crate::tree::short(parent), crate::tree::short(to));
@@ -591,7 +592,7 @@ fn landed_hint(name: &str, parent: &str, to: &str, gone: bool, itself: bool) -> 
         format!("`gitfold parent {name} --set {to}` moves {name} there with only its own commits");
     match itself {
         true => format!(
-            "{landed}: {set} (or delete {short}, `git branch -d {short}`, and {name} moves there \
+            "{landed}: {set} (or delete {short}, `git branch -D {short}`, and {name} moves there \
              by itself)"
         ),
         false => format!("{landed}: {set}"),

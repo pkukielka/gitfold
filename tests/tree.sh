@@ -564,7 +564,7 @@ eq "rebased by hand: nothing said" "" "$(turn)"
 check "  the conflict forgotten" fails R config branch.ui.gitfoldConflict
 # Its parent merged: said once; deleted, ui moves onto main.
 R merge -q --no-ff --no-edit api
-eq "the parent merged: said once" "gitfold: api looks merged into main: \`gitfold parent ui --set main\` moves ui there with only its own commits (or delete api, \`git branch -d api\`, and ui moves there by itself) " "$(turn)"
+eq "the parent merged: said once" "gitfold: api looks merged into main: \`gitfold parent ui --set main\` moves ui there with only its own commits (or delete api, \`git branch -D api\`, and ui moves there by itself) " "$(turn)"
 eq "  then nothing" "" "$(turn)"
 R config branch.ui.gitfoldFollow maybe
 eq "following set to no boolean: warned once, as unset" "1" "$(turn | grep -c 'branch.ui.gitfoldFollow is not a boolean (taken as unset)')"
