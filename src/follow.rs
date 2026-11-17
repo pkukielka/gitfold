@@ -95,7 +95,7 @@ fn merge_base(common_dir: &Path, args: &[&str]) -> Result<Option<ObjectId>> {
 
 /// Points `name` at `at` (with a reflog message).
 fn set_ref(common_dir: &Path, name: &str, at: ObjectId) -> Result<()> {
-    git::worktree::set_ref(common_dir, name, &at, "gitfold: parent")
+    git::worktree::set_ref(common_dir, name, &at, None, "gitfold: parent")
 }
 
 /// Deletes ref `name`, if it exists.
@@ -276,22 +276,20 @@ pub fn checked_out(common_dir: &Path, branch: &str) -> Option<CheckedOut> {
 /// unstaged, as with git's autostash). If git stops half-way anyway (a
 /// hook, a race), its state stays as git leaves it: a rebase in progress,
 /// the work kept in the stash.
-fn move_workspace(dir: &Path, tip: ObjectId, new: ObjectId) -> Result<rebase::Rebased> {
-    let git = |args: &[&str]| cmd::output_of(&mut cmd::in_workspace(dir)?, args, None);
+fn move_workspace(
+    dir: &Path,
+    branch: &str,
+    tip: ObjectId,
+    new: ObjectId,
+) -> Result<rebase::Rebased> {
     let (tip, new_hex) = (tip.to_string(), new.to_string());
-    let work = String::from_utf8_lossy(&git(&["stash", "create"])?)
-        .trim()
-        .to_string();
+    let stash = cmd::output_of(&mut cmd::in_workspace(dir)?, &["stash", "create"], None)?;
+    let work = String::from_utf8_lossy(&stash).trim().to_string();
     if !work.is_empty() {
-        let mut check = cmd::in_workspace(dir)?;
-        let args = [
-            "merge-tree",
-            "--write-tree",
-            "-z",
-            "--name-only",
-            "--merge-base",
-        ];
-        let out = check.args(args).args([&tip, &new_hex, &work]).output()?;
+        let args = ["merge-tree", "--write-tree", "-z", "--name-only"];
+        let out = (cmd::in_workspace(dir)?.args(args))
+            .args(["--merge-base", &tip, &new_hex, &work])
+            .output()?;
         match out.status.code() {
             Some(0) => {}
             // The tree, then the conflicted paths, then an empty field.
@@ -315,10 +313,8 @@ fn move_workspace(dir: &Path, tip: ObjectId, new: ObjectId) -> Result<rebase::Re
     rebase.env("GIT_EDITOR", ":");
     let args = ["rebase", "-q", "--autostash", "--no-update-refs", "--onto"];
     cmd::output_of(&mut rebase, &[&args[..], &[&new_hex, &tip]].concat(), None)?;
-    let head = String::from_utf8_lossy(&git(&["rev-parse", "HEAD"])?)
-        .trim()
-        .to_string();
-    Ok(rebase::Rebased::Done(ObjectId::from_hex(head.as_bytes())?))
+    // Checked out there, the branch moved with it.
+    Ok(rebase::Rebased::Done(git::branch_tip(branch)?.id))
 }
 
 /// What a move of a branch did, or why it didn't.
@@ -404,8 +400,7 @@ impl Plan {
         [self.tip.to_string(), format!("^{from}")]
     }
 
-    /// Whether it sits on `onto` already, with nothing of its old parent's
-    /// on top of `onto` (its own commits start on `onto`'s history).
+    /// See the field `up_to_date`.
     pub fn up_to_date(&self) -> bool {
         self.up_to_date
     }
@@ -466,19 +461,12 @@ impl Plan {
     /// The new tip, or the conflict of its uncommitted work with `new`.
     fn apply(&self, common_dir: &Path, new: ObjectId) -> Result<rebase::Rebased> {
         let Some(dir) = &self.workspace else {
-            let (name, new_hex, tip) = (
-                format!("refs/heads/{}", self.branch),
-                new.to_string(),
-                self.tip.to_string(),
-            );
+            let name = format!("refs/heads/{}", self.branch);
             let why = format!("gitfold: rebase onto {}", self.onto_ref);
-            cmd::output(
-                common_dir,
-                &["update-ref", "-m", &why, &name, &new_hex, &tip],
-            )?;
+            git::worktree::set_ref(common_dir, &name, &new, Some(&self.tip), &why)?;
             return Ok(rebase::Rebased::Done(new));
         };
-        move_workspace(dir, self.tip, new)
+        move_workspace(dir, &self.branch, self.tip, new)
     }
 
     /// Whether a merge is among the commits it would replay (which aren't
