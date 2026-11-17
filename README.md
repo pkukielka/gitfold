@@ -29,6 +29,9 @@ own branch and every reviewer any revision, side by side, without
   Chromium workspace costs about 125 MB of daemon memory.
 - **Your repository, as is.** Works on your existing clone: no new clone, no
   server, no root. Branches and commits are ordinary git.
+- **Agents building on each other's work.** A branch built on another takes
+  its new commits by itself, and read-only views show a branch merged with
+  everything built on it, uncommitted work included.
 
 ## Quick start
 
@@ -102,7 +105,9 @@ The skill's "Claude Code" section has the details
 
 The rest of this page is reference: [How it works](#how-it-works) ·
 [Requirements](#requirements) · [Usage](#usage) · [Snapshots](#snapshots) ·
-[Workspaces](#workspaces) · [Running it](#running-it) ·
+[Workspaces](#workspaces) ·
+[Branches built on branches](#branches-built-on-branches) ·
+[Running it](#running-it) ·
 [Cleaning up](#cleaning-up) ·
 [Differences from a checkout](#differences-from-a-checkout) ·
 [Performance](#performance) · [Development](#development)
@@ -121,9 +126,12 @@ Both are registered as linked git worktrees, so git commands inside them behave
 as in a normal checkout.
 
 gitfold writes into the repository: worktree registrations under
-`.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, and refs
+`.git/worktrees/gitfold-*`, workspace changes under `.git/gitfold/`, refs
 `refs/gitfold/*` that keep workspace bases from `git gc` (see
-[Cleaning up](#cleaning-up)).
+[Cleaning up](#cleaning-up)), refs `refs/gitfold-base/*` where a branch's own
+commits start (see [Branches built on
+branches](#branches-built-on-branches)), and settings in its git config
+(`gitfold.*`, `branch.<name>.gitfold*`).
 
 ## Requirements
 
@@ -132,7 +140,9 @@ gitfold writes into the repository: worktree registrations under
   mode gitfold depends on.
 - git with linked worktree and index v4 support (any git from the last decade;
   tested with 2.49). Moving branches built on branches (`gitfold parent
-  --update`, `--set`) needs git 2.40 or newer.
+  --update`, `--set`, following) and the views (`@committed`, `@live`) need
+  git 2.40 or newer (before 2.43, a view's merges read `.gitattributes` from the
+  checkout, not from the view); the views in a partial clone, 2.44.
 - A full clone, or a partial clone (`git clone --filter=blob:none`, or
   `tree:0`; git 2.29 or newer) whose promisor remote gitfold can fetch from
   without a prompt (an ssh agent, a credential helper); see [Partial
@@ -192,7 +202,8 @@ would share, and corrupt, the stored workspace changes. The mount is read-write
 
 Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
 error, 3 not found (no such branch, workspace or snapshot, or not a valid
-name), 4 uncommitted changes or a git operation in progress, 5 in use or busy.
+name), 4 uncommitted changes or a git operation in progress (for `parent`,
+also a move stopped by a conflict or by git), 5 in use or busy.
 Three commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
 daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps) and
 `inbox --claude-hook rewake` (2, to wake the session).
@@ -230,6 +241,9 @@ Names below the mount point:
 - Snapshots are pinned for the life of the mount: `@HEAD` keeps showing the
   commit HEAD pointed to when it was first opened. To see a newer commit, open
   it by SHA or remount.
+- `@committed/<branch>` and `@live/<branch>` are read-only views of a branch
+  merged with the branches built on it (see [Branches built on
+  branches](#branches-built-on-branches)).
 
 Options:
 
@@ -239,7 +253,7 @@ Options:
 | `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
 | `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
 | `--track-reads` | off | Record the files Claude Code reads in workspaces, as its hook reports them, for `gitfold overlaps`. A workspace's own setting wins (`gitfold track-reads`). |
-| `--threads N` | number of CPUs | FUSE worker threads. |
+| `--threads N` | number of CPUs (also for 0) | FUSE worker threads. Half of them at most wait for a resting view to wake (git reads the workspaces through the others): with 1, a first access doesn't wait. |
 
 A workspace can have its own prewarm mode, kept across remounts in the branch's
 git config: `gitfold branch <BRANCH> --prewarm none`, or `git config
@@ -452,7 +466,10 @@ leading `.` escaped (`agent%2Ftask-17`). The worktree registration is
 last tip, see above), as real files; `markers` records deleted files so they
 stay deleted; `times` the timestamps of files dropped from upper (committed,
 or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
-`refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress.
+`refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
+`agents/` the agents present in it, `told/` and `followed` what following told
+them (see [Branches built on
+branches](#branches-built-on-branches)).
 Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
 can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 
@@ -485,7 +502,7 @@ can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
 - After `git add` of files with `eol=crlf` attributes, git warns that line
   endings will be converted (see [Differences](#differences-from-a-checkout)).
 
-### Branches built on branches (in progress)
+### Branches built on branches
 
 A branch can be built on another branch, its parent: its own commits sit on
 the parent's, and it takes the parent's new commits. Branches built on
@@ -494,6 +511,13 @@ P's tip built on P, following it unless `--no-follow`. It has no upstream
 until you `git push -u` it: its parent isn't its upstream. `gitfold parent`
 shows a branch's parent and whether it follows it, forgets it (`--none`:
 the history stays as it is) or turns following on and off.
+
+A parent is a local branch or a remote-tracking one (`origin/main`, which
+moves when you fetch), named as git takes the name. The tree's root, the
+main branch (`origin/HEAD`'s, else `main`, `master`, `origin/main` or
+`origin/master`), has no parent. Both
+settings are kept in the branch's git config (`branch.<name>.gitfoldParent`,
+`gitfoldFollow`).
 
 `gitfold parent --update` takes the parent's new commits now, and `--set P`
 moves the branch onto another parent: its own commits move, as `git rebase
@@ -538,9 +562,21 @@ gitfold see merges.
 Commands people guess (`gitfold sync`, `pull`, `restack`, `rebase`, `branch
 --on`, `branch --merge`) exit 2 naming the right one.
 
+`gitfold changes -- <PATH>...` says who is changing those paths: one line per
+branch and path, sorted by path, with `committed` (its own commits, since it
+left its parent, else not yet in the main branch) or `uncommitted` (in its
+workspace). Directories match everything below them; `-z` works as for
+`changes`, `--stat` is refused.
+
+```
+api	committed	src/lexer.rs
+ui	uncommitted	src/lexer.rs
+```
+
 `<mount>/@committed/<branch>/` is a read-only view of a branch merged with
 every branch built on it, their committed tips (for the main branch, only
-branches opened as workspaces, and those they are built on). Each branch's
+branches opened as workspaces, and those they are built on; a branch without
+a parent isn't built on anything). Each branch's
 change is its files against where it left its parent, merged in turn by git
 (`git merge-tree`): renames, `.gitattributes` merge settings and
 `merge.conflictStyle` apply as in a merge, and conflicts stay in the files as
@@ -619,7 +655,8 @@ So do a workspace's base following a branch that moved, and the checks of
   up, or with the daemon's error. It logs to a file named after the mount point
   in `$XDG_STATE_HOME/gitfold/` (default `~/.local/state/gitfold/`), printing
   its path (`--log` to choose): one line per new snapshot commit, workspace,
-  prewarm and workspace rebase, and operation counters on exit. `RUST_LOG=warn`
+  prewarm, workspace rebase, view, and branch moved or paused by following,
+  and operation counters on exit. `RUST_LOG=warn`
   for only problems. With `--foreground` it stays in the foreground and logs to
   stderr, for service managers.
 - **Stop it with `gitfold unmount <MOUNTPOINT>`.** It waits until the daemon
@@ -666,8 +703,9 @@ So do a workspace's base following a branch that moved, and the checks of
 ### With coding agents
 
 - [skills/gitfold/SKILL.md](skills/gitfold/SKILL.md) tells agents how to work
-  in a mount: workspaces and snapshots, forking a workspace, merge previews,
-  cleaning up, and what differs from a checkout. It is a Claude Code skill:
+  in a mount: workspaces and snapshots, forking a workspace, branches built
+  on branches, views and merge previews, cleaning up, and what differs from
+  a checkout. It is a Claude Code skill:
   `ln -s "$PWD/skills/gitfold" ~/.claude/skills/gitfold` (or into a project's
   `.claude/skills/`). It is plain markdown, so other agents can be pointed at
   it from their instructions (`AGENTS.md`).
@@ -864,8 +902,11 @@ mount and real git (build with `--release` first):
 - `tests/manage.sh` (branch, list, changes, remove, prune), `tests/status.sh`
   (what a workspace's status sees: ignore rules, modes, half-way git
   operations, the index), `tests/mount.sh` (mount, unmount, version,
-  prewarm) and `tests/agents.sh` (overlaps, the task folder, messages): one
-  section at a time, each on a fresh repository. `SECTION=inbox
+  prewarm), `tests/agents.sh` (overlaps, the task folder, messages),
+  `tests/tree.sh` (branches built on branches: `parent`, following,
+  landing), `tests/from.sh` (`branch` with several `--from`) and
+  `tests/views.sh` (`@committed`, `@live`): one section at a time, each on a
+  fresh repository. `SECTION=inbox
   tests/agents.sh` runs the sections whose name contains `inbox`, and
   `PARALLEL=1` runs them all at once (a few timing checks may then be flaky on
   a loaded machine). A section that ends early counts as a failure.

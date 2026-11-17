@@ -102,7 +102,8 @@ impl StateDir {
     }
 
     /// Records a move following made while no agent was there (`said`, what
-    /// `--update` says), to tell its agent at its next turn start.
+    /// its agent is told of it: a move, or a landing), to tell its agent at
+    /// its next turn start.
     pub fn add_followed(&self, said: &str) -> Result<()> {
         if !self.dir.is_dir() {
             return Ok(());

@@ -56,6 +56,14 @@ impl Private {
         self.refs(format!("update refs/gitfold/live/{id} {commit}\n"))?;
         Ok(Live { tree, commit })
     }
+
+    /// Drops the live tree of the workspace of `branch` (removed): git's
+    /// garbage collection takes it then.
+    pub fn drop_live(&self, branch: &str) -> Result<()> {
+        let _writing = self.lock.read();
+        let id = crate::state::workspace_id(branch);
+        self.refs(format!("delete refs/gitfold/live/{id}\n"))
+    }
 }
 
 /// Copies the workspace's index `index` to `copy`, with its modification

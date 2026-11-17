@@ -125,12 +125,13 @@ pub fn pin_ref(id: &str) -> String {
 
 /// Files in a worktree's admin directory that mean a git operation is under
 /// way, or stopped half-way waiting for the user (conflicts, `rebase -i`,
-/// `bisect`).
+/// `bisect`). A rebase's first: `git_busy` names the first found, and a lock
+/// another git holds says nothing of a rebase under way.
 const BUSY: [&str; 9] = [
-    "index.lock",
-    "HEAD.lock",
     "rebase-merge",
     "rebase-apply",
+    "index.lock",
+    "HEAD.lock",
     "MERGE_HEAD",
     "CHERRY_PICK_HEAD",
     "REVERT_HEAD",

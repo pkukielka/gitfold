@@ -161,6 +161,7 @@ impl GitFold {
             snapshots: self.snapshots.clone(),
             workspaces: self.workspaces.clone(),
             names: self.names.clone(),
+            views: self.views.clone(),
             closed: self.removals_closed.clone(),
         }
     }

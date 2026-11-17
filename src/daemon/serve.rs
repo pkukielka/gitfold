@@ -74,7 +74,8 @@ pub fn run(options: Options) -> Result<()> {
         MountOption::FSName(mount_table::fs_name(&common_dir)),
         MountOption::Subtype("gitfold".into()),
     ];
-    let request_threads = threads.unwrap_or(cpus);
+    // 0 as unset: fuser serves with no fewer than one.
+    let request_threads = threads.filter(|&n| n > 0).unwrap_or(cpus);
     config.n_threads = Some(request_threads);
     config.clone_fd = true;
     let names = Arc::new(NameChanges::default());

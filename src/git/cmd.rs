@@ -173,17 +173,26 @@ pub const REPOSITORY_SAFE: [&str; 6] = [
 /// The options of git on a throwaway index: a plain index, whatever the
 /// repository's are like, so that nothing of it (a split index's shared
 /// part, a sparse index's trees) is written into the repository and no hook
-/// hears of it; paths taken literally.
-pub const PLAIN_INDEX: [&str; 11] = [
-    "-c",
-    "core.splitIndex=false",
-    "-c",
-    "index.sparse=false",
+/// hears of it (`REPOSITORY_SAFE`); its untracked cache and fsmonitor
+/// unused; paths taken literally.
+pub const PLAIN_INDEX: [&str; REPOSITORY_SAFE.len() + PLAIN.len()] = {
+    let mut all = [""; REPOSITORY_SAFE.len() + PLAIN.len()];
+    let mut i = 0;
+    while i < all.len() {
+        all[i] = match i < REPOSITORY_SAFE.len() {
+            true => REPOSITORY_SAFE[i],
+            false => PLAIN[i - REPOSITORY_SAFE.len()],
+        };
+        i += 1;
+    }
+    all
+};
+
+/// What `PLAIN_INDEX` adds to `REPOSITORY_SAFE`.
+const PLAIN: [&str; 5] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
     "core.untrackedCache=false",
-    "-c",
-    "core.hooksPath=/dev/null",
     "--literal-pathspecs",
 ];
