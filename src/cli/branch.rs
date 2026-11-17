@@ -3,7 +3,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail, ensure};
 use clap::builder::BoolishValueParser;
@@ -63,15 +62,18 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         );
         return Ok(());
     }
-    if from.len() > 1 && with_changes {
-        return Err(super::tree::not_implemented(
-            "gitfold branch --with-changes with several --from",
-        ));
-    }
     let common_dir = git::init(repo)?;
     check_new(&common_dir, name)?;
     if from.len() > 1 {
-        return merged(repo, &common_dir, name, &from, prewarm, track_reads);
+        return merged(
+            repo,
+            &common_dir,
+            name,
+            &from,
+            with_changes,
+            prewarm,
+            track_reads,
+        );
     }
     let from = from.into_iter().next();
     if with_changes {
@@ -128,11 +130,17 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
 /// (exit 1); git refusing leaves nothing: NEW's workspace and branch go
 /// again. Unmounted, the repository is mounted again where it last was;
 /// never mounted, refused. No relation to the sources afterwards.
+///
+/// `with_changes`: the uncommitted changes of the sources that are local
+/// branches with a workspace too (`Changes`), taken before NEW is made, and
+/// applied after the merge, unstaged; a merge that doesn't complete is then
+/// refused (undone), whatever stopped it.
 fn merged(
     repo: &Path,
     common_dir: &Path,
     name: &str,
     from: &[String],
+    with_changes: bool,
     prewarm: Option<Prewarm>,
     track_reads: Option<bool>,
 ) -> Result<()> {
@@ -143,13 +151,17 @@ fn merged(
     );
     // Where the user stands, before anything is made (or mounted). `-` is
     // the previous branch, as for `git merge -`, except as the start point.
-    // Only the merged ones go to git by name.
     let sources = (from.iter().enumerate())
         .map(|(i, rev)| {
             let rev = if rev == "-" && i > 0 { "@{-1}" } else { rev };
-            Source::resolve(repo, rev, i > 0)
+            Source::resolve(repo, rev)
         })
         .collect::<Result<Vec<_>>>()?;
+    // The workspaces whose changes are taken, checked before mounting too.
+    let copied = match with_changes {
+        true => Changes::workspaces(common_dir, &sources)?,
+        false => Vec::new(),
+    };
     let Some(mount) = super::mount::mount_or_again(common_dir)? else {
         bail!(
             "{} isn't mounted: mount it first (`gitfold mount`); git merges several --from \
@@ -157,6 +169,7 @@ fn merged(
             common_dir.display()
         )
     };
+    let changes = Changes::take(common_dir, &mount, &copied)?;
     let (first, others) = sources.split_first().expect("several --from");
     // Without an upstream: no relation afterwards.
     git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.id])?;
@@ -183,13 +196,36 @@ fn merged(
                 .collect::<Result<Vec<_>>>()?;
             run_merge(&workspace, &revs)
         });
+    // With -w, the changes go on the merge git made; one it didn't make
+    // (stopped by a conflict or a hook) is refused, as `git cherry-pick`
+    // refuses to go on it: that undoes it.
+    let merge = merge.and_then(|merged| match merged {
+        true => changes.apply(&workspace).map(Some),
+        false if !with_changes => Ok(None),
+        false => bail!(
+            "the merge didn't complete (see above): with --with-changes, the uncommitted \
+             changes go only on a merge made"
+        ),
+    });
     match merge {
-        Ok(true) => {
+        Ok(Some(conflicts)) if conflicts.is_empty() => {
             println!("created branch {name}; open it as {}", workspace.display());
             Ok(())
         }
+        // As `git cherry-pick` exits after a conflict.
+        Ok(Some(conflicts)) => {
+            let said: Vec<String> = (conflicts.iter())
+                .map(|(branch, paths)| format!("{branch}'s on {}", paths.join(", ")))
+                .collect();
+            let said: Vec<&str> = said.iter().map(String::as_str).collect();
+            bail!(
+                "created branch {name}; the uncommitted changes conflict (see above): {}; in {}",
+                and_list(&said),
+                workspace.display()
+            )
+        }
         // Stopped by a conflict, or by a hook or an empty message: git says.
-        Ok(false) if state.admin.join("MERGE_HEAD").is_file() => bail!(
+        Ok(None) if state.admin.join("MERGE_HEAD").is_file() => bail!(
             "created branch {name} with its merge in progress (see above): finish it in {} \
              with `git merge --continue`, or `git merge --abort`",
             workspace.display()
@@ -246,19 +282,20 @@ impl Made<'_> {
 const UNDO_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A `--from` as git takes it where the user stands: as typed, its commit,
-/// and the ref it names, shortened as git shortens it (`ui` for `HEAD` on
-/// ui), if it names one.
+/// and the ref it names (`refs/heads/ui` for `HEAD` on ui), in full and
+/// shortened as git shortens it, if it names one.
 struct Source {
     rev: String,
     id: String,
+    full: Option<String>,
     name: Option<String>,
 }
 
 impl Source {
-    /// `rev` in the worktree of git directory `repo`, and if `named`, the
-    /// ref it names; refused as `git merge` refuses what isn't a commit;
-    /// git's own error if it fails otherwise.
-    fn resolve(repo: &Path, rev: &str, named: bool) -> Result<Source> {
+    /// `rev` in the worktree of git directory `repo`, and the ref it names;
+    /// refused as `git merge` refuses what isn't a commit; git's own error
+    /// if it fails otherwise.
+    fn resolve(repo: &Path, rev: &str) -> Result<Source> {
         let line = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
         let commit = format!("{rev}^{{commit}}");
         let args = ["rev-parse", "--verify", "-q", "--end-of-options", &commit];
@@ -278,18 +315,31 @@ impl Source {
             String::from_utf8_lossy(&out.stderr).trim()
         );
         let id = line(out.stdout);
-        // Names starting with `-` are no refs (`check-ref-format`).
-        let args = ["rev-parse", "--verify", "-q", "--abbrev-ref", rev];
-        let name = (named && !rev.starts_with('-'))
-            .then(|| git::cmd::output(repo, &args).ok())
+        // Names starting with `-` are no refs (`check-ref-format`); a name
+        // git finds ambiguous names none (git warns).
+        let rev_parse = |how: &str, rev: &str| {
+            (git::cmd::output(repo, &["rev-parse", "--verify", "-q", how, rev]).ok())
+                .map(line)
+                .filter(|n| !n.is_empty() && n != "HEAD")
+        };
+        let full = (!rev.starts_with('-'))
+            .then(|| rev_parse("--symbolic-full-name", rev))
             .flatten()
-            .map(line)
-            .filter(|n| !n.is_empty() && n != "HEAD");
+            .filter(|full| full.starts_with("refs/"));
+        let name = full
+            .as_ref()
+            .and_then(|full| rev_parse("--abbrev-ref", full));
         Ok(Source {
             rev: rev.to_string(),
             id,
+            full,
             name,
         })
+    }
+
+    /// The local branch it names, if any.
+    fn branch(&self) -> Option<&str> {
+        self.full.as_deref()?.strip_prefix("refs/heads/")
     }
 
     /// What to give `git merge` in the worktree of git directory `admin`:
@@ -310,13 +360,157 @@ impl Source {
     }
 }
 
+/// The uncommitted changes of the sources' workspaces (`branch --from A
+/// --from B -w`), each as git takes it there: a commit of its files (tracked
+/// and untracked, not ignored) on its HEAD, made with a copy of its index
+/// (`git add -A`, `write-tree`), its own index untouched. Taken through the
+/// mount while the workspaces may change: not atomic, as `git stash create`
+/// isn't.
+#[derive(Default)]
+struct Changes(Vec<(String, String)>);
+
+impl Changes {
+    /// The workspaces of `sources` to take changes from: the local
+    /// branches' that have one, each once (a source that isn't one, or has
+    /// none, has no changes). Refused if git is busy in one (a merge, a
+    /// rebase), or its index has unmerged paths, as `git stash` refuses.
+    fn workspaces(common_dir: &Path, sources: &[Source]) -> Result<Vec<String>> {
+        let mut branches: Vec<String> = Vec::new();
+        for branch in sources.iter().filter_map(Source::branch) {
+            let state = StateDir::of(common_dir, branch);
+            if !state.opened() || branches.iter().any(|b| b == branch) {
+                continue;
+            }
+            let then = "branch from it once that is done";
+            crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
+            let mut git = git::cmd::command_in_other(&state.admin)?;
+            let unmerged = git::cmd::output_of(&mut git, &["ls-files", "-u"], None)?;
+            if !unmerged.is_empty() {
+                let message = format!("{branch}: its index has unmerged paths; {then}");
+                return Err(Refusal::Changes.error(message));
+            }
+            branches.push(branch.to_string());
+        }
+        Ok(branches)
+    }
+
+    /// The changes of the workspaces of `branches` under `mount`, those that
+    /// have any.
+    fn take(common_dir: &Path, mount: &Path, branches: &[String]) -> Result<Changes> {
+        let index = common_dir.join(format!("gitfold-snapshot-{}", std::process::id()));
+        let mut changes = Changes::default();
+        for branch in branches {
+            let state = StateDir::of(common_dir, branch);
+            let taken = Changes::of(&state, &mount.join(branch), &index);
+            let _ = fs::remove_file(&index);
+            if let Some(commit) = taken? {
+                changes.0.push((branch.clone(), commit));
+            }
+        }
+        Ok(changes)
+    }
+
+    /// The changes of workspace `workspace` (stored in `state`), if any,
+    /// with `index` for a copy of its index.
+    fn of(state: &StateDir, workspace: &Path, index: &Path) -> Result<Option<String>> {
+        // On the copy, safely for the repository (nothing of it written
+        // there; its untracked cache and fsmonitor used as git uses them);
+        // its throwaway commit unsigned and by gitfold, as `git stash
+        // create` makes one by git where no one is configured.
+        let git = |args: &[&str]| -> Result<String> {
+            let mut git = git::cmd::in_workspace(workspace)?;
+            git.env("GIT_INDEX_FILE", index);
+            for (var, value) in [("NAME", "gitfold"), ("EMAIL", "gitfold@localhost")] {
+                git.env(format!("GIT_COMMITTER_{var}"), value);
+                git.env(format!("GIT_AUTHOR_{var}"), value);
+            }
+            let unsigned = ["-c", "commit.gpgSign=false"];
+            let args: Vec<&str> = (git::cmd::REPOSITORY_SAFE.iter().chain(&unsigned))
+                .chain(args)
+                .copied()
+                .collect();
+            let out = git::cmd::output_of(&mut git, &args, None)?;
+            Ok(String::from_utf8_lossy(&out).trim().to_string())
+        };
+        match fs::copy(state.index(), index) {
+            // No registration (deleted since; its next open writes one): an
+            // index of HEAD, its files read anew.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                drop(git(&["read-tree", "HEAD"])?)
+            }
+            copied => drop(copied.context("copying its git index")?),
+        }
+        git(&["add", "-A"])?;
+        let tree = git(&["write-tree"])?;
+        let head = git(&["rev-parse", "HEAD^{commit}", "HEAD^{tree}"])?;
+        let (head, head_tree) = head.split_once('\n').context("git rev-parse: no HEAD")?;
+        if tree == head_tree {
+            return Ok(None);
+        }
+        let message = format!("uncommitted changes of {}", state.branch);
+        git(&["commit-tree", &tree, "-p", head, "-m", &message]).map(Some)
+    }
+
+    /// Applies them in workspace `workspace`, each as `git cherry-pick -n`
+    /// does, then unstages them (`git reset`); the branches whose changes
+    /// conflicted, with the paths git said conflict (each left as git
+    /// leaves it). Refused if git refuses one.
+    fn apply(&self, workspace: &Path) -> Result<Vec<(&str, Vec<String>)>> {
+        if self.0.is_empty() {
+            return Ok(Vec::new());
+        }
+        let git = || git::cmd::in_workspace(workspace);
+        let mut conflicts = Vec::new();
+        for (n, (branch, commit)) in self.0.iter().enumerate() {
+            // git's messages the user's, as for the merge.
+            let args = ["cherry-pick", "-n", "--end-of-options", commit];
+            if git()?.args(args).status()?.success() {
+                continue;
+            }
+            // A conflict leaves unmerged paths; a refusal, none.
+            let args = ["diff", "--name-only", "-z", "--diff-filter=U"];
+            let unmerged = git::cmd::output_of(&mut git()?, &args, None)?;
+            ensure!(
+                !unmerged.is_empty(),
+                "git cherry-pick of the uncommitted changes of {branch} failed"
+            );
+            let paths = (unmerged.split(|&b| b == 0))
+                .filter(|p| !p.is_empty())
+                .map(|p| String::from_utf8_lossy(p).into_owned())
+                .collect();
+            // Staged as they are, so the next one merges with them
+            // (`cherry-pick -n` staged the rest).
+            if n + 1 < self.0.len() {
+                let args = [
+                    "--literal-pathspecs",
+                    "add",
+                    "--pathspec-from-file=-",
+                    "--pathspec-file-nul",
+                ];
+                git::cmd::output_of(&mut git()?, &args, Some(unmerged))?;
+            }
+            conflicts.push((branch.as_str(), paths));
+        }
+        // Unstaged; only the index is reset (no refresh of every file).
+        git::cmd::output_of(&mut git()?, &["reset", "-q", "--no-refresh"], None)?;
+        Ok(conflicts)
+    }
+}
+
+/// `a`, `a and b`, `a, b and c`.
+fn and_list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => one.to_string(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 /// Runs `git merge` of `revs` in workspace `workspace`, its messages the
 /// user's, as in a shell there (`git::cmd::in_other_worktree`); whether it
 /// made the merge.
 fn run_merge(workspace: &Path, revs: &[String]) -> Result<bool> {
-    let mut git = Command::new("git");
-    let status = (git::cmd::in_other_worktree(&mut git)?)
-        .current_dir(workspace)
+    let status = (git::cmd::in_workspace(workspace)?)
         .args(["merge", "--end-of-options"])
         .args(revs)
         .status()
