@@ -527,6 +527,55 @@ eq "  its files moved" "more" "$(cat "$MNT/ui/a.txt" | tr '\n' ' ' | sed 's/ $//
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
 }
 
+# Following at an agent's turn start, and its presence (the plugin's hooks:
+# parent --claude-hook EVENT, inbox --claude-hook post-tool-use).
+# Hook $1 (of command $2) run as Claude Code runs it in workspace ui, with
+# input fields $3 (`"key":"value",...`): its output on one line.
+hook() { printf '{%s"cwd":"%s"}' "${3:+$3,}" "$MNT/ui" | (cd / && "$BIN" "$2" --claude-hook "$1" 2>&1) | tr '\n' ' '; }
+turn() { hook user-prompt-submit parent '"session_id":"s1"'; }
+agents() {
+AGENTS=$REPO/.git/gitfold/ui/agents
+identity
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+mount_fs
+echo one >"$MNT/ui/u.txt"; W ui add u.txt; W ui commit -qm "ui: one"
+hook session-start parent '"session_id":"s1"' >/dev/null
+eq "session start: the agent present" "s1" "$(cat "$AGENTS/s1")"
+eq "a turn start, nothing new: nothing said" "" "$(turn)"
+on api n.txt new
+r=$(turn)
+check "a turn start: the parent's new commits taken" test "$([[ $r == *"ui took its parent's new commits: moved 1 commit of ui onto api"* ]] && echo yes)" = yes
+check "  ui sits on api" R merge-base --is-ancestor api ui
+eq "  its files moved" "new" "$(cat "$MNT/ui/n.txt")"
+eq "  the next turn: nothing said" "" "$(turn)"
+on api u.txt theirs
+r=$(turn)
+check "a conflict: said in full once" test "$([[ $r == "gitfold: following paused: ui's commits conflict with api's on u.txt. Rebase by hand (git rebase api ui)"* ]] && echo yes)" = yes
+eq "  then a one-line reminder each turn" "gitfold: following still paused: conflict on u.txt (see \`gitfold parent\`) " "$(turn)"
+eq "  and again" "gitfold: following still paused: conflict on u.txt (see \`gitfold parent\`) " "$(turn)"
+"$BIN" -C "$REPO" parent ui --no-follow >/dev/null
+eq "not following: nothing said" "" "$(turn)"
+"$BIN" -C "$REPO" parent ui --follow >/dev/null
+W ui rebase -q api -X theirs >/dev/null 2>&1
+eq "rebased by hand: nothing said" "" "$(turn)"
+# Presence: one file per session or subagent, refreshed by its hooks.
+hook post-tool-use inbox '"session_id":"s1","agent_id":"a1"' >/dev/null
+eq "a subagent's tool call: it is present" "a1" "$(cat "$AGENTS/a1")"
+hook subagent-stop parent '"session_id":"s1","agent_id":"a1"' >/dev/null
+check "its stop: gone" test ! -e "$AGENTS/a1"
+check "  its session stays" test -e "$AGENTS/s1"
+touch -d '2 hours ago' "$AGENTS/s1"
+hook post-tool-use inbox '"session_id":"s1"' >/dev/null
+check "a tool call refreshes it" test -n "$(find "$AGENTS/s1" -mmin -1)"
+hook session-end parent '"session_id":"other"' >/dev/null
+check "another session's end: stays" test -e "$AGENTS/s1"
+hook session-end parent '"session_id":"s1"' >/dev/null
+check "session end: gone" test ! -e "$AGENTS/s1"
+eq "outside a workspace: nothing, exit 0" "0 " "$(cd / && printf '{"cwd":"/"}' | "$BIN" parent --claude-hook user-prompt-submit 2>&1; echo "$? ")"
+check "--claude-hook: hidden" lacks 0 "claude-hook" parent --help
+check "--claude-hook with a branch: refused" says 2 "cannot be used with" parent ui --claude-hook session-start
+"$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
+}
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
 section "tree: rules R (the root)" the_root
@@ -539,4 +588,5 @@ section "tree: moves (--update, --set)" moves
 section "tree: pushed commits" pushed
 section "tree: what isn't moved, and crashes" not_moved
 section "tree: workspaces moved through the mount" workspaces
+section "tree: following at turn start, agent presence" agents
 finish

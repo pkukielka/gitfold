@@ -61,6 +61,7 @@ pub enum Hook {
     UserPromptSubmit,
     /// `PostToolUse`: the messages as `additionalContext`, in the hook's JSON;
     /// nothing for a subagent's tool calls (its context isn't the session's).
+    /// It also marks the agent present in its workspace (`state::agents`).
     PostToolUse,
     /// An `asyncRewake` hook (on `Stop`): waits for a message, then puts it on
     /// stderr and exits 2, which wakes an idle session. One such waiter per
@@ -74,6 +75,14 @@ pub enum Hook {
 /// errors: they would show on every tool call.
 pub fn inbox(args: InboxArgs) -> Result<i32> {
     let hook = args.claude_hook.is_some();
+    if args.claude_hook == Some(Hook::PostToolUse) {
+        let input = hook_input()?;
+        super::claude::tool_used(&input);
+        // A subagent's context isn't the session's.
+        if super::hook::field(&input, "agent_id").is_some() {
+            return Ok(0);
+        }
+    }
     let found = super::repo().and_then(|repo| {
         let branch = super::branch_or_current(args.branch.clone(), &repo)?;
         Ok((repo, branch))
@@ -118,9 +127,6 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
                 }
             }
         }
-        return Ok(0);
-    }
-    if args.claude_hook == Some(Hook::PostToolUse) && in_subagent()? {
         return Ok(0);
     }
     let rewake = args.claude_hook == Some(Hook::Rewake);
@@ -211,14 +217,13 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
     Ok(code)
 }
 
-/// Whether the hook input on stdin is a subagent's (it names an `agent_id`).
-fn in_subagent() -> Result<bool> {
+/// The hook's input on stdin (none from a terminal).
+fn hook_input() -> Result<String> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        return Ok(false);
+        return Ok(String::new());
     }
-    let input = std::io::read_to_string(stdin)?;
-    Ok(super::hook::field(&input, "agent_id").is_some())
+    Ok(std::io::read_to_string(stdin)?)
 }
 
 /// An exclusive lock on `dir`'s `.waiting` file, if no one else holds it.

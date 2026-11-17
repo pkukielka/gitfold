@@ -1,6 +1,7 @@
 //! A workspace's stored state, mounted or not: where it is, what is in it, and
 //! what commands do with it without going through the mount.
 //!
+//! - `agents`: the agents in it (presence), and what following told them.
 //! - `markers`, `reads`: the formats of its deletion log and read log.
 //! - `status`: its uncommitted changes, ignored files, last change, line counts.
 //! - `retire`: the rules for removing a workspace or a snapshot's
@@ -15,6 +16,7 @@
 //! `times`, `reads`, `tmp/`. Its worktree registration (the admin directory,
 //! with its index and HEAD) is `.git/worktrees/gitfold-ws-<id>/`.
 
+pub mod agents;
 pub mod fork;
 pub mod markers;
 pub mod reads;

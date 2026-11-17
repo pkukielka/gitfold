@@ -66,6 +66,11 @@ pub struct ParentArgs {
     /// With --update: move commits that are pushed already.
     #[arg(long, requires = "update")]
     pub yes: bool,
+    // As Claude Code's hooks (`session-start`, `session-end`,
+    // `subagent-stop`, `user-prompt-submit`): an agent's presence in its
+    // workspace, and following at its turn start (`cli::claude::parent`).
+    #[arg(long, value_enum, value_name = "EVENT", exclusive = true, hide = true)]
+    pub claude_hook: Option<super::claude::ParentHook>,
 }
 
 /// `gitfold parent`: the checks of the rules table (S1-S6, F6), then shows
@@ -245,6 +250,91 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
     }
 }
 
+/// What following did for a branch at a safe moment (`follow_once`).
+pub enum Followed {
+    /// Nothing to take, or it doesn't follow (F1, F2).
+    Nothing,
+    /// Its parent's new commits taken: what `--update` says.
+    Moved(String),
+    /// Following paused: the full message, and its one-line summary.
+    Paused { full: String, short: String },
+}
+
+/// Takes its parent's new commits for `name`, if it follows its parent
+/// (spec section 3): as `--update` without `--yes`, but a conflict recorded
+/// against the parent's tip isn't tried again (paused until the parent
+/// moves on, or it is rebased by hand).
+pub fn follow_once(common_dir: &Path, name: &str) -> Followed {
+    match try_follow(common_dir, name) {
+        Ok(followed) => followed,
+        Err(e) => {
+            let full = format!("{e:#}");
+            let short = full.lines().next().unwrap_or_default().to_string();
+            Followed::Paused {
+                full: format!("following paused: {full}"),
+                short,
+            }
+        }
+    }
+}
+
+fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
+    let follows = |tree: &Tree| tree.follows(name) && !tree.parent_gone(name);
+    if !follows(&Tree::read(common_dir)?) {
+        return Ok(Followed::Nothing);
+    }
+    let _moving = follow::lock(common_dir, name)?;
+    let tree = Tree::read(common_dir)?;
+    let Some(parent) = tree.parent(name).filter(|_| follows(&tree)) else {
+        return Ok(Followed::Nothing);
+    };
+    let short = crate::tree::short(parent);
+    let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
+    if plan.up_to_date() {
+        return Ok(Followed::Nothing);
+    }
+    let local = settings::Local::read_checked(common_dir)?;
+    let moved = match plan.conflict(common_dir, &local)? {
+        Some(paths) => follow::Moved::Conflict(paths),
+        None => plan.run(common_dir, false, || movable(common_dir, name))?,
+    };
+    let paused = |full: String, short: String| {
+        let full = format!("following paused: {full}");
+        Ok(Followed::Paused { full, short })
+    };
+    match moved {
+        follow::Moved::UpToDate => Ok(Followed::Nothing),
+        follow::Moved::Conflict(paths) => paused(
+            conflict_said(name, short, &plan, &paths),
+            format!("conflict on {}", paths.join(", ")),
+        ),
+        follow::Moved::Pushed(pushed) => {
+            let are = if pushed.count == 1 { "is" } else { "are" };
+            let summary = format!("{} {are} pushed", commits(pushed.count));
+            paused(pushed_said(name, &pushed), summary)
+        }
+        moved @ follow::Moved::Done { .. } => {
+            let mut out = String::new();
+            if let Err(e) = said_to(&mut out, name, short, &plan, moved) {
+                out += &format!("{e:#}\n");
+            }
+            Ok(Followed::Moved(out))
+        }
+        moved => {
+            let summary = match &moved {
+                follow::Moved::Work(paths) => {
+                    format!("uncommitted work in the way on {}", paths.join(", "))
+                }
+                follow::Moved::Merge => "a merge among its own commits".to_string(),
+                _ => "git refused in its workspace".to_string(),
+            };
+            let mut out = String::new();
+            let e = said_to(&mut out, name, short, &plan, moved).expect_err("not moved");
+            paused(format!("{e:#}"), summary)
+        }
+    }
+}
+
 /// `gitfold parent NAME --set P` (P as `given`): P its parent, following it
 /// unless `follow` says otherwise (F3, F4), written first (with where its
 /// own commits start, on the old parent), under the tree's lock with the
@@ -341,6 +431,21 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
 /// What a move of `name` onto `parent` (short) did, or why it didn't, said
 /// (on standard output) or refused.
 fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> Result<()> {
+    let mut out = String::new();
+    let result = said_to(&mut out, name, parent, plan, moved);
+    print!("{out}");
+    result
+}
+
+/// `said`, its lines written to `out`.
+fn said_to(
+    out: &mut String,
+    name: &str,
+    parent: &str,
+    plan: &follow::Plan,
+    moved: follow::Moved,
+) -> Result<()> {
+    use std::fmt::Write;
     match moved {
         follow::Moved::UpToDate => Ok(()),
         follow::Moved::Done {
@@ -348,15 +453,13 @@ fn said(name: &str, parent: &str, plan: &follow::Plan, moved: follow::Moved) -> 
             push,
             unmerged,
         } => {
-            println!("moved {} of {name} onto {parent}", commits(kept));
+            writeln!(out, "moved {} of {name} onto {parent}", commits(kept))?;
             if plan.own > kept {
-                println!(
-                    "({} already in {parent}: dropped)",
-                    commits(plan.own - kept)
-                );
+                let dropped = commits(plan.own - kept);
+                writeln!(out, "({dropped} already in {parent}: dropped)")?;
             }
             if let Some(push) = push {
-                println!("its history was rewritten; force-push with: {push}");
+                writeln!(out, "its history was rewritten; force-push with: {push}")?;
             }
             match unmerged.is_empty() {
                 true => Ok(()),
