@@ -30,12 +30,13 @@ fn branch_of(name: &str) -> String {
 /// `WorktreeCreate`: makes worktree `name` of the repository of the session's
 /// directory and prints its path, the only thing on stdout, which Claude Code
 /// reads. A workspace of branch `worktree-<name>` (created from the session's
-/// HEAD if new) when the repository is mounted, or was.
+/// HEAD if new; from the mount root or a view, the repository's HEAD) when the
+/// repository is mounted, or was.
 pub fn worktree_create() -> Result<()> {
     let input = std::io::read_to_string(std::io::stdin())?;
     let name = field(&input, "name").context("no \"name\" in the hook's input")?;
     let cwd = cwd(&input)?;
-    let repo = git::discover(&cwd)?;
+    let repo = crate::cli::repo_at(&cwd)?;
     let common_dir = git::init(&repo)?;
     let branch = branch_of(&name);
     let exists = git::branch_exists(&branch);
@@ -101,7 +102,7 @@ pub fn worktree_remove() -> Result<()> {
         };
         return crate::cli::remove::remove(&repo, removal(branch));
     }
-    let repo = git::discover(&path)?;
+    let repo = crate::cli::repo_at(&path)?;
     let common_dir = git::init(&repo)?;
     let mount = mount_table::mount_of(&common_dir)?;
     if mount.is_some_and(|m| path.starts_with(m)) {
@@ -129,7 +130,7 @@ fn removal(branch: String) -> crate::cli::remove::RemoveArgs {
 /// path where it was last mounted (`gitfold.mountpoint`), and that workspace
 /// is stored.
 fn unmounted_workspace(session: &Path, path: &Path) -> Option<(PathBuf, String)> {
-    let repo = git::discover(session).ok()?;
+    let repo = crate::cli::repo_at(session).ok()?;
     let common_dir = git::init(&repo).ok()?;
     if mount_table::mount_of(&common_dir).ok()?.is_some() {
         return None;

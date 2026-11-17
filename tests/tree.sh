@@ -603,6 +603,12 @@ check "  the inbox hook too, nothing taken" test "$([[ $r == "gitfold inbox: mar
 eq "  the message still there" "user	hi" "$("$BIN" -C "$REPO" inbox ui --peek 2>&1)"
 rm "$AGENTS"; "$BIN" -C "$REPO" inbox ui >/dev/null
 eq "outside a workspace: nothing, exit 0" "0 " "$(cd / && printf '{"cwd":"/"}' | "$BIN" parent --claude-hook user-prompt-submit 2>&1; echo "$? ")"
+for e in session-start user-prompt-submit; do
+    for at in "$MNT" "$MNT/@live/ui"; do
+        eq "$e at ${at#"$MNT"}/ of the mount: nothing, exit 0" "0 " "$(cd / && printf '{"cwd":"%s","session_id":"s8"}' "$at" | "$BIN" parent --claude-hook "$e" 2>&1; echo "$? ")"
+    done
+done
+eq "the inbox hook at the mount root: nothing, exit 0" "0 " "$(cd "$MNT" && printf '{"cwd":"%s","session_id":"s8"}' "$MNT" | "$BIN" inbox --claude-hook post-tool-use 2>&1; echo "$? ")"
 check "--claude-hook: hidden" lacks 0 "claude-hook" parent --help
 check "--claude-hook with a branch: refused" says 2 "cannot be used with" parent ui --claude-hook session-start
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
