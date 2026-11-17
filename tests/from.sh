@@ -224,7 +224,9 @@ check "  nothing left behind" nothing_of w7
 check "-w, a revision that is no branch: no changes from it" says 0 "created branch w4" branch w4 -w --from api --from "$(R rev-parse ui)"
 eq "  the others' changes" "api changed" "$(cat "$MNT/w4/api.txt")"
 R tag api api
+r=$(gf branch w9 -w --from api --from x)
 check "a first source git finds ambiguous: refused as git branch refuses it" says 1 "fatal: ambiguous object name: 'api'" branch w9 -w --from api --from x
+eq "  git's warning said once" 1 "$(grep -o "warning: refname 'api' is ambiguous." <<<"$r" | wc -l)"
 check "  nothing left behind" nothing_of w9
 r=$(gf branch w11 -w --from x --from api)
 check "a later source git finds ambiguous: created" eq_ok "$r" "created branch w11"

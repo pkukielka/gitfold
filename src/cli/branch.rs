@@ -172,13 +172,17 @@ fn merged(
     let changes = Changes::take(common_dir, &mount, &copied)?;
     let (first, others) = sources.split_first().expect("several --from");
     // Without an upstream: no relation afterwards. The start point as
-    // typed: git takes it, or refuses it (a name it finds ambiguous).
-    git::cmd::output(repo, &["branch", "--no-track", "--", name, &first.rev])?;
+    // typed: git takes it, or refuses it (a name it finds ambiguous),
+    // saying so itself (its warnings too: `resolve` leaves them to it).
+    let args = ["branch", "--no-track", "--", name, &first.rev];
+    if !git::cmd::command(repo).args(args).status()?.success() {
+        bail!("branch {name} not created (see above)");
+    }
     // Where git made it (the start point may have moved since).
     let branch = format!("refs/heads/{name}");
     let at = git::cmd::output(repo, &["rev-parse", "--verify", &branch])
         .map(|out| String::from_utf8_lossy(&out).trim().to_string())
-        .unwrap_or_else(|_| first.id.clone());
+        .with_context(|| format!("branch {name} created: `git branch -D {name}`"))?;
     let made = Made {
         name,
         at: &at,
@@ -316,7 +320,7 @@ impl Source {
     /// `rev` in the worktree of git directory `repo`; refused as `git merge`
     /// refuses what isn't a commit; git's own error if it fails otherwise.
     /// With the ref it names: short if `merged` (given to `git merge`), in
-    /// full if `named` (`-w`).
+    /// full if `named` (`-w`). git's warnings of it said if `merged`.
     fn resolve(repo: &Path, rev: &str, merged: bool, named: bool) -> Result<Source> {
         let line = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
         let commit = format!("{rev}^{{commit}}");
@@ -344,8 +348,11 @@ impl Source {
                 String::from_utf8_lossy(&out.stderr).trim()
             );
         }
-        // git's warnings (a name it finds ambiguous), said once: here.
-        eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        // git's warnings (a name it finds ambiguous), said once: here, or
+        // by `git branch` given the start point.
+        if merged {
+            eprint!("{}", String::from_utf8_lossy(&out.stderr));
+        }
         let id = line(out.stdout);
         // Names starting with `-` are no refs (`check-ref-format`); a name
         // git finds ambiguous names none.
