@@ -131,8 +131,10 @@ pub fn check_new(common_dir: &Path, name: &str) -> Result<()> {
 /// again. Unmounted, the repository is mounted again where it last was;
 /// never mounted, refused. No relation to the sources afterwards.
 ///
-/// `with_changes`: each source's uncommitted changes too (`Changes`), taken
-/// before NEW is made, and applied after the merge, unstaged.
+/// `with_changes`: the uncommitted changes of the sources that are local
+/// branches with a workspace too (`Changes`), taken before NEW is made, and
+/// applied after the merge, unstaged; a merge that doesn't complete is then
+/// refused (undone), whatever stopped it.
 fn merged(
     repo: &Path,
     common_dir: &Path,
@@ -381,10 +383,9 @@ impl Changes {
             }
             let then = "branch from it once that is done";
             crate::git::worktree::refuse_if_busy(common_dir, &state.admin, branch, then)?;
-            let unmerged = git::cmd::command_in_other(&state.admin)?
-                .args(["ls-files", "-u"])
-                .output()?;
-            if !unmerged.stdout.is_empty() {
+            let mut git = git::cmd::command_in_other(&state.admin)?;
+            let unmerged = git::cmd::output_of(&mut git, &["ls-files", "-u"], None)?;
+            if !unmerged.is_empty() {
                 let message = format!("{branch}: its index has unmerged paths; {then}");
                 return Err(Refusal::Changes.error(message));
             }
