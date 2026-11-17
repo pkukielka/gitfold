@@ -463,36 +463,30 @@ fn rows(
             shown.entry(parent.to_string()).or_default();
         }
     }
-    // The branch a branch sits under: its parent, a local branch shown.
-    let under = |branch: &str| up(tree, branch).filter(|p| shown.contains_key(*p));
-    let mut stack: Vec<(usize, String)> = (shown.keys().rev())
-        .filter(|b| under(b).is_none())
-        .map(|b| (0, b.clone()))
-        .collect();
+    // The branches under each shown branch, by name; under `None`, the top.
+    let mut under: BTreeMap<Option<String>, Vec<String>> = BTreeMap::new();
+    for branch in shown.keys() {
+        let parent = up(tree, branch).filter(|p| shown.contains_key(*p));
+        (under.entry(parent.map(String::from)).or_default()).push(branch.clone());
+    }
+    let level = |depth, branches: Vec<String>| branches.into_iter().rev().map(move |b| (depth, b));
+    let mut stack: Vec<(usize, String)> =
+        level(0, under.remove(&None).unwrap_or_default()).collect();
     let mut rows = Vec::new();
-    let mut seen = HashSet::new();
     loop {
         let Some((depth, branch)) = stack.pop() else {
-            // Left over: a cycle a hand-edited config may hold (T4).
-            match shown.keys().find(|b| !seen.contains(*b)) {
-                Some(b) => stack.push((0, b.clone())),
+            // Left over: a cycle a hand-edited config may hold (T4), at the top.
+            match under.pop_first() {
+                Some((_, branches)) => stack.extend(level(0, branches)),
                 None => break,
             }
             continue;
         };
-        if !seen.insert(branch.clone()) {
-            continue;
+        if let Some(children) = under.remove(&Some(branch.clone())) {
+            stack.extend(level(depth + 1, children));
         }
-        let children = tree.children(&branch).into_iter().rev();
-        stack.extend(
-            children
-                .filter(|c| under(c) == Some(&branch))
-                .map(|c| (depth + 1, c.to_string())),
-        );
-        rows.push((depth, branch, None));
-    }
-    for row in &mut rows {
-        row.2 = shown.get_mut(&row.1).and_then(Option::take);
+        let workspace = shown.get_mut(&branch).and_then(Option::take);
+        rows.push((depth, branch, workspace));
     }
     rows
 }
@@ -521,7 +515,7 @@ fn tree_notes(
     let gone = tree.parent_gone(branch);
     let mut notes = Vec::new();
     let landed = (follow::landed_recorded(local, branch, !gone))
-        .filter(|to| to != parent && !tree.root_refs().contains(&parent.to_string()));
+        .filter(|to| to != parent && !tree.root_refs().iter().any(|r| r == parent));
     match (landed, gone) {
         (Some(to), _) => notes.push(landed_said(parent, &to, gone)),
         (None, true) => notes.push("parent gone".to_string()),
@@ -532,11 +526,10 @@ fn tree_notes(
             let (from, tip) = (git::resolve(parent)?.id, git::branch_tip(branch)?.id);
             Ok(!follow::is_ancestor(common_dir, from, tip)?)
         };
-        let paused = match behind() {
-            Ok(true) => paused(common_dir, tree, branch),
-            Ok(false) => Ok(None),
-            Err(e) => Err(e),
-        };
+        let paused = behind().and_then(|behind| match behind {
+            true => paused(common_dir, tree, branch),
+            false => Ok(None),
+        });
         match paused {
             Ok(Some((few, _))) => notes.push(few),
             Ok(None) => {}
