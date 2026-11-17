@@ -14,6 +14,7 @@ use crate::cli::hook::field;
 use crate::cli::tree::{Followed, follow_once};
 use crate::git;
 use crate::state::StateDir;
+use crate::tree::Tree;
 
 /// The Claude Code hooks `gitfold parent` serves.
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -96,7 +97,7 @@ fn unmark(state: &StateDir, id: Option<&str>) -> Result<()> {
 fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Result<String> {
     let branch = &state.branch;
     let session = session.unwrap_or_default();
-    let followed = follow_once(common_dir, branch);
+    let followed = follow_once(common_dir, branch, &Tree::read(common_dir)?);
     // Moves made while no agent was here (the daemon's): taken after
     // `follow_once`, which waits for one under way.
     let mut out = match state.take_followed()? {
@@ -110,13 +111,14 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
             state.set_told(session, None)?;
             String::new()
         }
-        Followed::Moved(said) => {
+        Followed::Moved(took) => {
             state.set_told(session, None)?;
+            let said = took.told();
             format!("gitfold: {branch} took its parent's new commits:\n{said}")
         }
-        Followed::Landed(said) => {
+        Followed::Landed(took) => {
             state.set_told(session, None)?;
-            format!("gitfold: {said}")
+            format!("gitfold: {}", took.told())
         }
         // Told once (to each session).
         Followed::Noted(said) => match state.told(session).as_deref() == Some(&said) {
@@ -126,7 +128,7 @@ fn turn_start(common_dir: &Path, state: &StateDir, session: Option<&str>) -> Res
                 format!("gitfold: {said}\n")
             }
         },
-        Followed::Paused { full, short } => match state.told(session).as_deref() == Some(&short) {
+        Followed::Paused { full, short, .. } => match state.told(session).as_deref() == Some(&short) {
             true => format!("gitfold: following still paused: {short} (see `gitfold parent`)\n"),
             false => {
                 state.set_told(session, Some(&short))?;

@@ -283,24 +283,32 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
 
 /// `gitfold parent NAME --update --auto`: its parent's new commits taken as
 /// the automation takes them (`follow_once`), if it follows its parent: a
-/// move said, a pause refused (exit 4).
+/// move said, a pause refused as `--update` refuses it (exit 4, 5 in use,
+/// else 1); a move whose uncommitted work, put back, conflicted, exit 4.
 fn update_auto(common_dir: &Path, name: &str) -> Result<()> {
     // F6, S4: only a branch with a parent.
     let tree = Tree::read(common_dir)?;
     let refuse = |r| refused("gitfold parent", name, "", r);
     tree.check_follow(name).map_err(refuse)?;
-    match follow_once(common_dir, name) {
+    match follow_once(common_dir, name, &tree) {
         Followed::Nothing => Ok(()),
-        Followed::Moved(said) | Followed::Landed(said) => {
-            print!("{said}");
-            Ok(())
+        Followed::Moved(took) | Followed::Landed(took) => {
+            print!("{}", took.said);
+            match took.unresolved {
+                Some(unresolved) => Err(Refusal::Changes.error(unresolved)),
+                None => Ok(()),
+            }
         }
         Followed::Noted(said) => {
             println!("{said}");
             Ok(())
         }
-        Followed::Paused { full, .. } => {
-            Err(Refusal::Changes.error(format!("following paused: {full}")))
+        Followed::Paused { full, refusal, .. } => {
+            let full = format!("following paused: {full}");
+            Err(match refusal {
+                Some(refusal) => refusal.error(full),
+                None => anyhow::anyhow!(full),
+            })
         }
     }
 }
@@ -309,14 +317,34 @@ fn update_auto(common_dir: &Path, name: &str) -> Result<()> {
 pub enum Followed {
     /// Nothing to take, or it doesn't follow (F1, F2).
     Nothing,
-    /// Its parent's new commits taken: what `--update` says.
-    Moved(String),
+    /// Its parent's new commits taken.
+    Moved(Took),
     /// Its parent gone and landed: built where it landed, and what moved.
-    Landed(String),
-    /// Following paused: why in full, and in one line.
-    Paused { full: String, short: String },
+    Landed(Took),
+    /// Following paused: why in full, and in one line; the refusal
+    /// `--update` refuses it with (`None`: a failure, exit 1).
+    Paused {
+        full: String,
+        short: String,
+        refusal: Option<Refusal>,
+    },
     /// Nothing moved, but its parent looks merged elsewhere: what to do.
     Noted(String),
+}
+
+/// What a branch that moved (or landed) says, as `--update` says it: what
+/// it did, and its refusal if its uncommitted work, put back, conflicted.
+pub struct Took {
+    pub said: String,
+    pub unresolved: Option<String>,
+}
+
+impl Took {
+    /// All it says, as the agent is told it.
+    pub fn told(&self) -> String {
+        let unresolved = self.unresolved.as_ref().map(|u| format!("{u}\n"));
+        self.said.clone() + &unresolved.unwrap_or_default()
+    }
 }
 
 /// Takes its parent's new commits for `name`, if it follows its parent
@@ -328,17 +356,24 @@ pub enum Followed {
 /// unmounted repository isn't mounted again. Its parent landed (`landed_in`,
 /// spec section 4): once the parent's branch is deleted, it is built on
 /// where the parent landed and moves there; while it exists, noted. A parent
-/// gone without landing is noted (section 5).
-pub fn follow_once(common_dir: &Path, name: &str) -> Followed {
-    try_follow(common_dir, name).unwrap_or_else(|e| {
+/// gone without landing is noted (section 5). `tree`: as read before (to
+/// see whether it follows without waiting for its lock; read again under
+/// it).
+pub fn follow_once(common_dir: &Path, name: &str, tree: &Tree) -> Followed {
+    try_follow(common_dir, name, tree).unwrap_or_else(|e| {
         let full = format!("{e:#}");
         let short = full.lines().next().unwrap_or_default().to_string();
-        Followed::Paused { full, short }
+        let refusal = Refusal::of(&e);
+        Followed::Paused {
+            full,
+            short,
+            refusal,
+        }
     })
 }
 
-fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
-    if !Tree::read(common_dir)?.follows(name) {
+fn try_follow(common_dir: &Path, name: &str, tree: &Tree) -> Result<Followed> {
+    if !tree.follows(name) {
         return Ok(Followed::Nothing);
     }
     // A move under way (the daemon's, begun before the agent came): waited
@@ -350,7 +385,12 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
                 if started.elapsed() >= std::time::Duration::from_secs(60) {
                     let short = "a move is under way".to_string();
                     let full = format!("a move of {name} is under way; `gitfold parent` once done");
-                    return Ok(Followed::Paused { full, short });
+                    let refusal = Some(Refusal::InUse);
+                    return Ok(Followed::Paused {
+                        full,
+                        short,
+                        refusal,
+                    });
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
@@ -406,7 +446,10 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     // Nothing moved: whether its parent looks merged somewhere, said once.
     let nothing = || -> Result<Followed> {
         if gone {
-            return Ok(Followed::Landed(landed.clone()));
+            return Ok(Followed::Landed(Took {
+                said: landed.clone(),
+                unresolved: None,
+            }));
         }
         // Only a note: its failure doesn't pause following.
         Ok(
@@ -464,15 +507,20 @@ fn try_follow(common_dir: &Path, name: &str) -> Result<Followed> {
     Ok(match summary {
         // Moved, its work put back conflicting maybe.
         None => {
-            let said = out + &said.err().map(|e| e + "\n").unwrap_or_default();
+            let took = Took {
+                said: out,
+                unresolved: said.err(),
+            };
             match gone {
-                true => Followed::Landed(said),
-                false => Followed::Moved(said),
+                true => Followed::Landed(took),
+                false => Followed::Moved(took),
             }
         }
+        // The automation's pauses: exit 4.
         Some(short) => Followed::Paused {
             full: landed + &(full.or(said.err())).unwrap_or_else(|| short.clone()),
             short,
+            refusal: Some(Refusal::Changes),
         },
     })
 }

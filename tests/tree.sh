@@ -748,9 +748,12 @@ check "pushed commits: paused (exit 4)" says 4 "following paused: 1 commit is pu
 check "  nothing moved" fails R merge-base --is-ancestor api ui
 check "  --update --yes moves them" says 0 "moved 1 commit of ui onto api" parent ui --update --yes
 R update-ref -d refs/remotes/origin/ui
+on api w.txt more; R worktree add -q "$T/wt" ui
+check "checked out in a git worktree: refused (exit 5, as --update)" says 5 "ui is checked out in $T/wt" parent ui --update --auto
+R worktree remove "$T/wt"
 mount_fs; ls "$MNT/ui" >/dev/null; unmount_fs
 on api c.txt more
-check "a workspace, unmounted: refused (exit 4)" says 4 "isn't mounted: mount it first" parent ui --update --auto
+check "a workspace, unmounted: refused (exit 1, as --update)" says 1 "isn't mounted: mount it first" parent ui --update --auto
 check "  not mounted again" fails mountpoint -q "$MNT"
 }
 # gitfold list (spec section 8): each branch under its parent, whether it
