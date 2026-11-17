@@ -272,7 +272,7 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
         );
     }
     let plan = follow::Plan::new(common_dir, name, Some(parent), &tree.root_refs(), parent)?;
-    match plan.run(common_dir, yes, || movable(common_dir, name, true))? {
+    match plan.run(common_dir, yes, |_| movable(common_dir, name, true))? {
         follow::Moved::UpToDate => {
             println!("{name} is up to date with {short}");
             Ok(())
@@ -470,7 +470,7 @@ fn try_follow(common_dir: &Path, name: &str, tree: &Tree) -> Result<Followed> {
         // Rebased by hand: its base recorded and a conflict forgotten, as
         // `--update` does (written only then).
         if follow::recorded_base(name) != Some(plan.onto) || local.conflict(name).is_some() {
-            plan.run(common_dir, false, || Ok(None))?;
+            plan.run(common_dir, false, |_| Ok(None))?;
         }
         return nothing();
     }
@@ -478,7 +478,7 @@ fn try_follow(common_dir: &Path, name: &str, tree: &Tree) -> Result<Followed> {
     let moved = match plan.conflict(common_dir, &local)?.filter(|_| !gone) {
         Some(paths) => follow::Moved::Conflict(paths),
         None => plan
-            .run(common_dir, false, || movable(common_dir, name, false))
+            .run(common_dir, false, |_| movable(common_dir, name, false))
             .map_err(|e| match gone {
                 // Built there all the same: said.
                 true => e.context(landed.trim_end().to_string()),
@@ -654,9 +654,11 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
     }
     // Refused or failed from here, it is built on P all the same.
     let moved = plan
-        .run(common_dir, false, || {
+        .run(common_dir, false, |moves| {
             let workspace = movable(common_dir, name, true)?;
-            println!("moves {} of {name} onto {short}", commits(plan.own));
+            if moves {
+                println!("moves {} of {name} onto {short}", commits(plan.own));
+            }
             Ok(workspace)
         })
         .inspect_err(|_| println!("{name} is now built on {short}"))?;

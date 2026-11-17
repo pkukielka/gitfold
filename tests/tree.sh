@@ -497,6 +497,9 @@ on api a.txt unresolved
 before=$(R rev-parse ui)
 check "a conflict left unresolved: resolve it (exit 4)" says 4 "ui has a conflict left unresolved in its workspace on g.txt: resolve it, then: \`gitfold parent ui --update\`" parent ui --update
 eq "  the branch where it was" "$before" "$(R rev-parse ui)"
+R remote add origin /nonexistent; R update-ref refs/remotes/origin/ui ui
+check "  said before its commits being pushed" says 4 "ui has a conflict left unresolved" parent ui --update
+R update-ref -d refs/remotes/origin/ui; R remote remove origin
 base=$(R rev-parse -q --verify refs/gitfold-base/ui); r=$(gf parent ui --set main)
 eq "--set with it: refused before it says what moves" "4 yes no" "${r%% *} $([[ $r == *"resolve it"* ]] && echo yes || echo no) $([[ $r == *"moves "* ]] && echo yes || echo no)"
 R config branch.ui.gitfoldParent refs/heads/api; put_base "$base"

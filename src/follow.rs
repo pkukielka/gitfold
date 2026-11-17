@@ -613,14 +613,16 @@ impl Plan {
 
     /// Moves it (see the module doc): its base recorded, a conflict cleared
     /// or recorded. Not with a merge among its own commits, nor commits
-    /// already pushed unless `yes`. `moving` is called once it is sure to
-    /// try, and says where the branch is checked out: its workspace (a
-    /// directory through the mount), or `None`. The caller holds `lock`.
+    /// already pushed unless `yes`. `moving` is called before the pushed
+    /// commits are checked (what is in the way in its workspace is said
+    /// first), with whether it moves (no pushed commits in the way), and
+    /// says where the branch is checked out: its workspace (a directory
+    /// through the mount), or `None`. The caller holds `lock`.
     pub fn run(
         &self,
         common_dir: &Path,
         yes: bool,
-        moving: impl FnOnce() -> Result<Option<PathBuf>>,
+        moving: impl FnOnce(bool) -> Result<Option<PathBuf>>,
     ) -> Result<Moved> {
         let branch = &self.branch;
         let outcome = Moving {
@@ -637,10 +639,10 @@ impl Plan {
             return Ok(Moved::Merge);
         }
         let pushed = self.pushed(common_dir)?;
+        let workspace = moving(yes || pushed.is_none())?;
         if !yes && let Some(pushed) = pushed {
             return Ok(Moved::Pushed(pushed));
         }
-        let workspace = moving()?;
         let upstream = (!self.on_history).then_some(self.base);
         settings::set_moving(common_dir, branch, Some(&outcome.encode()))?;
         // On an error (git may have moved it) the record stays, for
