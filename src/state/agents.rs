@@ -11,6 +11,8 @@
 //!   session that dies without ending stops counting then.
 //! - **Told:** `following`, the pause of following last reported to the
 //!   agent in full (its one-line summary): then only a reminder each turn.
+//! - **Followed:** `followed`, the moves following made while no agent was
+//!   there, said at its agent's next turn start.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -22,7 +24,6 @@ use anyhow::Result;
 use super::{StateDir, workspace_id};
 
 /// How long an agent counts as present after its last hook.
-#[allow(dead_code)]
 pub const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 impl StateDir {
@@ -55,7 +56,6 @@ impl StateDir {
 
     /// Whether an agent is present in the workspace now (see the module
     /// doc).
-    #[allow(dead_code)] // until the daemon follows
     pub fn agent_present(&self) -> bool {
         let Ok(entries) = fs::read_dir(self.agents()) else {
             return false;
@@ -86,6 +86,38 @@ impl StateDir {
                 _ => Ok(()),
             },
         }
+    }
+
+    fn followed_file(&self) -> PathBuf {
+        self.dir.join("followed")
+    }
+
+    /// Records a move following made while no agent was there (`said`, what
+    /// `--update` says), to tell its agent at its next turn start.
+    pub fn add_followed(&self, said: &str) -> Result<()> {
+        if !self.dir.is_dir() {
+            return Ok(());
+        }
+        let mut file = fs::File::options()
+            .create(true)
+            .append(true)
+            .open(self.followed_file())?;
+        std::io::Write::write_all(&mut file, said.as_bytes())?;
+        Ok(())
+    }
+
+    /// Takes the moves recorded by `add_followed`, if any.
+    pub fn take_followed(&self) -> Result<Option<String>> {
+        let taken = self
+            .dir
+            .join(format!("followed.taken-{}", std::process::id()));
+        match fs::rename(self.followed_file(), &taken) {
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+            renamed => renamed?,
+        }
+        let said = fs::read_to_string(&taken)?;
+        fs::remove_file(&taken)?;
+        Ok(Some(said))
     }
 }
 

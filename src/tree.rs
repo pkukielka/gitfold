@@ -242,6 +242,19 @@ impl Tree {
         out
     }
 
+    /// Every branch with a parent, each before its children (branches in a
+    /// cycle a hand-edited config may hold left out, T4).
+    pub fn with_parents(&self) -> Vec<&str> {
+        let tops: BTreeSet<String> = (self.parents.values())
+            .filter(|p| {
+                let branch = p.strip_prefix("refs/heads/");
+                !branch.is_some_and(|b| self.parents.contains_key(b))
+            })
+            .cloned()
+            .collect();
+        self.built_on(&tops.into_iter().collect::<Vec<_>>())
+    }
+
     /// The full ref of the parent named `parent`, if the parent of local
     /// branch `branch` may become it: the name resolves (S2), a root is known
     /// and `branch` isn't it, `parent` isn't `branch`, nor built on it

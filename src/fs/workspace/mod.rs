@@ -115,6 +115,9 @@ pub struct Workspace {
     tmp: PathBuf,
     /// Bumped by every change; cached listings of older generations are stale.
     generation: AtomicU64,
+    /// Bumped by every write or change through the mount (`touch`,
+    /// `changed`): how the daemon tells it is idle (`daemon::follow`).
+    writes: AtomicU64,
     listings: Mutex<HashMap<u64, (u64, Arc<Listing>)>>,
     /// Being removed (`Workspaces::remove`): the sync thread leaves it alone.
     pub removing: AtomicBool,
@@ -259,6 +262,7 @@ impl Workspace {
             modes: RwLock::new(()),
             tmp,
             generation: AtomicU64::new(0),
+            writes: AtomicU64::new(0),
             listings: Mutex::new(HashMap::new()),
             removing: AtomicBool::new(false),
             touched: Mutex::new(HashSet::new()),
@@ -288,6 +292,11 @@ impl Workspace {
     /// The task folder's link target: its directory.
     pub fn task_target(&self) -> Option<&[u8]> {
         self.task.as_ref().map(|t| t.dir.as_os_str().as_bytes())
+    }
+
+    /// How many writes and changes were made in it (see `writes`).
+    pub fn writes(&self) -> u64 {
+        self.writes.load(Ordering::Relaxed)
     }
 
     /// The base commit and its tree.
@@ -458,10 +467,12 @@ impl Workspace {
     /// upper entries when serving them.
     fn changed(&self) {
         self.generation.fetch_add(1, Ordering::Release);
+        self.writes.fetch_add(1, Ordering::Relaxed);
         self.listings.lock().clear();
     }
 
     fn touch(&self, path: &[u8]) {
+        self.writes.fetch_add(1, Ordering::Relaxed);
         let mut touched = self.touched.lock();
         if !touched.contains(path) {
             touched.insert(path.to_vec());

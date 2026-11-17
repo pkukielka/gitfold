@@ -461,7 +461,8 @@ edit_line() { sed -i "$2s/.*/$3/" "$MNT/ui/$1"; }
 workspaces() {
 identity
 seq 1 10 >"$REPO/g.txt"; R add g.txt; R commit -qm "main: g"
-R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+# Not following: the daemon would move it by itself (see daemon_follows).
+R branch api; "$BIN" -C "$REPO" branch ui --parent api --no-follow >/dev/null
 mount_fs
 echo one >"$MNT/ui/u.txt"; W ui add u.txt; W ui commit -qm "ui: one"
 edit_line g.txt 2 mine; echo dirty >"$MNT/ui/d.txt"
@@ -576,6 +577,52 @@ check "--claude-hook: hidden" lacks 0 "claude-hook" parent --help
 check "--claude-hook with a branch: refused" says 2 "cannot be used with" parent ui --claude-hook session-start
 "$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
 }
+
+# Following without an agent: the daemon moves a branch once its
+# workspace is idle and no agent is present, a branch without a workspace
+# when its parent moves, each before its children.
+# Waits up to 20 s for `$@` to succeed.
+until_ok() { for _ in $(seq 80); do "$@" >/dev/null 2>&1 && return; sleep 0.25; done; false; }
+daemon_follows() {
+AGENTS=$REPO/.git/gitfold/ui/agents
+identity
+R branch api; "$BIN" -C "$REPO" branch ui --parent api >/dev/null
+"$BIN" -C "$REPO" branch leaf --parent ui >/dev/null
+mount_fs
+echo one >"$MNT/ui/u.txt"; W ui add u.txt; W ui commit -qm "ui: one"
+check "a branch without a workspace: moved when its parent moves" until_ok R merge-base --is-ancestor ui leaf
+hook session-start parent '"session_id":"s1"' >/dev/null
+on api n.txt new
+sleep 6
+check "an agent present: not moved" fails R merge-base --is-ancestor api ui
+# The session dies without ending: no hook for longer than the timeout.
+touch -d '31 minutes ago' "$AGENTS/s1"
+check "the agent gone (timed out): moved" until_ok R merge-base --is-ancestor api ui
+eq "  its files moved, through the mount" "new" "$(cat "$MNT/ui/n.txt")"
+check "  its child after it" until_ok R merge-base --is-ancestor ui leaf
+check "  logged" until_ok grep -q "following: moved 1 commit of ui onto api" "$LOG"
+r=$(turn)
+check "  said at the agent's next turn start" test "$([[ $r == *"since your last turn, ui took its parent's new commits: moved 1 commit of ui onto api"* ]] && echo yes)" = yes
+eq "  once" "" "$(turn)"
+hook session-end parent '"session_id":"s1"' >/dev/null
+# Writes in the workspace hold it off until it is idle.
+on api n.txt newer
+for i in $(seq 16); do echo "$i" >"$MNT/ui/w.txt"; sleep 0.25; done
+check "written to: not moved" fails R merge-base --is-ancestor api ui
+check "  idle: moved" until_ok R merge-base --is-ancestor api ui
+eq "  the work carried along" "16" "$(cat "$MNT/ui/w.txt")"
+# A conflict: paused, logged once, nothing moved.
+on api u.txt theirs
+check "a conflict: logged" until_ok grep -q "following ui paused: .*conflict" "$LOG"
+check "  nothing moved" fails R merge-base --is-ancestor api ui
+sleep 3
+eq "  logged once" "1" "$(grep -c "following ui paused" "$LOG")"
+"$BIN" -C "$REPO" parent leaf --no-follow >/dev/null
+W ui rebase -q api -X theirs >/dev/null 2>&1
+sleep 5
+check "not following: not moved" fails R merge-base --is-ancestor ui leaf
+"$REAL_BIN" unmount "$MNT" >/dev/null 2>&1
+}
 section "tree: the command-line contract" the_contract
 section "tree: two questions about main" two_questions_about_main
 section "tree: rules R (the root)" the_root
@@ -589,4 +636,5 @@ section "tree: pushed commits" pushed
 section "tree: what isn't moved, and crashes" not_moved
 section "tree: workspaces moved through the mount" workspaces
 section "tree: following at turn start, agent presence" agents
+section "tree: following without an agent (the daemon)" daemon_follows
 finish

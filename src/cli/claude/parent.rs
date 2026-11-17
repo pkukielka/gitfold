@@ -95,7 +95,14 @@ fn unmark(state: &StateDir, id: Option<&str>) -> Result<()> {
 /// pause in full once, then a one-line reminder each turn while it lasts.
 fn turn_start(common_dir: &Path, state: &StateDir) -> Result<String> {
     let branch = &state.branch;
-    Ok(match follow_once(common_dir, branch) {
+    // Moves made while no agent was here (the daemon's).
+    let mut out = match state.take_followed()? {
+        Some(said) => format!(
+            "gitfold: since your last turn, {branch} took its parent's new commits:\n{said}"
+        ),
+        None => String::new(),
+    };
+    out += &match follow_once(common_dir, branch) {
         Followed::Nothing => {
             state.set_told(None)?;
             String::new()
@@ -111,5 +118,6 @@ fn turn_start(common_dir: &Path, state: &StateDir) -> Result<String> {
                 format!("gitfold: {full}\n")
             }
         },
-    })
+    };
+    Ok(out)
 }
