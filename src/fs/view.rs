@@ -10,6 +10,7 @@ use gix::objs::tree::EntryKind;
 use log::error;
 
 use super::GitFold;
+use super::views::{Item, ViewDir};
 use super::workspace::{GITFILE_LOCAL, Obj, Read, TASKLINK_LOCAL, Workspace};
 use super::workspaces::Slot;
 use crate::git;
@@ -120,7 +121,7 @@ impl GitFold {
     /// needed besides the invalidation (`names`): a listing in flight when a
     /// name was added can be cached after it; the new mtime drops it.
     fn names_mtime(&self) -> SystemTime {
-        self.snapshots.root_mtime().max(self.workspaces.mtime())
+        (self.snapshots.root_mtime().max(self.workspaces.mtime())).max(self.views.mtime())
     }
 
     pub(super) fn ws_node(&self, slot: u32, local: u64) -> Result<WsNode, Errno> {
@@ -161,7 +162,7 @@ impl GitFold {
     /// How many names the root and namespace directories hold together; only
     /// grows, so a change means a lookup added one.
     pub(super) fn name_count(&self) -> usize {
-        self.snapshots.name_count() + self.workspaces.len()
+        self.snapshots.name_count() + self.workspaces.len() + self.views.len()
     }
 
     pub(super) fn attr(&self, ino: u64) -> Result<FileAttr, Errno> {
@@ -194,7 +195,27 @@ impl GitFold {
                     self.obj_attr(ino, &obj)
                 }
             },
+            Ino::View { slot, local } => {
+                let item = self.views.get(slot)?.get(&self.store, local)?;
+                self.view_attr(ino, &item)
+            }
         }
+    }
+
+    /// Attributes of a view's entry: read-only.
+    fn view_attr(&self, ino: u64, item: &Item) -> Result<FileAttr, Errno> {
+        Ok(match item {
+            Item::Dir(time) => self.make_attr(ino, FileType::Directory, 0o555, 0, *time),
+            Item::Summary(data, time) => {
+                let size = data.len() as u64;
+                self.make_attr(ino, FileType::RegularFile, 0o444, size, *time)
+            }
+            Item::File(id, time) => {
+                let mut attr = self.file_attr(ino, *id, false)?;
+                (attr.atime, attr.mtime, attr.ctime) = (*time, *time, *time);
+                attr
+            }
+        })
     }
 
     pub(super) fn is_file(&self, ino: INodeNo) -> Result<bool, Errno> {
@@ -204,7 +225,8 @@ impl GitFold {
     /// Resolves a name below the mount root (a full path for names in namespaces).
     fn resolve_name(&self, path: &[u8]) -> Result<u64, Errno> {
         let path = std::str::from_utf8(path).map_err(|_| Errno::ENOENT)?;
-        self.workspaces.resolve(&self.store, &self.snapshots, path)
+        self.workspaces
+            .resolve(&self.store, &self.snapshots, &self.views, path)
     }
 
     /// Attributes of `name` in directory `parent`.
@@ -216,6 +238,16 @@ impl GitFold {
             // The lookup already resolved the entry; `attr` would do it again.
             let (child, obj) = ws.lookup(&self.store, local, name)?;
             return self.obj_attr(inode::ws(slot, child), &obj);
+        }
+        if let Ino::View { slot, local } = decode(parent.0)? {
+            // Counts the kernel's reference, as for workspaces.
+            let view = self.views.get(slot)?;
+            let (child, item) = view.lookup(&self.store, local, name)?;
+            let attr = self.view_attr(inode::view(slot, child), &item);
+            if attr.is_err() {
+                view.forget(child, 1); // the kernel gets no reference
+            }
+            return attr;
         }
         self.attr(self.lookup_ino(parent, name)?)
     }
@@ -277,8 +309,54 @@ impl GitFold {
                 WsNode::Entry(ws, _) => self.emit_ws(&ws, slot, local, offset, plus, emit),
                 WsNode::GitFile(_) | WsNode::TaskLink(_) => Err(Errno::ENOTDIR),
             },
+            Ino::View { slot, local } => {
+                let view = self.views.get(slot)?;
+                self.emit_view(&view, local, offset, plus, emit)
+            }
             _ => Err(Errno::ENOTDIR),
         }
+    }
+
+    /// Lists a view's directory `local`: `.`, `..` and its entries (at the
+    /// view's root, its summary among them).
+    fn emit_view(
+        &self,
+        view: &ViewDir,
+        local: u64,
+        offset: u64,
+        plus: bool,
+        mut emit: impl FnMut(u64, u64, &[u8], FileAttr) -> bool,
+    ) -> Result<(), Errno> {
+        let ino = |local: u64| inode::view(view.slot, local);
+        let listing = view.listing(&self.store, local)?;
+        let total = 2 + listing.entries.len() as u64;
+        if offset >= total {
+            // The kernel's closing request past the end.
+            view.listed(local);
+            return Ok(());
+        }
+        if offset < 2 {
+            let dots = [(ino(local), &b"."[..]), (inode::ROOT, &b".."[..])];
+            for (i, (ino, name)) in dots.into_iter().enumerate().skip(offset as usize) {
+                if emit(i as u64 + 1, ino, name, self.attr(ino)?) {
+                    return Ok(());
+                }
+            }
+        }
+        let first = (offset as usize).saturating_sub(2);
+        for (j, (name, obj)) in listing.entries.iter().enumerate().skip(first) {
+            let (child, item) = view.entry(&listing, local, name, obj, plus);
+            let full = self
+                .view_attr(ino(child), &item)
+                .map(|attr| emit(j as u64 + 3, ino(child), name, attr));
+            if !matches!(full, Ok(false)) {
+                if plus {
+                    view.forget(child, 1);
+                }
+                return full.map(drop);
+            }
+        }
+        Ok(())
     }
 
     /// Lists the root or a namespace directory: snapshots, workspaces and
@@ -292,6 +370,7 @@ impl GitFold {
     ) -> Result<(), Errno> {
         let mut names = self.snapshots.children(prefix);
         names.extend(self.workspaces.children(prefix));
+        names.extend(self.views.children(prefix));
         let entries = names.iter().map(|(ino, name)| (*ino, name.as_slice()));
         self.emit_entries(dots.into_iter().chain(entries), offset, emit)
     }
@@ -419,6 +498,11 @@ impl GitFold {
                 }
                 _ => Err(Errno::EISDIR),
             },
+            Ino::View { slot, local } => match self.views.get(slot)?.get(&self.store, local)? {
+                Item::Summary(data, _) => Ok(Content::Whole(data)),
+                Item::File(id, _) => cached(inode::file(id), &|| self.blob(id)),
+                Item::Dir(_) => Err(Errno::EISDIR),
+            },
             _ => Err(Errno::EISDIR),
         }
     }
@@ -427,6 +511,10 @@ impl GitFold {
     pub(super) fn link_target(&self, ino: INodeNo) -> Result<Vec<u8>, Errno> {
         match decode(ino.0)? {
             Ino::File(id) => Ok(self.blob(id)?.to_vec()),
+            Ino::View { slot, local } => match self.views.get(slot)?.get(&self.store, local)? {
+                Item::File(id, _) => Ok(self.blob(id)?.to_vec()),
+                _ => Err(Errno::EINVAL),
+            },
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {
                 WsNode::TaskLink(ws) => Ok(ws.task_target().unwrap_or_default().to_vec()),
                 WsNode::Entry(ws, local) => match ws.readlink(&self.store, local)? {
