@@ -338,33 +338,8 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
     let value = mountpoint
         .to_str()
         .context("a mount point that isn't UTF-8");
-    // Each written even if the other can't be, each retried a while: another
-    // git command may hold the config's lock.
-    let write = |key: &str, value: &str| -> Result<()> {
-        let key = format!("gitfold.{key}");
-        let started = Instant::now();
-        loop {
-            let out = (git::cmd::command(git_dir))
-                .args(["config", "--local", &key, value])
-                .output()?;
-            match out.status.code() {
-                Some(0) => return Ok(()),
-                // The file not written (4, git config's exit code) or its
-                // lock held (255, what git exits with then): retried; any
-                // other failure waiting doesn't change.
-                Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
-                    sleep(Duration::from_millis(100));
-                    continue;
-                }
-                _ => {}
-            }
-            anyhow::bail!(
-                "git config {key} failed ({}): {}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr).trim()
-            );
-        }
-    };
+    // Each written even if the other can't be.
+    let write = |key: &str, value: &str| config(git_dir, &[&format!("gitfold.{key}"), value]);
     let place = value.and_then(|value| write(MOUNTPOINT, value));
     write(MOUNT_OPTIONS, &flags.join("\n")).and(place)
 }
@@ -372,30 +347,57 @@ pub fn set_mountpoint(git_dir: &Path, mountpoint: &Path, flags: &[String]) -> Re
 /// How long writing a setting is retried while it fails (the config locked).
 const CONFIG_WAIT: Duration = Duration::from_secs(2);
 
-/// Sets `branch.<branch>.<key>` to `value`, with git, in the repository's
-/// own config file (where it is read), given the repository's or one of its
-/// worktrees' git directory.
-fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()> {
-    git::cmd::run(
-        git_dir,
-        &["config", "--local", &branch_key(branch, key), value],
-    )
+/// Runs `git config --local <args>`: writes the repository's own config file
+/// (where settings are read), given the repository's or one of its
+/// worktrees' git directory. Retried a while if git can't write the file:
+/// another git command (the user's, the mount's follow thread) may hold its
+/// lock. Exit 5, unsetting what isn't set, is no failure.
+fn config(git_dir: &Path, args: &[&str]) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let out = (git::cmd::command(git_dir))
+            .args(["config", "--local"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .output()?;
+        match out.status.code() {
+            Some(0 | 5) => return Ok(()),
+            // The file not written (4, git config's exit code) or its lock
+            // held (255, what git exits with then): retried; any other
+            // failure waiting doesn't change.
+            Some(4 | 255) if started.elapsed() < CONFIG_WAIT => {
+                sleep(Duration::from_millis(100));
+                continue;
+            }
+            _ => {}
+        }
+        anyhow::bail!(
+            "git config {} failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
 }
 
-/// Removes `branch.<branch>.<key>` (every value it has), if set.
+/// Sets `branch.<branch>.<key>` to `value` (see `config`).
+fn set_branch(git_dir: &Path, branch: &str, key: &str, value: &str) -> Result<()> {
+    config(git_dir, &[&branch_key(branch, key), value])
+}
+
+/// Removes `branch.<branch>.<key>` (every value it has), if set; if not,
+/// the config isn't written (git takes its lock even then).
 fn unset_branch(git_dir: &Path, branch: &str, key: &str) -> Result<()> {
     let key = branch_key(branch, key);
-    let out = git::cmd::command(git_dir)
-        .args(["config", "--local", "--unset-all", &key])
+    let set = (git::cmd::command(git_dir))
+        .args(["config", "--local", "--get-all", &key])
+        .stdin(std::process::Stdio::null())
         .output()?;
-    // Exit 5: it wasn't set.
-    match out.status.code() {
-        Some(0 | 5) => Ok(()),
-        _ => anyhow::bail!(
-            "git config --unset-all {key}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
+    // Exit 1: not set.
+    if set.status.code() == Some(1) {
+        return Ok(());
     }
+    config(git_dir, &["--unset-all", &key])
 }
 
 /// Gives branch `to` the settings set for branch `from` (a fork); one that
