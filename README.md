@@ -426,7 +426,11 @@ folder's directory: by default inside `.git`, which committing needs anyway.
 
 **Messages.** `gitfold send <BRANCH> <TEXT>` leaves a message in a task's
 inbox, `inbox/` in its task folder (`gitfold.inbox` names it); the branch
-needs no workspace yet. `gitfold inbox` takes the messages in the inbox of the
+needs no workspace yet. `from:` is the workspace it was sent from, so a reply
+goes there; `--from <NAME>` signs it otherwise (a person, an orchestrator),
+and a name that isn't a branch can't be replied to: sent to, it is refused
+(exit 3) with the workspaces listed, the sender's parent marked.
+`gitfold inbox` takes the messages in the inbox of the
 workspace you are in (or of `<BRANCH>`) and prints them: each is taken once,
 however many read at a time (none to take is no error: exit 0). `--wait` waits
 for one if there are none (up to `--timeout <SECS>`, then exit 124); `--peek`

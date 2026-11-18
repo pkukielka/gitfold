@@ -90,6 +90,11 @@ Each message is taken once. Messages are files in `.task/inbox/`, so anything
 can send one: an orchestrator, a script, a person (`gitfold send <BRANCH>
 <TEXT>` from the repository, as `user`).
 
+To reply, send to the message's `from:` when it names a branch (sent from a
+workspace, it does). A name that isn't a branch (`from: lead`, `user`) can't be
+replied to: `gitfold send` says so and lists the workspaces, your parent
+marked; that is usually who to tell.
+
 **Delivery without polling, in Claude Code:** the gitfold plugin's hooks
 deliver them (see [Claude Code](#claude-code) below). Without the plugin, add
 these (the `parent` ones also mark your presence and follow your branch's

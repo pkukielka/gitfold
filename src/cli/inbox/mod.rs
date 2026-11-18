@@ -270,9 +270,38 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
         words => words.join(" "),
     };
     let common_dir = git::init(repo)?;
+    if !git::branch_exists(&to) {
+        let refused = crate::refusal::Refusal::NotFound;
+        return Err(refused.error(no_branch(&common_dir, repo, &to)));
+    }
     deliver(&common_dir, &to, &from, subject.as_deref(), &body)?;
     println!("sent to {to}");
     Ok(())
+}
+
+/// Why `send` can't reach `to`, with who it can: the workspaces' branches,
+/// the parent of the workspace it is sent from marked, so an agent that took
+/// a sender's name (`from: lead`) for an address finds the branch to use.
+fn no_branch(common_dir: &Path, repo: &Path, to: &str) -> String {
+    let mut branches: Vec<String> = crate::state::list(common_dir)
+        .map(|stored| stored.into_iter().map(|w| w.branch).collect())
+        .unwrap_or_default();
+    branches.sort();
+    branches.dedup();
+    if branches.is_empty() {
+        return format!("no branch {to}");
+    }
+    let parent = super::branch_or_current(None, repo).ok().and_then(|branch| {
+        let tree = crate::tree::Tree::read(common_dir).ok()?;
+        tree.parent(&branch).map(|p| crate::tree::short(p).to_string())
+    });
+    let named: Vec<String> = (branches.into_iter())
+        .map(|b| match parent.as_deref() == Some(b.as_str()) {
+            true => format!("{b} (your parent)"),
+            false => b,
+        })
+        .collect();
+    format!("no branch {to}; workspaces: {}", named.join(", "))
 }
 
 /// Leaves a message from `from` in the inbox of branch `to` (see the module

@@ -236,6 +236,10 @@ mount_fs
 sleep 0.3; echo s >"$MNT/ib2/.task/status"; wait $WP
 eq "in a workspace: its own folder; writes through the link seen" "C	status" "$(cat "$T/watched")"
 eq "send from a workspace: from it" "from: ib2" "$(cd "$MNT/ib2" && "$BIN" send ib hi >/dev/null && "$BIN" inbox ib | head -1)"
+"$BIN" -C "$REPO" branch ibk --parent ib2 >/dev/null 2>&1
+out=$(cd "$MNT/ibk" && "$BIN" send lead hi 2>&1); rc=$?
+eq "send to a name no branch has: exit 3, the workspaces named, the parent marked" "3 yes yes" \
+    "$rc $([[ $out == *"no branch lead; workspaces: "* ]] && echo yes) $([[ $out == *"ib2 (your parent)"* ]] && echo yes)"
 unmount_fs
 R config gitfold.inbox mail
 "$BIN" -C "$REPO" send ib configured >/dev/null
