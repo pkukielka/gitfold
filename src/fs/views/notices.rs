@@ -21,10 +21,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::{Weak, mpsc};
 use std::thread;
+use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use gix::ObjectId;
-use log::{info, warn};
+use log::{debug, info, warn};
 
 use super::members::{self, Bases, Tip};
 use super::merge::Private;
@@ -61,9 +62,15 @@ pub fn spawn(views: Weak<Views>) -> mpsc::Sender<Step> {
                 }
                 let Some(views) = views.upgrade() else { return };
                 for step in queued {
+                    let started = Instant::now();
                     if let Err(e) = check(&views, &step) {
                         warn!("conflict notices: {} at {}: {e:#}", step.branch, step.to);
                     }
+                    let took = started.elapsed();
+                    debug!(
+                        "conflict notices: {} at {}: checked in {took:?}",
+                        step.branch, step.to
+                    );
                 }
             }
         });
