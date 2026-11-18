@@ -866,3 +866,7 @@ Notes:
   candidate isn't worth parallelising at this size.
 - **The commit path costs nothing while idle:** within tick noise of v0.4.1 (a difference of at
   most ~30 ms of CPU a minute with 12 workspaces).
+- **Case 3 stands for a commit on the main branch too.** It commits on `x`, a branch without a
+  parent, because the bench clone's checkout is on main and isn't moved; a main branch commit
+  is checked against the same set (main's view, the branches without a parent and what is
+  built on them), so it costs the same.
