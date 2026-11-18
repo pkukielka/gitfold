@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -31,7 +31,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::views::{Kind, Views};
+use super::views::{Kind, Step, Views};
 use super::workspace::Workspace;
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
@@ -92,6 +92,8 @@ pub struct Workspaces {
     requests: RwLock<bool>,
     /// Bumped whenever an entry is added, invalidating cached namespace listings.
     mtime: Mutex<SystemTime>,
+    /// Where workspaces hand their branches' commit steps (`set_commits`).
+    commits: OnceLock<mpsc::Sender<Step>>,
 }
 
 impl Workspaces {
@@ -116,7 +118,14 @@ impl Workspaces {
             busy: Mutex::new(HashMap::new()),
             requests: RwLock::new(false),
             mtime: Mutex::new(SystemTime::now()),
+            commits: OnceLock::new(),
         }
+    }
+
+    /// Sends the commit steps of the branches of workspaces opened from now on
+    /// (`Workspace::with_commits`) to `to` (once: the first one given stays).
+    pub fn set_commits(&self, to: mpsc::Sender<Step>) {
+        let _ = self.commits.set(to);
     }
 
     /// How many workspaces and namespace directories were added; only grows
@@ -532,7 +541,8 @@ impl Workspaces {
         let path = self.mount_point.join(branch);
         let ws = Workspace::open(store, state, new_base)
             .map_err(|e| fail("opening", e))?
-            .with_task_folder(store);
+            .with_task_folder(store)
+            .with_commits(self.commits.get().cloned());
         if let Err(e) = ws.track_reads(self.tracks_reads(branch)) {
             warn!("workspace {branch}: not recording reads: {e:#}");
         }

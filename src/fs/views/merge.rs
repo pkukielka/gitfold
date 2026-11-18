@@ -30,12 +30,15 @@ use gix::ObjectId;
 use log::warn;
 use parking_lot::RwLock;
 
+use super::members::Tip;
 use crate::git;
+use crate::store::Store;
 
-/// A branch merged into a view: its tip, and its merge point with its parent.
+/// A branch merged into a view: its tip (and its tree), and its merge point
+/// with its parent.
 pub struct Member<'a> {
     pub branch: &'a str,
-    pub tip: ObjectId,
+    pub tip: Tip,
     pub base: ObjectId,
 }
 
@@ -174,11 +177,13 @@ impl Private {
     /// says it is the one shown.
     pub fn merge(
         &self,
+        store: &Store,
         view: &str,
         branch: &str,
-        own: (ObjectId, ObjectId),
+        own: Tip,
         members: &[Member],
     ) -> Result<Merged> {
+        load(store, own, members.iter().map(|m| (m.tip, m.base)))?;
         let _writing = self.lock.read();
         // The view so far: its commit (a commit of each fold's tree: git
         // 2.44 takes no tree there), and how the summary names it.
@@ -186,33 +191,10 @@ impl Private {
         let mut tree = own.1;
         let mut conflicts = Vec::new();
         for (i, m) in members.iter().enumerate() {
-            let base = format!("--merge-base={}", m.base);
-            let (ours_hex, theirs) = (ours.to_string(), m.tip.to_string());
             // Attributes (`merge=union`) from the view so far, as a merge in a
             // checkout of it reads them.
-            let attributes = format!("attr.tree={tree}");
-            let args = [
-                "merge-tree",
-                "--write-tree",
-                "-z",
-                &base,
-                &ours_hex,
-                &theirs,
-            ];
-            let out = (self.in_repository()?.args(["-c", &attributes]).args(args))
-                .stdin(Stdio::null())
-                .output()?;
-            // 1: conflicts, which the output says.
-            if !matches!(out.status.code(), Some(0 | 1)) {
-                return Err(git::cmd::Failed {
-                    args: args.join(" "),
-                    status: out.status,
-                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
-                }
-                .into());
-            }
             let found;
-            (tree, found) = parse(&out.stdout)?;
+            (tree, found) = self.merge_tree(m.base, ours, m.tip.0, tree)?;
             for (kind, path) in found {
                 let sides = [side.clone(), m.branch.to_string()];
                 conflicts.push(Conflict { kind, sides, path });
@@ -231,6 +213,50 @@ impl Private {
             commit,
             conflicts,
         })
+    }
+
+    /// What git says conflicts when `theirs` is merged into `ours` from
+    /// `base`, as a view merges a member (commits by id, attributes from
+    /// `ours`): its kinds and paths; the merged tree isn't kept.
+    pub fn conflicts(
+        &self,
+        store: &Store,
+        base: ObjectId,
+        ours: Tip,
+        theirs: Tip,
+    ) -> Result<Found> {
+        load(store, ours, [(theirs, base)])?;
+        let _writing = self.lock.read();
+        Ok(self.merge_tree(base, ours.0, theirs.0, ours.0)?.1)
+    }
+
+    /// `git merge-tree --write-tree` of `theirs` into `ours` from `base`,
+    /// `.gitattributes` read from `attributes` (a tree-ish): the merged tree
+    /// and what git says conflicts. The caller holds `lock`, shared.
+    fn merge_tree(
+        &self,
+        base: ObjectId,
+        ours: ObjectId,
+        theirs: ObjectId,
+        attributes: ObjectId,
+    ) -> Result<(ObjectId, Found)> {
+        let base = format!("--merge-base={base}");
+        let (ours, theirs) = (ours.to_string(), theirs.to_string());
+        let attributes = format!("attr.tree={attributes}");
+        let args = ["merge-tree", "--write-tree", "-z", &base, &ours, &theirs];
+        let out = (self.in_repository()?.args(["-c", &attributes]).args(args))
+            .stdin(Stdio::null())
+            .output()?;
+        // 1: conflicts, which the output says.
+        if !matches!(out.status.code(), Some(0 | 1)) {
+            return Err(git::cmd::Failed {
+                args: args.join(" "),
+                status: out.status,
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            }
+            .into());
+        }
+        parse(&out.stdout)
     }
 
     /// View `view` (as for `merge`) now shows `commit` (from `merge`): it is kept
@@ -268,6 +294,18 @@ impl Private {
     }
 }
 
+/// What git will read of a merge of `own` with `sides` (each a tip and its
+/// merge base), loaded first: in a partial clone, fetched as for a snapshot
+/// (git doesn't fetch for the views). Loaded trees cost a lookup.
+fn load(store: &Store, own: Tip, sides: impl IntoIterator<Item = (Tip, ObjectId)>) -> Result<()> {
+    store.load_tree(own.1)?;
+    for (tip, base) in sides {
+        store.load_tree(tip.1)?;
+        store.load_tree(git::commit(base)?.tree)?;
+    }
+    Ok(())
+}
+
 /// The object id git printed (and a newline).
 pub(super) fn oid(out: &[u8]) -> Result<ObjectId> {
     Ok(ObjectId::from_hex(
@@ -291,7 +329,7 @@ fn label(branch: &str, ours: &str, member: &str, merged: usize, members: &[Membe
 }
 
 /// What git says conflicts in a merge: its kind, the path.
-type Found = Vec<(String, Vec<u8>)>;
+pub type Found = Vec<(String, Vec<u8>)>;
 
 /// The tree and the conflicts (`CONFLICT (…)` messages: kind, path) of a
 /// `git merge-tree --write-tree -z` output: the tree, the conflicted files'
@@ -341,15 +379,20 @@ mod tests {
         let inputs: Vec<Member> = (members.iter())
             .map(|(b, p)| {
                 let (b_ref, p_ref) = (format!("refs/heads/{b}"), format!("refs/heads/{p}"));
+                let tree = format!("{b_ref}^{{tree}}");
                 Member {
                     branch: b,
-                    tip: id(&run(&["rev-parse", &b_ref])),
+                    tip: (
+                        id(&run(&["rev-parse", &b_ref])),
+                        id(&run(&["rev-parse", &tree])),
+                    ),
                     base: id(&run(&["merge-base", &b_ref, &p_ref])),
                 }
             })
             .collect();
         private()
             .merge(
+                &Store::default(),
                 &format!("committed/{n}"),
                 n,
                 (
@@ -511,7 +554,7 @@ mod tests {
         let tip = ObjectId::empty_tree(gix::hash::Kind::Sha1);
         let member = |branch| Member {
             branch,
-            tip,
+            tip: (tip, tip),
             base: tip,
         };
         let x = "x".repeat(120);

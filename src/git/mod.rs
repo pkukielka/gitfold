@@ -184,6 +184,17 @@ pub fn resolve(spec: &str) -> Result<Commit> {
     })
 }
 
+/// The commit `id`, and its tree.
+pub fn commit(id: ObjectId) -> Result<Commit> {
+    with_repo(|repo| {
+        let commit = repo.find_commit(id)?;
+        Ok(Commit {
+            id,
+            tree: commit.tree_id()?.detach(),
+        })
+    })
+}
+
 /// Objects a tree load needed that the object database doesn't have (a
 /// partial clone: see `promisor`).
 #[derive(Debug)]

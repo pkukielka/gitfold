@@ -27,6 +27,12 @@ fn branch_of(name: &str) -> String {
     format!("worktree-{name}")
 }
 
+/// Whether `branch` is one this plugin named for a Claude Code worktree
+/// (`branch_of`): a session started there, or a subagent's home.
+pub fn is_worktree_branch(branch: &str) -> bool {
+    branch.starts_with("worktree-")
+}
+
 /// `WorktreeCreate`: makes worktree `name` of the repository of the session's
 /// directory and prints its path, the only thing on stdout, which Claude Code
 /// reads. A workspace of branch `worktree-<name>` (created from the session's

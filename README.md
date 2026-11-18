@@ -426,12 +426,23 @@ folder's directory: by default inside `.git`, which committing needs anyway.
 
 **Messages.** `gitfold send <BRANCH> <TEXT>` leaves a message in a task's
 inbox, `inbox/` in its task folder (`gitfold.inbox` names it); the branch
-needs no workspace yet. `gitfold inbox` takes the messages in the inbox of the
+needs no workspace yet. `from:` is the sender's workspace, so a reply goes
+there: the one the command runs in, or, in a Claude Code session with the
+plugin, the one the session started in, even after its shell `cd`'d into
+another workspace to look around (the plugin's SessionStart hook sets
+`GITFOLD_FROM`; a subagent at home in its own worktree signs with that).
+`--from <NAME>` signs it otherwise (a person, an orchestrator),
+and a name that isn't a branch can't be replied to: sent to, it is refused
+(exit 3) with the workspaces listed, the sender's parent marked.
+`gitfold inbox` takes the messages in the inbox of the
 workspace you are in (or of `<BRANCH>`) and prints them: each is taken once,
 however many read at a time (none to take is no error: exit 0). `--wait` waits
 for one if there are none (up to `--timeout <SECS>`, then exit 124); `--peek`
 lists them without taking; `--json` for programs. A fork (`branch -w`) leaves the inbox behind: its messages were for
 the source's agent.
+gitfold sends some itself, `from: gitfold`: conflict notices, when a commit
+conflicts with another workspace's work (see [Branches built on
+branches](#branches-built-on-branches)).
 `--claude-hook` hands them to Claude Code's hooks: injected into the
 conversation when a prompt is sent and after each tool call (not a
 subagent's: its context isn't the session's), and waking an idle session when
@@ -629,6 +640,37 @@ for a minute rests (nothing is refreshed; `GITFOLD_VIEW_REST_SECS` changes
 how long), and the first access afterwards waits up to 5 s for it to be
 current. A branch with no history in common with its parent is left out of
 both views, noted in the summary.
+
+**Conflict notices.** When a branch gets new commits in its workspace (not
+gitfold's own moves of it), the mount's daemon checks them against the
+workspaces whose work meets it where it lands: the members of its parent's
+view (`@live/<parent>`), the parent included. A branch without a parent
+(made with `branch X --from <start>`) counts as built on the main branch:
+where the main branch's view is used (for the main branch, those built on
+it, and those without a parent), the branches without a parent, and what
+is built on them, count too (`@live/main` doesn't show them). A conflict
+the commit makes, with the other side's committed or uncommitted work, is
+told once, to everyone involved, in the same words: both sides and the
+branch they land in get a message in their inbox, `from: gitfold`, one per
+commit:
+
+```
+from: gitfold
+subject: conflict: README.md
+
+cart-api committed 0724067; it conflicts with cart-ui's uncommitted README.md.
+If it needs resolving, cart-ui's change is the one still open, so that's the cheapest place to adjust.
+```
+
+The hint names the side whose change is uncommitted; else, of a branch and
+one built on it following it, the child (`cart-ui is built on cart-api:
+that's where it gets resolved (following is paused on it)`); else whoever
+committed last. A notice informs; gitfold doesn't stop or move anything for
+it. Commits made while unmounted or outside workspaces aren't checked, and
+commits already on a remote (a pull) aren't announced.
+`gitfold.conflictNotices false` turns the notices off for the repository,
+and `branch.<name>.gitfoldConflictNotices` (true or false) decides for that
+branch's workspace.
 
 A branch named `committed` or `live` is reached as `@refs/heads/committed` (a
 remote so named as `@refs/remotes/committed/<branch>`).

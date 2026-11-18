@@ -262,32 +262,102 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
         from,
         subject,
     } = args;
-    let from = from
-        .or_else(|| super::branch_or_current(None, repo).ok())
-        .unwrap_or_else(|| "user".to_string());
+    let from = from.unwrap_or_else(|| sender(repo));
     let body = match text.as_slice() {
         [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())?,
         words => words.join(" "),
     };
     let common_dir = git::init(repo)?;
-    let dir = inbox_dir(&common_dir, &to)?;
+    if !git::branch_exists(&to) {
+        let refused = crate::refusal::Refusal::NotFound;
+        return Err(refused.error(no_branch(&common_dir, repo, &to)));
+    }
+    deliver(&common_dir, &to, &from, subject.as_deref(), &body)?;
+    println!("sent to {to}");
+    Ok(())
+}
+
+/// The variable a Claude Code session's SessionStart hook sets to the branch
+/// of the workspace the session started in (`claude::parent`).
+pub const SENDER_ENV: &str = "GITFOLD_FROM";
+
+/// Who a message sent without `--from` is from: the workspace of the agent
+/// sending it. In a Claude Code session that's the one it started in
+/// (`GITFOLD_FROM`), even after its shell `cd`'d into another workspace to
+/// look at it; except in a workspace made for a Claude worktree
+/// (`worktree-<name>`) other than the session's own: there the commands are a
+/// subagent's, at home (a subagent's `cd` doesn't last). Without the
+/// variable, the workspace the command runs in; outside any, `user`.
+fn sender(repo: &Path) -> String {
+    let here = super::branch_or_current(None, repo).ok();
+    let session = std::env::var(SENDER_ENV).ok().filter(|b| !b.is_empty());
+    match (here, session) {
+        (Some(here), Some(session))
+            if here != session && super::claude::is_worktree_branch(&here) =>
+        {
+            here
+        }
+        (_, Some(session)) => session,
+        (Some(here), None) => here,
+        (None, None) => "user".to_string(),
+    }
+}
+
+/// Why `send` can't reach `to`, with who it can: the workspaces' branches,
+/// the parent of the workspace it is sent from marked, so an agent that took
+/// a sender's name (`from: lead`) for an address finds the branch to use.
+fn no_branch(common_dir: &Path, repo: &Path, to: &str) -> String {
+    let mut branches: Vec<String> = crate::state::list(common_dir)
+        .map(|stored| stored.into_iter().map(|w| w.branch).collect())
+        .unwrap_or_default();
+    branches.sort();
+    branches.dedup();
+    if branches.is_empty() {
+        return format!("no branch {to}");
+    }
+    let parent = super::branch_or_current(None, repo)
+        .ok()
+        .and_then(|branch| {
+            let tree = crate::tree::Tree::read(common_dir).ok()?;
+            tree.parent(&branch)
+                .map(|p| crate::tree::short(p).to_string())
+        });
+    let named: Vec<String> = (branches.into_iter())
+        .map(|b| match parent.as_deref() == Some(b.as_str()) {
+            true => format!("{b} (your parent)"),
+            false => b,
+        })
+        .collect();
+    format!("no branch {to}; workspaces: {}", named.join(", "))
+}
+
+/// Leaves a message from `from` in the inbox of branch `to` (see the module
+/// doc): `send`'s, and gitfold's own (`fs::views::notices`).
+pub fn deliver(
+    common_dir: &Path,
+    to: &str,
+    from: &str,
+    subject: Option<&str>,
+    body: &str,
+) -> Result<()> {
+    let dir = inbox_dir(common_dir, to)?;
     fs::create_dir_all(&dir)?;
     let one_line = |s: &str| s.replace(['\r', '\n'], " ");
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let mut text = format!(
         "from: {}\ntime: {}\n",
-        one_line(&from),
+        one_line(from),
         rfc3339(now.as_secs())
     );
-    if let Some(subject) = &subject {
+    if let Some(subject) = subject {
         text += &format!("subject: {}\n", one_line(subject));
     }
     text.push('\n');
-    text += &body;
+    text += body;
     if !body.ends_with('\n') {
         text.push('\n');
     }
-    let name = format!("{:020}-{}", now.as_nanos(), workspace_id(&from));
+    let name = format!("{:020}-{}", now.as_nanos(), workspace_id(from));
     let tmp = dir.join(format!(".new-{}-{name}", std::process::id()));
     {
         use std::io::Write;
@@ -310,7 +380,6 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
     };
     let _ = fs::remove_file(&tmp);
     delivered.with_context(|| format!("delivering to {to}"))?;
-    println!("sent to {to}");
     Ok(())
 }
 

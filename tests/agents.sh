@@ -236,6 +236,20 @@ mount_fs
 sleep 0.3; echo s >"$MNT/ib2/.task/status"; wait $WP
 eq "in a workspace: its own folder; writes through the link seen" "C	status" "$(cat "$T/watched")"
 eq "send from a workspace: from it" "from: ib2" "$(cd "$MNT/ib2" && "$BIN" send ib hi >/dev/null && "$BIN" inbox ib | head -1)"
+"$BIN" -C "$REPO" branch ibk --parent ib2 >/dev/null 2>&1
+out=$(cd "$MNT/ibk" && "$BIN" send lead hi 2>&1); rc=$?
+eq "send to a name no branch has: exit 3, the workspaces named, the parent marked" "3 yes yes" \
+    "$rc $([[ $out == *"no branch lead; workspaces: "* ]] && echo yes) $([[ $out == *"ib2 (your parent)"* ]] && echo yes)"
+: >"$T/envfile"
+printf '{"cwd":"%s","session_id":"s7"}' "$MNT/ib2" | CLAUDE_ENV_FILE="$T/envfile" "$BIN" parent --claude-hook session-start
+eq "a session starting in a workspace: its sends signed with it (\$CLAUDE_ENV_FILE)" "export GITFOLD_FROM='ib2'" "$(cat "$T/envfile")"
+(cd "$MNT/ibk" && GITFOLD_FROM=ib2 "$BIN" send ib looked >/dev/null)
+eq "  sent after cd'ing into another workspace: still from the session's" "from: ib2" "$("$BIN" -C "$REPO" inbox ib | head -1)"
+"$BIN" -C "$REPO" branch worktree-ibw >/dev/null 2>&1
+(cd "$MNT/worktree-ibw" && GITFOLD_FROM=ib2 "$BIN" send ib home >/dev/null)
+eq "  from a Claude worktree's workspace (a subagent at home): from it" "from: worktree-ibw" "$("$BIN" -C "$REPO" inbox ib | head -1)"
+(cd "$MNT/ibk" && "$BIN" send ib plain >/dev/null)
+eq "  no session variable: from the workspace it runs in" "from: ibk" "$("$BIN" -C "$REPO" inbox ib | head -1)"
 unmount_fs
 R config gitfold.inbox mail
 "$BIN" -C "$REPO" send ib configured >/dev/null

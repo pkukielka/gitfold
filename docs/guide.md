@@ -261,6 +261,27 @@ Run without `--against...`, it checks against the main branch: has
 something the agent changed (or, with read tracking on, read) changed there
 since it started?
 
+**Told without looking.** You don't have to keep reading the views: when a
+commit in one workspace conflicts with another's work, gitfold leaves a
+message in the inboxes of everyone involved, both sides and the branch they
+land in. When `checkout-api` commits its `README.md`:
+
+```
+$ gitfold inbox checkout-ui
+from: gitfold
+time: 2026-11-18T10:12:31Z
+subject: conflict: README.md
+
+checkout-api committed 0724067; it conflicts with checkout-ui's uncommitted README.md.
+If it needs resolving, checkout-ui's change is the one still open, so that's the cheapest place to adjust.
+```
+
+`checkout-api` and `checkout` get the same message; with Claude Code, it
+arrives in each agent's conversation by itself, and wakes an idle one. A
+notice only informs: whether it matters (not for a throwaway workspace, say)
+is for the agents, or for you. Who is told, the hint and the settings: see
+[the README](../README.md#branches-built-on-branches).
+
 **Why it works.** The views are made by `git merge-tree`, git's own merge,
 without touching any branch, index or working tree; conflicts look exactly
 as a real merge would leave them. `gitfold changes` and `overlaps` read what

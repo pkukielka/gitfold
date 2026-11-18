@@ -14,7 +14,7 @@
 //! repository (`.git`) is one entry, and nothing under a submodule counts as
 //! ignored.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
@@ -130,6 +130,34 @@ impl Status {
             .collect();
         all.sort_by(|a, b| a.1.cmp(b.1));
         all
+    }
+}
+
+impl StateDir {
+    /// Whether the workspace may have uncommitted changes on one of `paths`,
+    /// as stored: an upper entry at one, a file above one, or a marker
+    /// hiding one. More than `status` would say (an upper file may match the
+    /// base again), and much cheaper: a check before asking git.
+    pub fn may_change<'a>(&self, paths: impl IntoIterator<Item = &'a [u8]>) -> Result<bool> {
+        let upper = self.upper();
+        let (whiteouts, opaque) = Markers::read(&self.markers())?;
+        let meta = |p: &[u8]| fs::symlink_metadata(upper_path(&upper, p)).ok();
+        // Directories above the paths, each looked at once: whether upper
+        // has a file there.
+        let mut file_above: HashMap<&[u8], bool> = HashMap::new();
+        for path in paths {
+            if hidden(&whiteouts, &opaque, path) || meta(path).is_some() {
+                return Ok(true);
+            }
+            for dir in ancestors(path) {
+                let file = *(file_above.entry(dir))
+                    .or_insert_with(|| meta(dir).is_some_and(|m| !m.is_dir()));
+                if file {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 }
 

@@ -821,3 +821,52 @@ Notes:
 - **`changes -- PATH`: 9.0 s to 0.83 s.** The commit-graph write took 15.4 s at mount (nice 19,
   idle I/O class), in the background; an incremental one (`--split`, a branch moved) takes
   0.14 s. Requests never wait for it.
+
+## 2026-11-18, conflict notices
+
+`bench/notices.sh ~/work/bench/chromium /tmp/gf-v041/target/release/gitfold` (the second argument
+a v0.4.1 build, for the idle row), same machine as above, release build of feat/conflict-notices
+with one debug line added (`conflict notices: <branch> at <tip>: checked in <time>`, the
+notices thread's time per step). It mounts the clone and makes, at HEAD: `p` with children `a`
+and `b`; `x` and `s1`..`s6` without a parent (siblings under the root), `s1` with children `s1a`,
+`s1b`: 12 workspaces (13 open, with the clone's own `bench-ws`), each with one commit and one
+uncommitted edit on Markdown files of its own. Commits are made without a checkout (a temporary
+index, `commit-tree`, `update-ref`), timed from the ref update; a notice is timed until its file
+is in the inbox folder (polled every 10 ms). Each commit is on a new file (a conflict told once
+isn't told again). Cold = the first commit on a fresh mount, warm = the median of the next 4; two
+full runs, which agreed within a few %, the second shown. ms:
+
+| what | cold | warm |
+|---|---:|---:|
+| 1. `a` commits a line on a file `b` changed uncommitted: until in `b`'s inbox | 2310 | 1932 |
+| same, `a`'s inbox (the committer) | 2317 | 1938 |
+| same, `p`'s inbox (where they land) | 2323 | 1944 |
+| the check (notices thread) | 1580 | 986 |
+| 2. `a` commits a file no one else changed: until checked (no messages) | | 946 |
+| the check | | 13 |
+| 3. `x` (no parent) commits, 12 workspaces related, no overlap: until checked | | 961 |
+| the check | | 33 |
+| same, `s3` edits the file uncommitted: until in `s3`'s inbox | | 1962 |
+| the check | | 999 |
+
+4. Idle, nothing changing, 12 workspaces open: the daemon's CPU (user + system, its git children
+included) in 60 s: this build 190-220 ms (four measurements over two runs), v0.4.1 170-190 ms
+(two), at 10 ms tick resolution.
+
+Notes:
+
+- **A notice arrives ~2 s after the commit; the check is a live tree.** The sync thread polls the
+  tip every second (up to 1 s before the step is seen: the 930-960 ms of the no-overlap rows,
+  check included), then the check: ~1 s warm, 1.6 s for the first one on a fresh mount, nearly
+  all of it the other workspace's live tree (`git add -A` through the mount, as `@live` makes
+  it). The three messages are written within 15 ms of each other.
+- **What no one meets costs nothing:** 13 ms with 2 related workspaces, 33 ms with 12 (the
+  stored-changes prefilter, a merge base and one `git diff` of the committed paths per
+  workspace, serially: ~2 ms each). No live tree is made, no merge run. The serial `git diff` per
+  candidate isn't worth parallelising at this size.
+- **The commit path costs nothing while idle:** within tick noise of v0.4.1 (a difference of at
+  most ~30 ms of CPU a minute with 12 workspaces).
+- **Case 3 stands for a commit on the main branch too.** It commits on `x`, a branch without a
+  parent, because the bench clone's checkout is on main and isn't moved; a main branch commit
+  is checked against the same set (main's view, the branches without a parent and what is
+  built on them), so it costs the same.

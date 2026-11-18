@@ -126,20 +126,20 @@ Then, per request (`fs/workspace/`):
 | `src/fs/workspace/mod.rs` | one workspace: merged lower/upper view, lookups, cached listings, reads |
 | `src/fs/workspace/write.rs` | copy-up and mutations |
 | `src/fs/workspace/nodes.rs` | local id ↔ (parent, name) table, freed on kernel `forget` |
-| `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base |
+| `src/fs/workspace/rebase.rs` | moving the base to the branch tip invisibly; dropping upper files identical to the base; the branch's own commit steps, for the conflict notices |
 | `src/fs/workspace/times.rs` | timestamps of files dropped from upper (committed, or restored unchanged); only the mount uses them |
 | `src/fs/workspace/reads.rs` | read tracking: recording the files read in a workspace, for `gitfold overlaps` |
-| `src/fs/views/` | `@committed/<branch>` and `@live/<branch>`: which branches a view merges (`members`), the merge by `git merge-tree` in a private repository (`merge`), workspaces as trees for `@live` (`live`, `lives`), the merged tree as files and its summary (`shown`), serving it (`serve`), and keeping it current or resting (`watch`) |
+| `src/fs/views/` | `@committed/<branch>` and `@live/<branch>`: which branches a view merges (`members`), the merge by `git merge-tree` in a private repository (`merge`), workspaces as trees for `@live` (`live`, `lives`), the merged tree as files and its summary (`shown`), serving it (`serve`), and keeping it current or resting (`watch`); the conflict notices, on a workspace's new commits (`notices`) |
 | `src/fs/names.rs` | telling the kernel when names in the root or a namespace changed |
 | `src/fs/content.rs` | per-inode content cache and idle trimmer |
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk; what is at a path of a tree (`Lower`, `entry_at`) |
-| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory, registration and base pin; the files in it), ids, its base and branch files, paths below its root, whether an upper file matches a stored one |
+| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory, registration and base pin; the files in it), ids, its base and branch files, paths below its root, paths meeting (`PathTree`), whether an upper file matches a stored one |
 | `src/state/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/state/reads.rs` | the read log's format (`gitfold overlaps`) |
 | `src/state/agents.rs` | the agents present in a workspace (a file per session, 30 minutes), and what following told them |
-| `src/state/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`) |
+| `src/state/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`); whether they may touch some paths (`may_change`, for the conflict notices) |
 | `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
@@ -195,7 +195,7 @@ Then, per request (`fs/workspace/`):
 | `tests/agents.sh` | end-to-end test of overlaps, the task folder, inbox, send, watch, the Claude Code worktree hooks and the plugin's launcher |
 | `tests/tree.sh` | end-to-end test of branches built on branches: `parent` and `branch --parent` (the root and name rules), moves, pushed commits, crashes, landing, following at turn start and by the daemon, the tree in `list` |
 | `tests/from.sh` | end-to-end test of `branch` with several `--from` (compared with git's own merge), with `-w`, mounting again |
-| `tests/views.sh` | end-to-end test of `@committed` and `@live`: members, conflicts, refreshing, resting, the reserved names |
+| `tests/views.sh` | end-to-end test of `@committed` and `@live`: members, conflicts, refreshing, resting, the reserved names; the conflict notices |
 | `tests/fixture.sh` | the repository each isolated section of manage, status, mount, agents, tree, from and views starts from |
 | `tests/run.sh` | runs suites at once (by default all but `workspace.sh`) and sums up; `SECTION` across them |
 | `tests/promisor.sh` | end-to-end test of partial clones (fetches, stalls, backoff, remote choice) |
@@ -1395,6 +1395,78 @@ session end and a subagent's stop remove it.
   then as a one-line reminder each turn; moves the daemon made are said at
   the next turn start (`followed`).
 
+### Conflict notices: told at the commit, pairwise, to everyone involved
+
+**What:** a workspace's new commits are checked for new conflicts with the
+work they meet, and those involved are told (`src/fs/views/notices.rs`):
+
+1. *Trigger:* the sync thread (`Workspace::sync`) sees the branch move from
+   its base to its tip; a move of its own (not gitfold's: no
+   `gitfoldMoving`, `refs/gitfold-base/<branch>` unchanged; not at the
+   first sync) goes to one thread per mount, as one step.
+2. *Own paths:* what the step's commits after `follow::own_base` change
+   (`git log --no-renames`), commits already on a remote left out (a pull;
+   a branch's own remote branch counts as its own: pushed right after
+   committing).
+3. *Related:* the workspaces in the view of the branch it lands in
+   (`Tree::lands_in`: its parent, or the root for a branch without one).
+4. *Prefilter:* their stored uncommitted changes (`StateDir::may_change`)
+   or their commits since the merge base touch an own path.
+5. *Merges:* git merges the new tip, and the tip before, with each as it
+   is (`Private::conflicts`, `Lives`); conflicts only after are new, with
+   committed work where the merge with its tip has them too.
+6. *Told:* both sides and the workspace of the branch they land in, one
+   message each, the same words (`from: gitfold`), with a hint: the
+   uncommitted side, else a following child, else the committer; unless a
+   branch says not (`gitfoldConflictNotices`, `gitfold.conflictNotices`).
+
+**Why:**
+
+- **At the commit, where gitfold already sees it:** the sync thread
+  polls the tip every second anyway; a second poller would read the same
+  refs. The checks run on another thread: a live tree is git reading a
+  workspace through the mount (2-5 s on Chromium), and the sync thread
+  must go on moving bases. Commits are the moments work is offered to
+  others; live edits change every few seconds and `@live` shows them.
+- **Pairwise, not the views:** `@committed` has no uncommitted work, and in
+  `@live` both sides' uncommitted edits already conflict before the commit:
+  nothing changes when it lands. The views fold members in turn, so a
+  conflict's first side is "the view so far" (`a+b`), not a branch. A view
+  is computed only while someone reads it, and rests. The pairwise merge is
+  the same git merge, a few ms each, with exact sides; live trees are made
+  only for workspaces whose stored uncommitted changes meet the step's.
+- **New by difference, not by memory:** a conflict is new if the merge
+  with the tip before the step didn't have it. Nothing is stored: a
+  remount, a crash or a conflict that comes back need no bookkeeping, and a
+  later commit on the same lines isn't told again.
+- **Everyone involved, the same message:** each side may be the one to
+  act, and the branch they land in is where the conflict will surface; one
+  text for all keeps them from reading different stories. It informs and
+  hints; whether it matters (a throwaway workspace) is the agents' or their
+  lead's. gitfold decides nothing, as for following's pauses.
+- **Branches without a parent as siblings under the root:** `branch X
+  --from origin/main` is the plain way to start a task, and such branches
+  land in the main branch, as its children do; taken as built on nothing,
+  they would never be checked against each other. The root is the one the
+  tree and the views already use.
+- **A following child is named for both committed sides:** following's
+  pause tells the child to rebase; a notice naming the other would
+  contradict it.
+
+**Rejected:** a poller of its own (the sync thread sees commits already);
+reading `@committed` or `@live` (see above); a record of the conflicts told
+(the difference already says what is new); git hooks (`post-commit`), for
+the reasons workspaces don't use them for rebases; strategies of whom to
+tell (`act`, `all`), dropped for one rule: everyone involved.
+
+**Limits:** commits made while unmounted or outside workspaces (a fetch,
+the main checkout) aren't checked; commits already on a remote aren't
+announced (pulled into the main branch's workspace, say), and a branch
+pulling its own remote branch announces what others pushed there as its
+own. A step whose tip before shares no history with the other side's
+reports all its conflicts as new. A merge commit's own changes (a merge of a
+branch other than the parent) aren't among the step's paths.
+
 ### The commit-graph: git's own cache, kept current
 
 **What:** while mounted, the daemon keeps the repository's commit-graph
@@ -1447,6 +1519,7 @@ write, the settings and the lock are git's, as for `git maintenance`.
 | Hand-built merges for views | each left the next difference from git's | [views](#views-rebuilt-behind-the-kernels-back-then-told-what-changed) |
 | `git replay` for moves | experimental; keeps empty commits, no patch-id skipping | [tree](#branches-built-on-branches-git-does-the-moves) |
 | Sharing uncommitted work between branches | committed work through parents; the rest only read | [tree](#branches-built-on-branches-git-does-the-moves) |
+| Conflict notices from the views, or from a record of what was told | `@committed` has no uncommitted work, `@live` conflicts before the commit, views rest; the difference with the tip before says what is new | [notices](#conflict-notices-told-at-the-commit-pairwise-to-everyone-involved) |
 
 ## Known limitations
 

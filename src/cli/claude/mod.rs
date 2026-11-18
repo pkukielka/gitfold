@@ -21,7 +21,7 @@ use super::hook::field;
 
 pub use parent::{ParentHook, parent_hook, tool_used};
 pub use reads::reads_hook;
-pub use worktree::{worktree_create, worktree_remove};
+pub use worktree::{is_worktree_branch, worktree_create, worktree_remove};
 
 /// The hook's working directory: `cwd` in its input, else this process's.
 pub(super) fn cwd(input: &str) -> Result<PathBuf> {

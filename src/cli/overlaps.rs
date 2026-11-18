@@ -24,7 +24,7 @@ use crate::refusal::Refusal;
 use crate::state::reads;
 use crate::state::retire::{base_note, check_name};
 use crate::state::status;
-use crate::state::{StateDir, ancestors};
+use crate::state::{PathTree, StateDir};
 use crate::store::Store;
 
 /// Which lines to print.
@@ -42,32 +42,15 @@ const FOUND: i32 = 6;
 /// One target and the paths it changed.
 struct Target {
     name: String,
-    changed: HashSet<Vec<u8>>,
-    /// Every directory above a changed path.
-    dirs: HashSet<Vec<u8>>,
+    changed: PathTree,
 }
 
 impl Target {
     fn new(name: String, paths: impl IntoIterator<Item = Vec<u8>>) -> Self {
-        let changed: HashSet<Vec<u8>> = paths.into_iter().collect();
-        let dirs = changed
-            .iter()
-            .flat_map(|p| ancestors(p))
-            .map(<[u8]>::to_vec)
-            .collect();
         Target {
             name,
-            changed,
-            dirs,
+            changed: PathTree::new(paths),
         }
-    }
-
-    /// Whether this target changed `path`, a directory above it, or (`path`
-    /// being a directory then) a path below it.
-    fn touches(&self, path: &[u8]) -> bool {
-        self.changed.contains(path)
-            || self.dirs.contains(path)
-            || ancestors(path).any(|d| self.changed.contains(d))
     }
 }
 
@@ -162,13 +145,13 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
         let committed = match kinds {
             Kinds::Reads => Vec::new(),
             // The branch's own commits since it diverged from this target.
-            _ => diff(&common_dir, &t.name, &base.to_string())?,
+            _ => git::cmd::changed_paths(&common_dir, &format!("{}...{base}", t.name))?,
         };
         // The paths written that this target changed too.
         let mut written = HashSet::new();
         if kinds != Kinds::Reads {
             for path in committed.iter().chain(&uncommitted) {
-                if t.touches(path) && written.insert(path.as_slice()) {
+                if t.changed.touches(path) && written.insert(path.as_slice()) {
                     lines.insert((path.clone(), 'W', t.name.clone()));
                 }
             }
@@ -177,7 +160,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
             for path in read.iter().flatten() {
                 // A path also written says more: the agent read it and then
                 // changed it.
-                if t.touches(path) && !written.contains(path.as_slice()) {
+                if t.changed.touches(path) && !written.contains(path.as_slice()) {
                     lines.insert((path.clone(), 'R', t.name.clone()));
                 }
             }
@@ -217,25 +200,13 @@ fn rev_target(common_dir: &Path, store: &Store, base: &ObjectId, rev: String) ->
         true => format!("refs/heads/{rev}"),
         false => rev.clone(),
     };
-    let mut changed = diff(common_dir, &base.to_string(), &spec)?;
+    let mut changed = git::cmd::changed_paths(common_dir, &format!("{base}...{spec}"))?;
     let state = StateDir::of(common_dir, &rev);
     if branch && state.opened() {
         let s = status::status(store, &state)?;
         changed.extend(s.changed.into_iter().chain(s.deleted));
     }
     Ok(Target::new(rev, changed))
-}
-
-/// The paths `to` changed since it diverged from `from` (`git diff
-/// from...to`), both sides of a rename.
-fn diff(common_dir: &Path, from: &str, to: &str) -> Result<Vec<Vec<u8>>> {
-    let range = format!("{from}...{to}");
-    let args = ["diff", "--name-only", "-z", "--no-renames", &range, "--"];
-    Ok(git::cmd::output(common_dir, &args)?
-        .split(|b| *b == 0)
-        .filter(|p| !p.is_empty())
-        .map(<[u8]>::to_vec)
-        .collect())
 }
 
 /// The arguments of `gitfold overlaps`.
@@ -270,30 +241,5 @@ impl OverlapsArgs {
             (_, true) => Kinds::Writes,
             _ => Kinds::Both,
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn target(paths: &[&str]) -> Target {
-        Target::new("t".into(), paths.iter().map(|p| p.as_bytes().to_vec()))
-    }
-
-    #[test]
-    fn touches_paths_and_directories_both_ways() {
-        let t = target(&["a/b/c.txt", "d"]);
-        assert!(t.touches(b"a/b/c.txt"), "the same path");
-        assert!(
-            t.touches(b"a/b"),
-            "a directory above a changed path (replaced by a file)"
-        );
-        assert!(
-            t.touches(b"d/x"),
-            "below a path changed (a directory replaced by a file)"
-        );
-        assert!(!t.touches(b"a/bc"), "a sibling with a common prefix");
-        assert!(!t.touches(b"dx"));
     }
 }

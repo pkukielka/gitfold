@@ -90,6 +90,12 @@ Each message is taken once. Messages are files in `.task/inbox/`, so anything
 can send one: an orchestrator, a script, a person (`gitfold send <BRANCH>
 <TEXT>` from the repository, as `user`).
 
+To reply, send to the message's `from:` when it names a branch (sent by an
+agent, it is the agent's own workspace, even if it looked around in others
+first; so is yours). A name that isn't a branch (`from: lead`, `user`) can't be
+replied to: `gitfold send` says so and lists the workspaces, your parent
+marked; that is usually who to tell.
+
 **Delivery without polling, in Claude Code:** the gitfold plugin's hooks
 deliver them (see [Claude Code](#claude-code) below). Without the plugin, add
 these (the `parent` ones also mark your presence and follow your branch's
@@ -124,6 +130,21 @@ prompt, after the agent's next tool call, or, when the session is idle, by
 waking it (the `Stop` hook waits for a message and wakes the session when one
 comes; one waiter per inbox). Other harnesses: run `gitfold inbox --wait`
 between tasks, or as a background command that ends when a message arrives.
+
+**Messages `from: gitfold` are conflict notices:** a commit (yours or
+another workspace's) conflicts with work it meets, for example:
+
+```
+cart-api committed 0724067; it conflicts with cart-ui's uncommitted README.md.
+If it needs resolving, cart-ui's change is the one still open, so that's the cheapest place to adjust.
+```
+
+A notice is information, not an instruction. Decide whether it matters, or
+ask your lead (whoever gave you the task): it may not, for a throwaway
+workspace or an experiment. If it does, the hint says where a change goes:
+the uncommitted side, else a following child, else whoever committed last.
+Talk to the other side with `gitfold send <BRANCH>` rather than both
+changing the same lines.
 
 ## Getting gitfold, and mounting a repository
 
