@@ -200,7 +200,7 @@ fn recover(common_dir: &Path, branch: &str) -> Result<()> {
 
 /// Where the own commits of `branch` (at `tip`) start, on `parent` (a full
 /// ref; `None`: on the root, its existing refs `roots`). See the module doc.
-fn own_base(
+pub(crate) fn own_base(
     common_dir: &Path,
     branch: &str,
     parent: Option<&str>,
@@ -469,9 +469,9 @@ pub enum Moved {
 }
 
 /// `paths` as git quotes them (a newline in one can't split it).
-pub fn quoted(paths: &[Vec<u8>]) -> Vec<String> {
-    (paths.iter())
-        .map(|p| String::from_utf8_lossy(&crate::cli::quote(p)).into_owned())
+pub fn quoted<P: AsRef<[u8]>>(paths: impl IntoIterator<Item = P>) -> Vec<String> {
+    (paths.into_iter())
+        .map(|p| String::from_utf8_lossy(&crate::cli::quote(p.as_ref())).into_owned())
         .collect()
 }
 
@@ -884,16 +884,7 @@ fn squashed(
     let Some(fork) = merge_base(common_dir, &[&base_hex, &tip_hex])? else {
         return Ok(false);
     };
-    let fork_hex = fork.to_string();
-    let args = [
-        "diff",
-        "--no-renames",
-        "--name-only",
-        "-z",
-        &fork_hex,
-        &base_hex,
-    ];
-    let paths = cmd::nul_paths(&cmd::output(common_dir, &args)?);
+    let paths = cmd::changed_paths(common_dir, &format!("{fork}..{base}"))?;
     if paths.is_empty() {
         return Ok(false);
     }

@@ -8,7 +8,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -16,16 +15,14 @@ use std::time::{Duration, SystemTime};
 use anyhow::Result;
 use gix::ObjectId;
 use log::error;
-use parking_lot::Mutex;
 
-use super::lives::{Lives, Reach};
+use super::lives::Lives;
 use super::members::{self, Bases, BuiltOn, Note, Refs, Tip};
 use super::merge::{Member, Private};
 use super::serve::{Kind, Tick, ViewDir};
 use super::shown::{Changed, Shown, Times};
 use crate::fs::NameChanges;
 use crate::fs::workspaces::Workspaces;
-use crate::git;
 use crate::inode;
 use crate::state::{self, name, parent};
 use crate::store::Store;
@@ -33,8 +30,6 @@ use crate::tree::Tree;
 
 /// How often a view's refs are read.
 const INTERVAL: Duration = Duration::from_secs(1);
-/// How many live trees a view's watch makes at once.
-const LIVE_AT_ONCE: usize = 4;
 /// How often the tree is read again even when the config didn't change (a
 /// new `origin/HEAD` moves the root without touching it).
 const TREE_EVERY: u32 = 30;
@@ -54,18 +49,6 @@ pub struct Context {
     pub kind: Kind,
     pub workspaces: Arc<Workspaces>,
     pub lives: Arc<Lives>,
-}
-
-impl Context {
-    /// What its live trees need (`Lives::tip`).
-    fn reach(&self) -> Reach<'_> {
-        Reach {
-            store: &self.store,
-            names: &self.names,
-            workspaces: &self.workspaces,
-            private: &self.private,
-        }
-    }
 }
 
 /// Which trees an `@live` view merges.
@@ -141,12 +124,12 @@ impl Watch {
             // Each workspace as it is: its live tree for its tip (one that
             // can't be read: its tip, noted). Opens the workspaces not open
             // yet (`Workspaces::open_quietly`). The members' and its own are
-            // made side by side (`live_trees`).
+            // made side by side (`Lives::tips`).
             let mut asked: Vec<(&str, ObjectId)> = (refs.members.iter())
                 .map(|(member, tip, _)| (member.as_str(), tip.0))
                 .collect();
             asked.push((branch, refs.local.0));
-            let mut made = live_trees(ctx, &asked, now);
+            let mut made = ctx.lives.tips(&ctx.private, &asked, now);
             let own_made = made.pop().expect("its own asked for");
             let mut notes = Vec::new();
             // Errors logged once, while they last.
@@ -194,63 +177,20 @@ impl Watch {
             return Ok(None);
         }
         let inputs: Vec<Member> = (refs.members.iter())
-            .map(|(branch, (tip, _), base)| Member {
+            .map(|(branch, tip, base)| Member {
                 branch,
                 tip: *tip,
                 base: *base,
             })
             .collect();
-        // What git will read, loaded first: in a partial clone, fetched as
-        // for a snapshot (git doesn't fetch for the views).
-        ctx.store.load_tree(refs.own.1)?;
-        for (_, (_, tree), base) in &refs.members {
-            ctx.store.load_tree(*tree)?;
-            ctx.store.load_tree(git::resolve(&base.to_string())?.tree)?;
-        }
         // No lock the requests need is held meanwhile.
-        let merged = ctx.private.merge(&ctx.key, branch, refs.own, &inputs)?;
+        let merged = (ctx.private).merge(&ctx.store, &ctx.key, branch, refs.own, &inputs)?;
         let tree = ctx.store.load_tree(merged.tree)?;
         let (conflicts, notes) = (&merged.conflicts, &refs.notes);
         let (shown, changed) = Shown::next(&ctx.store, tree, conflicts, notes, before, &self.times);
         self.built = Some((members, refs, config));
         Ok(Some((shown, changed, merged.commit)))
     }
-}
-
-/// The live trees of the workspaces of `asked` (branch, tip), in its order
-/// (`Lives::tip`): made side by side, at most `LIVE_AT_ONCE` at a time (each
-/// is git reading a workspace through the mount, mostly waiting on it), this
-/// thread making some too. Threads of their own, not a rayon pool: opening a
-/// workspace loads trees with `par_iter` under `Workspaces::creating`, and a
-/// pool thread waiting there could take up another live tree, which waits for
-/// that very lock.
-fn live_trees(ctx: &Context, asked: &[(&str, ObjectId)], now: bool) -> Vec<Result<Option<Tip>>> {
-    let reach = ctx.reach();
-    let next = AtomicUsize::new(0);
-    let made: Vec<Mutex<Option<Result<Option<Tip>>>>> =
-        asked.iter().map(|_| Mutex::default()).collect();
-    let work = || {
-        loop {
-            let i = next.fetch_add(1, Ordering::Relaxed);
-            let Some(&(branch, tip)) = asked.get(i) else {
-                return;
-            };
-            *made[i].lock() = Some(ctx.lives.tip(&reach, branch, tip, now));
-        }
-    };
-    thread::scope(|scope| {
-        for _ in 1..asked.len().min(LIVE_AT_ONCE) {
-            // Without a thread (process limits), fewer at once.
-            let name = format!("view {}", ctx.name);
-            if (thread::Builder::new().name(name).spawn_scoped(scope, work)).is_err() {
-                break;
-            }
-        }
-        work();
-    });
-    (made.into_iter())
-        .map(|m| m.into_inner().expect("each made"))
-        .collect()
 }
 
 /// Keeps `view` current while it exists: every second, unless it rests (not

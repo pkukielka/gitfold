@@ -30,12 +30,15 @@ use gix::ObjectId;
 use log::warn;
 use parking_lot::RwLock;
 
+use super::members::Tip;
 use crate::git;
+use crate::store::Store;
 
-/// A branch merged into a view: its tip, and its merge point with its parent.
+/// A branch merged into a view: its tip (and its tree), and its merge point
+/// with its parent.
 pub struct Member<'a> {
     pub branch: &'a str,
-    pub tip: ObjectId,
+    pub tip: Tip,
     pub base: ObjectId,
 }
 
@@ -174,11 +177,13 @@ impl Private {
     /// says it is the one shown.
     pub fn merge(
         &self,
+        store: &Store,
         view: &str,
         branch: &str,
-        own: (ObjectId, ObjectId),
+        own: Tip,
         members: &[Member],
     ) -> Result<Merged> {
+        load(store, own, members.iter().map(|m| (m.tip, m.base)))?;
         let _writing = self.lock.read();
         // The view so far: its commit (a commit of each fold's tree: git
         // 2.44 takes no tree there), and how the summary names it.
@@ -189,7 +194,7 @@ impl Private {
             // Attributes (`merge=union`) from the view so far, as a merge in a
             // checkout of it reads them.
             let found;
-            (tree, found) = self.merge_tree(m.base, ours, m.tip, tree)?;
+            (tree, found) = self.merge_tree(m.base, ours, m.tip.0, tree)?;
             for (kind, path) in found {
                 let sides = [side.clone(), m.branch.to_string()];
                 conflicts.push(Conflict { kind, sides, path });
@@ -213,9 +218,16 @@ impl Private {
     /// What git says conflicts when `theirs` is merged into `ours` from
     /// `base`, as a view merges a member (commits by id, attributes from
     /// `ours`): its kinds and paths; the merged tree isn't kept.
-    pub fn conflicts(&self, base: ObjectId, ours: ObjectId, theirs: ObjectId) -> Result<Found> {
+    pub fn conflicts(
+        &self,
+        store: &Store,
+        base: ObjectId,
+        ours: Tip,
+        theirs: Tip,
+    ) -> Result<Found> {
+        load(store, ours, [(theirs, base)])?;
         let _writing = self.lock.read();
-        Ok(self.merge_tree(base, ours, theirs, ours)?.1)
+        Ok(self.merge_tree(base, ours.0, theirs.0, ours.0)?.1)
     }
 
     /// `git merge-tree --write-tree` of `theirs` into `ours` from `base`,
@@ -280,6 +292,18 @@ impl Private {
         }
         Ok(())
     }
+}
+
+/// What git will read of a merge of `own` with `sides` (each a tip and its
+/// merge base), loaded first: in a partial clone, fetched as for a snapshot
+/// (git doesn't fetch for the views). Loaded trees cost a lookup.
+fn load(store: &Store, own: Tip, sides: impl IntoIterator<Item = (Tip, ObjectId)>) -> Result<()> {
+    store.load_tree(own.1)?;
+    for (tip, base) in sides {
+        store.load_tree(tip.1)?;
+        store.load_tree(git::commit(base)?.tree)?;
+    }
+    Ok(())
 }
 
 /// The object id git printed (and a newline).
@@ -355,15 +379,20 @@ mod tests {
         let inputs: Vec<Member> = (members.iter())
             .map(|(b, p)| {
                 let (b_ref, p_ref) = (format!("refs/heads/{b}"), format!("refs/heads/{p}"));
+                let tree = format!("{b_ref}^{{tree}}");
                 Member {
                     branch: b,
-                    tip: id(&run(&["rev-parse", &b_ref])),
+                    tip: (
+                        id(&run(&["rev-parse", &b_ref])),
+                        id(&run(&["rev-parse", &tree])),
+                    ),
                     base: id(&run(&["merge-base", &b_ref, &p_ref])),
                 }
             })
             .collect();
         private()
             .merge(
+                &Store::default(),
                 &format!("committed/{n}"),
                 n,
                 (
@@ -525,7 +554,7 @@ mod tests {
         let tip = ObjectId::empty_tree(gix::hash::Kind::Sha1);
         let member = |branch| Member {
             branch,
-            tip,
+            tip: (tip, tip),
             base: tip,
         };
         let x = "x".repeat(120);

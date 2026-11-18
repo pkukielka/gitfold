@@ -93,7 +93,7 @@ pub struct Workspaces {
     /// Bumped whenever an entry is added, invalidating cached namespace listings.
     mtime: Mutex<SystemTime>,
     /// Where workspaces hand their branches' commit steps (`set_commits`).
-    commits: Arc<OnceLock<mpsc::Sender<Step>>>,
+    commits: OnceLock<mpsc::Sender<Step>>,
 }
 
 impl Workspaces {
@@ -118,12 +118,12 @@ impl Workspaces {
             busy: Mutex::new(HashMap::new()),
             requests: RwLock::new(false),
             mtime: Mutex::new(SystemTime::now()),
-            commits: Arc::default(),
+            commits: OnceLock::new(),
         }
     }
 
-    /// Sends the commit steps of workspaces' branches (`Workspace::take_commit`)
-    /// to `to` from now on (once: the first one given stays).
+    /// Sends the commit steps of the branches of workspaces opened from now on
+    /// (`Workspace::with_commits`) to `to` (once: the first one given stays).
     pub fn set_commits(&self, to: mpsc::Sender<Step>) {
         let _ = self.commits.set(to);
     }
@@ -541,7 +541,8 @@ impl Workspaces {
         let path = self.mount_point.join(branch);
         let ws = Workspace::open(store, state, new_base)
             .map_err(|e| fail("opening", e))?
-            .with_task_folder(store);
+            .with_task_folder(store)
+            .with_commits(self.commits.get().cloned());
         if let Err(e) = ws.track_reads(self.tracks_reads(branch)) {
             warn!("workspace {branch}: not recording reads: {e:#}");
         }
@@ -574,13 +575,7 @@ impl Workspaces {
         );
         let ws = Arc::new(ws);
         let slot = self.add(branch, Registered::Workspace(ws.clone()));
-        let commits = self.commits.clone();
-        watch(
-            Arc::downgrade(&ws),
-            store.clone(),
-            branch.to_string(),
-            commits,
-        );
+        watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
         if walk {
             self.prewarm(branch);
         }
@@ -594,15 +589,8 @@ const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
 /// How often workspaces check whether their branch moved (see `workspace::rebase`).
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Keeps the workspace's base at its branch tip while the workspace exists,
-/// and hands each commit step of its branch to `commits` (if set): the
-/// checks on it run elsewhere, this thread goes on syncing.
-fn watch(
-    ws: Weak<Workspace>,
-    store: Arc<Store>,
-    branch: String,
-    commits: Arc<OnceLock<mpsc::Sender<Step>>>,
-) {
+/// Keeps the workspace's base at its branch tip while the workspace exists.
+fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
     let name = format!("sync {branch}");
     let spawned = thread::Builder::new().name(name).spawn({
         let branch = branch.clone();
@@ -626,12 +614,6 @@ fn watch(
                             last_error = e;
                         }
                     }
-                }
-                if let Some((from, to)) = ws.take_commit()
-                    && let Some(commits) = commits.get()
-                {
-                    let branch = branch.clone();
-                    let _ = commits.send(Step { branch, from, to });
                 }
             }
         }

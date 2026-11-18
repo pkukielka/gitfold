@@ -36,14 +36,15 @@ use std::io::{self, ErrorKind};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result};
 use fuser::Errno;
 use gix::ObjectId;
 use parking_lot::{Mutex, RwLock};
 
+use crate::fs::views::Step;
 use crate::fsutil::not_found;
 use crate::git;
 use crate::inode;
@@ -127,11 +128,12 @@ pub struct Workspace {
     /// The files read, if recorded (see `reads`).
     reads: Mutex<Option<reads::Reads>>,
     /// What tells its branch's own commits from gitfold's moves of it
-    /// (`rebase`): where those start (`refs/gitfold-base/<branch>`) as last
-    /// seen, `None` until the first sync.
-    own_start: Mutex<Option<Option<ObjectId>>>,
-    /// The last commit step of its branch not yet taken (`take_commit`).
-    commit: Mutex<Option<(ObjectId, ObjectId)>>,
+    /// (`rebase`): where its own commits start (`refs/gitfold-base/<branch>`,
+    /// if set) as last seen with the base at the tip. The outer `None`: not
+    /// seen yet (before the first sync, which sees no step).
+    last_recorded_base: Mutex<Option<Option<ObjectId>>>,
+    /// Where its branch's commit steps go (the conflict notices), if anywhere.
+    commits: Option<mpsc::Sender<Step>>,
 }
 
 /// The lower layer and how upper overrides it.
@@ -273,9 +275,15 @@ impl Workspace {
             removing: AtomicBool::new(false),
             touched: Mutex::new(HashSet::new()),
             reads: Mutex::new(None),
-            own_start: Mutex::new(None),
-            commit: Mutex::new(None),
+            last_recorded_base: Mutex::new(None),
+            commits: None,
         })
+    }
+
+    /// Sends its branch's commit steps to `commits` (see `rebase`).
+    pub fn with_commits(mut self, commits: Option<mpsc::Sender<Step>>) -> Workspace {
+        self.commits = commits;
+        self
     }
 
     /// Gives it its task folder, as one served under the mount: none, with a

@@ -371,8 +371,8 @@ fn held(nodes: &Nodes, path: &[u8]) -> Option<u64> {
 pub struct Views {
     pub(super) common_dir: PathBuf,
     pub(super) store: Arc<Store>,
-    pub(super) names: Arc<NameChanges>,
-    pub(super) workspaces: Arc<Workspaces>,
+    names: Arc<NameChanges>,
+    workspaces: Arc<Workspaces>,
     /// The live trees of workspaces, shared by the `@live` views and the
     /// conflict notices.
     pub(super) lives: Arc<Lives>,
@@ -392,12 +392,13 @@ impl Views {
         names: Arc<NameChanges>,
         workspaces: Arc<Workspaces>,
     ) -> Views {
+        let lives = Lives::new(store.clone(), names.clone(), workspaces.clone());
         Views {
             common_dir,
             store,
             names,
             workspaces,
-            lives: Arc::default(),
+            lives: Arc::new(lives),
             list: RwLock::default(),
             creating: Mutex::default(),
             mtime: Mutex::new(SystemTime::now()),

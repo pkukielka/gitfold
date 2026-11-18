@@ -176,19 +176,8 @@ impl Local {
     /// `gitfold.conflictNotices`, else on; a value that isn't a boolean is
     /// warned about (once) and counts as unset.
     pub fn conflict_notices(&self, branch: &str) -> bool {
-        let repository = || {
-            let config = self.0.as_ref()?;
-            let value = config.boolean_by("gitfold", None, REPOSITORY_CONFLICT_NOTICES);
-            value
-                .inspect_err(|_| {
-                    let key = format!("gitfold.{REPOSITORY_CONFLICT_NOTICES}");
-                    warn_once(&format!("{key} is not a boolean (taken as unset)"))
-                })
-                .ok()
-                .flatten()
-        };
         (self.branch_bool(branch, CONFLICT_NOTICES))
-            .or_else(repository)
+            .or_else(|| self.repository_bool(REPOSITORY_CONFLICT_NOTICES))
             .unwrap_or(true)
     }
 
@@ -246,6 +235,16 @@ impl Local {
             warn_once(&e);
             None
         })
+    }
+
+    /// `gitfold.<key>` as a boolean, if set; a value that isn't one is warned
+    /// about (`warn_once`) and counts as unset.
+    fn repository_bool(&self, key: &str) -> Option<bool> {
+        let config = self.0.as_ref()?;
+        (config.boolean_by("gitfold", None, key))
+            .inspect_err(|_| warn_once(&format!("gitfold.{key} is not a boolean (taken as unset)")))
+            .ok()
+            .flatten()
     }
 
     /// `branch_bool`, a value that isn't a boolean an error saying so.

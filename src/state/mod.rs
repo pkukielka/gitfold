@@ -201,6 +201,42 @@ pub fn upper_path(upper: &Path, path: &[u8]) -> PathBuf {
     }
 }
 
+/// Paths, and the directories above them: what meets them (`touches`), as
+/// two changes meet in a merge.
+#[derive(Default)]
+pub struct PathTree {
+    paths: std::collections::HashSet<Vec<u8>>,
+    /// Every directory above a path.
+    dirs: std::collections::HashSet<Vec<u8>>,
+}
+
+impl PathTree {
+    pub fn new(paths: impl IntoIterator<Item = Vec<u8>>) -> PathTree {
+        let paths: std::collections::HashSet<Vec<u8>> = paths.into_iter().collect();
+        let dirs = (paths.iter())
+            .flat_map(|p| ancestors(p))
+            .map(<[u8]>::to_vec)
+            .collect();
+        PathTree { paths, dirs }
+    }
+
+    /// Whether `path` is one of them, a directory above one, or (one being a
+    /// file where `path` is a directory) below one.
+    pub fn touches(&self, path: &[u8]) -> bool {
+        self.paths.contains(path)
+            || self.dirs.contains(path)
+            || ancestors(path).any(|d| self.paths.contains(d))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.paths.iter().map(Vec::as_slice)
+    }
+}
+
 /// The path prefixes of `path` at `/` boundaries, shortest first, excluding
 /// `path`.
 pub fn ancestors(path: &[u8]) -> impl Iterator<Item = &[u8]> {
@@ -307,6 +343,22 @@ pub fn matches_stored(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_meet_through_directories_both_ways() {
+        let t = PathTree::new(["a/b/c.txt", "d"].map(|p| p.as_bytes().to_vec()));
+        assert!(t.touches(b"a/b/c.txt"), "the same path");
+        assert!(
+            t.touches(b"a/b"),
+            "a directory above one (replaced by a file)"
+        );
+        assert!(
+            t.touches(b"d/x"),
+            "below one (a file replaced by a directory)"
+        );
+        assert!(!t.touches(b"a/bc"), "a sibling with a common prefix");
+        assert!(!t.touches(b"dx"));
+    }
 
     /// Ids name directories: no `/`, and the branch reads back from its id.
     #[test]

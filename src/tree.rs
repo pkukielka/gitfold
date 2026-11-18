@@ -123,7 +123,15 @@ impl Tree {
     /// The tree of the repository of `common_dir` (`git::init` done); an
     /// unreadable config fails (T5).
     pub fn read(common_dir: &Path) -> Result<Tree> {
-        let local = Local::read_checked(common_dir)?;
+        Ok(Tree::of_config(
+            common_dir,
+            &Local::read_checked(common_dir)?,
+        ))
+    }
+
+    /// The tree of the repository of `common_dir` (`git::init` done), its
+    /// config read as `local` (checked, as `read` does).
+    pub fn of_config(common_dir: &Path, local: &Local) -> Tree {
         let mut tree = Tree::of(
             local.parents(),
             git::root_branch(common_dir),
@@ -136,7 +144,7 @@ impl Tree {
                 Err(e) => _ = tree.malformed.insert(branch.clone(), e),
             }
         }
-        Ok(tree)
+        tree
     }
 
     /// The tree of `stored` (branch to the parent as stored) rooted at
@@ -312,6 +320,26 @@ impl Tree {
         match self.parent(branch) {
             Some(_) => Ok(()),
             None => Err(Refused::NoParent),
+        }
+    }
+
+    /// Whether local branch `child` is built on local branch `parent` and
+    /// follows it.
+    pub fn follows_parent(&self, child: &str, parent: &str) -> bool {
+        self.children(parent).contains(&child) && self.follows(child)
+    }
+
+    /// The branch local branch `branch` lands in, as a full ref: its parent;
+    /// for one without a parent (made from a start point, not built on
+    /// anything) but the root, the root, as its siblings there do (its local
+    /// branch, else origin's; its local one if neither is there).
+    pub fn lands_in(&self, branch: &str) -> Option<String> {
+        match self.parent(branch) {
+            Some(parent) => Some(parent.to_string()),
+            None if !self.is_root(branch) => {
+                (self.root_refs().into_iter().next()).or_else(|| self.root.as_deref().map(local))
+            }
+            None => None,
         }
     }
 

@@ -208,3 +208,10 @@ const PLAIN: [&str; 5] = [
     "core.untrackedCache=false",
     "--literal-pathspecs",
 ];
+
+/// The paths changed in `range` (`git diff <range>`: `a..b` from a to b,
+/// `a...b` since they diverged), both sides of a rename.
+pub fn changed_paths(git_dir: &Path, range: &str) -> Result<Vec<Vec<u8>>> {
+    let args = ["diff", "--name-only", "-z", "--no-renames", range, "--"];
+    Ok(nul_paths(&output(git_dir, &args)?))
+}

@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -24,12 +26,17 @@ use crate::store::Store;
 const QUIET: Duration = Duration::from_secs(2);
 /// How long into a burst of changes at most.
 const AT_MOST: Duration = Duration::from_secs(10);
+/// How many live trees `tips` makes at once.
+const AT_ONCE: usize = 4;
 
 /// The live trees, by branch: each behind a lock of its own, held while
-/// git makes it (the others go on meanwhile).
-#[derive(Default)]
+/// git makes it (the others go on meanwhile); and the mount's parts making
+/// one needs.
 pub struct Lives {
     trees: Mutex<HashMap<String, Arc<Mutex<Option<Made>>>>>,
+    store: Arc<Store>,
+    names: Arc<NameChanges>,
+    workspaces: Arc<Workspaces>,
 }
 
 /// A live tree, and what it was made at.
@@ -41,36 +48,42 @@ struct Made {
     changing: Option<(Signal, Instant, Instant)>,
 }
 
-/// What making a live tree needs from the mount: a view's (`watch::Context`),
-/// or the conflict notices'.
-pub struct Reach<'a> {
-    pub store: &'a Arc<Store>,
-    pub names: &'a NameChanges,
-    pub workspaces: &'a Workspaces,
-    pub private: &'a Private,
-}
-
 /// What tells a workspace changed: writes through the mount, its base, its
 /// branch's tip, its index (staging, a commit).
 type Signal = (u64, ObjectId, ObjectId, Stamp);
 
 impl Lives {
+    pub fn new(store: Arc<Store>, names: Arc<NameChanges>, workspaces: Arc<Workspaces>) -> Lives {
+        Lives {
+            trees: Mutex::default(),
+            store,
+            names,
+            workspaces,
+        }
+    }
+
     /// The live tree of the workspace of `branch` (whose tip is `tip`), as a
     /// commit in the private repository and its tree; `None` if it has no
     /// workspace. Made again if it changed and has been quiet since, or is
     /// changing for long, or `now` asks for it at once (a view woken).
-    pub fn tip(&self, ctx: &Reach, branch: &str, tip: ObjectId, now: bool) -> Result<Option<Tip>> {
-        let opened = (ctx.workspaces.open_quietly(ctx.store, branch))
+    pub fn tip(
+        &self,
+        private: &Private,
+        branch: &str,
+        tip: ObjectId,
+        now: bool,
+    ) -> Result<Option<Tip>> {
+        let opened = (self.workspaces.open_quietly(&self.store, branch))
             .map_err(|e| anyhow!("opening the workspace of {branch}: {e:?}"))?;
         let Some((ws, opened_now)) = opened else {
-            self.forget(ctx.private, branch);
+            self.forget(private, branch);
             return Ok(None);
         };
         if opened_now {
             // A new name in the root and namespace listings.
-            ctx.names.changed(&ctx.workspaces.names_dirs());
+            self.names.changed(&self.workspaces.names_dirs());
         }
-        let state = StateDir::of(ctx.workspaces.common_dir(), branch);
+        let state = StateDir::of(self.workspaces.common_dir(), branch);
         let signal = (ws.writes(), ws.base().0, tip, stamp(&state.index()));
         let entry = self
             .trees
@@ -98,8 +111,8 @@ impl Lives {
             }
         }
         // The signal was read before: a change meanwhile is seen next time.
-        let dir = ctx.workspaces.mount_point().join(branch);
-        let live = ctx.private.live(branch, &dir, &state.index())?;
+        let dir = self.workspaces.mount_point().join(branch);
+        let live = private.live(branch, &dir, &state.index())?;
         let tip = (live.commit, live.tree);
         *entry = Some(Made {
             at: signal,
@@ -120,5 +133,45 @@ impl Lives {
         if let Err(e) = private.drop_live(branch) {
             error!("views: dropping the live tree of {branch}: {e:#}");
         }
+    }
+
+    /// The live trees of the workspaces of `asked` (branch, tip), in its order
+    /// (`tip`): made side by side, at most `AT_ONCE` at a time (each is git
+    /// reading a workspace through the mount, mostly waiting on it), this
+    /// thread making some too. Threads of their own, not a rayon pool: opening
+    /// a workspace loads trees with `par_iter` under `Workspaces::creating`,
+    /// and a pool thread waiting there could take up another live tree, which
+    /// waits for that very lock.
+    pub fn tips(
+        &self,
+        private: &Private,
+        asked: &[(&str, ObjectId)],
+        now: bool,
+    ) -> Vec<Result<Option<Tip>>> {
+        let next = AtomicUsize::new(0);
+        let made: Vec<Mutex<Option<Result<Option<Tip>>>>> =
+            asked.iter().map(|_| Mutex::default()).collect();
+        let work = || {
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&(branch, tip)) = asked.get(i) else {
+                    return;
+                };
+                *made[i].lock() = Some(self.tip(private, branch, tip, now));
+            }
+        };
+        thread::scope(|scope| {
+            for _ in 1..asked.len().min(AT_ONCE) {
+                // Without a thread (process limits), fewer at once.
+                let spawned = thread::Builder::new().name("live trees".into());
+                if spawned.spawn_scoped(scope, work).is_err() {
+                    break;
+                }
+            }
+            work();
+        });
+        (made.into_iter())
+            .map(|m| m.into_inner().expect("each made"))
+            .collect()
     }
 }
