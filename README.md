@@ -637,11 +637,14 @@ both views, noted in the summary.
 commit, an amend, a reset forward; not gitfold's own moves of it), the
 mount's daemon checks them against the workspaces whose work meets it where
 it lands: those in the view of its parent (`@live/<parent>`), the parent's
-own included; for a branch without a parent, those built on it. git merges
-the new tip with each of those workspaces as it is (`git merge-tree`, from
-their merge base, as the views merge), and the tip before: a conflict only
-after is new, whether the other side's change is committed or not. Only the
-commits that aren't the parent's count (a rebase onto the parent, or a
+own included. A branch without a parent (made with `branch X --from
+<start>`) counts as built on the main branch: branches without a parent are
+siblings there, with those built on the main branch, and what is built on
+any of them. git merges the new tip with each of those workspaces as it is
+(`git merge-tree`, from their merge base, as the views merge), and the tip
+before: a conflict only after is new, whether the other side's change is
+committed or not. Only the commits that aren't the parent's (the main
+branch's, for a branch without a parent) count (a rebase onto the parent, or a
 merge of it, brings its changes, not the branch's). Everyone involved gets
 the same message in its inbox, `from: gitfold`: both sides, and the
 workspace of the branch they land in (the parent, or the committer when the
@@ -656,12 +659,17 @@ cart-api committed 0724067; it conflicts with cart-ui's uncommitted README.md.
 If it needs resolving, cart-ui's change is the one still open, so that's the cheapest place to adjust.
 ```
 
-and when both sides committed:
+and when both sides committed (siblings here; branches without a parent
+land in the main branch):
 
 ```
-cart-ui committed 9f3e2a1; it conflicts with cart-api's committed README.md, so the two will conflict when they land in cart-api.
+cart-ui committed 9f3e2a1; it conflicts with cart-web's committed README.md, so the two will conflict when they land in cart.
 If it needs resolving, cart-ui committed last.
 ```
+
+When one of the two is built on the other and follows it, the hint names
+the child, as following does: `If it needs resolving, cart-ui is built on
+cart-api: that's where it gets resolved (following is paused on it).`
 
 A conflict is told once: one that was there before the commit isn't told
 again, one that went and came back is. A notice informs; gitfold doesn't

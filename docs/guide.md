@@ -276,7 +276,9 @@ checkout-api committed 0724067; it conflicts with checkout-ui's uncommitted READ
 If it needs resolving, checkout-ui's change is the one still open, so that's the cheapest place to adjust.
 ```
 
-`checkout-api` and `checkout` get the same message. With Claude Code, it
+`checkout-api` and `checkout` get the same message. Branches made without a
+parent (`gitfold branch X --from origin/main`) count as siblings under the
+main branch. With Claude Code, it
 arrives in each agent's conversation by itself, and wakes an idle one. Each
 conflict is told once, at the commit that makes it; a notice only informs:
 whether it matters (not for a throwaway workspace, say) is for the agents, or

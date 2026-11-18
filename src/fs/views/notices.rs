@@ -8,7 +8,10 @@
 //!   read other workspaces through the mount, which takes seconds.
 //! - **Who is checked:** the workspaces of the branches that meet the
 //!   committer's work where it lands: those in the view of its parent
-//!   (`members`, the parent included), or of itself if it has none.
+//!   (`members`, the parent included). A branch without a parent (made
+//!   from a start point, not built on anything) is taken as built on the
+//!   root: the branches without one are siblings there, with those built on
+//!   the root; the root itself checks them all.
 //! - **What is new:** for each, git merges (`git merge-tree`, pairwise, from
 //!   their merge base, as a view merges) the committer's tip with the
 //!   workspace as it is (`Lives`: its commits and its uncommitted work), and
@@ -25,8 +28,10 @@
 //!   branch says not (`gitfoldConflictNotices`, `gitfold.conflictNotices`).
 //!   One message per workspace and step. It informs, and hints where a
 //!   change would be cheapest if one is needed: the side whose change is
-//!   uncommitted (still open), else the committer (committed last). gitfold
-//!   decides nothing: whether it matters is for the agents or their lead.
+//!   uncommitted (still open); else, of a branch and the one following it,
+//!   the child (where following's pause says it gets resolved); else the
+//!   committer (committed last). gitfold decides nothing: whether it
+//!   matters is for the agents or their lead.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
@@ -95,8 +100,9 @@ struct Pair {
     /// the committer's parent (as shown); and that branch's workspace, if
     /// it has one.
     land: (String, Option<String>),
-    /// The other follows the committer (its following stops on these).
-    follows: bool,
+    /// The one of the two built on the other and following it, if one is
+    /// (its following stops on these).
+    follower: Option<String>,
 }
 
 /// Checks `step` (see the module doc).
@@ -109,13 +115,19 @@ fn check(views: &Views, step: &Step) -> Result<()> {
         .filter(|s| s.state.opened())
         .map(|s| s.branch)
         .collect();
-    let (others, parent_ws) = related(&tree, committer, |b| opened.contains(b));
-    let parent_name = tree.parent(committer).map(|p| tree::short(p).to_string());
-    let mut everyone = (others.iter().chain(&parent_ws)).chain(std::iter::once(&step.branch));
+    let Related { others, land } = related(&tree, committer, &opened);
+    let land_ws = land.as_ref().and_then(|(_, ws)| ws.as_ref());
+    let mut everyone = (others.iter().chain(land_ws)).chain(std::iter::once(&step.branch));
     if !everyone.any(|b| local.conflict_notices(b)) {
         return Ok(());
     }
-    let (paths, filter) = own_paths(common_dir, step, tree.parent(committer))?;
+    // A branch without a parent: built on the root, as for `related`.
+    let parents = match tree.parent(committer) {
+        Some(p) => vec![p.to_string()],
+        None if !tree.is_root(committer) => tree.root_refs(),
+        None => Vec::new(),
+    };
+    let (paths, filter) = own_paths(common_dir, step, &parents)?;
     if paths.is_empty() {
         return Ok(());
     }
@@ -162,12 +174,17 @@ fn check(views: &Views, step: &Step) -> Result<()> {
                 pairs.push(Pair {
                     other: other.clone(),
                     found,
-                    land: match (built_on, &parent_name) {
-                        (false, Some(name)) => (name.clone(), parent_ws.clone()),
+                    land: match (built_on, &land) {
+                        (false, Some(land)) => land.clone(),
                         _ => (committer.to_string(), Some(committer.to_string())),
                     },
-                    follows: tree.parent(other) == Some(format!("refs/heads/{committer}").as_str())
-                        && tree.follows(other),
+                    follower: [(other.as_str(), committer), (committer, other.as_str())]
+                        .into_iter()
+                        .find(|(child, parent)| {
+                            tree.parent(child) == Some(format!("refs/heads/{parent}").as_str())
+                                && tree.follows(child)
+                        })
+                        .map(|(child, _)| child.to_string()),
                 });
             }
             Ok(None) => {}
@@ -189,29 +206,45 @@ fn check(views: &Views, step: &Step) -> Result<()> {
     Ok(())
 }
 
-/// The branches with a workspace (`has_workspace`) whose work meets
-/// `committer`'s where it lands (`committer` left out), and the workspace
-/// of the branch it lands in, if that is its parent: those of the view of
-/// its parent (a local branch, or origin's root as the root), the parent
-/// with them; of a remote-tracking parent, what is built on it; of the
-/// view of itself without a parent.
-fn related(
-    tree: &Tree,
-    committer: &str,
-    has_workspace: impl Fn(&str) -> bool,
-) -> (Vec<String>, Option<String>) {
+/// Whose work meets `committer`'s (see the module doc).
+struct Related {
+    /// The branches with a workspace whose work meets it (`committer` left
+    /// out).
+    others: Vec<String>,
+    /// Where it lands with those not built on it, as shown, and that
+    /// branch's workspace if it has one: its parent; for a branch without
+    /// one, the root. None for the root itself.
+    land: Option<(String, Option<String>)>,
+}
+
+/// Whose work meets `committer`'s where it lands, among the branches with a
+/// workspace (`workspaces`): those of the view of its parent (a local
+/// branch, or origin's root as the root), the parent with them; of a
+/// remote-tracking parent, what is built on it. A branch without a parent
+/// (but the root) is taken as built on the root: with the root's view, the
+/// branches without one count (as siblings), with what is built on them,
+/// and the root.
+fn related(tree: &Tree, committer: &str, workspaces: &HashSet<String>) -> Related {
+    let has_workspace = |b: &str| workspaces.contains(b);
+    let root = tree.root();
     let parent = tree.parent(committer);
-    let view_of = match parent {
-        None => Some(committer.to_string()),
-        Some(p) => (p.strip_prefix("refs/heads/").map(String::from)).or_else(|| {
-            let root = tree.root()?;
-            (p == format!("refs/remotes/origin/{root}")).then(|| root.to_string())
-        }),
+    let (view_of, land) = match parent {
+        Some(p) => {
+            let view = (p.strip_prefix("refs/heads/").map(String::from)).or_else(|| {
+                let root = root?;
+                (p == format!("refs/remotes/origin/{root}")).then(|| root.to_string())
+            });
+            (view, Some(tree::short(p).to_string()))
+        }
+        None => match root.filter(|r| *r != committer) {
+            Some(root) => (Some(root.to_string()), Some(root.to_string())),
+            None => (Some(committer.to_string()), None),
+        },
     };
-    let mut names: Vec<String> = match (&view_of, parent) {
+    let mut others: Vec<String> = match (&view_of, parent) {
         (Some(view), _) => {
             let origin = members::origin_root(tree, view);
-            let members = members::members(tree, view, origin.as_deref(), &has_workspace);
+            let members = members::members(tree, view, origin.as_deref(), has_workspace);
             let members = members.into_iter().map(|m| m.branch);
             std::iter::once(view.clone()).chain(members).collect()
         }
@@ -220,21 +253,38 @@ fn related(
             .collect(),
         (None, None) => Vec::new(),
     };
-    names.retain(|b| b != committer && has_workspace(b));
-    let parent_ws = view_of.filter(|v| parent.is_some() && has_workspace(v));
-    (names, parent_ws)
+    if view_of.is_some() && view_of.as_deref() == root {
+        let mut parentless: Vec<&String> = (workspaces.iter())
+            .filter(|b| tree.parent(b).is_none() && !tree.is_root(b))
+            .collect();
+        parentless.sort();
+        for b in parentless {
+            others.push(b.clone());
+            others.extend(tree.subtree(b).into_iter().map(String::from));
+        }
+    }
+    others.retain(|b| b != committer && has_workspace(b));
+    let mut seen = HashSet::new();
+    others.retain(|b| seen.insert(b.clone()));
+    let ws = view_of.filter(|v| v != committer && has_workspace(v));
+    Related {
+        others,
+        land: land.map(|name| (name, ws)),
+    }
 }
 
 /// The paths the step's own commits change (`git log`, renames as a
 /// deletion and an addition, merges by themselves none), not those of its
-/// parent's commits among them (a rebase onto its parent, a merge of it);
+/// parent's commits among them (`parents`: its parent, or the root's refs for a
+/// branch without one; a rebase onto it, a merge of it);
 /// and whether there were any of those (then a conflict counts only on
 /// these paths).
-fn own_paths(common_dir: &Path, step: &Step, parent: Option<&str>) -> Result<(Paths, bool)> {
+fn own_paths(common_dir: &Path, step: &Step, parents: &[String]) -> Result<(Paths, bool)> {
     let range = format!("{}..{}", step.from, step.to);
-    let not: Vec<&str> = match parent.filter(|p| git::resolve(p).is_ok()) {
-        Some(p) => vec!["--not", p],
-        None => Vec::new(),
+    let parents = parents.iter().filter(|p| git::resolve(p).is_ok());
+    let not: Vec<&str> = match parents.map(String::as_str).collect::<Vec<_>>() {
+        found if found.is_empty() => Vec::new(),
+        found => [vec!["--not"], found].concat(),
     };
     let count = |not: &[&str]| -> Result<usize> {
         let args = [&["rev-list", "--count", &range][..], not].concat();
@@ -374,7 +424,7 @@ fn told(
         let mut texts = Vec::new();
         if !pair.found.uncommitted.is_empty() {
             let paths = list(&pair.found.uncommitted);
-            let follows = match pair.follows {
+            let follows = match pair.follower.as_deref() == Some(other) {
                 true => format!(
                     "\n{other} follows {committer}: it takes the commit once they don't \
                      conflict (until then following says nothing moved)."
@@ -389,14 +439,21 @@ fn told(
         }
         if !pair.found.committed.is_empty() {
             let paths = list(&pair.found.committed);
-            let follows = match pair.follows {
-                true => format!("\n{other} follows {committer}: following is paused on it."),
-                false => String::new(),
+            // Following's pause says the same: the child rebases.
+            let hint = match pair.follower.as_deref() {
+                Some(child) => {
+                    let parent = if child == other { committer } else { other };
+                    format!(
+                        "{child} is built on {parent}: that's where it gets resolved \
+                         (following is paused on it)"
+                    )
+                }
+                None => format!("{committer} committed last"),
             };
             texts.push(format!(
                 "{committer} committed {short}; it conflicts with {other}'s committed \
                  {paths}, so the two will conflict when they land in {land}.\nIf it needs \
-                 resolving, {committer} committed last.{follows}"
+                 resolving, {hint}."
             ));
         }
         let paths: Paths = (pair.found.uncommitted.iter())
@@ -521,7 +578,7 @@ mod tests {
             to: id(to),
         };
         let own =
-            |from, to| own_paths(&git_dir(), &step(from, to), Some("refs/heads/n1-p")).unwrap();
+            |from, to| own_paths(&git_dir(), &step(from, to), &["refs/heads/n1-p".into()]).unwrap();
         assert_eq!(own(&c0, &a1), (paths(&["a"]), false));
         // Rebased onto p1 by hand: its own commit only, and only its paths.
         let a1_on_p1 = commit(Some(&p1), &[("a", Some("a1\n"))]);
@@ -553,6 +610,75 @@ mod tests {
         assert!(!meets_path(&set, b"e"));
     }
 
+    #[test]
+    fn whose_work_meets() {
+        git_dir(); // the repository open
+        let stored = [("ui", "api"), ("web", "main"), ("css", "web")];
+        let stored = (stored.iter())
+            .map(|(b, p)| (b.to_string(), format!("refs/heads/{p}")))
+            .collect();
+        let tree = Tree::of(stored, Some("main".into()), |_| true);
+        let workspaces: HashSet<String> = ["api", "lone", "ui", "web", "css", "main"]
+            .map(String::from)
+            .into();
+        let of = |b: &str| {
+            let r = related(&tree, b, &workspaces);
+            (r.others, r.land)
+        };
+        let names = |list: &[&str]| list.iter().map(|b| b.to_string()).collect::<Vec<_>>();
+        let land = |name: &str, ws: Option<&str>| Some((name.to_string(), ws.map(String::from)));
+        // Without a parent: built on the root, a sibling of the others
+        // without one and of those built on the root.
+        let main = land("main", Some("main"));
+        assert_eq!(
+            of("api"),
+            (names(&["main", "web", "css", "ui", "lone"]), main.clone())
+        );
+        assert_eq!(
+            of("web"),
+            (names(&["main", "css", "api", "ui", "lone"]), main)
+        );
+        // Built on a branch without a parent: its family only.
+        assert_eq!(of("ui"), (names(&["api"]), land("api", Some("api"))));
+        assert_eq!(of("css"), (names(&["web"]), land("web", Some("web"))));
+        // The root: everything, landing in itself.
+        assert_eq!(
+            of("main"),
+            (names(&["web", "css", "api", "ui", "lone"]), None)
+        );
+    }
+
+    #[test]
+    fn a_following_child_is_where_it_gets_resolved() {
+        let mut p = pair(
+            "cart-ui",
+            &[],
+            &["README.md"],
+            ("cart-api", Some("cart-api")),
+        );
+        p.follower = Some("cart-ui".into());
+        let said = told("cart-api", "0724067", &[p], |_| true);
+        assert_eq!(
+            said["cart-ui"].1,
+            "cart-api committed 0724067; it conflicts with cart-ui's committed README.md, so \
+             the two will conflict when they land in cart-api.\nIf it needs resolving, cart-ui \
+             is built on cart-api: that's where it gets resolved (following is paused on it).\n"
+        );
+        // The child committing last: the same.
+        let mut p = pair(
+            "cart-api",
+            &[],
+            &["README.md"],
+            ("cart-api", Some("cart-api")),
+        );
+        p.follower = Some("cart-ui".into());
+        let said = told("cart-ui", "9f3e2a1", &[p], |_| true);
+        assert!(said["cart-api"].1.ends_with(
+            "If it needs resolving, cart-ui is built on cart-api: that's where it gets resolved \
+             (following is paused on it).\n"
+        ));
+    }
+
     fn pair(
         other: &str,
         uncommitted: &[&str],
@@ -566,7 +692,7 @@ mod tests {
                 committed: paths(committed),
             },
             land: (land.0.into(), land.1.map(String::from)),
-            follows: false,
+            follower: None,
         }
     }
 

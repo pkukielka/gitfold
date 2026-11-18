@@ -127,7 +127,8 @@ between tasks, or as a background command that ends when a message arrives.
 
 **Messages `from: gitfold` are conflict notices.** When a commit (yours or
 another workspace's) conflicts with work it meets, everyone involved gets
-the same message: both sides, and the branch they land in. For example:
+the same message: both sides, and the branch they land in (branches made
+without a parent land in the main branch, as siblings). For example:
 
 ```
 cart-api committed 0724067; it conflicts with cart-ui's uncommitted README.md.
@@ -137,7 +138,8 @@ If it needs resolving, cart-ui's change is the one still open, so that's the che
 A notice is information, not an instruction. Decide whether it matters, or
 ask your lead (whoever gave you the task): it may not, for a throwaway
 workspace or an experiment. If it does, the hint says where a change is
-cheapest (the uncommitted side, else whoever committed last); talk to the
+cheapest: the uncommitted side; of a branch and one built on it following
+it, the child; else whoever committed last. Talk to the
 other side with `gitfold send <BRANCH>` rather than both changing the same
 lines. If your branch follows the other one, following says the same at
 your next turn (nothing moved, or following paused); see the parent section

@@ -354,7 +354,7 @@ eq "and to the committer" "$(said shop)" "$(said api)"
 eq "the subject names the paths" "subject: conflict: a.txt, d/b.txt" "$(said shop | sed -n 2p)"
 }
 
-notices_both_committed_no_parent() {
+notices_both_committed_following() {
 R branch api main
 R branch ui main; built_on ui api
 mount_fs
@@ -367,8 +367,7 @@ short=$(R rev-parse --short api)
 check "the committer is told" until_told api 1
 check "so is the other side" until_told ui 1
 eq "they land in the committer" "api committed $short; it conflicts with ui's committed a.txt, so the two will conflict when they land in api.
-If it needs resolving, api committed last.
-ui follows api: following is paused on it." "$(said api | sed '1,3d;$d')"
+If it needs resolving, ui is built on api: that's where it gets resolved (following is paused on it)." "$(said api | sed '1,3d;$d')"
 }
 
 notices_once() {
@@ -513,6 +512,57 @@ check "a binary file" until_told ui 1
 check "named" grep -q "uncommitted b.dat" <(said ui)
 }
 
+# An origin whose main is the repository's: branches made from origin/main.
+with_origin() {
+    git init -q --bare "$T/origin.git"
+    R remote add origin "$T/origin.git"; R push -q origin main; R fetch -q origin
+    R remote set-head origin main >/dev/null
+}
+
+notices_without_parents() {
+with_origin
+R branch -q --no-track api origin/main; R branch -q --no-track web origin/main
+mount_fs
+open api web
+echo web >"$MNT/web/d/b.txt"; commit_in web
+echo web >"$MNT/web/a.txt"
+echo api >"$MNT/api/a.txt"; echo api >"$MNT/api/d/b.txt"
+sleep 2
+commit_in api
+short=$(R rev-parse --short api)
+check "the other branch without a parent is told" until_told web 1
+check "so is the committer" until_told api 1
+eq "siblings under main" "api committed $short; it conflicts with web's uncommitted a.txt.
+If it needs resolving, web's change is the one still open, so that's the cheapest place to adjust.
+
+api committed $short; it conflicts with web's committed d/b.txt, so the two will conflict when they land in main.
+If it needs resolving, api committed last." "$(said web | sed '1,3d;$d')"
+eq "the same to both" "$(said web)" "$(said api)"
+}
+
+notices_without_a_parent_and_built_on_main() {
+with_origin
+R checkout -q --detach   # main free for its workspace
+R branch -q --no-track api origin/main
+R branch -q web main; built_on web main; R config branch.web.gitfoldFollow false
+mount_fs
+open main api web
+echo web >"$MNT/web/a.txt"
+echo api >"$MNT/api/a.txt"
+sleep 2
+commit_in api
+short=$(R rev-parse --short api)
+check "a branch built on main is told" until_told web 1
+check "main too, where they land" until_told main 1
+check "and the committer" until_told api 1
+eq "the same to each" "$(said web)" "$(said main)"
+clear_inbox web; clear_inbox main; clear_inbox api
+echo main >"$MNT/main/d/b.txt"; echo api >"$MNT/api/d/b.txt"
+commit_in main
+check "main's own commit: the branch without a parent is told" until_told api 1
+eq "main is told too, once" 1 "$(notices main)"
+}
+
 section "views: merged with what is built on it" merged_with_whats_built_on_it
 section "views: conflicts" conflicts
 section "views: git's merge" gits_merge
@@ -528,7 +578,7 @@ section "views: garbage collection in a partial clone" gc_in_a_partial_clone
 section "notices: the uncommitted side" notices_uncommitted_side
 section "notices: a child's commit, its parent's uncommitted work" notices_committer_parents_uncommitted
 section "notices: siblings, landing in their parent" notices_siblings
-section "notices: both committed, no parent" notices_both_committed_no_parent
+section "notices: both committed, a child following the committer" notices_both_committed_following
 section "notices: each conflict once" notices_once
 section "notices: not for gitfold's moves" notices_not_for_moves
 section "notices: not for the parent's commits" notices_not_for_the_parents_commits
@@ -537,4 +587,6 @@ section "notices: not at the first sync" notices_not_at_first_sync
 section "notices: off for the repository" notices_off
 section "notices: off for a branch" notices_off_per_branch
 section "notices: a binary file" notices_binary
+section "notices: branches without a parent, siblings under main" notices_without_parents
+section "notices: a branch without a parent and one built on main" notices_without_a_parent_and_built_on_main
 finish

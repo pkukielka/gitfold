@@ -1408,8 +1408,8 @@ handed, as one step however many commits it holds, to one thread per mount.
 That thread takes the paths the step's own commits change (`git log
 --no-renames`, the parent's commits left out: a rebase onto the parent or a
 merge of it brings the parent's changes, not the branch's), and for each
-workspace in the view of the branch's parent (the parent's own included; a
-branch without a parent: what is built on it) whose stored changes, or
+workspace in the view of the branch's parent (the parent's own included)
+whose stored changes, or
 commits since the merge base, touch one of them, git merges
 (`Private::conflicts`, `git merge-tree` from the merge base, as the views
 merge a member) the new tip with the workspace as it is (its live tree,
@@ -1417,9 +1417,14 @@ merge a member) the new tip with the workspace as it is (its live tree,
 new; those also in the merge with the workspace's tip are with committed
 work. Both sides and the workspace of the branch they land in get one
 message each (`cli::inbox::deliver`, `from: gitfold`), the same words for
-all, hinting where a change is cheapest: the uncommitted side, else the
-side that committed last. `gitfold.conflictNotices` and
+all, hinting where a change would go. `gitfold.conflictNotices` and
 `branch.<name>.gitfoldConflictNotices` say who is told (on unless false).
+A branch without a parent (made from a start point) is taken as built on
+the root: the branches without one are siblings there, with what is built
+on the root and on them, and the root's commits are its parent's. The
+hint names the uncommitted side (still open, the cheapest); else, of a
+branch and one following it, the child, as following's pause does; else
+the committer (committed last).
 
 **Why:**
 
@@ -1445,6 +1450,14 @@ side that committed last. `gitfold.conflictNotices` and
   text for all keeps them from reading different stories. It informs and
   hints; whether it matters (a throwaway workspace) is the agents' or their
   lead's. gitfold decides nothing, as for following's pauses.
+- **Branches without a parent as siblings under the root:** `branch X
+  --from origin/main` is the plain way to start a task, and such branches
+  land in the main branch, as its children do; taken as built on nothing,
+  they would never be checked against each other. The root is the one the
+  tree and the views already use.
+- **A following child is named for both committed sides:** following's
+  pause tells the child to rebase; a notice naming the other would
+  contradict it.
 
 **Rejected:** a poller of its own (the sync thread sees commits already);
 reading `@committed` or `@live` (see above); a record of the conflicts told
@@ -1453,8 +1466,7 @@ the reasons workspaces don't use them for rebases; strategies of whom to
 tell (`act`, `all`), dropped for one rule: everyone involved.
 
 **Limits:** commits made while unmounted or outside workspaces (a fetch,
-the main checkout) aren't checked, nor branches without a parent against
-each other (they share no view). A merge commit's own changes (a merge of a
+the main checkout) aren't checked. A merge commit's own changes (a merge of a
 branch other than the parent) aren't among the step's paths.
 
 ### The commit-graph: git's own cache, kept current
