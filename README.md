@@ -432,6 +432,9 @@ however many read at a time (none to take is no error: exit 0). `--wait` waits
 for one if there are none (up to `--timeout <SECS>`, then exit 124); `--peek`
 lists them without taking; `--json` for programs. A fork (`branch -w`) leaves the inbox behind: its messages were for
 the source's agent.
+gitfold sends some itself, `from: gitfold`: conflict notices, when a commit
+conflicts with another workspace's work (see [Branches built on
+branches](#branches-built-on-branches)).
 `--claude-hook` hands them to Claude Code's hooks: injected into the
 conversation when a prompt is sent and after each tool call (not a
 subagent's: its context isn't the session's), and waking an idle session when
@@ -629,6 +632,44 @@ for a minute rests (nothing is refreshed; `GITFOLD_VIEW_REST_SECS` changes
 how long), and the first access afterwards waits up to 5 s for it to be
 current. A branch with no history in common with its parent is left out of
 both views, noted in the summary.
+
+**Conflict notices.** When a branch gets new commits in its workspace (a
+commit, an amend, a reset forward; not gitfold's own moves of it), the
+mount's daemon checks them against the workspaces whose work meets it where
+it lands: those in the view of its parent (`@live/<parent>`), the parent's
+own included; for a branch without a parent, those built on it. git merges
+the new tip with each of those workspaces as it is (`git merge-tree`, from
+their merge base, as the views merge), and the tip before: a conflict only
+after is new, whether the other side's change is committed or not. Only the
+commits that aren't the parent's count (a rebase onto the parent, or a
+merge of it, brings its changes, not the branch's). Everyone involved gets
+the same message in its inbox, `from: gitfold`: both sides, and the
+workspace of the branch they land in (the parent, or the committer when the
+other is built on it). One message per workspace and commit, each conflict
+on its own lines:
+
+```
+from: gitfold
+subject: conflict: README.md
+
+cart-api committed 0724067; it conflicts with cart-ui's uncommitted README.md.
+If it needs resolving, cart-ui's change is the one still open, so that's the cheapest place to adjust.
+```
+
+and when both sides committed:
+
+```
+cart-ui committed 9f3e2a1; it conflicts with cart-api's committed README.md, so the two will conflict when they land in cart-api.
+If it needs resolving, cart-ui committed last.
+```
+
+A conflict is told once: one that was there before the commit isn't told
+again, one that went and came back is. A notice informs; gitfold doesn't
+stop or move anything for it. Commits made while unmounted, or outside
+workspaces (a fetch, the main checkout), aren't checked.
+`gitfold.conflictNotices false` turns the notices off for the repository, and
+`branch.<name>.gitfoldConflictNotices` (true or false) decides for that
+branch's workspace whether it is told.
 
 A branch named `committed` or `live` is reached as `@refs/heads/committed` (a
 remote so named as `@refs/remotes/committed/<branch>`).
