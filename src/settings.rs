@@ -7,9 +7,11 @@
 //!   (whether it takes its parent's new commits by itself; on unless set
 //!   false). A parent is a setting of the child: renaming or deleting the
 //!   parent with git leaves the child naming the old branch ("parent gone");
+//!   `gitfoldConflictNotices` (whether its workspace is told of conflicts);
 //! - per repository, `gitfold.<key>`: `taskDir`, `tasksDir` and `inbox` (the
-//!   task folder and its inbox), and `mountpoint` (where `gitfold mount` last
-//!   mounted it, for Claude Code's worktree hook to mount it there again).
+//!   task folder and its inbox), `mountpoint` (where `gitfold mount` last
+//!   mounted it, for Claude Code's worktree hook to mount it there again),
+//!   and `conflictNotices` (the default of `gitfoldConflictNotices`, on).
 //!
 //! They are read from the repository's own config file, where `git config`
 //! writes them (not included files), at the moment they are needed: the
@@ -45,6 +47,11 @@ const MOVING: &str = "gitfoldMoving";
 /// `branch.<branch>.gitfoldLanding`: what was checked of the landing of its
 /// parent (see `follow::landing`).
 const LANDING: &str = "gitfoldLanding";
+
+/// `branch.<branch>.gitfoldConflictNotices`, and `gitfold.conflictNotices`
+/// for every branch that doesn't say: booleans, on unless set false.
+const CONFLICT_NOTICES: &str = "gitfoldConflictNotices";
+const REPOSITORY_CONFLICT_NOTICES: &str = "conflictNotices";
 
 /// `gitfold.taskDir`: the task folder's name in a workspace.
 const TASK_DIR: &str = "taskDir";
@@ -162,6 +169,27 @@ impl Local {
     /// `branch_bool`).
     pub fn track_reads(&self, branch: &str) -> Option<bool> {
         self.branch_bool(branch, TRACK_READS)
+    }
+
+    /// Whether the workspace of `branch` is told of conflicts
+    /// (`fs::views::notices`): its `gitfoldConflictNotices`, else
+    /// `gitfold.conflictNotices`, else on; a value that isn't a boolean is
+    /// warned about (once) and counts as unset.
+    pub fn conflict_notices(&self, branch: &str) -> bool {
+        let repository = || {
+            let config = self.0.as_ref()?;
+            let value = config.boolean_by("gitfold", None, REPOSITORY_CONFLICT_NOTICES);
+            value
+                .inspect_err(|_| {
+                    let key = format!("gitfold.{REPOSITORY_CONFLICT_NOTICES}");
+                    warn_once(&format!("{key} is not a boolean (taken as unset)"))
+                })
+                .ok()
+                .flatten()
+        };
+        (self.branch_bool(branch, CONFLICT_NOTICES))
+            .or_else(repository)
+            .unwrap_or(true)
     }
 
     /// Every branch's parent (`gitfoldParent`), by branch.
@@ -441,6 +469,11 @@ pub fn copy_branch(local: &Local, common_dir: &Path, from: &str, to: &str) -> Ve
             local
                 .track_reads(from)
                 .map(|on| set_track_reads(common_dir, to, on)),
+        ),
+        (
+            CONFLICT_NOTICES,
+            (local.branch(from, CONFLICT_NOTICES))
+                .map(|value| set_branch(common_dir, to, CONFLICT_NOTICES, &value)),
         ),
     ];
     (copied.into_iter())

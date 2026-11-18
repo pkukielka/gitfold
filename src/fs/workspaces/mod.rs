@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -31,7 +31,7 @@ use parking_lot::{Mutex, RwLock};
 
 use super::snapshots::Snapshots;
 use super::snapshots::load_failed;
-use super::views::{Kind, Views};
+use super::views::{Kind, Step, Views};
 use super::workspace::Workspace;
 use crate::git;
 use crate::git::index::{IndexWriter, StatInfo};
@@ -92,6 +92,8 @@ pub struct Workspaces {
     requests: RwLock<bool>,
     /// Bumped whenever an entry is added, invalidating cached namespace listings.
     mtime: Mutex<SystemTime>,
+    /// Where workspaces hand their branches' commit steps (`set_commits`).
+    commits: Arc<OnceLock<mpsc::Sender<Step>>>,
 }
 
 impl Workspaces {
@@ -116,7 +118,14 @@ impl Workspaces {
             busy: Mutex::new(HashMap::new()),
             requests: RwLock::new(false),
             mtime: Mutex::new(SystemTime::now()),
+            commits: Arc::default(),
         }
+    }
+
+    /// Sends the commit steps of workspaces' branches (`Workspace::take_commit`)
+    /// to `to` from now on (once: the first one given stays).
+    pub fn set_commits(&self, to: mpsc::Sender<Step>) {
+        let _ = self.commits.set(to);
     }
 
     /// How many workspaces and namespace directories were added; only grows
@@ -565,7 +574,13 @@ impl Workspaces {
         );
         let ws = Arc::new(ws);
         let slot = self.add(branch, Registered::Workspace(ws.clone()));
-        watch(Arc::downgrade(&ws), store.clone(), branch.to_string());
+        let commits = self.commits.clone();
+        watch(
+            Arc::downgrade(&ws),
+            store.clone(),
+            branch.to_string(),
+            commits,
+        );
         if walk {
             self.prewarm(branch);
         }
@@ -579,8 +594,15 @@ const IN_FLIGHT_WAIT: Duration = Duration::from_secs(5);
 /// How often workspaces check whether their branch moved (see `workspace::rebase`).
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 
-/// Keeps the workspace's base at its branch tip while the workspace exists.
-fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
+/// Keeps the workspace's base at its branch tip while the workspace exists,
+/// and hands each commit step of its branch to `commits` (if set): the
+/// checks on it run elsewhere, this thread goes on syncing.
+fn watch(
+    ws: Weak<Workspace>,
+    store: Arc<Store>,
+    branch: String,
+    commits: Arc<OnceLock<mpsc::Sender<Step>>>,
+) {
     let name = format!("sync {branch}");
     let spawned = thread::Builder::new().name(name).spawn({
         let branch = branch.clone();
@@ -604,6 +626,12 @@ fn watch(ws: Weak<Workspace>, store: Arc<Store>, branch: String) {
                             last_error = e;
                         }
                     }
+                }
+                if let Some((from, to)) = ws.take_commit()
+                    && let Some(commits) = commits.get()
+                {
+                    let branch = branch.clone();
+                    let _ = commits.send(Step { branch, from, to });
                 }
             }
         }

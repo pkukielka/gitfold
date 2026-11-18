@@ -270,24 +270,38 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
         words => words.join(" "),
     };
     let common_dir = git::init(repo)?;
-    let dir = inbox_dir(&common_dir, &to)?;
+    deliver(&common_dir, &to, &from, subject.as_deref(), &body)?;
+    println!("sent to {to}");
+    Ok(())
+}
+
+/// Leaves a message from `from` in the inbox of branch `to` (see the module
+/// doc): `send`'s, and gitfold's own (`fs::views::notices`).
+pub fn deliver(
+    common_dir: &Path,
+    to: &str,
+    from: &str,
+    subject: Option<&str>,
+    body: &str,
+) -> Result<()> {
+    let dir = inbox_dir(common_dir, to)?;
     fs::create_dir_all(&dir)?;
     let one_line = |s: &str| s.replace(['\r', '\n'], " ");
     let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
     let mut text = format!(
         "from: {}\ntime: {}\n",
-        one_line(&from),
+        one_line(from),
         rfc3339(now.as_secs())
     );
-    if let Some(subject) = &subject {
+    if let Some(subject) = subject {
         text += &format!("subject: {}\n", one_line(subject));
     }
     text.push('\n');
-    text += &body;
+    text += body;
     if !body.ends_with('\n') {
         text.push('\n');
     }
-    let name = format!("{:020}-{}", now.as_nanos(), workspace_id(&from));
+    let name = format!("{:020}-{}", now.as_nanos(), workspace_id(from));
     let tmp = dir.join(format!(".new-{}-{name}", std::process::id()));
     {
         use std::io::Write;
@@ -310,7 +324,6 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
     };
     let _ = fs::remove_file(&tmp);
     delivered.with_context(|| format!("delivering to {to}"))?;
-    println!("sent to {to}");
     Ok(())
 }
 

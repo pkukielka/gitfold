@@ -369,17 +369,19 @@ fn held(nodes: &Nodes, path: &[u8]) -> Option<u64> {
 
 /// The served views, by slot (never reused: a slot's inodes stay its own).
 pub struct Views {
-    common_dir: PathBuf,
-    store: Arc<Store>,
-    names: Arc<NameChanges>,
-    workspaces: Arc<Workspaces>,
-    /// The live trees of workspaces, shared by the `@live` views.
-    lives: Arc<Lives>,
+    pub(super) common_dir: PathBuf,
+    pub(super) store: Arc<Store>,
+    pub(super) names: Arc<NameChanges>,
+    pub(super) workspaces: Arc<Workspaces>,
+    /// The live trees of workspaces, shared by the `@live` views and the
+    /// conflict notices.
+    pub(super) lives: Arc<Lives>,
     list: RwLock<Vec<Arc<ViewDir>>>,
     creating: Mutex<()>,
     /// Bumped when a view opens: the namespace listings holding it changed.
     mtime: Mutex<SystemTime>,
-    /// Where the views' merges are made, once the first view opens.
+    /// Where the views' merges are made, once the first view opens (or
+    /// the conflict notices first need it).
     private: Mutex<Option<Arc<Private>>>,
 }
 
@@ -418,7 +420,7 @@ impl Views {
 
     /// The private repository the views are merged in, made when the first
     /// view opens (`merge::Private::create`). EIO if it can't be.
-    fn private(&self) -> Result<Arc<Private>, Errno> {
+    pub(super) fn private(&self) -> Result<Arc<Private>, Errno> {
         let mut private = self.private.lock();
         if let Some(p) = &*private {
             return Ok(p.clone());

@@ -14,8 +14,11 @@ use parking_lot::Mutex;
 
 use super::members::Tip;
 use super::merge::Private;
-use super::watch::{Context, Stamp, stamp};
+use super::watch::{Stamp, stamp};
+use crate::fs::NameChanges;
+use crate::fs::workspaces::Workspaces;
 use crate::state::StateDir;
+use crate::store::Store;
 
 /// How long a workspace is quiet before its live tree is made again.
 const QUIET: Duration = Duration::from_secs(2);
@@ -38,6 +41,15 @@ struct Made {
     changing: Option<(Signal, Instant, Instant)>,
 }
 
+/// What making a live tree needs from the mount: a view's (`watch::Context`),
+/// or the conflict notices'.
+pub struct Reach<'a> {
+    pub store: &'a Arc<Store>,
+    pub names: &'a NameChanges,
+    pub workspaces: &'a Workspaces,
+    pub private: &'a Private,
+}
+
 /// What tells a workspace changed: writes through the mount, its base, its
 /// branch's tip, its index (staging, a commit).
 type Signal = (u64, ObjectId, ObjectId, Stamp);
@@ -47,17 +59,11 @@ impl Lives {
     /// commit in the private repository and its tree; `None` if it has no
     /// workspace. Made again if it changed and has been quiet since, or is
     /// changing for long, or `now` asks for it at once (a view woken).
-    pub fn tip(
-        &self,
-        ctx: &Context,
-        branch: &str,
-        tip: ObjectId,
-        now: bool,
-    ) -> Result<Option<Tip>> {
-        let opened = (ctx.workspaces.open_quietly(&ctx.store, branch))
+    pub fn tip(&self, ctx: &Reach, branch: &str, tip: ObjectId, now: bool) -> Result<Option<Tip>> {
+        let opened = (ctx.workspaces.open_quietly(ctx.store, branch))
             .map_err(|e| anyhow!("opening the workspace of {branch}: {e:?}"))?;
         let Some((ws, opened_now)) = opened else {
-            self.forget(&ctx.private, branch);
+            self.forget(ctx.private, branch);
             return Ok(None);
         };
         if opened_now {

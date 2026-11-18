@@ -18,7 +18,7 @@ use gix::ObjectId;
 use log::error;
 use parking_lot::Mutex;
 
-use super::lives::Lives;
+use super::lives::{Lives, Reach};
 use super::members::{self, Bases, BuiltOn, Note, Refs, Tip};
 use super::merge::{Member, Private};
 use super::serve::{Kind, Tick, ViewDir};
@@ -54,6 +54,18 @@ pub struct Context {
     pub kind: Kind,
     pub workspaces: Arc<Workspaces>,
     pub lives: Arc<Lives>,
+}
+
+impl Context {
+    /// What its live trees need (`Lives::tip`).
+    fn reach(&self) -> Reach<'_> {
+        Reach {
+            store: &self.store,
+            names: &self.names,
+            workspaces: &self.workspaces,
+            private: &self.private,
+        }
+    }
 }
 
 /// Which trees an `@live` view merges.
@@ -213,6 +225,7 @@ impl Watch {
 /// pool thread waiting there could take up another live tree, which waits for
 /// that very lock.
 fn live_trees(ctx: &Context, asked: &[(&str, ObjectId)], now: bool) -> Vec<Result<Option<Tip>>> {
+    let reach = ctx.reach();
     let next = AtomicUsize::new(0);
     let made: Vec<Mutex<Option<Result<Option<Tip>>>>> =
         asked.iter().map(|_| Mutex::default()).collect();
@@ -222,7 +235,7 @@ fn live_trees(ctx: &Context, asked: &[(&str, ObjectId)], now: bool) -> Vec<Resul
             let Some(&(branch, tip)) = asked.get(i) else {
                 return;
             };
-            *made[i].lock() = Some(ctx.lives.tip(ctx, branch, tip, now));
+            *made[i].lock() = Some(ctx.lives.tip(&reach, branch, tip, now));
         }
     };
     thread::scope(|scope| {

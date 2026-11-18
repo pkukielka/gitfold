@@ -126,6 +126,12 @@ pub struct Workspace {
     touched: Mutex<HashSet<Vec<u8>>>,
     /// The files read, if recorded (see `reads`).
     reads: Mutex<Option<reads::Reads>>,
+    /// What tells its branch's own commits from gitfold's moves of it
+    /// (`rebase`): where those start (`refs/gitfold-base/<branch>`) as last
+    /// seen, `None` until the first sync.
+    own_start: Mutex<Option<Option<ObjectId>>>,
+    /// The last commit step of its branch not yet taken (`take_commit`).
+    commit: Mutex<Option<(ObjectId, ObjectId)>>,
 }
 
 /// The lower layer and how upper overrides it.
@@ -267,6 +273,8 @@ impl Workspace {
             removing: AtomicBool::new(false),
             touched: Mutex::new(HashSet::new()),
             reads: Mutex::new(None),
+            own_start: Mutex::new(None),
+            commit: Mutex::new(None),
         })
     }
 

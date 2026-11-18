@@ -13,15 +13,19 @@
 //! - `serve`: the views served, by slot, and their nodes.
 //! - `watch`: keeping each view current, and telling the kernel. A view not
 //!   accessed for a minute rests until accessed again.
+//! - `notices`: the conflict notices, when a workspace's branch gets new
+//!   commits (the live trees and the private repository shared).
 
 mod live;
 mod lives;
 pub mod members;
 pub mod merge;
+mod notices;
 mod serve;
 pub mod shown;
 #[cfg(test)]
 mod test_repo;
 mod watch;
 
+pub use notices::{Step, spawn as notices};
 pub use serve::{Item, Kind, ViewDir, Views, waiting_at_most};

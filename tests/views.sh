@@ -269,6 +269,250 @@ check "a full gc there" P -c gc.pruneExpire=now gc --quiet
 eq "the view's tree kept" $'ui\na\nweb' "$(P show refs/gitfold/views/committed/api:a.txt)"
 }
 
+# Conflict notices: a commit in a workspace, checked against the work of the
+# branches its work meets; messages from gitfold in their inboxes.
+
+# The messages in the inbox of branch $1, oldest first: each file's text.
+inbox_of() { local d=$COMMON/gitfold/.tasks/$1/inbox; for m in $(ls "$d" 2>/dev/null); do cat "$d/$m"; echo ---; done; }
+# How many messages there are in the inbox of branch $1.
+notices() { ls "$COMMON/gitfold/.tasks/$1/inbox" 2>/dev/null | grep -vc '^\.'; }
+# The bodies of the messages of branch $1 (headers but `from:` and `subject:` dropped).
+said() { inbox_of "$1" | grep -v '^time: '; }
+# Waits until branch $1 has $2 messages (up to 10 s).
+told_n() { test "$(notices "$1")" = "$2"; }
+until_told() { until_ok told_n "$1" "$2"; }
+# Waits long enough for a notice that should not come: two sync rounds and
+# a live tree.
+settle() { sleep 4; }
+# Commits what the workspace of $1 changed (`git commit -am`).
+commit_in() { G "$MNT/$1" commit -qam "$1" >/dev/null; }
+# Takes every message of branch $1 (deletes them).
+clear_inbox() { rm -f "$COMMON/gitfold/.tasks/$1/inbox"/[0-9]*; }
+# Opens the workspaces $@.
+open() { for b in "$@"; do ls "$MNT/$b" >/dev/null; done; }
+
+notices_uncommitted_side() {
+R branch api main
+R branch ui main; built_on ui api
+mount_fs
+open api ui
+echo ui >"$MNT/ui/a.txt"
+echo api >"$MNT/api/a.txt"
+sleep 2   # past the first sync, which only records
+commit_in api
+short=$(R rev-parse --short api)
+text="from: gitfold
+subject: conflict: a.txt
+
+api committed $short; it conflicts with ui's uncommitted a.txt.
+If it needs resolving, ui's change is the one still open, so that's the cheapest place to adjust.
+ui follows api: it takes the commit once they don't conflict (until then following says nothing moved).
+---"
+check "the other side is told" until_told ui 1
+eq "what it is told" "$text" "$(said ui)"
+eq "the committer too, the same (it is where they land, too)" "$text" "$(said api)"
+eq "nothing moved" "$(R rev-parse main)" "$(R rev-parse ui)"
+}
+
+notices_committer_parents_uncommitted() {
+R branch api main
+R branch ui main; built_on ui api
+mount_fs
+open api ui
+echo api >"$MNT/api/a.txt"
+echo ui >"$MNT/ui/a.txt"
+sleep 2
+commit_in ui
+short=$(R rev-parse --short ui)
+check "the parent, whose work is uncommitted, is told" until_told api 1
+check "so is the committer" until_told ui 1
+eq "what" "ui committed $short; it conflicts with api's uncommitted a.txt." "$(said api | sed -n 4p)"
+eq "the same to both" "$(said api)" "$(said ui)"
+}
+
+notices_siblings() {
+R branch shop main
+for b in api web; do R branch "$b" main; built_on "$b" shop; R config "branch.$b.gitfoldFollow" false; done
+mount_fs
+open shop api web
+echo web >"$MNT/web/d/b.txt"; commit_in web
+echo web >"$MNT/web/a.txt"
+echo api >"$MNT/api/a.txt"; echo api >"$MNT/api/d/b.txt"
+sleep 2
+commit_in api
+short=$(R rev-parse --short api)
+check "the sibling is told" until_told web 1
+check "the parent too" until_told shop 1
+check "the committer too" until_told api 1
+eq "uncommitted, then committed" "api committed $short; it conflicts with web's uncommitted a.txt.
+If it needs resolving, web's change is the one still open, so that's the cheapest place to adjust.
+
+api committed $short; it conflicts with web's committed d/b.txt, so the two will conflict when they land in shop.
+If it needs resolving, api committed last." "$(said shop | sed '1,3d;$d')"
+eq "the same to each" "$(said shop)" "$(said web)"
+eq "and to the committer" "$(said shop)" "$(said api)"
+eq "the subject names the paths" "subject: conflict: a.txt, d/b.txt" "$(said shop | sed -n 2p)"
+}
+
+notices_both_committed_no_parent() {
+R branch api main
+R branch ui main; built_on ui api
+mount_fs
+open api ui
+echo ui >"$MNT/ui/a.txt"; commit_in ui
+echo api >"$MNT/api/a.txt"
+sleep 2
+commit_in api
+short=$(R rev-parse --short api)
+check "the committer is told" until_told api 1
+check "so is the other side" until_told ui 1
+eq "they land in the committer" "api committed $short; it conflicts with ui's committed a.txt, so the two will conflict when they land in api.
+If it needs resolving, api committed last.
+ui follows api: following is paused on it." "$(said api | sed '1,3d;$d')"
+}
+
+notices_once() {
+R branch api main
+R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
+mount_fs
+open api ui
+echo ui >"$MNT/ui/a.txt"
+echo api >"$MNT/api/a.txt"
+sleep 2
+commit_in api
+check "told" until_told ui 1
+clear_inbox ui; clear_inbox api
+echo api2 >"$MNT/api/a.txt"; commit_in api
+echo x >"$MNT/api/x.txt"; G "$MNT/api" add x.txt; commit_in api
+settle
+eq "a conflict already there isn't told again" "0 0" "$(notices ui) $(notices api)"
+echo a >"$MNT/api/a.txt"; commit_in api
+settle
+eq "nor gone" 0 "$(notices ui)"
+echo api3 >"$MNT/api/a.txt"; commit_in api
+check "back: told again" until_told ui 1
+}
+
+notices_not_for_moves() {
+R config user.name t; R config user.email t@t   # git rebase commits
+R branch api main
+R branch web main; built_on web api; R config branch.web.gitfoldFollow false
+commit_on ui main $'ui.txt=ui\n'; built_on ui api
+mount_fs
+open api web ui
+echo web >"$MNT/web/a.txt"
+echo api >"$MNT/api/a.txt"
+sleep 2
+commit_in api
+check "web is told of api's commit" until_told web 1
+clear_inbox web; clear_inbox api
+check "ui follows api" until_ok R merge-base --is-ancestor api ui
+settle
+eq "ui moving onto api brings api's change: not told again" "0 0" "$(notices web) $(notices api)"
+}
+
+notices_not_for_the_parents_commits() {
+R branch api main
+for b in ui web; do R branch "$b" main; built_on "$b" api; R config "branch.$b.gitfoldFollow" false; done
+mount_fs
+open api ui web
+echo web >"$MNT/web/a.txt"
+echo ui >"$MNT/ui/ui.txt"; G "$MNT/ui" add ui.txt; commit_in ui
+echo api >"$MNT/api/a.txt"
+sleep 2
+commit_in api
+check "web is told of api's commit" until_told web 1
+clear_inbox web; clear_inbox api
+G "$MNT/ui" rebase -q api
+settle
+eq "ui rebased onto api by hand: api's change isn't ui's" "0 0" "$(notices web) $(notices api)"
+echo web >"$MNT/web/d/b.txt"
+echo api >"$MNT/api/d/b.txt"; commit_in api
+check "web is told of api's next commit" until_told web 1
+clear_inbox web; clear_inbox api
+G "$MNT/ui" merge -q --no-edit api
+settle
+eq "nor ui merging api" "0 0" "$(notices web) $(notices api)"
+}
+
+notices_one_step() {
+R branch api main
+R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
+mount_fs
+open api ui
+echo ui >"$MNT/ui/a.txt"; echo ui >"$MNT/ui/d/b.txt"
+sleep 2
+commit_on two api $'a.txt=api\n'
+c1=$(R rev-parse two)
+commit_on two api $'d/b.txt=api\n'
+c2=$(R rev-parse two)
+R update-ref refs/heads/api "$c1"; R update-ref refs/heads/api "$c2"
+check "told" until_told ui 1
+settle
+eq "once, for both commits" 1 "$(notices ui)"
+eq "both paths" "subject: conflict: a.txt, d/b.txt" "$(said ui | sed -n 2p)"
+}
+
+notices_not_at_first_sync() {
+R branch api main
+R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
+mount_fs
+open api ui
+echo ui >"$MNT/ui/a.txt"
+unmount_fs
+commit_on api main $'a.txt=api\n'
+mount_fs
+open api ui
+settle
+eq "a commit made while unmounted: not told" "0 0" "$(notices ui) $(notices api)"
+echo api2 >"$MNT/api/d/b.txt"; echo ui >"$MNT/ui/d/b.txt"; G "$MNT/api" commit -qm api -- d/b.txt
+check "the next one is" until_told ui 1
+}
+
+notices_off() {
+R branch api main
+R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
+R config gitfold.conflictNotices false
+mount_fs
+open api ui
+echo ui >"$MNT/ui/a.txt"; echo api >"$MNT/api/a.txt"
+sleep 2
+commit_in api
+settle
+eq "off for the repository: no one told" "0 0" "$(notices ui) $(notices api)"
+R config branch.ui.gitfoldConflictNotices true
+echo ui >"$MNT/ui/d/b.txt"; echo api >"$MNT/api/d/b.txt"; commit_in api
+check "on for one branch: it is told" until_told ui 1
+settle
+eq "the others aren't" 0 "$(notices api)"
+}
+
+notices_off_per_branch() {
+R branch api main
+R branch ui main; built_on ui api; R config branch.ui.gitfoldConflictNotices false; R config branch.ui.gitfoldFollow false
+mount_fs
+open api ui
+echo ui >"$MNT/ui/a.txt"; echo api >"$MNT/api/a.txt"
+sleep 2
+commit_in api
+check "the committer is told" until_told api 1
+settle
+eq "a branch set off isn't" 0 "$(notices ui)"
+}
+
+notices_binary() {
+printf 'bin\0ary\n' >"$REPO/b.dat"; R add b.dat; R commit -qm bin
+R branch api main
+R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
+mount_fs
+open api ui
+printf 'ui\0\n' >"$MNT/ui/b.dat"; printf 'api\0\n' >"$MNT/api/b.dat"
+sleep 2
+commit_in api
+check "a binary file" until_told ui 1
+check "named" grep -q "uncommitted b.dat" <(said ui)
+}
+
 section "views: merged with what is built on it" merged_with_whats_built_on_it
 section "views: conflicts" conflicts
 section "views: git's merge" gits_merge
@@ -281,4 +525,16 @@ section "views: resting, and woken current" resting_views
 section "views: @live makes its live trees side by side" live_trees_side_by_side
 section "views: a branch with unrelated history left out" unrelated_history
 section "views: garbage collection in a partial clone" gc_in_a_partial_clone
+section "notices: the uncommitted side" notices_uncommitted_side
+section "notices: a child's commit, its parent's uncommitted work" notices_committer_parents_uncommitted
+section "notices: siblings, landing in their parent" notices_siblings
+section "notices: both committed, no parent" notices_both_committed_no_parent
+section "notices: each conflict once" notices_once
+section "notices: not for gitfold's moves" notices_not_for_moves
+section "notices: not for the parent's commits" notices_not_for_the_parents_commits
+section "notices: several commits at once, one notice" notices_one_step
+section "notices: not at the first sync" notices_not_at_first_sync
+section "notices: off for the repository" notices_off
+section "notices: off for a branch" notices_off_per_branch
+section "notices: a binary file" notices_binary
 finish

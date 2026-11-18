@@ -31,6 +31,10 @@
 //! to the base again (git rewrites unchanged files in `stash`, `rebase --abort`).
 //! Those are read under the shared lock and re-checked by `stat` under the
 //! exclusive one; files changed in the last second wait for a later pass.
+//!
+//! A base moved to the branch's own new commits (not a move gitfold made, see
+//! `own_commits`) is kept as a commit step, which the sync thread hands on
+//! (`take_commit`, for the conflict notices, `fs::views::notices`).
 
 use std::collections::HashSet;
 use std::fs;
@@ -40,6 +44,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow};
+use gix::ObjectId;
 use gix::objs::tree::EntryKind;
 use log::info;
 
@@ -144,14 +149,27 @@ impl Workspace {
             return Ok(());
         }
         let tip = git::branch_tip(&self.state.branch)?;
-        let rebased = if tip.id != self.layers.read().base {
+        let base = self.layers.read().base;
+        let moved = tip.id != base;
+        let (own, start) = self.own_commits(moved);
+        let rebased = if moved {
             let rebased = self.rebase(store, &tip, fetch);
             self.rebase_failed
                 .store(rebased.is_err(), Ordering::Relaxed);
+            if rebased.is_ok() && own {
+                let mut commit = self.commit.lock();
+                let from = commit.map_or(base, |(from, _)| from);
+                *commit = Some((from, tip.id));
+            }
             rebased
         } else {
             Ok(())
         };
+        // Kept once the base is at the tip: a move retried is told apart as
+        // when first seen.
+        if rebased.is_ok() {
+            *self.own_start.lock() = Some(start);
+        }
         // The rebase may have fetched (a partial clone) for long: git may have
         // started meanwhile.
         if !self.git_idle() {
@@ -167,6 +185,28 @@ impl Workspace {
         // Retried every call until it succeeds, whatever else failed.
         let pinned = self.pin_base();
         rebased.and(dropped).and(pinned)
+    }
+
+    /// The commit step of its branch seen since the last call, if any: from
+    /// the base before to the tip its base moved to (steps not taken in
+    /// between are one).
+    pub fn take_commit(&self) -> Option<(ObjectId, ObjectId)> {
+        self.commit.lock().take()
+    }
+
+    /// Whether a move of its branch seen now (`moved`) is its own commits
+    /// (made in it, or a reset or amend), not a move gitfold made onto its
+    /// parent (`follow`: following, `parent --set`, a landing), which records
+    /// the move first (`gitfoldMoving`) and where its own commits start after
+    /// (`refs/gitfold-base/<branch>`); and where they start now. Not at its
+    /// first sync: what moved before is not seen moving.
+    fn own_commits(&self, moved: bool) -> (bool, Option<ObjectId>) {
+        let branch = &self.state.branch;
+        let start = crate::follow::recorded_base(branch);
+        let own = moved
+            && *self.own_start.lock() == Some(start)
+            && (crate::settings::Local::read(&self.state.common_dir).moving(branch)).is_none();
+        (own, start)
     }
 
     fn limit_touched(&self) {

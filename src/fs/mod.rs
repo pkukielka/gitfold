@@ -123,17 +123,19 @@ impl GitFold {
             opts.track_reads,
         ));
         views::waiting_at_most(opts.request_threads / 2);
-        let views = Views::new(
+        let views = Arc::new(Views::new(
             common_dir.clone(),
             store.clone(),
             names.clone(),
             workspaces.clone(),
-        );
+        ));
+        // Commit steps seen in workspaces, checked for conflicts to tell.
+        workspaces.set_commits(views::notices(Arc::downgrade(&views)));
         GitFold {
             no_open: opts.no_open,
             stat,
             store,
-            views: Arc::new(views),
+            views,
             snapshots: Arc::new(Snapshots::new(
                 common_dir.clone(),
                 mount_point.clone(),
