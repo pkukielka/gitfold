@@ -135,11 +135,11 @@ Then, per request (`fs/workspace/`):
 | `src/fs/stats.rs` | operation counters, logged at unmount |
 | `src/fs/removal.rs` | removing a workspace or snapshot while mounted |
 | `src/store.rs` | shared tree tables, file ids, directory layout, index walk; what is at a path of a tree (`Lower`, `entry_at`) |
-| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory, registration and base pin; the files in it), ids, its base and branch files, paths below its root, whether an upper file matches a stored one |
+| `src/state/mod.rs` | where a workspace's stored state is (`StateDir`: its id, state directory, registration and base pin; the files in it), ids, its base and branch files, paths below its root, paths meeting (`PathTree`), whether an upper file matches a stored one |
 | `src/state/markers.rs` | whiteouts and opaque markers, as an append-only log |
 | `src/state/reads.rs` | the read log's format (`gitfold overlaps`) |
 | `src/state/agents.rs` | the agents present in a workspace (a file per session, 30 minutes), and what following told them |
-| `src/state/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`) |
+| `src/state/status.rs` | a workspace's uncommitted changes, ignored files, last change and line counts, read from its state directory (for `list`, `changes`, `overlaps` and `remove`); whether they may touch some paths (`may_change`, for the conflict notices) |
 | `src/state/retire.rs` | the removal rules for a workspace or a snapshot's registration, shared by `remove` and the daemon |
 | `src/state/fork.rs` | `branch --with-changes`: copying a workspace's state, registration and index into a new branch |
 | `src/state/task.rs` | the task folder (the `.task` link): where it is stored, its `info/exclude` entry, copying it for forks |
@@ -1397,34 +1397,26 @@ session end and a subagent's stop remove it.
 
 ### Conflict notices: told at the commit, pairwise, to everyone involved
 
-**What:** when a workspace's branch gets new commits, the workspaces whose
-work meets it are told of new conflicts, in their inboxes
-(`src/fs/views/notices.rs`). The sync thread (`Workspace::sync`) already
-sees each move of the branch from its old base to its tip; a move that is
-the branch's own commits (not one recorded by a move of gitfold's,
-`gitfoldMoving` or `refs/gitfold-base/<branch>` changing; not at the
-workspace's first sync, which would see what moved while unmounted) is
-handed, as one step however many commits it holds, to one thread per mount.
-That thread takes the paths the step's own commits change (`git log
---no-renames`, the parent's commits left out: a rebase onto the parent or a
-merge of it brings the parent's changes, not the branch's), and for each
-workspace in the view of the branch's parent (the parent's own included)
-whose stored changes, or
-commits since the merge base, touch one of them, git merges
-(`Private::conflicts`, `git merge-tree` from the merge base, as the views
-merge a member) the new tip with the workspace as it is (its live tree,
-`Lives`, shared with `@live`), and the tip before. Conflicts only after are
-new; those also in the merge with the workspace's tip are with committed
-work. Both sides and the workspace of the branch they land in get one
-message each (`cli::inbox::deliver`, `from: gitfold`), the same words for
-all, hinting where a change would go. `gitfold.conflictNotices` and
-`branch.<name>.gitfoldConflictNotices` say who is told (on unless false).
-A branch without a parent (made from a start point) is taken as built on
-the root: the branches without one are siblings there, with what is built
-on the root and on them, and the root's commits are its parent's. The
-hint names the uncommitted side (still open, the cheapest); else, of a
-branch and one following it, the child, as following's pause does; else
-the committer (committed last).
+**What:** a workspace's new commits are checked for new conflicts with the
+work they meet, and those involved are told (`src/fs/views/notices.rs`):
+
+1. *Trigger:* the sync thread (`Workspace::sync`) sees the branch move from
+   its base to its tip; a move of its own (not gitfold's: no
+   `gitfoldMoving`, `refs/gitfold-base/<branch>` unchanged; not at the
+   first sync) goes to one thread per mount, as one step.
+2. *Own paths:* what the step's commits after `follow::own_base` change
+   (`git log --no-renames`).
+3. *Related:* the workspaces in the view of the branch it lands in
+   (`Tree::lands_in`: its parent, or the root for a branch without one).
+4. *Prefilter:* their stored uncommitted changes (`StateDir::may_change`)
+   or their commits since the merge base touch an own path.
+5. *Merges:* git merges the new tip, and the tip before, with each as it
+   is (`Private::conflicts`, `Lives`); conflicts only after are new, with
+   committed work where the merge with its tip has them too.
+6. *Told:* both sides and the workspace of the branch they land in, one
+   message each, the same words (`from: gitfold`), with a hint: the
+   uncommitted side, else a following child, else the committer; unless a
+   branch says not (`gitfoldConflictNotices`, `gitfold.conflictNotices`).
 
 **Why:**
 
@@ -1440,7 +1432,7 @@ the committer (committed last).
   conflict's first side is "the view so far" (`a+b`), not a branch. A view
   is computed only while someone reads it, and rests. The pairwise merge is
   the same git merge, a few ms each, with exact sides; live trees are made
-  only for workspaces the path check flags.
+  only for workspaces whose stored uncommitted changes meet the step's.
 - **New by difference, not by memory:** a conflict is new if the merge
   with the tip before the step didn't have it. Nothing is stored: a
   remount, a crash or a conflict that comes back need no bookkeeping, and a

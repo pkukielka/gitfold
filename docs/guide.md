@@ -276,14 +276,11 @@ checkout-api committed 0724067; it conflicts with checkout-ui's uncommitted READ
 If it needs resolving, checkout-ui's change is the one still open, so that's the cheapest place to adjust.
 ```
 
-`checkout-api` and `checkout` get the same message. Branches made without a
-parent (`gitfold branch X --from origin/main`) count as siblings under the
-main branch. With Claude Code, it
-arrives in each agent's conversation by itself, and wakes an idle one. Each
-conflict is told once, at the commit that makes it; a notice only informs:
-whether it matters (not for a throwaway workspace, say) is for the agents, or
-for you. `git config gitfold.conflictNotices false` turns them off,
-`git config branch.<name>.gitfoldConflictNotices false` for one workspace.
+`checkout-api` and `checkout` get the same message; with Claude Code, it
+arrives in each agent's conversation by itself, and wakes an idle one. A
+notice only informs: whether it matters (not for a throwaway workspace, say)
+is for the agents, or for you. Who is told, the hint and the settings: see
+[the README](../README.md#branches-built-on-branches).
 
 **Why it works.** The views are made by `git merge-tree`, git's own merge,
 without touching any branch, index or working tree; conflicts look exactly
