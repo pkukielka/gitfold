@@ -90,8 +90,9 @@ Each message is taken once. Messages are files in `.task/inbox/`, so anything
 can send one: an orchestrator, a script, a person (`gitfold send <BRANCH>
 <TEXT>` from the repository, as `user`).
 
-To reply, send to the message's `from:` when it names a branch (sent from a
-workspace, it does). A name that isn't a branch (`from: lead`, `user`) can't be
+To reply, send to the message's `from:` when it names a branch (sent by an
+agent, it is the agent's own workspace, even if it looked around in others
+first; so is yours). A name that isn't a branch (`from: lead`, `user`) can't be
 replied to: `gitfold send` says so and lists the workspaces, your parent
 marked; that is usually who to tell.
 

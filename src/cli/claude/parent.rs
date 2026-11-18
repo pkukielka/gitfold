@@ -41,7 +41,10 @@ fn run(event: ParentHook, input: &str) -> Result<()> {
     };
     let session = field(input, "session_id");
     match event {
-        ParentHook::SessionStart => mark(&state, session.as_deref()),
+        ParentHook::SessionStart => {
+            remember_sender(&repo);
+            mark(&state, session.as_deref())
+        }
         ParentHook::SessionEnd => unmark(&state, session.as_deref()),
         // Its session's own presence stays.
         ParentHook::SubagentStop => unmark(&state, field(input, "agent_id").as_deref()),
@@ -51,6 +54,30 @@ fn run(event: ParentHook, input: &str) -> Result<()> {
             print!("{}", turn_start(&common_dir, &state, session.as_deref())?);
             Ok(())
         }
+    }
+}
+
+/// Has `gitfold send` sign the session's messages with the workspace it
+/// started in (`GITFOLD_FROM`), wherever its shell has `cd`'d since: Claude
+/// Code runs the shell commands of the session, its subagents included, with
+/// what a SessionStart hook writes to `$CLAUDE_ENV_FILE`. Best effort: without
+/// it, `send` signs with the workspace a command runs in, as before.
+fn remember_sender(repo: &Path) {
+    let Some(file) = std::env::var_os("CLAUDE_ENV_FILE") else {
+        return;
+    };
+    let Ok(branch) = crate::cli::branch_or_current(None, repo) else {
+        return;
+    };
+    let quoted = format!("'{}'", branch.replace('\'', r"'\''"));
+    let line = format!("export {}={quoted}\n", crate::cli::inbox::SENDER_ENV);
+    let written = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&file)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+    if let Err(e) = written {
+        log::debug!("writing {}: {e}", Path::new(&file).display());
     }
 }
 

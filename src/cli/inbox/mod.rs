@@ -262,9 +262,7 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
         from,
         subject,
     } = args;
-    let from = from
-        .or_else(|| super::branch_or_current(None, repo).ok())
-        .unwrap_or_else(|| "user".to_string());
+    let from = from.unwrap_or_else(|| sender(repo));
     let body = match text.as_slice() {
         [dash] if dash == "-" => std::io::read_to_string(std::io::stdin())?,
         words => words.join(" "),
@@ -279,6 +277,32 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
     Ok(())
 }
 
+/// The variable a Claude Code session's SessionStart hook sets to the branch
+/// of the workspace the session started in (`claude::parent`).
+pub const SENDER_ENV: &str = "GITFOLD_FROM";
+
+/// Who a message sent without `--from` is from: the workspace of the agent
+/// sending it. In a Claude Code session that's the one it started in
+/// (`GITFOLD_FROM`), even after its shell `cd`'d into another workspace to
+/// look at it; except in a workspace made for a Claude worktree
+/// (`worktree-<name>`) other than the session's own: there the commands are a
+/// subagent's, at home (a subagent's `cd` doesn't last). Without the
+/// variable, the workspace the command runs in; outside any, `user`.
+fn sender(repo: &Path) -> String {
+    let here = super::branch_or_current(None, repo).ok();
+    let session = std::env::var(SENDER_ENV).ok().filter(|b| !b.is_empty());
+    match (here, session) {
+        (Some(here), Some(session))
+            if here != session && super::claude::is_worktree_branch(&here) =>
+        {
+            here
+        }
+        (_, Some(session)) => session,
+        (Some(here), None) => here,
+        (None, None) => "user".to_string(),
+    }
+}
+
 /// Why `send` can't reach `to`, with who it can: the workspaces' branches,
 /// the parent of the workspace it is sent from marked, so an agent that took
 /// a sender's name (`from: lead`) for an address finds the branch to use.
@@ -291,10 +315,13 @@ fn no_branch(common_dir: &Path, repo: &Path, to: &str) -> String {
     if branches.is_empty() {
         return format!("no branch {to}");
     }
-    let parent = super::branch_or_current(None, repo).ok().and_then(|branch| {
-        let tree = crate::tree::Tree::read(common_dir).ok()?;
-        tree.parent(&branch).map(|p| crate::tree::short(p).to_string())
-    });
+    let parent = super::branch_or_current(None, repo)
+        .ok()
+        .and_then(|branch| {
+            let tree = crate::tree::Tree::read(common_dir).ok()?;
+            tree.parent(&branch)
+                .map(|p| crate::tree::short(p).to_string())
+        });
     let named: Vec<String> = (branches.into_iter())
         .map(|b| match parent.as_deref() == Some(b.as_str()) {
             true => format!("{b} (your parent)"),

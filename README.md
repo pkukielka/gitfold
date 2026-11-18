@@ -426,8 +426,12 @@ folder's directory: by default inside `.git`, which committing needs anyway.
 
 **Messages.** `gitfold send <BRANCH> <TEXT>` leaves a message in a task's
 inbox, `inbox/` in its task folder (`gitfold.inbox` names it); the branch
-needs no workspace yet. `from:` is the workspace it was sent from, so a reply
-goes there; `--from <NAME>` signs it otherwise (a person, an orchestrator),
+needs no workspace yet. `from:` is the sender's workspace, so a reply goes
+there: the one the command runs in, or, in a Claude Code session with the
+plugin, the one the session started in, even after its shell `cd`'d into
+another workspace to look around (the plugin's SessionStart hook sets
+`GITFOLD_FROM`; a subagent at home in its own worktree signs with that).
+`--from <NAME>` signs it otherwise (a person, an orchestrator),
 and a name that isn't a branch can't be replied to: sent to, it is refused
 (exit 3) with the workspaces listed, the sender's parent marked.
 `gitfold inbox` takes the messages in the inbox of the
