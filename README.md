@@ -635,10 +635,12 @@ both views, noted in the summary.
 
 **Conflict notices.** When a branch gets new commits in its workspace (not
 gitfold's own moves of it), the mount's daemon checks them against the
-workspaces whose work meets it where it lands: those in the view of its
-parent (`@live/<parent>`), the parent included. A branch without a parent
-(made with `branch X --from <start>`) counts as built on the main branch,
-a sibling of the others without one and of those built on it. A conflict
+workspaces whose work meets it where it lands: the members of its parent's
+view (`@live/<parent>`), the parent included. A branch without a parent
+(made with `branch X --from <start>`) counts as built on the main branch:
+where the main branch's view is used (for the main branch, those built on
+it, and those without a parent), the branches without a parent, and what
+is built on them, count too (`@live/main` doesn't show them). A conflict
 the commit makes, with the other side's committed or uncommitted work, is
 told once, to everyone involved, in the same words: both sides and the
 branch they land in get a message in their inbox, `from: gitfold`, one per
@@ -656,7 +658,8 @@ The hint names the side whose change is uncommitted; else, of a branch and
 one built on it following it, the child (`cart-ui is built on cart-api:
 that's where it gets resolved (following is paused on it)`); else whoever
 committed last. A notice informs; gitfold doesn't stop or move anything for
-it. Commits made while unmounted or outside workspaces aren't checked.
+it. Commits made while unmounted or outside workspaces aren't checked, and
+commits already on a remote (a pull) aren't announced.
 `gitfold.conflictNotices false` turns the notices off for the repository,
 and `branch.<name>.gitfoldConflictNotices` (true or false) decides for that
 branch's workspace.

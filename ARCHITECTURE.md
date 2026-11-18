@@ -1405,7 +1405,9 @@ work they meet, and those involved are told (`src/fs/views/notices.rs`):
    `gitfoldMoving`, `refs/gitfold-base/<branch>` unchanged; not at the
    first sync) goes to one thread per mount, as one step.
 2. *Own paths:* what the step's commits after `follow::own_base` change
-   (`git log --no-renames`).
+   (`git log --no-renames`), commits already on a remote left out (a pull;
+   a branch's own remote branch counts as its own: pushed right after
+   committing).
 3. *Related:* the workspaces in the view of the branch it lands in
    (`Tree::lands_in`: its parent, or the root for a branch without one).
 4. *Prefilter:* their stored uncommitted changes (`StateDir::may_change`)
@@ -1458,7 +1460,11 @@ the reasons workspaces don't use them for rebases; strategies of whom to
 tell (`act`, `all`), dropped for one rule: everyone involved.
 
 **Limits:** commits made while unmounted or outside workspaces (a fetch,
-the main checkout) aren't checked. A merge commit's own changes (a merge of a
+the main checkout) aren't checked; commits already on a remote aren't
+announced (pulled into the main branch's workspace, say), and a branch
+pulling its own remote branch announces what others pushed there as its
+own. A step whose tip before shares no history with the other side's
+reports all its conflicts as new. A merge commit's own changes (a merge of a
 branch other than the parent) aren't among the step's paths.
 
 ### The commit-graph: git's own cache, kept current

@@ -178,27 +178,29 @@ fn check(views: &Views, step: &Step) -> Result<()> {
         .map(|c| (c.other.branch.as_str(), c.tip.0))
         .collect();
     let mut lives = views.lives.tips(&private, &asked, true).into_iter();
+    let only = took.then_some(&paths);
     let mut pairs = Vec::new();
     for c in &candidates {
+        let branch = &c.other.branch;
+        // A live tree that can't be made: its tip, as the views take it
+        // (its committed conflicts still told).
         let live = match c.uncommitted {
-            false => Ok(c.tip),
-            true => lives
-                .next()
-                .expect("one per asked")
-                .map(|t| t.unwrap_or(c.tip)),
+            false => c.tip,
+            true => match lives.next().expect("one per asked") {
+                Ok(live) => live.unwrap_or(c.tip),
+                Err(e) => {
+                    warn!("conflict notices: the workspace of {branch}: {e:#}; its tip instead");
+                    c.tip
+                }
+            },
         };
-        let only = took.then_some(&paths);
-        match live.and_then(|live| new_conflicts(&private, &views.store, step_tips, c, live, only))
-        {
+        match new_conflicts(&private, &views.store, step_tips, c, live, only) {
             Ok(Some(conflicts)) => pairs.push(Pair {
                 other: c.other,
                 conflicts,
             }),
             Ok(None) => {}
-            Err(e) => warn!(
-                "conflict notices: {committer} and {}: {e:#}",
-                c.other.branch
-            ),
+            Err(e) => warn!("conflict notices: {committer} and {branch}: {e:#}"),
         }
     }
     if pairs.is_empty() {
@@ -305,18 +307,30 @@ fn own_paths(common_dir: &Path, tree: &Tree, step: &Step) -> Result<Option<(Path
             )?)
         }
     };
-    let range = format!("{}..{}", step.from, step.to);
-    let not = start.map(|s| format!("^{s}"));
-    let args = [
+    // Not commits already on a remote: a pull, a fast-forward to upstream,
+    // is no one's work in a workspace. A branch's own remote branch's are
+    // its own, though (pushed right after committing, before this check),
+    // but the root's (where pulls come from). A remote ref that can't be read
+    // is left out (`--ignore-missing`), as the views leave it.
+    let mut args: Vec<String> = [
         "log",
+        "--ignore-missing",
         "--no-renames",
         "--name-only",
         "-z",
         "--format=",
-        &range,
-    ];
-    let not: Vec<&str> = not.iter().map(String::as_str).collect();
-    let out = git::cmd::output(common_dir, &[&args[..], &not].concat())?;
+    ]
+    .map(String::from)
+    .into();
+    args.push(format!("{}..{}", step.from, step.to));
+    args.extend(start.map(|s| format!("^{s}")));
+    args.push("--not".into());
+    if start.is_some() {
+        args.push(format!("--exclude=*/{branch}"));
+    }
+    args.push("--remotes".into());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = git::cmd::output(common_dir, &args)?;
     // Each commit's paths after a newline (its empty format).
     let paths = PathTree::new(
         (out.split(|b| *b == 0)
@@ -366,8 +380,8 @@ fn candidate<'a>(
 
 /// The new conflicts of the step (its tips before and after, `step`) with
 /// candidate `c`, its workspace as it is `live`: git's merge of `live` into
-/// the step's tip less that into the tip before, and with `only`, on paths
-/// it touches only. Those where the merge of its tip conflicts too are with
+/// the step's tip, but on paths that conflicted in that into the tip before
+/// (in whichever way), and with `only`, on paths it touches only. Those where the merge of its tip conflicts too are with
 /// its committed work (all of them, if its uncommitted work can't meet the
 /// step's).
 fn new_conflicts(
@@ -382,17 +396,17 @@ fn new_conflicts(
     if after.is_empty() {
         return Ok(None);
     }
-    let before: HashSet<(String, Vec<u8>)> = match c.before {
-        Some(base) => private
-            .conflicts(store, base, from, live)?
-            .into_iter()
+    // By path: one that conflicted before, in another way, isn't new.
+    let before: HashSet<Vec<u8>> = match c.before {
+        Some(base) => (private.conflicts(store, base, from, live)?.into_iter())
+            .map(|(_, path)| path)
             .collect(),
         None => HashSet::new(),
     };
     let new: Paths = (after.into_iter())
-        .filter(|c| !before.contains(c))
-        .filter(|(_, path)| only.is_none_or(|only| only.touches(path)))
         .map(|(_, path)| path)
+        .filter(|path| !before.contains(path))
+        .filter(|path| only.is_none_or(|only| only.touches(path)))
         .collect();
     if new.is_empty() {
         return Ok(None);
@@ -614,6 +628,10 @@ mod tests {
         assert_eq!(new(&api3, &api4), None);
         let api5 = commit(Some(&api4), &[("README", Some("api 5\n"))]);
         assert!(new(&api4, &api5).is_some());
+        // The same path conflicting another way (api deletes what ui edits):
+        // not new.
+        let api6 = commit(Some(&api5), &[("README", None)]);
+        assert_eq!(new(&api5, &api6), None);
     }
 
     #[test]
@@ -650,8 +668,33 @@ mod tests {
             "merge",
         ]);
         assert_eq!(own(&a1, &merge), None);
+        // Its own commits pushed (before the check): still its own.
+        super::super::test_repo::remote_branch("origin/n1-a", &a1);
+        assert_eq!(own(&c0, &a1), Some((paths(&["a"]), false)));
         // A reset back: nothing.
         assert_eq!(own(&a1, &c0), None);
+    }
+
+    #[test]
+    fn the_roots_commits_on_a_remote_are_no_ones() {
+        let c0 = commit(None, &[("u", Some("u\n")), ("l", Some("l\n"))]);
+        let u1 = commit(Some(&c0), &[("u", Some("u1\n"))]);
+        super::super::test_repo::remote_branch("origin/n2-root", &u1);
+        let l1 = commit(Some(&u1), &[("l", Some("l1\n"))]);
+        let tree = Tree::of(Default::default(), Some("n2-root".into()), |_| true);
+        let own = |from: &str, to: &str| {
+            let step = Step {
+                branch: "n2-root".into(),
+                from: id(from),
+                to: id(to),
+            };
+            let found = own_paths(&super::super::test_repo::git_dir(), &tree, &step).unwrap();
+            found.map(|(paths, _)| paths.iter().map(<[u8]>::to_vec).collect::<Paths>())
+        };
+        // Fast-forwarded to its upstream (a pull): nothing of its own.
+        assert_eq!(own(&c0, &u1), None);
+        // Its own commit on top: only that.
+        assert_eq!(own(&c0, &l1), Some(paths(&["l"])));
     }
 
     #[test]

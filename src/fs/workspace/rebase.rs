@@ -195,18 +195,22 @@ impl Workspace {
         rebased.and(dropped).and(pinned)
     }
 
-    /// Whether a move of its branch seen now (`moved`) is its own commits
-    /// (made in it, or a reset or amend), not a move gitfold made onto its
-    /// parent (`follow`: following, `parent --set`, a landing), which records
-    /// the move first (`gitfoldMoving`) and where its own commits start after
-    /// (`refs/gitfold-base/<branch>`); and where they start now. Not at its
-    /// first sync: what moved before is not seen moving.
+    /// Whether a move of its branch seen now (`moved`, the tip read before)
+    /// is its own commits (made in it, or a reset or amend), not a move
+    /// gitfold made onto its parent (`follow`: following, `parent --set`, a
+    /// landing); and where its own commits start now. Not at its first sync:
+    /// what moved before is not seen moving.
     fn own_commits(&self, moved: bool) -> (bool, Option<ObjectId>) {
         let branch = &self.state.branch;
+        // Read in the order that can't straddle a move: gitfold records it
+        // (`gitfoldMoving`), moves the branch, records where its own commits
+        // start (`refs/gitfold-base/<branch>`), then drops the record. So
+        // with the tip read moved, either the record is still there, or the
+        // start read after it has changed too.
+        let moving = moved
+            && (crate::settings::Local::read(&self.state.common_dir).moving(branch)).is_some();
         let recorded = crate::follow::recorded_base(branch);
-        let own = moved
-            && *self.last_recorded_base.lock() == Some(recorded)
-            && (crate::settings::Local::read(&self.state.common_dir).moving(branch)).is_none();
+        let own = moved && !moving && *self.last_recorded_base.lock() == Some(recorded);
         (own, recorded)
     }
 

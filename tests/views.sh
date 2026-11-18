@@ -514,6 +514,23 @@ check "main's own commit: the branch without a parent is told" until_told api 1
 eq "main is told too, once" 1 "$(notices main)"
 }
 
+notices_not_for_pulls() {
+with_origin
+R checkout -q --detach   # main free for its workspace
+R branch -q --no-track ui origin/main
+mount_fs
+open main ui
+echo ui >"$MNT/ui/a.txt"; echo ui >"$MNT/ui/d/b.txt"
+commit_on upstream main $'a.txt=upstream\n'
+R push -q origin upstream:main; R fetch -q origin
+R update-ref refs/heads/main origin/main    # main pulled (fast-forwarded)
+based() { [ "$(cat "$COMMON/gitfold/$1/base")" = "$(R rev-parse "$1")" ]; }
+check "main's workspace takes it" until_ok based main
+echo main >"$MNT/main/d/b.txt"; G "$MNT/main" commit -qm main -- d/b.txt
+check "main's own commit is told" until_told ui 1
+eq "not upstream's, pulled before" "subject: conflict: d/b.txt" "$(said ui | sed -n 2p)"
+}
+
 section "views: merged with what is built on it" merged_with_whats_built_on_it
 section "views: conflicts" conflicts
 section "views: git's merge" gits_merge
@@ -539,4 +556,5 @@ section "notices: off for the repository, or for a branch" notices_off
 section "notices: a binary file" notices_binary
 section "notices: branches without a parent, siblings under main" notices_without_parents
 section "notices: a branch without a parent and one built on main" notices_without_a_parent_and_built_on_main
+section "notices: not for commits pulled from a remote" notices_not_for_pulls
 finish
