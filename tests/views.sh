@@ -272,34 +272,41 @@ eq "the view's tree kept" $'ui\na\nweb' "$(P show refs/gitfold/views/committed/a
 # Conflict notices: a commit in a workspace, checked against the work of the
 # branches its work meets; messages from gitfold in their inboxes.
 
-# The messages in the inbox of branch $1, oldest first: each file's text.
-inbox_of() { local d=$COMMON/gitfold/.tasks/$1/inbox; for m in $(ls "$d" 2>/dev/null); do cat "$d/$m"; echo ---; done; }
 # How many messages there are in the inbox of branch $1.
 notices() { ls "$COMMON/gitfold/.tasks/$1/inbox" 2>/dev/null | grep -vc '^\.'; }
-# The bodies of the messages of branch $1 (headers but `from:` and `subject:` dropped).
-said() { inbox_of "$1" | grep -v '^time: '; }
-# Waits until branch $1 has $2 messages (up to 10 s).
-told_n() { test "$(notices "$1")" = "$2"; }
-until_told() { until_ok told_n "$1" "$2"; }
+# The messages of branch $1, oldest first, each ending with `---`, without
+# their `time:` header.
+said() {
+    local d=$COMMON/gitfold/.tasks/$1/inbox m
+    for m in $(ls "$d" 2>/dev/null); do cat "$d/$m"; echo ---; done | grep -v '^time: '
+}
+# Waits (up to 10 s) until branch $1 has $2 messages.
+until_told() { for _ in $(seq 100); do [ "$(notices "$1")" = "$2" ] && return 0; sleep 0.1; done; return 1; }
 # Waits long enough for a notice that should not come: two sync rounds and
 # a live tree.
 settle() { sleep 4; }
 # Commits what the workspace of $1 changed (`git commit -am`).
 commit_in() { G "$MNT/$1" commit -qam "$1" >/dev/null; }
-# Takes every message of branch $1 (deletes them).
-clear_inbox() { rm -f "$COMMON/gitfold/.tasks/$1/inbox"/[0-9]*; }
-# Opens the workspaces $@.
-open() { for b in "$@"; do ls "$MNT/$b" >/dev/null; done; }
+# Takes every message of the branches $@ (deletes them).
+clear_inbox() { for b in "$@"; do rm -f "$COMMON/gitfold/.tasks/$b/inbox"/[0-9]*; done; }
+# Opens the workspaces $@, and waits past their first sync, which only
+# records where they are.
+open() { for b in "$@"; do ls "$MNT/$b" >/dev/null; done; sleep 2; }
+# api, and ui built on it (made if it isn't yet; following api with --follow),
+# mounted, both open.
+api_ui() {
+    R branch api main
+    R rev-parse -q --verify refs/heads/ui >/dev/null || R branch ui main
+    built_on ui api
+    [ "${1:-}" = --follow ] || R config branch.ui.gitfoldFollow false
+    mount_fs
+    open api ui
+}
 
 notices_uncommitted_side() {
-R branch api main
-R branch ui main; built_on ui api
-mount_fs
-open api ui
+api_ui --follow
 echo ui >"$MNT/ui/a.txt"
-echo api >"$MNT/api/a.txt"
-sleep 2   # past the first sync, which only records
-commit_in api
+echo api >"$MNT/api/a.txt"; commit_in api
 short=$(R rev-parse --short api)
 text="from: gitfold
 subject: conflict: a.txt
@@ -315,14 +322,9 @@ eq "nothing moved" "$(R rev-parse main)" "$(R rev-parse ui)"
 }
 
 notices_committer_parents_uncommitted() {
-R branch api main
-R branch ui main; built_on ui api
-mount_fs
-open api ui
+api_ui --follow
 echo api >"$MNT/api/a.txt"
-echo ui >"$MNT/ui/a.txt"
-sleep 2
-commit_in ui
+echo ui >"$MNT/ui/a.txt"; commit_in ui
 short=$(R rev-parse --short ui)
 check "the parent, whose work is uncommitted, is told" until_told api 1
 check "so is the committer" until_told ui 1
@@ -332,14 +334,12 @@ eq "the same to both" "$(said api)" "$(said ui)"
 
 notices_siblings() {
 R branch shop main
-for b in api web; do R branch "$b" main; built_on "$b" shop; R config "branch.$b.gitfoldFollow" false; done
+R branch api main; commit_on web main $'d/b.txt=web\n'
+for b in api web; do built_on "$b" shop; R config "branch.$b.gitfoldFollow" false; done
 mount_fs
 open shop api web
-echo web >"$MNT/web/d/b.txt"; commit_in web
 echo web >"$MNT/web/a.txt"
-echo api >"$MNT/api/a.txt"; echo api >"$MNT/api/d/b.txt"
-sleep 2
-commit_in api
+echo api >"$MNT/api/a.txt"; echo api >"$MNT/api/d/b.txt"; commit_in api
 short=$(R rev-parse --short api)
 check "the sibling is told" until_told web 1
 check "the parent too" until_told shop 1
@@ -355,32 +355,22 @@ eq "the subject names the paths" "subject: conflict: a.txt, d/b.txt" "$(said sho
 }
 
 notices_both_committed_following() {
-R branch api main
-R branch ui main; built_on ui api
-mount_fs
-open api ui
-echo ui >"$MNT/ui/a.txt"; commit_in ui
-echo api >"$MNT/api/a.txt"
-sleep 2
-commit_in api
+commit_on ui main $'a.txt=ui\n'
+api_ui --follow
+echo api >"$MNT/api/a.txt"; commit_in api
 short=$(R rev-parse --short api)
 check "the committer is told" until_told api 1
 check "so is the other side" until_told ui 1
-eq "they land in the committer" "api committed $short; it conflicts with ui's committed a.txt, so the two will conflict when they land in api.
+eq "they land in the committer; the child is where it gets resolved" "api committed $short; it conflicts with ui's committed a.txt, so the two will conflict when they land in api.
 If it needs resolving, ui is built on api: that's where it gets resolved (following is paused on it)." "$(said api | sed '1,3d;$d')"
 }
 
 notices_once() {
-R branch api main
-R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
-mount_fs
-open api ui
+api_ui
 echo ui >"$MNT/ui/a.txt"
-echo api >"$MNT/api/a.txt"
-sleep 2
-commit_in api
+echo api >"$MNT/api/a.txt"; commit_in api
 check "told" until_told ui 1
-clear_inbox ui; clear_inbox api
+clear_inbox ui api
 echo api2 >"$MNT/api/a.txt"; commit_in api
 echo x >"$MNT/api/x.txt"; G "$MNT/api" add x.txt; commit_in api
 settle
@@ -400,52 +390,42 @@ commit_on ui main $'ui.txt=ui\n'; built_on ui api
 mount_fs
 open api web ui
 echo web >"$MNT/web/a.txt"
-echo api >"$MNT/api/a.txt"
-sleep 2
-commit_in api
+echo api >"$MNT/api/a.txt"; commit_in api
 check "web is told of api's commit" until_told web 1
-clear_inbox web; clear_inbox api
+clear_inbox web api
 check "ui follows api" until_ok R merge-base --is-ancestor api ui
 settle
 eq "ui moving onto api brings api's change: not told again" "0 0" "$(notices web) $(notices api)"
 }
 
 notices_not_for_the_parents_commits() {
-R branch api main
-for b in ui web; do R branch "$b" main; built_on "$b" api; R config "branch.$b.gitfoldFollow" false; done
-mount_fs
-open api ui web
+api_ui
+R branch web main; built_on web api; R config branch.web.gitfoldFollow false
+open web
 echo web >"$MNT/web/a.txt"
 echo ui >"$MNT/ui/ui.txt"; G "$MNT/ui" add ui.txt; commit_in ui
-echo api >"$MNT/api/a.txt"
-sleep 2
-commit_in api
+echo api >"$MNT/api/a.txt"; commit_in api
 check "web is told of api's commit" until_told web 1
-clear_inbox web; clear_inbox api
+clear_inbox web api
 G "$MNT/ui" rebase -q api
 settle
 eq "ui rebased onto api by hand: api's change isn't ui's" "0 0" "$(notices web) $(notices api)"
 echo web >"$MNT/web/d/b.txt"
 echo api >"$MNT/api/d/b.txt"; commit_in api
 check "web is told of api's next commit" until_told web 1
-clear_inbox web; clear_inbox api
+clear_inbox web api
 G "$MNT/ui" merge -q --no-edit api
 settle
 eq "nor ui merging api" "0 0" "$(notices web) $(notices api)"
 }
 
 notices_one_step() {
-R branch api main
-R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
-mount_fs
-open api ui
+api_ui
 echo ui >"$MNT/ui/a.txt"; echo ui >"$MNT/ui/d/b.txt"
-sleep 2
 commit_on two api $'a.txt=api\n'
 c1=$(R rev-parse two)
 commit_on two api $'d/b.txt=api\n'
-c2=$(R rev-parse two)
-R update-ref refs/heads/api "$c1"; R update-ref refs/heads/api "$c2"
+R update-ref refs/heads/api "$c1"; R update-ref refs/heads/api two
 check "told" until_told ui 1
 settle
 eq "once, for both commits" 1 "$(notices ui)"
@@ -453,61 +433,39 @@ eq "both paths" "subject: conflict: a.txt, d/b.txt" "$(said ui | sed -n 2p)"
 }
 
 notices_not_at_first_sync() {
-R branch api main
-R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
-mount_fs
-open api ui
+api_ui
 echo ui >"$MNT/ui/a.txt"
 unmount_fs
 commit_on api main $'a.txt=api\n'
 mount_fs
 open api ui
-settle
-eq "a commit made while unmounted: not told" "0 0" "$(notices ui) $(notices api)"
 echo api2 >"$MNT/api/d/b.txt"; echo ui >"$MNT/ui/d/b.txt"; G "$MNT/api" commit -qm api -- d/b.txt
-check "the next one is" until_told ui 1
+check "the next commit is told" until_told ui 1
+eq "not the one made while unmounted" "subject: conflict: d/b.txt" "$(said ui | sed -n 2p)"
 }
 
+# Each commit is checked after the one before: the last one told says what
+# those before did.
 notices_off() {
-R branch api main
-R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
+api_ui
 R config gitfold.conflictNotices false
-mount_fs
-open api ui
-echo ui >"$MNT/ui/a.txt"; echo api >"$MNT/api/a.txt"
-sleep 2
-commit_in api
-settle
-eq "off for the repository: no one told" "0 0" "$(notices ui) $(notices api)"
+echo ui >"$MNT/ui/a.txt"; echo api >"$MNT/api/a.txt"; commit_in api
+settle   # checked with the settings as they are then
 R config branch.ui.gitfoldConflictNotices true
 echo ui >"$MNT/ui/d/b.txt"; echo api >"$MNT/api/d/b.txt"; commit_in api
-check "on for one branch: it is told" until_told ui 1
-settle
-eq "the others aren't" 0 "$(notices api)"
-}
-
-notices_off_per_branch() {
-R branch api main
-R branch ui main; built_on ui api; R config branch.ui.gitfoldConflictNotices false; R config branch.ui.gitfoldFollow false
-mount_fs
-open api ui
-echo ui >"$MNT/ui/a.txt"; echo api >"$MNT/api/a.txt"
-sleep 2
-commit_in api
-check "the committer is told" until_told api 1
-settle
-eq "a branch set off isn't" 0 "$(notices ui)"
+check "on for one branch only: it is told" until_told ui 1
+eq "off for the repository: not before, and not the others" "subject: conflict: d/b.txt 0" "$(said ui | sed -n 2p) $(notices api)"
+R config --unset gitfold.conflictNotices; R config branch.ui.gitfoldConflictNotices false
+clear_inbox ui
+echo ui >"$MNT/ui/c.txt"; G "$MNT/ui" add c.txt; echo api >"$MNT/api/c.txt"; G "$MNT/api" add c.txt; commit_in api
+check "off for one branch: the others are told" until_told api 1
+eq "it isn't" 0 "$(notices ui)"
 }
 
 notices_binary() {
 printf 'bin\0ary\n' >"$REPO/b.dat"; R add b.dat; R commit -qm bin
-R branch api main
-R branch ui main; built_on ui api; R config branch.ui.gitfoldFollow false
-mount_fs
-open api ui
-printf 'ui\0\n' >"$MNT/ui/b.dat"; printf 'api\0\n' >"$MNT/api/b.dat"
-sleep 2
-commit_in api
+api_ui
+printf 'ui\0\n' >"$MNT/ui/b.dat"; printf 'api\0\n' >"$MNT/api/b.dat"; commit_in api
 check "a binary file" until_told ui 1
 check "named" grep -q "uncommitted b.dat" <(said ui)
 }
@@ -521,14 +479,11 @@ with_origin() {
 
 notices_without_parents() {
 with_origin
-R branch -q --no-track api origin/main; R branch -q --no-track web origin/main
+R branch -q --no-track api origin/main; commit_on web origin/main $'d/b.txt=web\n'
 mount_fs
 open api web
-echo web >"$MNT/web/d/b.txt"; commit_in web
 echo web >"$MNT/web/a.txt"
-echo api >"$MNT/api/a.txt"; echo api >"$MNT/api/d/b.txt"
-sleep 2
-commit_in api
+echo api >"$MNT/api/a.txt"; echo api >"$MNT/api/d/b.txt"; commit_in api
 short=$(R rev-parse --short api)
 check "the other branch without a parent is told" until_told web 1
 check "so is the committer" until_told api 1
@@ -548,17 +503,13 @@ R branch -q web main; built_on web main; R config branch.web.gitfoldFollow false
 mount_fs
 open main api web
 echo web >"$MNT/web/a.txt"
-echo api >"$MNT/api/a.txt"
-sleep 2
-commit_in api
-short=$(R rev-parse --short api)
+echo api >"$MNT/api/a.txt"; commit_in api
 check "a branch built on main is told" until_told web 1
 check "main too, where they land" until_told main 1
 check "and the committer" until_told api 1
 eq "the same to each" "$(said web)" "$(said main)"
-clear_inbox web; clear_inbox main; clear_inbox api
-echo main >"$MNT/main/d/b.txt"; echo api >"$MNT/api/d/b.txt"
-commit_in main
+clear_inbox web main api
+echo main >"$MNT/main/d/b.txt"; echo api >"$MNT/api/d/b.txt"; commit_in main
 check "main's own commit: the branch without a parent is told" until_told api 1
 eq "main is told too, once" 1 "$(notices main)"
 }
@@ -584,8 +535,7 @@ section "notices: not for gitfold's moves" notices_not_for_moves
 section "notices: not for the parent's commits" notices_not_for_the_parents_commits
 section "notices: several commits at once, one notice" notices_one_step
 section "notices: not at the first sync" notices_not_at_first_sync
-section "notices: off for the repository" notices_off
-section "notices: off for a branch" notices_off_per_branch
+section "notices: off for the repository, or for a branch" notices_off
 section "notices: a binary file" notices_binary
 section "notices: branches without a parent, siblings under main" notices_without_parents
 section "notices: a branch without a parent and one built on main" notices_without_a_parent_and_built_on_main
