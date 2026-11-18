@@ -2,6 +2,7 @@
 name = "gitfold"
 version = "0.4.1"
 edition = "2024"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1.0.104"
