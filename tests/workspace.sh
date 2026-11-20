@@ -174,6 +174,11 @@ eq "write-only mode kept" 200 "$(stat -c %a "$W/wo")"
 eq "the lifted mode is never visible to others" "0 444" \
     "$(perl "$TESTS/race-modes.pl" "$W/race")"
 chmod 644 "$W/wo" "$W/race"; rm "$W/wo" "$W/race"
+for m in delete create rename; do
+    eq "a listing read while entries are ${m}d: each other entry once" "0 0" \
+        "$(perl "$TESTS/readdir-stable.pl" "$W/readdir-$m" "$m")"
+    rm -r "$W/readdir-$m"
+done
 
 echo "== names and protection"
 check "branch with slash" test -d "$MNT/feature/x/core"

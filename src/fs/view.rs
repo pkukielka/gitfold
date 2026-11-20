@@ -10,6 +10,7 @@ use gix::objs::tree::EntryKind;
 use log::error;
 
 use super::GitFold;
+use super::offsets;
 use super::views::{Item, ViewDir};
 use super::workspace::{GITFILE_LOCAL, Obj, Read, TASKLINK_LOCAL, Workspace};
 use super::workspaces::Slot;
@@ -292,7 +293,7 @@ impl GitFold {
     ) -> Result<(), Errno> {
         let dots = [(ino.0, &b"."[..]), (inode::ROOT, &b".."[..])];
         match decode(ino.0)? {
-            Ino::Root => self.emit_names("", dots, offset, emit),
+            Ino::Root => self.emit_names("", ino.0, offset, emit),
             Ino::Dir { slot, dir } => {
                 let rec = self.snapshots.dir_rec(slot, dir)?;
                 let table = self.store.tree(rec.tree);
@@ -302,7 +303,7 @@ impl GitFold {
                 self.emit_entries(dots.into_iter().chain(entries).chain(gitfile), offset, emit)
             }
             Ino::Ws { slot, local } => match self.ws_node(slot, local)? {
-                WsNode::Namespace(prefix) => self.emit_names(&prefix, dots, offset, emit),
+                WsNode::Namespace(prefix) => self.emit_names(&prefix, ino.0, offset, emit),
                 WsNode::Entry(ws, _) => self.emit_ws(&ws, slot, local, offset, plus, emit),
                 WsNode::GitFile(_) | WsNode::TaskLink(_) => Err(Errno::ENOTDIR),
             },
@@ -326,26 +327,19 @@ impl GitFold {
     ) -> Result<(), Errno> {
         let ino = |local: u64| inode::view(view.slot, local);
         let listing = view.listing(&self.store, local)?;
-        let total = 2 + listing.entries.len() as u64;
-        if offset >= total {
+        if offset >= end(&listing.entries, offsets::DOTDOT) {
             // The kernel's closing request past the end.
             view.listed(local);
             return Ok(());
         }
-        if offset < 2 {
-            let dots = [(ino(local), &b"."[..]), (inode::ROOT, &b".."[..])];
-            for (i, (ino, name)) in dots.into_iter().enumerate().skip(offset as usize) {
-                if emit(i as u64 + 1, ino, name, self.attr(ino)?) {
-                    return Ok(());
-                }
-            }
+        if self.emit_fixed(&dots(ino(local)), offset, &mut emit)? {
+            return Ok(());
         }
-        let first = (offset as usize).saturating_sub(2);
-        for (j, (name, obj)) in listing.entries.iter().enumerate().skip(first) {
+        for (off, name, obj) in offsets::after(&listing.entries, offset) {
             let (child, item) = view.entry(&listing, local, name, obj, plus);
             let full = self
                 .view_attr(ino(child), &item)
-                .map(|attr| emit(j as u64 + 3, ino(child), name, attr));
+                .map(|attr| emit(*off, ino(child), name, attr));
             if !matches!(full, Ok(false)) {
                 if plus {
                     view.forget(child, 1);
@@ -361,15 +355,23 @@ impl GitFold {
     fn emit_names(
         &self,
         prefix: &str,
-        dots: [(u64, &[u8]); 2],
+        dot: u64,
         offset: u64,
-        emit: impl FnMut(u64, u64, &[u8], FileAttr) -> bool,
+        mut emit: impl FnMut(u64, u64, &[u8], FileAttr) -> bool,
     ) -> Result<(), Errno> {
         let mut names = self.snapshots.children(prefix);
         names.extend(self.workspaces.children(prefix));
         names.extend(self.views.children(prefix));
-        let entries = names.iter().map(|(ino, name)| (*ino, name.as_slice()));
-        self.emit_entries(dots.into_iter().chain(entries), offset, emit)
+        let names = offsets::order(names.into_iter().map(|(ino, name)| (name, ino)).collect());
+        if self.emit_fixed(&dots(dot), offset, &mut emit)? {
+            return Ok(());
+        }
+        for (off, name, ino) in offsets::after(&names, offset) {
+            if emit(*off, *ino, name, self.attr(*ino)?) {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn emit_ws(
@@ -381,44 +383,31 @@ impl GitFold {
         plus: bool,
         mut emit: impl FnMut(u64, u64, &[u8], FileAttr) -> bool,
     ) -> Result<(), Errno> {
-        // Before `page` takes the workspace lock: the directory's own attributes
-        // take it too (parking_lot read locks don't nest while a writer waits).
-        let dot = inode::ws(slot, local);
-        let dots = [
-            (dot, &b"."[..], self.attr(dot)?),
-            (inode::ROOT, &b".."[..], self.attr(inode::ROOT)?),
-        ];
-        // The root's virtual entries, after its listing: `.git`, the task link.
-        let mut virtuals = Vec::new();
+        // `.`, `..` and the root's virtual entries (`.git`, the task link) come
+        // first, so they're sent before `page` takes the workspace lock: their
+        // attributes take it too (parking_lot read locks don't nest while a
+        // writer waits).
+        let mut fixed = dots(inode::ws(slot, local)).to_vec();
         if local == 0 {
-            virtuals.push((inode::ws(slot, GITFILE_LOCAL), b".git".to_vec()));
+            fixed.push((offsets::GITFILE, inode::ws(slot, GITFILE_LOCAL), b".git"));
             if let Some(name) = ws.task_name() {
-                virtuals.push((inode::ws(slot, TASKLINK_LOCAL), name.to_vec()));
+                fixed.push((offsets::TASKLINK, inode::ws(slot, TASKLINK_LOCAL), name));
             }
         }
-        let virtuals = virtuals
-            .into_iter()
-            .map(|(ino, name)| Ok((ino, name, self.attr(ino)?)))
-            .collect::<Result<Vec<_>, Errno>>()?;
+        if self.emit_fixed(&fixed, offset, &mut emit)? {
+            return Ok(());
+        }
+        let last_fixed = fixed.last().map_or(0, |f| f.0);
         ws.page(&self.store, local, |page| -> Result<(), Errno> {
             let entries = &page.listing.entries;
-            let total = (dots.len() + entries.len() + virtuals.len()) as u64;
-            if offset >= total {
+            if offset >= end(entries, last_fixed) {
                 // The kernel's closing request past the end: it won't page this
                 // listing again. (Dropping it after the last full page would make
                 // this request rebuild it.)
                 page.done();
                 return Ok(());
             }
-            let skip = offset as usize;
-            for (i, (ino, name, attr)) in dots.iter().enumerate().skip(skip) {
-                if emit(i as u64 + 1, *ino, name, *attr) {
-                    return Ok(());
-                }
-            }
-            let first = skip.saturating_sub(dots.len());
-            for (j, (name, entry)) in entries.iter().enumerate().skip(first) {
-                let i = dots.len() + j;
+            for (off, name, entry) in offsets::after(entries, offset) {
                 // Readdirplus entries count as kernel references, so the node is
                 // claimed (and given back if the entry doesn't fit); plain readdir
                 // only needs an id.
@@ -431,7 +420,7 @@ impl GitFold {
                 let full = page
                     .obj(name, entry)
                     .and_then(|obj| self.obj_attr(ino, &obj))
-                    .map(|attr| emit(i as u64 + 1, ino, name, attr));
+                    .map(|attr| emit(*off, ino, name, attr));
                 if !matches!(full, Ok(false)) {
                     if plus {
                         page.give_back(child);
@@ -439,15 +428,24 @@ impl GitFold {
                     return full.map(drop);
                 }
             }
-            let first = skip.saturating_sub(dots.len() + entries.len());
-            for (k, (ino, name, attr)) in virtuals.iter().enumerate().skip(first) {
-                let i = dots.len() + entries.len() + k;
-                if emit(i as u64 + 1, *ino, name, *attr) {
-                    return Ok(());
-                }
-            }
             Ok(())
         })?
+    }
+
+    /// Emits the fixed entries after `offset`, looking up only their
+    /// attributes; whether the reply is full.
+    fn emit_fixed(
+        &self,
+        fixed: &[Fixed],
+        offset: u64,
+        emit: &mut impl FnMut(u64, u64, &[u8], FileAttr) -> bool,
+    ) -> Result<bool, Errno> {
+        for &(off, ino, name) in fixed.iter().filter(|f| f.0 > offset) {
+            if emit(off, ino, name, self.attr(ino)?) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn emit_entries<'a>(
@@ -536,4 +534,23 @@ impl GitFold {
             _ => Err(Errno::EROFS),
         }
     }
+}
+
+/// An entry every listing of a directory has, at a fixed offset: offset,
+/// inode, name (see `offsets`).
+type Fixed<'a> = (u64, u64, &'a [u8]);
+
+/// The offset of a listing's last entry, of those at `entries` or else the
+/// last fixed one at `fixed`: a request at or past it is the kernel's closing
+/// one.
+fn end<T>(entries: &[offsets::Entry<T>], fixed: u64) -> u64 {
+    entries.last().map_or(fixed, |e| e.0)
+}
+
+/// `.` (directory `dot`) and `..` (listed as the root, as everywhere here).
+fn dots(dot: u64) -> [Fixed<'static>; 2] {
+    [
+        (offsets::DOT, dot, b"."),
+        (offsets::DOTDOT, inode::ROOT, b".."),
+    ]
 }

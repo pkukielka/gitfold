@@ -19,6 +19,7 @@ use super::merge::Private;
 use super::shown::{Changed, Obj, Shown};
 use super::watch::{self, Trees, Watch};
 use crate::fs::NameChanges;
+use crate::fs::offsets;
 use crate::fs::workspace::nodes::Nodes;
 use crate::fs::workspaces::Workspaces;
 use crate::inode;
@@ -203,12 +204,13 @@ impl Item {
     }
 }
 
-/// A directory's entries, kept while the kernel pages through them.
+/// A directory's entries with their readdir offsets, in offset order (see
+/// `offsets`), kept while the kernel pages through them.
 pub struct Listing {
     /// What they were listed from.
     shown: Arc<Shown>,
     pub dir: Vec<u8>,
-    pub entries: Vec<(Vec<u8>, Obj)>,
+    pub entries: Vec<offsets::Entry<Obj>>,
 }
 
 /// One served view.
@@ -313,7 +315,7 @@ impl ViewDir {
         }
         let dir = self.path(local)?;
         let entries = match shown.list(store, &dir) {
-            Some(entries) => entries,
+            Some(entries) => offsets::order(entries),
             None if shown.obj(store, &dir).is_none() => return Err(Errno::ENOENT),
             None => return Err(Errno::ENOTDIR),
         };
