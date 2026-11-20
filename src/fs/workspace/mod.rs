@@ -44,6 +44,7 @@ use fuser::Errno;
 use gix::ObjectId;
 use parking_lot::{Mutex, RwLock};
 
+use crate::fs::offsets;
 use crate::fs::views::Step;
 use crate::fsutil::not_found;
 use crate::git;
@@ -145,12 +146,12 @@ struct Layers {
     times: Times,
 }
 
-/// A directory listing: the directory's path and its merged entries, sorted by
-/// name. Entries carry no local ids: nodes are claimed only for entries the
-/// kernel actually receives (see `nodes`).
+/// A directory listing: the directory's path and its merged entries with their
+/// readdir offsets, in offset order (see `offsets`). Entries carry no local ids:
+/// nodes are claimed only for entries the kernel actually receives (see `nodes`).
 pub struct Listing {
     dir: Vec<u8>,
-    pub entries: Vec<(Vec<u8>, ListEntry)>,
+    pub entries: Vec<offsets::Entry<ListEntry>>,
 }
 
 /// A listing entry. Upper entries are stat-ed when served, not when listed, so
@@ -413,7 +414,7 @@ impl Workspace {
             Some((g, listing)) if g == generation => listing,
             _ => {
                 let dir = self.path(local)?;
-                let entries = self.entries(store, &layers, &dir)?;
+                let entries = offsets::order(self.entries(store, &layers, &dir)?);
                 let listing = Arc::new(Listing { dir, entries });
                 self.listings
                     .lock()
@@ -429,7 +430,7 @@ impl Workspace {
         }))
     }
 
-    /// The merged entries of directory `path`, sorted by name.
+    /// The merged entries of directory `path`, in no particular order.
     fn entries(
         &self,
         store: &Store,
@@ -471,7 +472,6 @@ impl Workspace {
                 entries.push((name.to_vec(), entry));
             }
         }
-        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Ok(entries)
     }
 

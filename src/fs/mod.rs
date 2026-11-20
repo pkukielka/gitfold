@@ -22,12 +22,14 @@
 //! - `workspace`: one workspace: lower/upper merged view and its mutations.
 //! - `content`: content kept between the reads of one file.
 //! - `names`: telling the kernel when names in the root or a namespace changed.
+//! - `offsets`: readdir offsets that stay valid while a directory changes.
 //! - `removal`: removing a workspace or snapshot while mounted.
 //! - `stats`: operation counters.
 //! - `views`: the read-only views of a branch and those built on it.
 
 mod content;
 mod names;
+mod offsets;
 mod removal;
 mod snapshots;
 mod stats;

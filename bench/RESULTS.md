@@ -870,3 +870,50 @@ Notes:
   parent, because the bench clone's checkout is on main and isn't moved; a main branch commit
   is checked against the same set (main's view, the branches without a parent and what is
   built on them), so it costs the same.
+
+## 2026-11-20, Linux kernel builds, and readdir offsets
+
+`bench/kbuild.sh` on the Linux kernel (21a7f44fd076, 97,203 files) in a native `git worktree`
+and in a gitfold workspace of the same commit, same ext4 disk, 24 threads, GCC 15.3 from `nix
+develop nixpkgs#linux`; `allmodconfig` with `WERROR` and `RUST` off. One run each (the no-op
+two, alternating), seconds:
+
+| | native | gitfold |
+|---|---:|---:|
+| new worktree / workspace | 3.5 (1.8 GB) | 0.19 (nothing) |
+| `defconfig` full build | 103.0 | 107.2 (+4%) |
+| `defconfig` no-op | 1.53 | 1.64 (+7%) |
+| `defconfig` incremental (`kernel/fork.c` touched) | 11.0 | 14.2 (+29%) |
+| `defconfig` `git status` after | 0.28 | 0.13 |
+| `allmodconfig` full build | 1,523 | 1,562 (+2.5%) |
+| `allmodconfig` no-op | 24.0 | 25.2 (+5%) |
+| `allmodconfig` incremental | 54.8 | 60.8 (+11%) |
+| `allmodconfig` `git status` after | 0.25 | 0.20 |
+| `allmodconfig` disk after | 13 GB | 12 GB (upper) |
+
+Notes:
+
+- **Compiling barely notices gitfold; linking does.** Full builds are CPU-bound and sources
+  read from the object store keep up (+2.5-4%). Incremental builds are mostly relinking
+  `vmlinux` (240 MB with `allmodconfig`), written through FUSE: +11-29%, as with cargo (see
+  "builds in a workspace").
+- **Disk:** the workspace stores the build output only; with `allmodconfig` its 11 GB of objects
+  dwarf the 1.8 GB checkout a worktree adds.
+- **The first `allmodconfig` builds in a workspace failed**, twice, at the module link
+  (`No rule to make target 'drivers/rtc/rtc-pcf8563.ko'`), the file make needed being there.
+  make reads a directory lazily while parallel jobs create and delete temporary files in it;
+  readdir offsets were entry positions, so each name removed before the reader's position made
+  it skip an unrelated one. `tests/readdir-stable.pl` reproduces it in under a second (100
+  entries missing of 2,900 after deleting 100 already read; 100 seen twice after creating 100
+  that sort first). Offsets are now name hashes (`src/fs/offsets.rs`); the `allmodconfig` full
+  build above is with that fix. Its no-op and incremental rows were measured before it, on the
+  tree the failed build left and a later one completed; the fix changes a listing's cost by
+  microseconds (below).
+- **Listing cost of the fix** (`cargo test --release offsets::tests::bench -- --ignored
+  --nocapture`, old vs new): building a 7,500-entry listing 374 → 296 µs (hashes sort faster
+  than names; foldhash 1.6 ns a name, FNV-1a and SipHash ~6), serving all its pages 2.1 → 9.4
+  µs (a binary search per page instead of an index).
+- **On NixOS,** `nix develop nixpkgs#linux` exports the package's `modules` output path as an
+  environment variable; make then passes the kernel's own 381 KB `modules` list to every
+  command, past Linux's 128 KiB per string (`Argument list too long` at the module link).
+  `bench/kbuild.sh` unsets it.

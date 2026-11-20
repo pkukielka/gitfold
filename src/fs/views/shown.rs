@@ -142,7 +142,8 @@ impl Shown {
         store.entry_at(self.tree, path).map(Obj::of)
     }
 
-    /// The entries of directory `dir`, sorted by name; `None` if it isn't one.
+    /// The entries of directory `dir`, in no particular order; `None` if it
+    /// isn't one.
     pub fn list(&self, store: &Store, dir: &[u8]) -> Option<Vec<(Vec<u8>, Obj)>> {
         let tree = match store.entry_at(self.tree, dir)? {
             Lower::Tree(tree) => tree,
@@ -150,13 +151,15 @@ impl Shown {
             Lower::File(_) => return None,
         };
         let table = store.tree(tree);
-        let mut out: BTreeMap<Vec<u8>, Obj> = (table.entries().iter())
+        let mut out: Vec<_> = (table.entries().iter())
             .map(|e| (table.name(e).to_vec(), Obj::of(Lower::of(e))))
             .collect();
         if dir.is_empty() {
-            out.insert(SUMMARY.to_vec(), Obj::Summary(self.summary.clone()));
+            // The summary replaces a committed file of its name.
+            out.retain(|(name, _)| name != SUMMARY);
+            out.push((SUMMARY.to_vec(), Obj::Summary(self.summary.clone())));
         }
-        Some(out.into_iter().collect())
+        Some(out)
     }
 
     /// When `path` last changed.
@@ -241,8 +244,9 @@ mod tests {
         store.load_tree(tip(c).tree).unwrap()
     }
 
+    /// The names listed, sorted (`list` is in no particular order).
     fn names(list: Option<Vec<(Vec<u8>, Obj)>>) -> Vec<String> {
-        (list.unwrap().into_iter())
+        let mut names: Vec<_> = (list.unwrap().into_iter())
             .map(|(n, o)| {
                 let n = String::from_utf8(n).unwrap();
                 match o {
@@ -250,7 +254,9 @@ mod tests {
                     _ => n,
                 }
             })
-            .collect()
+            .collect();
+        names.sort();
+        names
     }
 
     #[test]

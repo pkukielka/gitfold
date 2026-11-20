@@ -492,6 +492,7 @@ dependencies = [
  "anyhow",
  "clap",
  "env_logger",
+ "foldhash 0.2.0",
  "fuser",
  "gix",
  "imara-diff",
