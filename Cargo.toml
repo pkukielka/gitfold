@@ -2,6 +2,8 @@
 name = "gitfold"
 version = "0.5.1"
 edition = "2024"
+# The newest any dependency needs (rable); README "Requirements".
+rust-version = "1.93"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

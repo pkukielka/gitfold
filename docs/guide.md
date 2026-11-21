@@ -14,8 +14,9 @@ any checkout. This guide walks through the situations where that pays off.
 For every command and option, see the [README](../README.md); for the advice
 gitfold gives agents, the [skill](../skills/gitfold/SKILL.md).
 
-The examples use a small repository, `shop`, cloned at `~/src/shop` and
-mounted at `~/mnt/shop`:
+To install gitfold (or its Claude Code plugin), see the README's [Quick
+start](../README.md#quick-start). The examples use a small repository, `shop`,
+cloned at `~/src/shop` and mounted at `~/mnt/shop`:
 
 ```
 $ mkdir -p ~/mnt/shop
@@ -44,7 +45,7 @@ bug, add search, refresh the docs.
 
 **With plain git**, each agent needs its own checkout. On a big repository
 every `git worktree add` copies the whole tree: on Chromium that is 17
-seconds and 5.5 GB each, before the agent has read a line.
+seconds and 5.5 GiB each, before the agent has read a line.
 
 **With gitfold**, create a branch per task and open its folder:
 
@@ -200,7 +201,7 @@ commits you have pushed without asking, and leaves conflicts to you.
 ## 3. Keeping an eye on a team
 
 **The situation.** A lead agent (or you) owns a feature branch, `checkout`.
-Two sub-agents work on it: `checkout-api` and `checkout-ui`. You want to see
+Two subagents work on it: `checkout-api` and `checkout-ui`. You want to see
 the feature as a whole while they work, and catch collisions before anyone
 merges.
 
@@ -215,6 +216,7 @@ $ gitfold branch checkout-api --parent checkout
 $ gitfold branch checkout-ui --parent checkout
 ```
 
+The lead works in `~/mnt/shop/checkout/`, each subagent in its own folder.
 Then read the feature through a view. `~/mnt/shop/@live/checkout/` is
 `checkout` merged with every branch built on it, uncommitted work included,
 and kept up to date as they write. `@committed/checkout/` is the same with
@@ -263,8 +265,8 @@ since it started?
 
 **Told without looking.** You don't have to keep reading the views: when a
 commit in one workspace conflicts with another's work, gitfold leaves a
-message in the inboxes of everyone involved, both sides and the branch they
-land in. When `checkout-api` commits its `README.md`:
+message in the inboxes of everyone involved: both sides, and the branch they
+land in if it has a workspace. When `checkout-api` commits its `README.md`:
 
 ```
 $ gitfold inbox checkout-ui
@@ -276,8 +278,8 @@ checkout-api committed 0724067; it conflicts with checkout-ui's uncommitted READ
 If it needs resolving, checkout-ui's change is the one still open, so that's the cheapest place to adjust.
 ```
 
-`checkout-api` and `checkout` get the same message; with Claude Code, it
-arrives in each agent's conversation by itself, and wakes an idle one. A
+`checkout-api` and the lead's `checkout` get the same message; with Claude
+Code, it arrives in each agent's conversation by itself, and wakes an idle one. A
 notice only informs: whether it matters (not for a throwaway workspace, say)
 is for the agents, or for you. Who is told, the hint and the settings: see
 [the README](../README.md#branches-built-on-branches).
