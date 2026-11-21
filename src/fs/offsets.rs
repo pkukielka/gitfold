@@ -152,7 +152,11 @@ mod tests {
         let listing = order(names(10_000).into_iter().map(|n| (n, ())).collect());
         assert!(listing.windows(2).all(|w| w[0].0 < w[1].0));
         assert!(listing[0].0 >= FIRST && listing.last().unwrap().0 < 1 << 63);
-        assert!(names(1000).iter().all(|n| (of(n) - FIRST).is_multiple_of(SLOTS)));
+        assert!(
+            names(1000)
+                .iter()
+                .all(|n| (of(n) - FIRST).is_multiple_of(SLOTS))
+        );
     }
 
     /// `names` ordered with `offset`, as (offset, name).
@@ -225,6 +229,7 @@ mod tests {
     /// --ignored --nocapture`
     #[test]
     #[ignore]
+    #[allow(clippy::print_stdout)]
     fn bench() {
         for n in [100, 1_000, 7_500, 100_000] {
             let input: Vec<(Vec<u8>, u32)> = names(n).into_iter().zip(0..).collect();
