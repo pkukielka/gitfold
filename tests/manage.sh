@@ -35,6 +35,24 @@ eq "from inside a workspace" "$L" "$(cd "$W1/d" && "$BIN" list 2>&1)"
 eq "-C after the command too" "$L" "$("$BIN" list -C "$REPO" 2>&1)"
 check "outside any repository, an error naming the directory" sh -c "cd / && '$BIN' list 2>&1 | grep -q 'no git repository at or above /$'"
 eq "from inside .git" "$L" "$(cd "$REPO/.git" && "$BIN" list 2>&1)"
+# Into a pipe nobody reads any more (`| head` done): exit 141, as a shell
+# reports for git, with nothing said (it used to panic), and cleaned up after.
+closed_pipe() { # command...: its exit code, then what it said on stderr
+    perl -e 'pipe(R, W) or die; close R; open(STDOUT, ">&W") or die; exec @ARGV' "$@" 2>"$T/pipe.err"
+    echo "$? $(cat "$T/pipe.err")"
+}
+eq "list into a closed pipe: ended quietly, as git" "141 " "$(closed_pipe "$BIN" -C "$REPO" list)"
+eq "changes too" "141 " "$(closed_pipe "$BIN" -C "$REPO" changes agent/one)"
+eq "with -z too (no newline to flush it)" "141 " "$(closed_pipe "$BIN" -C "$REPO" changes -z agent/one)"
+mkdir "$T/tmp"
+eq "changes -- PATH too" "141 " "$(TMPDIR=$T/tmp closed_pipe "$BIN" -C "$REPO" changes -- a.txt)"
+eq "leaving no temporary index behind" "" "$(ls -A "$T/tmp")"
+out=$(closed_pipe "$BIN" -C "$REPO" changes no/such)
+eq "a refusal keeps its exit code" 3 "${out%% *}"
+out=$(closed_pipe "$BIN" -C "$REPO" branch piped --from agent/one --from two)
+eq "a branch of two, merged by git, made all the same (git's output on stderr)" \
+    "141 $(R rev-parse agent/one)" "${out%% *} $(R rev-parse piped^1)"
+"$BIN" -C "$REPO" remove --force piped >/dev/null; R branch -D -q piped
 EXPECT=$(printf 'M\ta.txt\nD\td/b.txt\nA\tnew.txt')
 eq "changes while mounted: modified, deleted, added, by path" "$EXPECT" "$("$BIN" -C "$REPO" changes agent/one 2>&1)"
 eq "--stat: lines added and removed, and git's summary" "M	1	0	a.txt

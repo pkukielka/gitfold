@@ -213,12 +213,12 @@ pub fn mount(args: MountArgs) -> Result<()> {
         settings::set_mountpoint(&common_dir, &mountpoint, &args.flags())
     };
     let recorded = record();
-    println!(
+    outln!(
         "mounted at {} (log: {})",
         mountpoint.display(),
         log.display()
-    );
-    println!("unmount with: gitfold unmount {}", mountpoint.display());
+    )?;
+    outln!("unmount with: gitfold unmount {}", mountpoint.display())?;
     // Mounted all the same, but not to be mounted again by itself.
     recorded.context(
         "the mount is up, but recording its mount point and flags in the git config failed: \
@@ -292,7 +292,7 @@ fn start(mountpoint: &Path, log: &Path) -> Result<()> {
 /// daemon's. Returns the exit code: 0 the same build, 3 another build
 /// (remount to upgrade), 4 a daemon too old to tell, 5 no answer (busy).
 pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
-    println!("gitfold {}", crate::VERSION);
+    outln!("gitfold {}", crate::VERSION)?;
     let Some(mountpoint) = mountpoint else {
         return Ok(0);
     };
@@ -301,7 +301,7 @@ pub fn version(mountpoint: Option<&Path>) -> Result<i32> {
     let answer = control::request(&common_dir, &control::Request::Version, Some(WAIT));
     let (code, message) = match answer {
         Ok(Some(daemon)) => {
-            println!("daemon {daemon}");
+            outln!("daemon {daemon}")?;
             if daemon == crate::VERSION {
                 return Ok(0);
             }
@@ -390,20 +390,18 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
                  last process using it leaves (`cd` out)"
             )));
         }
-        println!("{shown} is in use: detached it; waiting for gitfold to exit once these leave:");
+        outln!("{shown} is in use: detached it; waiting for gitfold to exit once these leave:")?;
         for u in &users {
-            println!("  {u}");
+            outln!("  {u}")?;
         }
         if users.is_empty() {
-            println!(
-                "  (none visible here: in another mount namespace, a container or a sandbox?)"
-            );
+            outln!("  (none visible here: in another mount namespace, a container or a sandbox?)")?;
         }
-        println!("Close them or `cd` out; Ctrl-C is safe: gitfold still exits once they leave.");
+        outln!("Close them or `cd` out; Ctrl-C is safe: gitfold still exits once they leave.")?;
     }
     // The daemon holds the lock of its repository until it has exited.
     if !common_dir.is_dir() {
-        println!("unmounted {shown} (can't tell when gitfold exits: {source} not found)");
+        outln!("unmounted {shown} (can't tell when gitfold exits: {source} not found)")?;
         return Ok(());
     }
     let started = Instant::now();
@@ -412,19 +410,19 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
     while crate::lock::lock(&common_dir)?.is_none() {
         let waited = started.elapsed();
         if told == 0 && waited > Duration::from_secs(2) {
-            println!("waiting for gitfold to exit (bringing workspace bases up to date)...");
+            outln!("waiting for gitfold to exit (bringing workspace bases up to date)...")?;
             told = 1;
         } else if told == 1 && waited > Duration::from_secs(15) {
-            println!(
+            outln!(
                 "still waiting: the repository is locked. The mount may still be in use in \
                  another mount namespace (a container, a sandbox), or a `gitfold remove` or \
                  `prune` holds the lock. It is unmounted here; Ctrl-C is safe."
-            );
+            )?;
             told = 2;
         }
         sleep(Duration::from_millis(50));
     }
-    println!("unmounted {shown}");
+    outln!("unmounted {shown}")?;
     Ok(())
 }
 

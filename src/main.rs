@@ -1,3 +1,5 @@
+#[macro_use]
+mod out;
 mod bench;
 mod cli;
 mod daemon;
@@ -217,7 +219,11 @@ const LONG_VERSION: &str = env!("GITFOLD_LONG_VERSION");
 
 fn main() -> std::process::ExitCode {
     let code = match run() {
+        // Done, but its reader went away (`| head`): as git, 141, saying
+        // nothing (see `out`). Any other result stands.
+        Ok(0) if out::gone() => out::CLOSED_EXIT,
         Ok(code) => code,
+        Err(e) if out::closed(&e) => out::CLOSED_EXIT,
         Err(e) if e.is::<cli::tree::Usage>() => {
             eprintln!("{e}");
             2

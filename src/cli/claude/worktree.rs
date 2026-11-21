@@ -83,7 +83,7 @@ pub fn worktree_create() -> Result<()> {
             path
         }
     };
-    println!("{}", path.display());
+    outln!("{}", path.display())?;
     Ok(())
 }
 

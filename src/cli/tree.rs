@@ -120,26 +120,26 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
         // too.
         settings::forget_parent(&common_dir, &name)?;
         match parent {
-            Some(parent) => println!("{name} no longer has a parent (it was {parent})"),
-            None => println!("{}", show(&tree, &name, None)),
+            Some(parent) => outln!("{name} no longer has a parent (it was {parent})")?,
+            None => outln!("{}", show(&tree, &name, None))?,
         }
     } else if args.follow || args.no_follow {
         let parent = parent.expect("check_follow: a branch with a parent (F6)");
         // Written even if unchanged: a malformed value is replaced.
         settings::set_follow(&common_dir, &name, args.follow)?;
         match args.follow {
-            true => println!("{name} follows {parent}"),
-            false => println!("{name} doesn't follow {parent}"),
+            true => outln!("{name} follows {parent}")?,
+            false => outln!("{name} doesn't follow {parent}")?,
         }
     } else {
-        println!("{}", show(&tree, &name, parent));
+        outln!("{}", show(&tree, &name, parent))?;
         // A pause of following, only while it follows.
         let paused = match tree.follows(&name) {
             true => paused(&common_dir, &tree, &name),
             false => Ok(None),
         };
         match paused {
-            Ok(Some((_, full))) => println!("{full}"),
+            Ok(Some((_, full))) => outln!("{full}")?,
             Ok(None) => {}
             Err(e) => log::warn!("{name}: whether it can take its parent's commits: {e:#}"),
         }
@@ -150,7 +150,7 @@ pub fn parent(repo: &Path, args: ParentArgs) -> Result<()> {
                 let gone = tree.parent_gone(&name);
                 let parent = tree.parent(&name).expect("landed: a parent");
                 let itself = !gone && tree.follows(&name) && tree.root_refs().contains(&to);
-                println!("{}", landed_hint(&name, parent, &to, gone, itself));
+                outln!("{}", landed_hint(&name, parent, &to, gone, itself))?;
             }
             Ok(None) => {}
             Err(e) => log::warn!("{name}: whether its parent landed: {e:#}"),
@@ -289,7 +289,7 @@ fn update(common_dir: &Path, name: &str, yes: bool) -> Result<()> {
     let moving = |moves| movable(common_dir, name, true, moves, &plan.by_hand(short));
     match plan.run(common_dir, yes, moving)? {
         follow::Moved::UpToDate => {
-            println!("{name} is up to date with {short}");
+            outln!("{name} is up to date with {short}")?;
             Ok(())
         }
         moved => said(name, short, &plan, moved, None),
@@ -308,14 +308,14 @@ fn update_auto(common_dir: &Path, name: &str) -> Result<()> {
     match follow_once(common_dir, name, &tree) {
         Followed::Nothing => Ok(()),
         Followed::Moved(took) | Followed::Landed(took) => {
-            print!("{}", took.said);
+            out!("{}", took.said)?;
             match took.unresolved {
                 Some(unresolved) => Err(Refusal::Changes.error(unresolved)),
                 None => Ok(()),
             }
         }
         Followed::Noted(said) => {
-            println!("{said}");
+            outln!("{said}")?;
             Ok(())
         }
         Followed::Paused { full, refusal, .. } => {
@@ -638,7 +638,7 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         if let Some(on) = follow {
             settings::set_follow(common_dir, name, on)?;
         }
-        println!("{name} is built on {short} already");
+        outln!("{name} is built on {short} already")?;
         return Ok(());
     }
     let old = tree.parent(name).map(String::from);
@@ -676,7 +676,10 @@ fn set(common_dir: &Path, name: &str, given: &str, follow: Option<bool>) -> Resu
         .run(common_dir, false, |moves| {
             movable(common_dir, name, true, moves, &plan.by_hand(short))
         })
-        .inspect_err(|_| println!("{built}"))?;
+        // Said even when refused; the refusal, not a failed print, is the result.
+        .inspect_err(|_| {
+            let _ = outln!("{built}");
+        })?;
     let paused = match follow.unwrap_or(true) {
         true => "; following paused",
         false => "",
@@ -710,7 +713,7 @@ fn said(
 ) -> Result<()> {
     let mut out = String::new();
     let result = said_to(&mut out, name, parent, plan, moved, built);
-    print!("{out}");
+    out!("{out}")?;
     result
 }
 

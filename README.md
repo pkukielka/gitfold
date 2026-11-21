@@ -216,6 +216,9 @@ daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
 `inbox --claude-hook rewake` (2, to wake the session), and `inbox --wait
 --timeout` and `watch --timeout` (124 if the time runs out first, as GNU
 `timeout`; nothing printed).
+A command whose output's reader has gone (`gitfold list | head`) does what
+it would have and says nothing more: it exits 141, as a shell reports for
+git, unless it would have exited with another code (that one, then).
 A command that did only part of what was asked doesn't exit 0: it says what
 it did and what it didn't, and exits 1 (unless said): `mount` up but its mount
 point not recorded, `unmount` run from inside the mount that could only
