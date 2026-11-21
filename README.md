@@ -35,6 +35,26 @@ New here? Start with the [user guide](docs/guide.md).
   its new commits by itself, and read-only views show a branch merged with
   everything built on it, uncommitted work included.
 
+## How it differs
+
+- **`git worktree`** writes every file of every checkout; gitfold writes none
+  and stores only what you change, at the cost of writes through FUSE.
+- **Sparse checkout and partial clone** make a checkout smaller by leaving
+  files out or fetching them later; gitfold shows the whole tree without
+  writing it.
+- **overlayfs** needs a checkout per base and root (or a user namespace), and
+  its base can't move; gitfold's base is any git revision, and it moves with
+  the branch.
+- **EdenFS (Sapling) and VFS for Git** fetch files lazily from their own
+  servers, outside plain git; gitfold works on an ordinary local clone.
+- **jj workspaces** are full checkouts, and jj is a separate version control
+  system built on git; gitfold stays plain git.
+- **Stacked-branch tools** rebase a stack when you run them; gitfold moves
+  branches onto their parents' new commits by itself, workspaces included.
+
+Each is the better choice in some cases (small repositories, heavy builds,
+Git LFS, macOS); see [gitfold and the alternatives](docs/comparison.md).
+
 ## Quick start
 
 Needs Linux with FUSE 3 (`fusermount3`, kernel 5.1+) and git.
