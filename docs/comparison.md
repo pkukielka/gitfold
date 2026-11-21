@@ -53,8 +53,8 @@ this table.
   about 2x, creating many small files 4-6x.
 - **Git LFS, `.gitattributes` filters, submodules, real mtimes:** gitfold shows
   LFS files as pointers, applies no filters, doesn't initialise submodules and
-  gives unchanged files a fixed time (see the README's "Differences from a
-  checkout").
+  gives unchanged files a fixed time (see [Differences from a
+  checkout](reference.md#differences-from-a-checkout)).
 - **Small repositories, or macOS and Windows:** use `git worktree` (or sparse
   checkout, or jj); a checkout takes seconds and writes at native speed. gitfold
   pays off when a checkout costs tens of seconds or gigabytes, or when you open

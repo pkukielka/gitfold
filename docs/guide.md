@@ -11,8 +11,8 @@ workspace and every commit a read-only snapshot. Opening one takes about a
 second however big the repository, and costs only the files you change. Each
 is a real git worktree, so agents, editors and git itself work there as in
 any checkout. This guide walks through the situations where that pays off.
-For every command and option, see the [README](../README.md); for the advice
-gitfold gives agents, the [skill](../skills/gitfold/SKILL.md).
+For how each command behaves, see the [reference](reference.md); for the
+advice gitfold gives agents, the [skill](../skills/gitfold/SKILL.md).
 
 To install gitfold (or its Claude Code plugin), see the README's [Quick
 start](../README.md#quick-start). The examples use a small repository, `shop`,
@@ -279,10 +279,11 @@ If it needs resolving, checkout-ui's change is the one still open, so that's the
 ```
 
 `checkout-api` and the lead's `checkout` get the same message; with Claude
-Code, it arrives in each agent's conversation by itself, and wakes an idle one. A
-notice only informs: whether it matters (not for a throwaway workspace, say)
-is for the agents, or for you. Who is told, the hint and the settings: see
-[the README](../README.md#branches-built-on-branches).
+Code, it arrives in each agent's conversation by itself, and wakes an idle
+one. A notice only informs: whether it matters (not for a throwaway
+workspace, say) is for the agents, or for you. [The
+reference](reference.md#branches-built-on-branches) explains who is told, the
+hint and the settings.
 
 **Why it works.** The views are made by `git merge-tree`, git's own merge,
 without touching any branch, index or working tree; conflicts look exactly

@@ -1,0 +1,857 @@
+# gitfold reference
+
+This reference covers every command and behaviour in detail. For a first
+look, see the [README](../README.md); for walkthroughs, the [user
+guide](guide.md); for how it works inside, [ARCHITECTURE.md](../ARCHITECTURE.md).
+
+Contents: [Usage](#usage) · [Snapshots](#snapshots) ·
+[Workspaces](#workspaces) ·
+[Branches built on branches](#branches-built-on-branches) ·
+[Partial clones](#partial-clones) · [Running it](#running-it) ·
+[With coding agents](#with-coding-agents) · [Cleaning up](#cleaning-up) ·
+[Uninstalling](#uninstalling) ·
+[Differences from a checkout](#differences-from-a-checkout) ·
+[Performance](#performance)
+
+## Usage
+
+The README's [Usage](../README.md#usage) lists every command;
+`gitfold <command> --help` lists a command's options. This section covers how
+a command finds its repository, what `mount` needs, exit codes, `branch` with
+several `--from`, names below the mount point, and the mount's options and
+prewarm settings.
+
+Commands other than `mount` work on the repository the current directory is
+in, as git does (a workspace or snapshot under the mount included), or, from
+elsewhere in a mount (its root, a view), on the mounted one. `-C <PATH>` runs
+any command as if started in `<PATH>`, as `git -C` does. For `mount`,
+`<REPO>` is the repository's top-level work tree or its git directory (not a
+subdirectory). `<MOUNTPOINT>` must be an existing directory you own; use an
+empty one, since its contents are hidden while mounted. A repository can be
+mounted only once at a time (a second `gitfold mount` of it fails): two mounts
+would share, and corrupt, the stored workspace changes. The mount is read-write
+(for workspaces); snapshots are read-only (see [Snapshots](#snapshots)).
+
+Exit codes, the same for every command: 0 success, 1 an error, 2 a usage
+error, 3 not found (no such branch, workspace or snapshot, or not a valid
+name), 4 uncommitted changes or a git operation in progress (for `parent`,
+also a move stopped by a conflict or by git), 5 in use or busy.
+Some commands add their own: `version <MOUNTPOINT>` (3 another build, 4 a
+daemon too old to tell, 5 no answer), `overlaps` (6 something overlaps),
+`inbox --claude-hook rewake` (2, to wake the session), and `inbox --wait
+--timeout` and `watch --timeout` (124 if the time runs out first, as GNU
+`timeout`; nothing printed).
+A command whose output's reader has gone (`gitfold list | head`) does what
+it would have and says nothing more: it exits 141, as a shell reports for
+git, unless it would have exited with another code (that one, then).
+A command that did only part of what was asked doesn't exit 0: it says what
+it did and what it didn't, and exits 1 (unless said): `mount` up but its mount
+point not recorded, `unmount` run from inside the mount that could only
+detach it (5: the daemon keeps running until you `cd` out), `parent --set` or
+`--update` held back by pushed commits (4), `changes -- PATH` or `overlaps
+--against-workspaces` with a workspace or branch skipped (`overlaps` still
+exits 6 if something overlaps), `branch -w` without the source's task folder
+or settings, `inbox` with a message printed but not deleted (it may come
+again). An empty answer is no error: nothing to take, nothing overlapping.
+
+`gitfold branch` starts the branch at HEAD unless `--from` says otherwise. With
+several `--from`, it starts at the first, and `git merge` of the others runs in
+its workspace (mounting the repository again where and as it last was, if it isn't
+mounted): git merges, and says how, as it does. In a terminal it opens your
+editor for the merge message, as `git merge` does (`GIT_MERGE_AUTOEDIT=no`
+skips it). A conflict leaves the branch with git's merge in progress (exit
+1): finish it with `git merge --continue` there, or `git merge --abort`. If
+git refuses, nothing is left. The branch keeps no relation to the others.
+With `-w`, each local branch's uncommitted changes in its
+workspace (tracked and untracked, not ignored files) are then applied as `git
+cherry-pick -n` applies them, unstaged; a conflict between them is left as git
+leaves it (exit 1, the paths named). With `-w`, a merge that doesn't complete
+is refused (nothing is left), as the changes go only on a merge made.
+
+Names below the mount point:
+
+- `@<rev>` is a snapshot. `<rev>` is anything that resolves to a commit using
+  git's revision syntax (parsed by gitoxide): `@HEAD`, `@HEAD~5`, `@<sha>`,
+  `@<short-sha>`, `@v1.2.0`. Ref names containing `/` work as typed
+  (`@origin/main`, `@origin/main~3`), since each `/` is a directory level;
+  other syntax with `/` (`@HEAD^{/fix}`, `@:/msg`) can't be used, so resolve it
+  to a SHA first. `@origin` is then a directory, so git's `origin` shorthand is
+  `@origin/HEAD`.
+- `<branch>` is a workspace on an existing local branch: `feature/login` is
+  `<mount>/feature/login`, through a `feature/` directory. Git doesn't allow
+  `feature` and `feature/login` to coexist, so this is never ambiguous. Branches
+  whose name starts with `@` can't be opened (`@` means a snapshot).
+- Snapshots and workspaces are opened on first access (a workspace resumes its
+  saved changes). `ls <MOUNTPOINT>` lists only what has been opened so far; it
+  starts empty, so names can't be browsed or tab-completed.
+- A name that doesn't resolve looks like a missing directory (`No such file or
+  directory`); for `@<rev>` the daemon logs why (`cannot resolve @<rev>: ...`),
+  for branch names it doesn't.
+- Snapshots are pinned for the life of the mount: `@HEAD` keeps showing the
+  commit HEAD pointed to when it was first opened. To see a newer commit, open
+  it by SHA or remount.
+- `@committed/<branch>` and `@live/<branch>` are read-only views of a branch
+  merged with the branches built on it (see [Branches built on
+  branches](#branches-built-on-branches)).
+
+Options:
+
+| option | default | |
+|---|---|---|
+| `--prewarm none\|meta\|content` | `meta` | After opening a snapshot, workspace or view, walk it in the background to fill kernel caches. `meta` makes the first `find`/`git status` fast; `content` also reads every file, so the first grep is fast too, at the cost of page cache equal to the tree size. The directory is usable while this runs (chromium: 0.70 s for a snapshot, 1.16 s for a workspace). |
+| `--prewarm-threads N` | 4 (or half the CPUs, if fewer) | Threads used by each prewarm walk. More only queue in the daemon. |
+| `--prewarm-walks N` | 2 | Walks running at once; walks of what is opened meanwhile wait their turn. |
+| `--track-reads` | off | Record the files Claude Code reads in workspaces, as its hook reports them, for `gitfold overlaps`. A workspace's own setting wins (`gitfold track-reads`). |
+| `--threads N` | number of CPUs (also for 0) | FUSE worker threads; at most half wait for a resting view to wake, git reads the workspaces through the rest (with 1, a first access doesn't wait). |
+
+A workspace can have its own prewarm mode, kept across remounts in the branch's
+git config: `gitfold branch <BRANCH> --prewarm none`, or `git config
+branch.<BRANCH>.gitfoldPrewarm none` for an existing branch (read from the
+repository's own config file, where `git config` writes it, when the workspace
+opens; `--prewarm none` for the whole mount still wins). `gitfold prewarm
+<BRANCH> none|meta|content` sets it and, while mounted, applies it at
+once: an open workspace is walked now (a read-only session turning into a
+coding one), or its walk stopped (`none`). `none` suits workspaces an agent
+only reads a few files in: a walk of a tree of over a million files costs over
+a million FUSE requests and more than a minute of the daemon's CPU.
+
+## Snapshots
+
+Read-only: files and directories have no write bits, so writes fail with
+`EACCES`; `chmod` and setting times (`touch -d`, `utimensat`) fail with
+`EROFS`. Each snapshotted commit is registered as a linked worktree under
+`<repo>/.git/worktrees/gitfold-<sha12>` (the first 12 hex digits of the commit)
+with a detached HEAD, so `git status`, `log`, `diff`, `show`, `blame` etc. work.
+Names that resolve to the same commit (`@HEAD` and `@<its sha>`) share one
+registration; `git worktree list` shows it once, under the first name opened.
+
+Git commands that write files (`checkout`, `reset --hard`, `stash`, merges) fail.
+Commands that only change `.git` (e.g. `commit`, `reset --soft`)
+succeed and move that worktree's HEAD away from the snapshot's files, after which
+`git status` shows differences. Don't use them in a snapshot; use a workspace.
+
+Recommended for agents: resolve the revision to a SHA yourself and give each task
+its own snapshot (`cd <mount>/@$(git rev-parse origin/main)`). If agents grep a
+fresh snapshot immediately, consider `--prewarm content`: on chromium it reads
+everything in the background in 2.6-3.8 s (24 vs 8 threads), after which the
+first `rg` takes about 0.5 s instead of 2.9 s.
+
+## Workspaces
+
+**Start.** Create a branch (gitfold only opens existing local branches) and
+open it:
+
+```
+cd ~/src/monorepo
+gitfold branch agent/task-17 --from origin/main
+cd ~/mnt/repo/agent/task-17
+```
+
+Starting from a remote branch makes it the upstream, so push with
+`git push -u origin HEAD`. Workspaces are opened by name, not created with
+`mkdir` (the mount root is read-only); create the branch first.
+
+`gitfold branch` runs `git branch`, refusing names that start with `@` (they
+would open as snapshots) and names whose earlier workspace is still stored (it
+would be resumed; `gitfold remove` it first). Creating the branch with git
+directly also works, without these checks.
+
+Like `git worktree add`, a branch that is checked out elsewhere (for example in
+your main checkout), or being rebased or bisected there, is refused with
+`EBUSY` (`Device or resource busy`); the daemon logs where it is checked out.
+Create another branch from it instead.
+
+`@agent/task-17` is a separate, read-only snapshot of the branch tip when it was
+opened; it doesn't see the workspace's uncommitted changes, and both can be open
+at once. Recommended for agents: one branch and workspace per task.
+
+**Work.** Edit, create, delete and rename files normally. The workspace is a
+linked worktree whose HEAD is the branch, so `git add`, `commit`, `diff`,
+`log` etc. work and commits move the branch in your repository. Changes are
+written to `.git/gitfold/` as they happen (and `fsync` is passed through), so
+unmounting, remounting or a daemon crash keeps them. Don't switch branches
+inside a workspace (`git switch`, `git checkout <branch>`): it works as in any
+worktree, but the directory keeps the old branch's name and its stored changes.
+
+**Commits, merges, rebases** work as usual, also from outside the workspace
+(`reset`, `commit --amend`, ...). Within about a second, once git is idle (no
+conflicts, `rebase -i` or `bisect` pending), gitfold moves the workspace's base
+to the new branch tip. No file changes content, mode or mtime in the process,
+so commands chained after a commit (`git commit && git status`) see the same
+files either way, and committed files, as well as files git rewrote unchanged
+(`stash`, `rebase --abort`), stop taking space in `upper/`.
+
+**Fork.** `gitfold branch -w <BRANCH> [--from <SOURCE>]` (`--with-changes`)
+creates `<BRANCH>` at `<SOURCE>`'s tip with a copy of `<SOURCE>`'s uncommitted
+changes and git index: the new workspace shows the same files and the same `git
+status`, staged changes included, and from then on each changes on its own.
+Without `--from`, the source is the workspace the command runs in. Only the
+changes are copied (with reflinks on btrfs and XFS), so a fork costs what they
+weigh, not the tree: an agent can try several approaches from the same
+half-done state, or hand it to a reviewer. It works mounted or not; a source
+never opened as a workspace gives just the new branch. A source with a git
+operation in progress (a commit, a rebase) is refused, as is one whose branch
+moves during the copy: retry once it is done.
+
+**Overlaps.** `gitfold overlaps [<BRANCH>]` lists what a workspace touched that
+changed elsewhere since: `W` for a path it changed (committed on its branch or
+not) that the target changed too, `R` for a file it read that the target
+changed, then the target and the path:
+
+```
+R	main	src/parser.rs
+W	main	src/lexer.rs
+W	agent/task-18	docs/api.md
+```
+
+The target is the remote's default branch (`origin/HEAD`, else `main`), or
+each `--against <REV>` (not the branch's upstream: after `git push -u` that is
+its own remote branch);
+a target's changes are its commits since it diverged from the workspace's base.
+A branch with a workspace adds that workspace's uncommitted changes, so
+`--against <BRANCH>` gives the paths two workspaces both changed, and
+`--against-workspaces` compares with every other workspace. A path counts if
+the target changed it, a directory above it, or (a directory replaced by a
+file) a path below it. It exits 6 if anything overlaps, 0 if not (1 if,
+with nothing overlapping, a workspace couldn't be compared with). `W` is about
+paths, not lines: two agents editing different parts of one file usually merge
+cleanly (`git merge-tree --write-tree` tells for sure).
+
+`R` lines need read tracking, off by default: `gitfold mount --track-reads`
+turns it on for the mount, `gitfold branch --track-reads on|off` or
+`gitfold track-reads <BRANCH> on|off` for one workspace, whatever the mount
+says (in git config, `branch.<BRANCH>.gitfoldTrackReads`; applied at once
+while mounted). Reads are what Claude Code's hook reports (the plugin's
+`gitfold track-reads --claude-hook pre-tool-use`): its Read tool's files, and
+the files simple viewers in its Bash commands show (`cat`, `head`, `tail`,
+`sed`, `less`, `nl` with file arguments), before the tool runs (so a
+command's own `cd` counts once, and a call then denied is recorded too). The
+filesystem records none (why: ARCHITECTURE, "Overlaps"). Other harnesses get
+`W` lines only (`overlaps` notes when a tracked workspace has nothing
+recorded). Without
+tracking, `overlaps` shows `W` lines and says so; `--reads` then fails
+(exit 3). A fork inherits what its source read, and its setting; turning
+tracking off keeps what was recorded.
+
+**The task folder.** Every workspace has a `.task` link to a directory for
+what belongs to the task but not to its commits: a spec, drafts, notes, a
+handoff, a PR description. The directory is `.git/gitfold/.tasks/<id>/`, plain
+files outside the mount: kept after `gitfold remove` and after the branch is
+deleted (a branch of the same name opened later finds it again), written at
+disk speed, and seen at once whoever writes them, an orchestrator or you
+included. Git doesn't follow the link, so it never sees or cleans what is in
+it (`git clean -fdx` fails to delete the link, warns, and moves on); an entry
+in the repository's `info/exclude`, which every worktree shares, keeps the
+link out of `git status`. `gitfold branch -w` copies the folder with the
+changes; `gitfold list` shows the first line of `.task/status` (what the agent
+says it is doing), and writes in the folder count as activity. The link can't
+be removed or renamed (`EPERM`). Two settings, in the repository's config:
+`gitfold.taskDir` names the link (default `.task`; one name, for a project that
+uses `.task`), and `gitfold.tasksDir` keeps the folders elsewhere, an absolute
+path or `~/...` (say in your notes; then `<dir>/<id>/`). A workspace whose base
+tracks a path of the link's name, or that has one among its changes, has no
+task folder (the daemon logs why). Sandboxed agents need write access to the
+folder's directory: by default inside `.git`, which committing needs anyway.
+
+**Messages.** `gitfold send <BRANCH> <TEXT>` leaves a message in a task's
+inbox, `inbox/` in its task folder (`gitfold.inbox` names it); the branch
+needs no workspace yet. `from:` is the sender's workspace, so a reply goes
+there: the one the command runs in, or, in a Claude Code session with the
+plugin, the one the session started in, even after its shell `cd`'d into
+another workspace to look around (the plugin's SessionStart hook sets
+`GITFOLD_FROM`; a subagent at home in its own worktree signs with that).
+`--from <NAME>` signs it otherwise (a person, an orchestrator),
+and a name that isn't a branch can't be replied to: sent to, it is refused
+(exit 3) with the workspaces listed, the sender's parent marked.
+`gitfold inbox` takes the messages in the inbox of the
+workspace you are in (or of `<BRANCH>`) and prints them: each is taken once,
+however many read at a time (none to take is no error: exit 0). `--wait` waits
+for one if there are none (up to `--timeout <SECS>`, then exit 124); `--peek`
+lists them without taking; `--json` for programs. A fork (`branch -w`) leaves the inbox behind: its messages were for
+the source's agent.
+gitfold sends some itself, `from: gitfold`: conflict notices, when a commit
+conflicts with another workspace's work (see [Branches built on
+branches](#branches-built-on-branches)).
+`--claude-hook` hands them to Claude Code's hooks: injected into the
+conversation when a prompt is sent and after each tool call (not a
+subagent's: its context isn't the session's), and waking an idle session when
+one arrives (the skill has the configuration). `gitfold watch
+[<BRANCH>:]<DIR>` is the general form: it waits until a file in a directory of
+a task folder changes, prints which (`C` or `D` and the name, each name's
+last change), and exits (`D .` if the directory itself goes; with `--timeout
+<SECS>`, exit 124 if nothing changed by then); a supervisor can wait on another
+task's folder (`agent/b:.`) for its handoff, an agent on `reviews/` for work.
+
+The format is plain files, for anything to read and write without gitfold:
+one file per message in the inbox directory, named `<nanoseconds since the
+epoch>-<sender>` (so names sort by arrival), holding header lines (`from:`,
+`time:` in UTC, `subject:` if any), an empty line, and the body. A sender
+writes a file whose name starts with a dot and renames it into place; a
+reader takes a message by renaming it to `.taken-<pid>-<name>` before reading
+it, so that it goes to one reader, and deletes it once printed (a message a
+dead reader left is put back). Names starting with a dot are never messages.
+A file without headers is all body; CRLF line ends are read as LF.
+Watchers use inotify on the folder's directory, mounted or not.
+
+**Finish.** Push or merge the branch from anywhere, then remove the workspace
+with `gitfold remove <BRANCH>`, mounted or not (see
+[Cleaning up](#cleaning-up) for when it refuses). `gitfold list` shows
+how many files each workspace has changed and deleted, and how many ignored
+files (build output) it holds, how long ago it last changed (`last`: a file
+written, created or deleted, or a commit; a stalled agent stands out), with a
+note if its branch was deleted or its base is behind the branch tip (unmounted:
+mount once to update it; mounted, the mount catches up); `--stat` adds the
+lines added and removed in total, reading every changed file. It shows the
+tree of branches too: each branch under its parent (`└─`; the main branch's
+children at the top), branches without a workspace only if they have a parent
+or children, whether each follows its parent (`follow`: on or off), and a note
+when something needs doing:
+following paused (`conflict on PATH`, `following paused: pushed`), the
+parent landed (`api looks merged into main`, as last checked by following,
+or `api landed in main`) or `parent gone`. `gitfold changes
+[<BRANCH>]` lists one workspace's uncommitted changes against its base,
+untracked files included and whatever is staged, as `git add -A` and `git diff
+--cached --name-status` would (`A`, `M`, `D` and the path, quoted as git quotes
+it; `-z` for NUL-terminated, unquoted lines); run inside a workspace, it is
+that workspace's. `--stat` adds the lines added and removed per path (`-` for
+binary files), as `git diff --numstat` against the base would, and git's
+`--shortstat` summary line. It reads the workspace's stored state, not every directory
+of the tree as `git status` does, so a supervisor can poll many agents'
+workspaces cheaply. Until it is removed,
+git treats the branch as checked out, even while unmounted: you can't check it
+out elsewhere or delete it.
+
+**How it's stored.** The workspace id is the branch name with `%`, `/` and a
+leading `.` escaped (`agent%2Ftask-17`). The worktree registration is
+`.git/worktrees/gitfold-ws-<id>`; the changes are in `.git/gitfold/<id>/`:
+`upper/` holds every file that differs from the workspace's base (the branch's
+last tip, see above), as real files; `markers` records deleted files so they
+stay deleted; `times` the timestamps of files dropped from upper (committed,
+or restored unchanged); `reads` the files read, if tracked; `base` is that commit, kept from `git gc` by the ref
+`refs/gitfold/<id>`; `branch` the branch name; `tmp/` copies in progress;
+`agents/` the agents present in it, `told/` and `followed` what following told
+them (see [Branches built on
+branches](#branches-built-on-branches)).
+Task folders are in `.git/gitfold/.tasks/<id>/` (see above), plain files you
+can change any time. Don't modify the rest of `.git/gitfold/` while mounted.
+
+**Limitations.**
+
+- Moving the branch far without changing the files (`reset --soft` to an old
+  commit) copies every file that differs into `upper/`, during which the
+  workspace's file operations wait: 0.40 s to copy 2,857 files in Apache Spark.
+- Renaming a directory from the base commit copies its files into `upper/`
+  first, while the workspace's file operations wait (0.23 s for a 7,500-file,
+  19 MB directory in Apache Spark). Above 10,000 files or 100 MiB, or if the
+  copy fails, it returns `EXDEV` instead, as overlayfs does: `mv` then copies
+  and deletes, but `git mv` of such a directory fails. Renaming files, and
+  directories you created, works directly.
+- Hard links and special files (`mknod`) are not supported (`EPERM`); symlinks
+  are.
+- Reads and writes are addressed by path, so reading or writing a file that was
+  deleted or replaced (renamed over) while open fails.
+- Writes go through the gitfold daemon. Creating many small files is several
+  times slower than on a local disk: untarring Apache Spark's 27,599 files
+  takes 3.00 s instead of 0.53 s, which is what a `node_modules` install looks
+  like. Builds cost much less: a full `cargo build` of gitfold takes 15.99 s
+  instead of 13.64 s, an incremental one 3.91 s instead of 1.85 s (see
+  [Performance](#performance)).
+- `git stash --all` (`-a`, which stashes ignored files too) fails in a
+  workspace: it can't remove the task folder's link (`EPERM`) and leaves the
+  working tree as it was, with a stash `git stash pop` refuses (`.task already
+  exists`). Use `git stash -u`, which leaves ignored files alone; drop such a
+  stash with `git stash drop`. `git clean -fdx` only warns about the link.
+- After `git add` of files with `eol=crlf` attributes, git warns that line
+  endings will be converted (see [Differences](#differences-from-a-checkout)).
+
+## Branches built on branches
+
+A branch can be built on another branch, its parent: its own commits sit on
+the parent's, and it takes the parent's new commits. Branches built on
+branches form a tree. `gitfold branch NEW --parent P` creates a branch at
+P's tip built on P, following it unless `--no-follow`. It has no upstream
+until you `git push -u` it: its parent isn't its upstream. `gitfold parent`
+shows a branch's parent and whether it follows it, forgets it (`--none`:
+the history stays as it is) or turns following on and off.
+
+A parent is a local branch or a remote-tracking one (`origin/main`, which
+moves when you fetch), named as git takes the name. The tree's root, the
+main branch (`origin/HEAD`'s, else `main`, `master`, `origin/main` or
+`origin/master`), has no parent. Both
+settings are kept in the branch's git config (`branch.<name>.gitfoldParent`,
+`gitfoldFollow`).
+
+`gitfold parent --update` takes the parent's new commits now, and `--set P`
+moves the branch onto another parent: its own commits move, as `git rebase
+--onto` moves them (git rebase does it, in a temporary worktree that checks
+out only the top-level files; commits the parent has already are dropped,
+as git does). A conflict moves nothing: the paths are named, and the
+conflict is recorded until the parent changes again. Commits already on the
+branch's own remote branch are moved only with `--update --yes`, and
+gitfold prints the force-push (it never pushes). A merge among its own
+commits, or a branch checked out in a git worktree, is left for you to
+rebase. A workspace's branch moves in its workspace, through the mount
+(mounted again where it last was if it isn't now), by git there: its
+uncommitted work is carried along as `git rebase --autostash` carries it,
+and work that would conflict with the move stops it, nothing moved.
+
+A branch that follows its parent takes its new commits by itself, at safe
+moments: in a workspace with an agent, at the agent's turn start (Claude
+Code's `UserPromptSubmit` hook, `gitfold parent --claude-hook
+user-prompt-submit`), which tells the agent what moved, or why following is
+paused (in full once, then a one-line reminder each turn); in a workspace
+without one, once nothing was written in it for a few seconds; a branch
+without a workspace, when its parent moves (both by the mount's daemon,
+which logs each move and pause, and cascade down the tree). An agent is
+present while its session's hooks say so (session start and end, a
+subagent's stop, each turn and tool call), or until 30 minutes pass without
+one. Automatic moves never move pushed commits, never retry a conflict
+recorded against the parent's tip, and never mount the repository again:
+the daemon and the turn start both run that policy, which is also `gitfold
+parent B --update --auto` (hidden; the daemon runs it as a child process).
+
+When a parent lands (a merge commit, squash, rebase merge or fast-forward)
+in the main branch, local or origin's, or in its own parent while that is
+known, git tells (`git merge-base --is-ancestor`, `git merge-tree`). While
+the parent's branch exists, that is only said, with the `gitfold parent B
+--set` that moves B there. Once it is deleted (as forges do after a merge),
+a following branch is built where the parent landed and moves there with
+only its own commits, told once. A parent deleted without landing leaves
+the branch's commits as they are, noted. gitfold never fetches: a merge on
+the forge is seen once a fetch or pull brings it in, so fetch to let
+gitfold see merges.
+
+Commands people guess (`gitfold sync`, `pull`, `restack`, `rebase`, `branch
+--on`, `branch --merge`) exit 2 naming the right one.
+
+`gitfold changes -- <PATH>...` says who is changing those paths: one line per
+branch and path, sorted by path, with `committed` (its own commits, since it
+left its parent, else not yet in the main branch) or `uncommitted` (in its
+workspace). Directories match everything below them; `-z` works as for
+`changes`, `--stat` is refused. Paths are taken as git takes them, from the
+current directory: in a view, from its top as from a work tree's; from the
+mount root, from the top of the repository.
+
+```
+api	committed	src/lexer.rs
+ui	uncommitted	src/lexer.rs
+```
+
+`<mount>/@committed/<branch>/` is a read-only view of a branch merged with
+every branch built on it, their committed tips (for the main branch, only
+branches opened as workspaces, and those they are built on; a branch without
+a parent isn't built on anything). Each branch's
+change is its files against where it left its parent, merged in turn by git
+(`git merge-tree`): renames, `.gitattributes` merge settings and
+`merge.conflictStyle` apply as in a merge, and conflicts stay in the files as
+git leaves them (markers name the sides by commit id: the branches' tips, and
+commits of the view so far in gitfold's private repository).
+`.gitfold-conflicts` at the view's root lists every conflict git reports, one
+per line (`CONFLICT (<kind>)\t<the two sides>\t<path>`, the sides named by
+branch: `api+ui, web`), and the branches left out (`skipped`) or refs that
+couldn't be read (`unread`). git merges in the repository itself (its
+settings, attributes and merge drivers), but writes its objects into a
+private repository, `.git/gitfold/.views.git`, which borrows the
+repository's objects: no object or ref is written into the repository (merge
+drivers run in its top, as in any merge). The view
+follows new commits and changes to the tree within about a second.
+
+`<mount>/@live/<branch>/` is the same view of the workspaces as they are,
+uncommitted work included: each branch with a workspace contributes what
+`git add -A` in it would stage (ignored files left out, as git leaves them),
+the others their tips. A workspace's files count once it has been quiet for
+2 s after a change, or every 10 s while it keeps changing; reading the tree
+(a `git add -A` on a copy of its index, through the mount) takes about as long
+as `git status` there. Opening `@live/<branch>` opens the workspaces in it
+(without `--prewarm`), and makes their live trees side by side. A view is
+walked once when it opens, as a snapshot is (`--prewarm`). A view not read
+for a minute rests (nothing is refreshed; `GITFOLD_VIEW_REST_SECS` changes
+how long), and the first access afterwards waits up to 5 s for it to be
+current. A branch with no history in common with its parent is left out of
+both views, noted in the summary.
+
+**Conflict notices.** When a branch gets new commits in its workspace (not
+gitfold's own moves of it), the mount's daemon checks them against the
+workspaces whose work meets it where it lands: the members of its parent's
+view (`@live/<parent>`), the parent included. A branch without a parent
+(made with `branch X --from <start>`) counts as built on the main branch:
+where the main branch's view is used (for the main branch, those built on
+it, and those without a parent), the branches without a parent, and what
+is built on them, count too (`@live/main` doesn't show them). A conflict
+the commit makes, with the other side's committed or uncommitted work, is
+told once, to everyone involved, in the same words: the workspaces of both
+sides, and of the branch they land in where it has one, each get a message in
+their inbox, `from: gitfold`, one per
+commit:
+
+```
+from: gitfold
+subject: conflict: README.md
+
+checkout-api committed 0724067; it conflicts with checkout-ui's uncommitted README.md.
+If it needs resolving, checkout-ui's change is the one still open, so that's the cheapest place to adjust.
+```
+
+The hint names the side whose change is uncommitted; else, of a branch and
+one built on it following it, the child (`checkout-ui is built on checkout-api:
+that's where it gets resolved (following is paused on it)`); else whoever
+committed last. A notice informs; gitfold doesn't stop or move anything for
+it. Commits made while unmounted or outside workspaces aren't checked, and
+commits already on a remote (a pull) aren't announced.
+`gitfold.conflictNotices false` turns the notices off for the repository,
+and `branch.<name>.gitfoldConflictNotices` (true or false) decides for that
+branch's workspace.
+
+A branch named `committed` or `live` is reached as `@refs/heads/committed` (a
+remote so named as `@refs/remotes/committed/<branch>`).
+
+## Partial clones
+
+In a partial clone the object database lacks blobs (`blob:none`) or trees
+(`tree:0`), which git fetches on demand. gitfold does the same: opening a
+snapshot or workspace fetches what its commit misses from the promisor remote,
+in one `git fetch` (the one git's own lazy fetch runs), before the directory
+appears, so the first `ls` of a new snapshot can take as long as that download.
+So do a workspace's base following a branch that moved, and the checks of
+`gitfold remove` and `list`.
+
+- The remote must let clients fetch objects by id, as git's own lazy fetch
+  needs: hosting services do; a plain `git daemon` or ssh remote needs
+  `uploadpack.allowAnySHA1InWant` (or `allowReachableSHA1InWant`) and
+  `uploadpack.allowFilter`. Otherwise the fetch fails with `not our ref`.
+- The whole commit is fetched, as a checkout would: gitfold needs every file's
+  size to show it.
+- The remotes are the ones git would use, in its order: those with
+  `promisor = true` or a `partialclonefilter`, in config file order, the one
+  `extensions.partialClone` names last. Each is asked for what the ones before
+  it didn't bring. They are read once per mount: a remote added or flagged
+  later is used after a remount (a changed URL at once).
+- The daemon has no terminal to ask for credentials: use an ssh agent or a
+  credential helper (`gitfold list` and `remove` run from a terminal let ssh
+  ask). A fetch that fails (unreachable remote, refused) fails the open with
+  `EIO` and is logged once; the same commit is refused for 30 s, unless its
+  objects arrive meanwhile (`git fetch` by hand). A remote that refuses objects
+  asked for by id (`not our ref`: the server needs
+  `uploadpack.allowAnySHA1InWant`, or they are gone from it) is retried after
+  10 min instead. A resumed workspace whose
+  branch moved needs only its stored base: if the tip can't be fetched, it
+  opens and follows the tip later.
+- A fetch that prints nothing (no progress) for 120 s is stopped, with its ssh
+  and index-pack; one making progress may take as long as it needs.
+  `GITFOLD_FETCH_STALL_SECS` changes the limit.
+- No fetch starts with less than 1 GiB free in `.git/objects`
+  (`GITFOLD_FETCH_MIN_FREE_MB` changes it): a large commit can be tens of
+  thousands of objects.
+- The views (`@committed`, `@live`) need git 2.44 or newer: gitfold fetches
+  what their merges read first, and older git, which can't be told not to
+  (`GIT_NO_LAZY_FETCH`), would fetch what a merge misses on its own.
+
+## Running it
+
+- `gitfold mount` starts the daemon in the background, detached from the
+  terminal (closing it doesn't stop the mount), and returns once the mount is
+  up, or with the daemon's error. It logs to a file named after the mount point
+  in `$XDG_STATE_HOME/gitfold/` (default `~/.local/state/gitfold/`), printing
+  its path (`--log` to choose): one line per new snapshot commit, workspace,
+  prewarm, workspace rebase, view, and branch moved or paused by following,
+  and operation counters on exit. `RUST_LOG=warn`
+  for only problems. With `--foreground` it stays in the foreground and logs to
+  stderr, for service managers.
+- **Stop it with `gitfold unmount <MOUNTPOINT>`.** It waits until the daemon
+  has exited, so `gitfold remove` or `prune` can follow right away. If the
+  mount is busy (say a `git maintenance run --auto` a commit started), it is
+  detached and `unmount` names the processes using it and waits for them to
+  leave, however long that takes (an editor or another terminal inside it too).
+  Only if `unmount` or a process it runs under (your shell) is itself inside
+  the mount does it return at once, only detaching it (exit 5): the daemon
+  exits when you `cd` out. Before
+  exiting, the daemon brings every open workspace's base up to its branch tip.
+  Ctrl-C (in the foreground), SIGTERM, SIGHUP and `fusermount3 -u <MOUNTPOINT>`
+  stop it as well; a second SIGINT or SIGTERM exits immediately.
+- **After upgrading gitfold,** a mount keeps running the build it was started
+  with. `gitfold version <MOUNTPOINT>` prints both builds and exits with 3 if
+  they differ (unmount and mount again to upgrade), 4 if the daemon is too old
+  to say, and 5 if it doesn't answer within 3 s (busy, say with a removal). A
+  build is named by its version and a hash of its sources (`gitfold --version`
+  adds the git commit, for people): the same sources give the same name however
+  they were committed, so a commit that only changes docs asks for no remount.
+- Only `kill -9` (or a crash) leaves the mount behind: accesses then fail with
+  `Transport endpoint is not connected`, and `gitfold unmount <MOUNTPOINT>`
+  cleans it up. `gitfold mount` detects such stale mounts, and mount points
+  that are missing, not directories or already mounted, and says so.
+- **Cost of a long-running mount:** snapshots and workspaces stay loaded until
+  unmount.
+  - Each additional Chromium snapshot costs 2-11 MB of daemon heap, ~160 MB of
+    kernel inode/dentry cache and ~195 MB of page cache when opened (mostly
+    cached directory listings), plus page cache for file contents not already
+    cached by another snapshot.
+  - A Chromium workspace costs ~125 MB of daemon memory once prewarmed (~67 MB
+    of it the node table: one ~120-byte entry per path the kernel has looked
+    up; ~58 MB in total with `--prewarm none`, measured before the node table
+    was compacted). Its unchanged files don't share page cache with snapshots
+    or other workspaces.
+  - Kernel caches are reclaimable; if evicted, the next access is just slower.
+  - On large trees, reclaim is what makes workspaces go cold. Reported from a
+    monorepo of over a million files: each workspace held a couple of GB of
+    kernel cache. Under ten concurrent full-tree `git status` runs, free memory
+    (`MemFree`) fell below the kernel's low watermark while `MemAvailable` still
+    showed tens of GB, and reclaim dropped millions of cached directory entries,
+    which git then looked up again. That is the kernel's ordinary memory reclaim, not
+    gitfold; size RAM for the workspaces in use at once.
+
+### With coding agents
+
+- [skills/gitfold/SKILL.md](../skills/gitfold/SKILL.md) tells agents how to work
+  in a mount: workspaces and snapshots, forking a workspace, branches built
+  on branches, views and merge previews, cleaning up, and what differs from
+  a checkout. It is a Claude Code skill:
+  `ln -s "$PWD/skills/gitfold" ~/.claude/skills/gitfold` (or into a project's
+  `.claude/skills/`). It is plain markdown, so other agents can be pointed at
+  it from their instructions (`AGENTS.md`).
+- The gitfold Claude Code plugin: see [Quick start](../README.md#quick-start) and the
+  skill's "Claude Code" section.
+- Workspaces an agent only reads a few files in are cheaper without the prewarm
+  walk: give their branch prewarm mode `none` (see [Usage](#usage)).
+- **Claude Code's git scans** (measured with Claude Code 2.1.322 and a git
+  wrapper logging every call):
+  - After every Bash command it runs `git --no-optional-locks status
+    --porcelain --untracked-files=normal --ignore-submodules=dirty`, with
+    fsmonitor and hooks off, killed after about 2 s
+    ([anthropics/claude-code#97752](https://github.com/anthropics/claude-code/issues/97752)):
+    about 9 per 8-command session, seconds each on a tree of over a million files. No
+    Claude Code setting controls it (`CLAUDE_CODE_BASH_EDIT_DIFF=0`
+    doesn't). It has no `--ignored`, so git's untracked cache can serve it:
+    run `git config core.untrackedCache true` once in the repository (the
+    config is shared by all its workspaces). The cache itself lives in each
+    workspace's index, so run a plain `git status` once in each workspace to
+    fill it (the scan, with `--no-optional-locks`, never writes it). On a
+    Spark workspace (27.6k files) it went from 41 ms to 19 ms, listing no
+    directory. Its results matched uncached runs across additions and
+    removals, `.gitignore` edits, commits, `stash -u`, `clean` and invisible
+    rebases, and unchanged directories (dated 2020-01-01) are trusted at
+    once, unlike those of a fresh checkout.
+  - A `--ignored=matching` variant, which git doesn't serve from the
+    untracked cache (each run lists the whole workspace), comes only from its
+    "bash edit diff" feature (`CLAUDE_CODE_BASH_EDIT_DIFF`, or
+    `bashEditDiffEnabled` in its settings), which a server-side flag can keep
+    off by default (it was in these runs). `CLAUDE_CODE_BASH_EDIT_DIFF=0`
+    keeps it off.
+  - `CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING` changes none of these scans.
+  - For read-only sessions, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` also cuts
+    the git commands it runs.
+- Orchestrators tearing down agent workspaces can use `gitfold remove`'s exit
+  codes, `--check` and `--wait SECS` (see [Cleaning up](#cleaning-up)), and
+  `gitfold version <MOUNTPOINT>` to find mounts still running an old build
+  after an upgrade.
+
+## Cleaning up
+
+Worktree registrations are locked, so `git worktree prune` keeps them while
+unmounted; later mounts reuse them.
+
+- `gitfold prune` deletes the snapshot registrations; snapshots are
+  registered again when opened. It refuses while the repository is mounted.
+- `gitfold remove @<rev>` deletes one snapshot's registration
+  (unmounted: of what `<rev>` names now). While mounted it also closes the
+  snapshot (it leaves the mount root; opening it again registers it again), and
+  keeps the registration while another open name (`@main` and `@<its hash>`)
+  shows the same commit.
+- `gitfold remove <BRANCH>` deletes a workspace: its registration, its
+  stored changes and its base ref. Its commits stay on the branch. It refuses if
+  the workspace has uncommitted or staged changes (it lists them), or a git
+  operation is in progress or stopped half-way in it (a merge with conflicts,
+  `rebase -i`, a detached HEAD or another branch checked out), unless
+  `--force`, which discards them. "Uncommitted" is roughly what `git status`
+  would show: files that differ from the workspace's base (changed, new or
+  deleted; of a mode, only the executable bit counts). Untracked files git
+  ignores (build output, by `.gitignore`, `.git/info/exclude` or
+  `core.excludesFile`, by default `~/.config/git/ignore`) don't count: they are
+  deleted with the workspace, as `git worktree remove` does, and `remove` says
+  how many (without `--force`). An untracked nested repository counts as one
+  change unless ignored. If the branch moved since the workspace was
+  last mounted, its base catches up first, as a mount would.
+- `remove` works while the repository is mounted: the daemon does the removal,
+  and the name leaves the mount at once (the branch, if it still exists, opens
+  again as a fresh workspace). It refuses while a process of yours uses the
+  workspace or snapshot (its working directory, an open or mapped file), naming
+  it; processes in another container or sandbox (mount namespace) aren't seen,
+  but the checks for uncommitted changes still apply.
+- For scripts: `remove` exits with 3 if there is no such workspace or snapshot,
+  4 if it has uncommitted or staged changes, a git operation stopped in it, or
+  changes that can't be told (its base couldn't catch up), 5 if it is in use (a
+  process, a git command updating a ref, an unmount in progress), and 1 on any
+  other error. `--check` only checks: it exits as `remove` would (reporting
+  uncommitted changes even while a process uses it) and removes nothing (it may
+  bring the workspace's stored base up to its branch tip, as mounting would).
+  `--wait SECS` retries while it is in use, for up to SECS seconds. While
+  mounted, these need a daemon of this version (remount after upgrading).
+
+The same by hand (bash), for example to remove everything at once: unmount,
+then use the repository's absolute git directory (a relative one would make
+`rm` act on the current directory):
+
+```
+common=$(git -C <REPO> rev-parse --path-format=absolute --git-common-dir)
+```
+
+Snapshot registrations only (keeps workspaces):
+
+```
+rm -rf "$common"/worktrees/gitfold-[0-9a-f]*
+```
+
+A workspace: its registration and its changes, together (deleting only one leaves
+a workspace gitfold can't resume correctly). This discards uncommitted changes;
+commits are on the branch and stay there.
+
+```
+id=agent%2Ftask-17
+rm -rf "$common/worktrees/gitfold-ws-$id" "$common/gitfold/$id"
+git -C <REPO> update-ref -d "refs/gitfold/$id"
+```
+
+All workspaces:
+
+```
+rm -rf "$common"/worktrees/gitfold-ws-* "$common"/gitfold
+git -C <REPO> for-each-ref --format='%(refname)' refs/gitfold \
+  | xargs -r -n1 git -C <REPO> update-ref -d
+```
+
+## Uninstalling
+
+Your branches and commits are ordinary git and stay. To take gitfold out of a
+repository:
+
+1. With Claude Code, uninstall the plugin (`/plugin`) first, or its hooks will
+   remount the repository when you use it.
+2. Remove each workspace (`gitfold list` names them; commits stay; uncommitted
+   changes need `--force`), unmount, and delete the snapshot registrations:
+
+   ```
+   gitfold remove <BRANCH>        # each workspace
+   gitfold unmount <MOUNTPOINT>
+   gitfold prune
+   ```
+
+3. Remove what gitfold kept in the repository: its settings, its refs
+   (workspace bases and the starts of branches built on others), and its
+   folders, task folders included. If you set `gitfold.tasksDir`, the task
+   folders are there instead (`git config gitfold.tasksDir` says where):
+   delete them before running the commands below, which remove that setting.
+
+   ```
+   cd <REPO>
+   common=$(git rev-parse --path-format=absolute --git-common-dir)
+   git config --remove-section gitfold
+   git config --name-only --get-regexp '^branch\..*\.gitfold' \
+     | xargs -r -n1 git config --unset-all
+   git for-each-ref --format='%(refname)' refs/gitfold refs/gitfold-base \
+     | xargs -r -n1 git update-ref -d
+   rm -rf "$common/gitfold" "$common/gitfold-moves"
+   ```
+
+   Then delete the two lines it added to `.git/info/exclude`: `# gitfold's
+   task folder link (see gitfold.taskDir)` and the link's pattern (`/.task`
+   unless `gitfold.taskDir` names another).
+4. Delete the `gitfold` binary (with the plugin, it is in
+   `~/.local/share/gitfold/bin`) and, if you like, the mount logs in
+   `~/.local/state/gitfold/`.
+
+## Differences from a checkout
+
+- **File contents are served as stored in git.** Checkout conversions from
+  `.gitattributes` are not applied: `eol=crlf`, Git LFS smudging, `ident`,
+  `working-tree-encoding` and custom filters. With git's defaults on Linux
+  (`core.autocrlf` unset) only files with such explicit attributes are affected:
+  19 in Apache Spark, 1 in Chromium. Git LFS files show their pointer files.
+  `git status` is unaffected, since its index is built from the same unconverted
+  data; `git add` of such files in a workspace prints git's line-ending warning.
+- **Timestamps:** unchanged files have mtime/ctime 2020-01-01; files changed in
+  a workspace have their real times, and keep them once committed. See
+  [ARCHITECTURE.md](../ARCHITECTURE.md#constant-timestamps).
+- **Inodes:** in snapshots, files with identical content and mode share an inode,
+  within a snapshot and across snapshots. They report link count 1, so `cp -a`,
+  `tar`, `du` and `rsync -H` don't treat them as hardlinks; tools that compare
+  device and inode (`find -samefile`) see them as the same file. In workspaces,
+  inodes are per path.
+- **Submodules** appear as empty directories, as in a checkout without
+  `git submodule update`; they can't be initialized inside the mount.
+
+## Performance
+
+Chromium (512k files, 4.4 GB at HEAD, 64 GB pack), 24 cores, 62 GB RAM, pack
+and native checkout in page cache, gitfold after the default metadata prewarm,
+a fresh workspace; first run / repeat. "git status" is the invocation Claude
+Code issues itself. Details, methodology and more repositories:
+[bench/RESULTS.md](../bench/RESULTS.md).
+
+| | native checkout | snapshot | workspace |
+|---|---:|---:|---:|
+| open | `git worktree add`: 17.30 / 17.22 s, 5.5 GiB | 0.86 s (0.10-0.12 s near an open one) | 0.87 s |
+| prewarm (background) | | 0.70 s | 1.16 s |
+| `find . -type f` (GNU find) | 0.47 / 0.47 s | 0.35 / 0.35 s | 0.35 / 0.35 s |
+| `git status` | 0.87 / 0.86 s | 0.88 / 0.71 s | 0.94 / 0.72 s |
+| `rg` | 0.37 / 0.37 s | 2.87 / 0.41 s | 3.27 / 0.40 s |
+| daemon memory | | 63 MB | 124 MB |
+
+The slow first `rg` is the cost of decompressing and caching every file it
+reads; later reads come from the kernel page cache, which snapshots share for
+identical files (a second snapshot ~1 day older than one already grepped:
+0.40 s for its first `rg`).
+
+Writes, on Apache Spark (`bench/writes.sh`: a workspace vs a plain directory on
+the same ext4 disk, or for the appends the scratch clone's checkout; first /
+repeat):
+
+| workload | native | workspace |
+|---|---:|---:|
+| untar the checkout (27,599 files, 227 MiB) | 0.53 / 0.53 s | 3.00 / 2.80 s |
+| `rm -r` of it | 0.33 / 0.33 s | 1.23 / 1.23 s |
+| write a 1 GiB file | 0.40 / 0.39 s | 0.77 / 0.71 s |
+| `cp -r sql/` (21,094 files) | 0.48 / 0.46 s | 1.81 / 1.83 s |
+| append to 1,000 tracked files | 0.03 / 0.03 s | 0.11 / 0.04 s |
+
+Every file created costs about six requests to the daemon (lookup, create,
+write, tar's `utimes`, and the attribute reads that follow a write), so file
+creation is 4-6x slower than native; large writes are under 2x. The first
+appends to tracked files copy them into `upper/`.
+
+Builds write fewer, larger files, so they suffer much less. `cargo build`
+(debug, offline) of gitfold itself, a workspace vs a native clone; `target/`
+is 715 MB in 1,677 files:
+
+| build | native | workspace |
+|---|---:|---:|
+| full | 13.64 s | 15.99 s |
+| incremental (one source file touched) | 1.85 s | 3.91 s |
+| no-op | 0.17 s | 0.36 s |
+
+Branches built on branches and views, on the same Chromium clone (`bench/tree.sh`: a branch with
+three children, each with commits and a workspace with an uncommitted edit; first / repeat;
+—: git has none):
+
+| | gitfold | native equivalent |
+|---|---:|---:|
+| `@committed/<branch>`, first access (built and merged by git) | 0.78 s | — |
+| a commit visible in `@committed` | 0.6-0.75 s | — |
+| an edit visible in `@live` (2 s quiet period included) | 4.0 s | — |
+| `@live/<branch>` on a fresh mount: first access / complete | 5.8 / 6.2 s | — |
+| a view's cold `find` / warm `rg` (after its metadata prewarm, 1.9 s; `@live` 7.3 s) | 0.35 / 0.36 s | 0.47 / 0.37 s (the native checkout above) |
+| `parent --update`, branch without a workspace | 0.11 s | 0.08 s (`git replay`) |
+| `parent --update`, a clean workspace | 1.95 s | 1.94 s (`git rebase`) |
+| `parent --update`, a workspace with uncommitted work | 4.9 s | 5.1 s (`git rebase --autostash`) |
+| `branch t --from a --from c` (with `-w`) | 3.8 s (7.2-8.0 s) | 1.6-2.1 s (switch + merge) |
+| landing check (`gitfold parent`) | 0.06-0.07 s | — |
+| `changes -- PATH`, 11 branches and workspaces | 0.83 s (9.0 s without a commit-graph) | — |
+
+Moves cost what git's own rebase costs. gitfold keeps a commit-graph current: while mounted, the
+daemon runs git's own task for it, `git maintenance run --task=commit-graph --auto` (at mount and
+every ten minutes, at the lowest CPU and I/O priority, in the background), which writes it
+incrementally (`git commit-graph write --reachable --split`) once 100 commits are missing from
+it (`maintenance.commit-graph.auto`). The first on Chromium took 15 s, later ones a fraction of
+a second. Without one, git walks
+every commit for `changes -- PATH`'s `for-each-ref --no-merged` (9 s on Chromium). To turn it
+off, use git's settings: `maintenance.commit-graph.auto=0` (gitfold leaves the commit-graph to
+you), `maintenance.auto=false` (git's automatic maintenance off, gitfold's too), or
+`core.commitGraph=false` (git doesn't use one at all).

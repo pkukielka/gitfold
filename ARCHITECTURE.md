@@ -4,7 +4,8 @@ How gitfold works and why it works that way. Most decisions were made by
 measuring; all numbers come from [bench/RESULTS.md](bench/RESULTS.md) (24 cores,
 62 GB RAM, Linux 6.12) on three repositories: Apache Spark (27.6k files),
 the Linux kernel (97k files) and Chromium (512k files, 4.4 GB at HEAD, 64 GB
-pack). User-facing behaviour is described in [README.md](README.md).
+pack). User-facing behaviour is described in [README.md](README.md) and, in
+detail, [docs/reference.md](docs/reference.md).
 
 Contents: [Goals](#goals-and-non-goals) · [Overview](#overview) ·
 [Code map](#code-map) · [Glossary](#glossary) · [Invariants](#invariants) ·
@@ -333,7 +334,7 @@ decision that creates them.
 - **The workspace on-disk format is a compatibility contract**: the id escaping,
   the layout of `.git/gitfold/<id>/` (`base`, `branch`, `markers`, `times` and
   `reads` record formats, `upper/`), task folders in `.git/gitfold/.tasks/<id>/`
-  and the message format of their inboxes (README, "Messages"), the
+  and the message format of their inboxes (docs/reference.md, "Messages"), the
   base-pinning ref `refs/gitfold/<id>`, the own-commits ref
   `refs/gitfold-base/<branch>` and the per-branch settings in git config
   (`branch.<b>.gitfold*`), the
@@ -1294,7 +1295,7 @@ unmounted, and anything can read or write the files.
 
 - **Files, not a service:** orchestrators that already have mail (Gas Town's
   is in a SQL database) can ignore it, or write and read the same files
-  without gitfold. The format is documented in the README as an interface.
+  without gitfold. The format is documented in docs/reference.md as an interface.
 - **Delivery by hooks, not polling:** an agent told to check its inbox spends
   tokens on every empty check. Claude Code hooks inject messages when a
   prompt is sent and after each tool call (as Gas Town does on
@@ -1523,7 +1524,7 @@ write, the settings and the lock are git's, as for `git maintenance`.
 
 ## Known limitations
 
-User-visible effects are listed in README ("Workspaces", "Differences from a
+User-visible effects are listed in docs/reference.md ("Workspaces", "Differences from a
 checkout" and "Running it"); this is the why and what it would take.
 
 - **Partial clones** fetch a commit's every missing blob at open, as a checkout
