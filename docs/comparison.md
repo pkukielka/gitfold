@@ -33,7 +33,7 @@ gitfold's numbers come from [bench/RESULTS.md](../bench/RESULTS.md). Checked
 
 | | New working copy (big repo) | Needs a server | Needs root | Platforms | Plain git works | Writes |
 |---|---|---|---|---|---|---|
-| **gitfold** | 0.85 s, almost no disk (Chromium) | no | no | Linux | yes: a linked worktree | FUSE: kernel build +2.5-4% full, +11-29% incremental |
+| **gitfold** | 0.87 s, almost no disk (Chromium) | no | no | Linux | yes: a linked worktree | FUSE: kernel build +2.5-4% full, +11-29% incremental |
 | `git worktree` | 17 s, 5.5 GiB (Chromium) | no | no | all | yes | native |
 | Sparse checkout, partial clone, Scalar | in proportion to what's checked out | partial clone: yes | no | all | yes | native |
 | Reflink copies, btrfs snapshots | little disk, copies every inode | no | no | btrfs, XFS, ZFS 2.2+, APFS | once registered as a worktree | native |
