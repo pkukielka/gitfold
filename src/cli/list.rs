@@ -54,7 +54,7 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
     if !note.is_empty() {
         eprintln!("note: {name}: {note}; changes are against the stored base");
     }
-    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let mut out = crate::out::buffered();
     let changes = s.changes(&store);
     let mut total = (0, 0);
     for &(change, path) in &changes {
@@ -69,6 +69,15 @@ pub fn changes(repo: &Path, args: ChangesArgs) -> Result<()> {
             }
         }
         write_path(&mut out, path, nul)?;
+        // Each line counted costs a diff: sent at once, so a reader gone
+        // (`| head`) is seen before the next one, and none more are worked
+        // out (see `out`).
+        if stat {
+            out.flush()?;
+            if crate::out::gone() {
+                return Ok(());
+            }
+        }
     }
     if stat && !nul && !changes.is_empty() {
         writeln!(out, "{}", shortstat(changes.len(), total))?;
@@ -141,7 +150,7 @@ pub fn who_changes(repo: &Path, args: ChangesArgs) -> Result<i32> {
             eprintln!("note: {branch}: {note}; changes are against the stored base");
         }
     }
-    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let mut out = crate::out::buffered();
     for (path, branch, kind) in &lines {
         write!(out, "{branch}\t{kind}\t")?;
         write_path(&mut out, path, args.nul)?;
@@ -385,7 +394,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
     });
     let rows = rows(&tree, state::list(&common_dir)?);
     if rows.is_empty() {
-        println!("no workspaces");
+        outln!("no workspaces")?;
         return Ok(());
     }
     let store = Store::default();
@@ -395,11 +404,21 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
         true => format!(" {:>8} {:>8}", "+lines", "-lines"),
         false => String::new(),
     };
-    println!(
+    outln!(
         "{:<40} {:>8} {:>8} {:>8}{lines}  {:<12} {:>6}  {:<6}  status",
-        "branch", "changed", "deleted", "ignored", "base", "last", "follow"
-    );
+        "branch",
+        "changed",
+        "deleted",
+        "ignored",
+        "base",
+        "last",
+        "follow"
+    )?;
     for (depth, branch, workspace) in rows {
+        // Its reader gone (`| head`): no more rows to work out (see `out`).
+        if crate::out::gone() {
+            break;
+        }
         let name = match depth {
             0 => branch.clone(),
             _ => format!("{}└─ {branch}", "   ".repeat(depth - 1)),
@@ -427,7 +446,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
                 Err(e) => {
                     // Its tree notes all the same.
                     let notes = notes.iter().map(|n| format!("; {n}")).collect::<String>();
-                    println!("{name:<40} unreadable ({e:#}); id {}{notes}", w.state.id);
+                    outln!("{name:<40} unreadable ({e:#}); id {}{notes}", w.state.id)?;
                     continue;
                 }
             };
@@ -463,7 +482,7 @@ pub fn list(repo: &Path, args: ListArgs) -> Result<()> {
             "{name:<40} {changed:>8} {deleted:>8} {ignored:>8}{lines}  {base:<12} {last:>6}  \
              {follow:<6}  {status}"
         );
-        println!("{}", line.trim_end());
+        outln!("{}", line.trim_end())?;
     }
     Ok(())
 }

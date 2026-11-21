@@ -48,7 +48,7 @@ pub fn remove(repo: &Path, args: RemoveArgs) -> Result<()> {
     check_name(name)?;
     let common_dir = git::init(repo)?;
     let done = remove_waiting(&common_dir, name, force, check, Duration::from_secs(wait))?;
-    println!("{done}");
+    outln!("{done}")?;
     Ok(())
 }
 
@@ -124,7 +124,7 @@ pub fn prune(repo: &Path) -> Result<()> {
             removed += 1;
         }
     }
-    println!("removed {removed} snapshot registrations");
+    outln!("removed {removed} snapshot registrations")?;
     Ok(())
 }
 

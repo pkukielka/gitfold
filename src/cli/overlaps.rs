@@ -166,7 +166,7 @@ pub fn overlaps(repo: &Path, args: OverlapsArgs) -> Result<i32> {
             }
         }
     }
-    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let mut out = crate::out::buffered();
     for (path, kind, target) in &lines {
         write!(out, "{kind}\t{target}\t")?;
         write_path(&mut out, path, nul)?;

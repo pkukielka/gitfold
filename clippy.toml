@@ -1,0 +1,5 @@
+# Commands print through `out!`/`outln!`/`out::buffered` (src/out.rs), which
+# end quietly when stdout's reader is gone; std's stdout would panic or fail.
+disallowed-methods = [
+    { path = "std::io::stdout", reason = "print with out!/outln!/out::buffered (src/out.rs)" },
+]

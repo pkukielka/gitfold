@@ -56,12 +56,12 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
             }
             return Err(e);
         }
-        println!(
+        outln!(
             "created branch {name} on {} ({}); open it as {}",
             crate::tree::short(&full),
             super::tree::following(!no_follow),
             open_as(&common_dir, name)
-        );
+        )?;
         return Ok(());
     }
     check_new(&common_dir, name)?;
@@ -110,7 +110,7 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
         let open = open_as(&common_dir, name);
         return match (forked, set) {
             (Ok(done), Ok(())) => {
-                println!("{done}; open it as {open}");
+                outln!("{done}; open it as {open}")?;
                 Ok(())
             }
             (Ok(done), Err(e)) => Err(Refusal::Incomplete.error(format!(
@@ -125,10 +125,10 @@ pub fn branch(repo: &Path, args: BranchArgs) -> Result<()> {
     }
     create(repo, name, from.as_deref())?;
     set_branch_settings(repo, name, prewarm, track_reads)?;
-    println!(
+    outln!(
         "created branch {name}; open it as {}",
         open_as(&common_dir, name)
-    );
+    )?;
     Ok(())
 }
 
@@ -208,8 +208,7 @@ fn merged(
     // typed: git takes it, or refuses it (a name it finds ambiguous),
     // saying so itself (its warnings too: `resolve` leaves them to it).
     let args = ["branch", "--no-track", "--", name, &first.rev];
-    let created = git::cmd::command(repo)
-        .args(args)
+    let created = git::cmd::says(git::cmd::command(repo).args(args))
         .stdin(std::process::Stdio::null())
         .status()?;
     if !created.success() {
@@ -256,7 +255,7 @@ fn merged(
     });
     match merge {
         Ok(Some(conflicts)) if conflicts.is_empty() => {
-            println!("created branch {name}; open it as {}", workspace.display());
+            outln!("created branch {name}; open it as {}", workspace.display())?;
             Ok(())
         }
         // As `git cherry-pick` exits after a conflict.
@@ -536,7 +535,7 @@ impl Changes {
         for (n, (branch, commit)) in self.0.iter().enumerate() {
             // git's messages the user's, as for the merge.
             let args = ["cherry-pick", "-n", "--end-of-options", commit];
-            if git()?.args(args).status()?.success() {
+            if git::cmd::says(git()?.args(args)).status()?.success() {
                 continue;
             }
             // A conflict leaves unmerged paths; a refusal, none.
@@ -583,11 +582,13 @@ fn and_list(names: &[String]) -> String {
 fn run_merge(workspace: &Path, revs: &[String]) -> Result<bool> {
     // git's own warnings stay on (its hooks' git too): a name already
     // warned about as it was resolved may be warned about again here.
-    let status = (git::cmd::in_workspace(workspace)?)
-        .args(["merge", "--end-of-options"])
-        .args(revs)
-        .status()
-        .context("running git merge")?;
+    let status = git::cmd::says(
+        git::cmd::in_workspace(workspace)?
+            .args(["merge", "--end-of-options"])
+            .args(revs),
+    )
+    .status()
+    .context("running git merge")?;
     Ok(status.success())
 }
 
@@ -632,9 +633,9 @@ pub fn prewarm(repo: &Path, args: PrewarmArgs) -> Result<()> {
 /// mounted gitfold is too old to apply it.
 fn apply(common_dir: &Path, request: control::Request, unmounted: &str, older: &str) -> Result<()> {
     match control::request(common_dir, &request, None) {
-        Ok(Some(done)) => println!("{done}"),
-        Ok(None) => println!("{unmounted}"),
-        Err(e) if control::is_older_daemon(&e) => println!("{older}"),
+        Ok(Some(done)) => outln!("{done}")?,
+        Ok(None) => outln!("{unmounted}")?,
+        Err(e) if control::is_older_daemon(&e) => outln!("{older}")?,
         Err(e) => return Err(e.context("set, but not applied to the mount")),
     }
     Ok(())

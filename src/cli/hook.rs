@@ -33,8 +33,13 @@ pub fn input() -> String {
 
 /// A hook's error inside a workspace, said on stderr as `what`'s: exit 1,
 /// for Claude Code an error shown to the user, the hook's output not used (2
-/// would block, or wake the session).
+/// would block, or wake the session); 141, saying nothing, if its output's
+/// reader is gone (`out::check`).
 pub fn failed(what: &str, e: anyhow::Error) -> i32 {
+    // Its reader gone: nothing to say, as for a command (see `out`).
+    if crate::out::closed(&e) {
+        return crate::out::CLOSED_EXIT;
+    }
     eprintln!("{what}: {e:#}");
     1
 }

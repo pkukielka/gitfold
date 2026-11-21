@@ -40,9 +40,17 @@ impl Here {
     }
 }
 
-/// Runs git with `args`; its messages go to the terminal. Fails if git does.
+/// `command`, its stdout sent to gitfold's stderr, for git run to say
+/// what it does to the user: gitfold's stdout is its own output, whose reader
+/// may have gone (`out`), which would kill git with SIGPIPE halfway.
+pub fn says(command: &mut Command) -> &mut Command {
+    command.stdout(std::io::stderr())
+}
+
+/// Runs git with `args`; its messages go to the terminal (`says`). Fails if git
+/// does.
 pub fn run(git_dir: &Path, args: &[&str]) -> Result<()> {
-    let status = command(git_dir).args(args).status()?;
+    let status = says(command(git_dir).args(args)).status()?;
     if !status.success() {
         bail!("git {} failed ({status})", args.join(" "));
     }

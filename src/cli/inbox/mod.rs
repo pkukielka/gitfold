@@ -128,13 +128,13 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
             };
             let m = Message::parse(&path, &String::from_utf8_lossy(&bytes));
             match args.json {
-                true => println!("{}", m.json()),
+                true => outln!("{}", m.json())?,
                 false => {
                     let about = match m.header("subject") {
                         "" => m.body.lines().next().unwrap_or(""),
                         subject => subject,
                     };
-                    println!("{}\t{about}", m.header("from"));
+                    outln!("{}\t{about}", m.header("from"))?;
                 }
             }
         }
@@ -201,19 +201,19 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
         // Waited, and the time ran out first.
         None if wait && taken.is_empty() => TIMED_OUT,
         None => {
-            print!("{text}");
+            out!("{text}")?;
             0
         }
         Some(_) if text.is_empty() => 0,
         Some(Hook::UserPromptSubmit) => {
-            print!("{intro}{text}");
+            out!("{intro}{text}")?;
             0
         }
         Some(Hook::PostToolUse) => {
-            println!(
+            outln!(
                 "{{\"hookSpecificOutput\":{{\"hookEventName\":\"PostToolUse\",\"additionalContext\":{}}}}}",
                 json_str(&format!("{intro}{text}"))
-            );
+            )?;
             0
         }
         Some(Hook::Rewake) => {
@@ -221,8 +221,9 @@ fn take_all(repo: &Path, branch: &str, args: &InboxArgs) -> Result<i32> {
             2
         }
     };
-    use std::io::Write;
-    std::io::stdout().flush()?;
+    // Kept if its reader was gone when printed, to be taken again. (What a pipe
+    // took in before its reader left, unread, is gone: as for any command.)
+    crate::out::check()?;
     // Printed: now gone for good. One left would be taken again once this
     // process is gone (`message::abandoned`): exit 1, but not for a hook,
     // whose output Claude Code would then drop, the deleted ones with it.
@@ -273,7 +274,7 @@ pub fn send(repo: &Path, args: SendArgs) -> Result<()> {
         return Err(refused.error(no_branch(&common_dir, repo, &to)));
     }
     deliver(&common_dir, &to, &from, subject.as_deref(), &body)?;
-    println!("sent to {to}");
+    outln!("sent to {to}")?;
     Ok(())
 }
 

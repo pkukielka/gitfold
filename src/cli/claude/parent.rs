@@ -51,7 +51,7 @@ fn run(event: ParentHook, input: &str) -> Result<()> {
         ParentHook::UserPromptSubmit => {
             mark(&state, session.as_deref())?;
             let common_dir = git::init(&repo)?;
-            print!("{}", turn_start(&common_dir, &state, session.as_deref())?);
+            out!("{}", turn_start(&common_dir, &state, session.as_deref())?)?;
             Ok(())
         }
     }

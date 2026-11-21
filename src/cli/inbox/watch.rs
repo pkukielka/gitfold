@@ -91,12 +91,12 @@ pub fn watch(repo: &Path, args: WatchArgs) -> Result<i32> {
     for (name, kind) in &events {
         let name = String::from_utf8_lossy(name);
         match json {
-            true => println!(
+            true => outln!(
                 "{{\"event\":{},\"path\":{}}}",
                 json_str(if *kind == 'D' { "deleted" } else { "changed" }),
                 json_str(&name)
-            ),
-            false => println!("{kind}\t{name}"),
+            )?,
+            false => outln!("{kind}\t{name}")?,
         }
     }
     // Nothing seen: the time ran out first.
